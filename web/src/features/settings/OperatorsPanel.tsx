@@ -61,6 +61,30 @@ import {
 import { OneTimeTokenDialog, ONE_TIME_TOKEN_NOTICE } from "@/features/settings/OneTimeTokenDialog";
 
 /* ------------------------------------------------------------------ *
+ * 角色常量
+ * ------------------------------------------------------------------ */
+
+const ROLE_OPTIONS = [
+  { value: "member" as const, label: "成员（只读）" },
+  { value: "teacher" as const, label: "老师（处理+发布）" },
+  { value: "admin" as const, label: "管理员（全部权限）" },
+];
+
+const ROLE_SHORT_OPTIONS = [
+  { value: "member" as const, label: "成员" },
+  { value: "teacher" as const, label: "老师" },
+  { value: "admin" as const, label: "管理员" },
+];
+
+function roleLabel(role?: string): string {
+  switch (role) {
+    case "admin": return "管理员";
+    case "teacher": return "老师";
+    default: return "成员";
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * 当前身份卡
  * ------------------------------------------------------------------ */
 
@@ -366,11 +390,7 @@ function CreateOperatorDialog({
           <Select
             value={role}
             onChange={(value) => setRole(value as "admin" | "teacher" | "member")}
-            options={[
-              { value: "member", label: "成员（只读）" },
-              { value: "teacher", label: "老师（处理+发布）" },
-              { value: "admin", label: "管理员（全部权限）" },
-            ]}
+            options={ROLE_OPTIONS}
           />
         </Field>
       </div>
@@ -658,15 +678,15 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                       <td className="px-3 py-2.5">
                         {item.role === "admin" ? (
                           <Badge variant="brand" icon={<ShieldCheck className="size-3" />}>
-                            管理员
+                            {roleLabel(item.role)}
                           </Badge>
                         ) : item.role === "teacher" ? (
                           <Badge variant="info" size="sm">
-                            老师
+                            {roleLabel(item.role)}
                           </Badge>
                         ) : (
                           <Badge variant="neutral" size="sm">
-                            成员
+                            {roleLabel(item.role)}
                           </Badge>
                         )}
                       </td>
@@ -712,17 +732,13 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                                       { id: item.id, role: value as "admin" | "teacher" | "member" },
                                       {
                                         onSuccess: () =>
-                                          toast.success(`已把「${item.name}」改为${value === "admin" ? "管理员" : value === "teacher" ? "老师" : "成员"}`),
+                                          toast.success(`已把「${item.name}」改为${roleLabel(value)}`),
                                         onError: (error) =>
                                           toast.error("改角色失败", { description: apiErrorMessage(error) }),
                                       }
                                     );
                                   }}
-                                  options={[
-                                    { value: "member", label: "成员" },
-                                    { value: "teacher", label: "老师" },
-                                    { value: "admin", label: "管理员" },
-                                  ]}
+                                  options={ROLE_SHORT_OPTIONS}
                                 />
                               </Tooltip>
                               <Tooltip content="重置 token（旧 token 立刻失效）">

@@ -527,7 +527,6 @@ def select_template(payload: dict[str, Any], db: DbSession,
 def save_template(payload: dict[str, Any], db: DbSession,
                   operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
-    from core import errors
     from services import price_template
 
     raw = payload.get("template") if isinstance(payload.get("template"), dict) else payload
@@ -555,7 +554,6 @@ def save_template(payload: dict[str, Any], db: DbSession,
 def delete_template(name: str, db: DbSession,
                     operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
-    from core import errors
 
     if not setting_service.delete_template(db, name):
         raise errors.not_found(f"定价模板「{name}」不存在", template=name)
@@ -575,8 +573,6 @@ def logs_tail(limit: str | None = None) -> dict[str, Any]:
     老版把运行日志直接铺在界面上（index.html#logs），出问题能当场看到。
     新版日志只落文件，用户拿不到；这里补一个只读窗口。
     """
-    from core.config import get_settings
-
     count = 200
     if limit:
         try:

@@ -1779,10 +1779,6 @@ def count(db: Session) -> int:
     return active_query(db).count()
 
 
-def max_entries() -> int:
-    return WAREHOUSE_MAX_ITEMS
-
-
 def over_limit(db: Session) -> int:
     """超过上限多少件；没超返回 0。给界面提示用，**不改数据**。"""
     return max(0, count(db) - WAREHOUSE_MAX_ITEMS)
@@ -1875,10 +1871,3 @@ def all_source_item_ids(db: Session, account_id: Any = None) -> list[str]:
                 ids.append(value)
     return list(dict.fromkeys(ids))
 
-
-def as_key(detail_id: Any, shop_id: Any) -> str:
-    return product_key(detail_id, shop_id)
-
-
-def identity_of(product: Product) -> dict[str, Any]:
-    return {"id": as_id_str(product.id), "key": product.warehouse_key}

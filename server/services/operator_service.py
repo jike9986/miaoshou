@@ -254,6 +254,26 @@ def rename(db: Session, operator_id: Any, name: Any) -> dict[str, Any]:
     return serialize(row)
 
 
+def _require_admin(is_admin_operator: bool, action: str) -> None:
+    """只有管理员能执行的操作的统一校验。"""
+    if not is_admin_operator:
+        raise errors.AppError(
+            "FORBIDDEN", f"只有管理员可以{action}", status=403,
+            details={"reason": "not_admin"})
+
+
+def _check_last_admin(db: Session, row: Operator, *, action: str) -> None:
+    """不能把最后一个启用中的管理员停用/降级。"""
+    remaining = (db.query(Operator)
+                 .filter(Operator.is_admin.is_(True),
+                         Operator.enabled.is_(True),
+                         Operator.id != row.id).count())
+    if remaining == 0:
+        raise errors.AppError(
+            "FORBIDDEN", f"这是最后一个启用中的管理员，{action}后将无人能管理操作员",
+            status=409, details={"reason": "last_admin"})
+
+
 def disable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[str, Any]:
     """停用。不是删除：删了之后历史日志的 operator_id 会变 NULL。
 
@@ -262,20 +282,10 @@ def disable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[s
       · 不能停用自己，也不能停用最后一个启用中的管理员——
         否则没人能再停用/启用任何人，也没人能改共享设置。
     """
-    if not is_admin_operator:
-        raise errors.AppError(
-            "FORBIDDEN", "只有管理员可以停用操作员", status=403,
-            details={"reason": "not_admin"})
+    _require_admin(is_admin_operator, "停用操作员")
     row = get(db, operator_id)
     if row.enabled and bool(row.is_admin):
-        remaining = (db.query(Operator)
-                     .filter(Operator.is_admin.is_(True),
-                             Operator.enabled.is_(True),
-                             Operator.id != row.id).count())
-        if remaining == 0:
-            raise errors.AppError(
-                "FORBIDDEN", "这是最后一个启用中的管理员，停用后将无人能管理操作员",
-                status=409, details={"reason": "last_admin"})
+        _check_last_admin(db, row, action="停用")
     row.enabled = False
     db.flush()
     return serialize(row)
@@ -283,10 +293,7 @@ def disable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[s
 
 def enable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[str, Any]:
     """重新启用（停用的反操作，同一条路由的两个方向）。"""
-    if not is_admin_operator:
-        raise errors.AppError(
-            "FORBIDDEN", "只有管理员可以启用操作员", status=403,
-            details={"reason": "not_admin"})
+    _require_admin(is_admin_operator, "启用操作员")
     row = get(db, operator_id)
     row.enabled = True
     db.flush()
@@ -296,24 +303,14 @@ def enable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[st
 def set_role(db: Session, operator_id: Any, role: str, *,
              is_admin_operator: bool) -> dict[str, Any]:
     """改角色。只有管理员能改，且不能把最后一个管理员降成非管理员。"""
-    if not is_admin_operator:
-        raise errors.AppError(
-            "FORBIDDEN", "只有管理员可以改角色", status=403,
-            details={"reason": "not_admin"})
+    _require_admin(is_admin_operator, "改角色")
     if role not in VALID_ROLES:
         raise errors.validation(f"角色无效：{role}，可选 admin/teacher/member",
                                 field="role", value=role)
     row = get(db, operator_id)
     # 不能把最后一个启用中的管理员降成非管理员
     if role != ROLE_ADMIN and bool(row.is_admin) and row.enabled:
-        remaining = (db.query(Operator)
-                     .filter(Operator.is_admin.is_(True),
-                             Operator.enabled.is_(True),
-                             Operator.id != row.id).count())
-        if remaining == 0:
-            raise errors.AppError(
-                "FORBIDDEN", "这是最后一个启用中的管理员，不能降级",
-                status=409, details={"reason": "last_admin"})
+        _check_last_admin(db, row, action="降级")
     row.role = role
     row.is_admin = (role == ROLE_ADMIN)
     db.flush()
