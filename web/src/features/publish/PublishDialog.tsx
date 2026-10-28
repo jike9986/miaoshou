@@ -352,9 +352,25 @@ export function PublishDialog({
                 value={template}
                 onChange={(name) => {
                   setTemplate(name);
-                  // 记住这个账号用哪套：下次打开自动带出来，建定时任务也用它当默认
+                  // 记住这个账号用哪套：下次打开自动带出来，建定时任务也用它当默认。
+                  //
+                  // 这里是「顺手记住」的副作用写入，用户的主操作是选模板、不是存模板，
+                  // 所以失败**不能**把弹窗打断（他没要求保存，凭什么报错挡住他发布）。
+                  // 但也**不能什么都不做**：原来这个 mutate 完全没有 onError，
+                  // 失败时用户以为记住了，下次打开还是旧模板，而界面上一点提示都没有。
+                  // 折中：toast 说一句「这次没记住，但发布用的是你刚选的」——
+                  // 发布本身用的就是本地 state，不受这个写入影响。
                   if (name && auth?.accountId) {
-                    selectTemplate.mutate({ name, account: String(auth.accountId) });
+                    selectTemplate.mutate(
+                      { name, account: String(auth.accountId) },
+                      {
+                        onError: (error) => {
+                          toast.warning("模板选择没保存住", {
+                            description: `${apiErrorMessage(error)}。本次发布会用你刚选的「${name}」，但下次打开可能还是旧的。`,
+                          });
+                        },
+                      }
+                    );
                   }
                 }}
                 options={templateOptions}

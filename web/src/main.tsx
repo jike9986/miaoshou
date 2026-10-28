@@ -41,6 +41,18 @@ const queryClient = new QueryClient({
       },
       refetchOnWindowFocus: false,
     },
+    /**
+     * 写操作不重试：失败立即反馈，静默重试会造成「点一次提交两次」。
+     *
+     * 这里**刻意不设全局 onError**。曾经想加一个「兜底 toast」，
+     * 但 TanStack Query 的语义是：`mutate(vars, { onError })` 的调用点回调
+     * 与 hook 里的 `onError` **都会执行**，不是覆盖关系。而本项目 57 处调用点里
+     * 有 54 处自己传了 onError —— 加全局兜底的结果是**每个失败都弹两个 toast**，
+     * 比漏提示更烦人。
+     *
+     * 正确做法是在漏掉的那几个 hook 上单独补（已补 `useSelectTemplate` 的调用点）。
+     * 剩余欠账见 docs/交付报告-0.1.5.md 的 P1 清单。
+     */
     mutations: { retry: false },
   },
 });
