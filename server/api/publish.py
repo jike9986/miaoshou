@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from api.deps import CredentialsHeader, DbSession, OperatorDep, require_writable
+from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from api.helpers import parse_bool
 from schemas.requests import PublishRequest
 from services import audit_service, publish_service, setting_service
@@ -80,12 +80,11 @@ def set_publish_settings(payload: dict[str, Any], db: DbSession,
     return {"publishEnabled": setting_service.publish_enabled(db)}
 
 
-@router.post("", summary="发布（单个/批量，必须 confirm=true）")
+@router.post("", summary="发布（单个/批量，必须 confirm=true）",
+             dependencies=[require_permission("publish")])
 def publish(payload: PublishRequest, db: DbSession,
             operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
-    # 发布需要 teacher 以上权限（member 只能看）
-    operator_service.require_role(operator, "publish")
     body = payload.model_dump(by_alias=False, exclude_none=True)
     # confirm 必须是字面量 true：这里再落一次，避免 Pydantic 真值转换影响判定
     body["confirm"] = payload.confirm is True

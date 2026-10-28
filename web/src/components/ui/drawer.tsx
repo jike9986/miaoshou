@@ -150,5 +150,4 @@ export function Drawer({
   );
 }
 
-/** Sheet 是 Drawer 的别名（同一规格，便于业务侧按语义取名） */
-export { Drawer as Sheet };
+

@@ -37,7 +37,6 @@ import type {
   GroupCreateRequest,
   GroupDeleteResponse,
   GroupsResponse,
-  ImageJobResponse,
   ImageJobsResponse,
   ImageJobUploadResponse,
   ImageTranslateRequest,
@@ -536,25 +535,6 @@ export function useCategoryTree(
   });
 }
 
-export function useSyncCategories(): UseMutationResult<
-  CategoryTreeResponse,
-  Error,
-  { site?: string | null; rootCid?: string | null }
-> {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (body: { site?: string | null; rootCid?: string | null }) =>
-      api.post<CategoryTreeResponse, { site?: string | null; rootCid?: string | null }>(
-        "/categories/sync",
-        body, {
-        timeoutMs: 120_000,
-      }),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: queryKeys.categories.all });
-    },
-  });
-}
-
 /* ================================================================== *
  * §3 采集箱
  * ================================================================== */
@@ -616,22 +596,6 @@ export interface ClaimVariables {
   request: ClaimRequest;
 }
 
-export function useClaimItem(): UseMutationResult<ClaimResult, Error, ClaimVariables> {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: ({ detailId, shopId, request }: ClaimVariables) =>
-      api.post<ClaimResult, ClaimRequest>(
-        `/collect-box/${encodeURIComponent(detailId)}/claim`,
-        request,
-        { query: { shopId }, timeoutMs: 60_000 }
-      ),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: queryKeys.collectBox.all });
-      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
-    },
-  });
-}
-
 export interface ProcessCollectVariables {
   detailId: string;
   request: ProcessCollectRequest;
@@ -669,26 +633,6 @@ export interface BatchClaimResponse {
   targetShopId: string;
   results: ClaimResult[];
   failures: Array<{ key: string; code?: string; reason: string }>;
-}
-
-export function useBatchClaim(): UseMutationResult<
-  BatchClaimResponse,
-  Error,
-  { keys: string[]; targetShopId: string }
-> {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (body: { keys: string[]; targetShopId: string }) =>
-      api.post<BatchClaimResponse, { keys: string[]; targetShopId: string }>(
-        "/collect-box/claim",
-        body,
-        { timeoutMs: 120_000 }
-      ),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: queryKeys.collectBox.all });
-      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
-    },
-  });
 }
 
 /* ================================================================== *
@@ -767,24 +711,6 @@ export interface VersionPayload {
 }
 
 /** 取版本；refresh=true 时真的去拉更新清单。 */
-/** 服务端运行日志尾部：对照老版 index.html#logs 的排查窗口 */
-export interface LogTailResponse {
-  lines: string[];
-  path: string;
-  missing?: boolean;
-}
-
-export function useLogTail(enabled = true): UseQueryResult<LogTailResponse> {
-  return useQuery({
-    queryKey: ["system-logs-tail"],
-    queryFn: () => api.get<LogTailResponse>("/system/logs/tail", { query: { limit: 300 } }),
-    enabled,
-    staleTime: 0,
-    retry: false,
-    // 日志是给人看的，打开时刷新一次就够，不做轮询
-    refetchOnWindowFocus: false,
-  });
-}
 
 export function useVersion(refresh = false, enabled = true): UseQueryResult<VersionPayload> {
   return useQuery({
@@ -1077,25 +1003,6 @@ export function useReconcileImages(): UseMutationResult<
       void client.invalidateQueries({ queryKey: queryKeys.imageJobs.all });
       void client.invalidateQueries({ queryKey: ["images", "usage"] });
     },
-  });
-}
-
-/** 单任务查询；轮询由 useImageJobPolling 驱动 */
-export function imageJobQueryKey(id: string): readonly unknown[] {
-  return queryKeys.imageJobs.detail(id);
-}
-
-export function useImageJob(id: string | null, refresh: boolean): UseQueryResult<ImageJobResponse> {
-  return useQuery({
-    queryKey: [...imageJobQueryKey(id ?? "none"), { refresh }],
-    queryFn: () =>
-      api.get<ImageJobResponse>(`/images/jobs/${encodeURIComponent(id ?? "")}`, {
-        query: refresh ? { refresh: true } : undefined,
-      }),
-    enabled: Boolean(id),
-    staleTime: 0,
-    gcTime: 60_000,
-    retry: 0,
   });
 }
 
@@ -1524,36 +1431,6 @@ export function useTitlePreview(): UseMutationResult<
   return useMutation({
     mutationFn: (body: { titles?: string[]; warehouseIds?: string[]; limit?: number; refreshYears?: boolean }) =>
       api.post<TitlePreviewResponse, typeof body>("/titles/preview", body),
-  });
-}
-
-export interface TitleSaveResponse {
-  id: string;
-  detailId: string;
-  shopId: string;
-  title: string;
-  previousTitle: string;
-  changed: boolean;
-  removedWords: string[];
-}
-
-/** 保存单个商品标题；只改本地库，不回写妙手草稿（api.md §16.2） */
-export function useSaveTitle(): UseMutationResult<
-  TitleSaveResponse,
-  Error,
-  { ident: string; title: string; clean?: boolean }
-> {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: ({ ident, ...body }: { ident: string; title: string; clean?: boolean }) =>
-      api.patch<TitleSaveResponse, { title: string; clean?: boolean }>(
-        `/titles/${encodeURIComponent(ident)}`,
-        body
-      ),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
-      void client.invalidateQueries({ queryKey: queryKeys.titles.all });
-    },
   });
 }
 

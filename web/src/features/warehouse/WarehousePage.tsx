@@ -49,7 +49,6 @@ import {
   ErrorState,
   Field,
   IconButton,
-  InlineError,
   Input,
   KpiCard,
   SearchInput,
@@ -597,7 +596,6 @@ export function WarehousePage() {
                     "grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5",
                     listQuery.isFetching && "opacity-90"
                   )}
-                  style={{ gridTemplateColumns: undefined }}
                 >
                   <AnimatePresence initial={false}>
                     {items.map((product: Product, index: number) => (
@@ -634,12 +632,6 @@ export function WarehousePage() {
               onPageSizeChange={query.setPageSize}
               disabled={listQuery.isFetching}
             />
-
-            {listQuery.isError && (
-              <InlineError onRetry={() => void listQuery.refetch()}>
-                {apiErrorMessage(listQuery.error)}
-              </InlineError>
-            )}
           </>
         )}
       </PageContent>

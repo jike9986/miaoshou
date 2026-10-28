@@ -181,7 +181,6 @@ export function ProcessSettings({
     }
     return null;
   })();
-  const comboDanger = false;
 
   return (    <>
       <div
@@ -197,12 +196,7 @@ export function ProcessSettings({
         <div className="flex min-w-0 flex-col gap-3">
           {comboWarning && (
             <p
-              className={cn(
-                "rounded-md border px-2.5 py-1.5 text-2xs leading-4",
-                comboDanger
-                  ? "border-danger-600/20 bg-danger-50 text-danger-700"
-                  : "border-warning-600/20 bg-warning-50 text-warning-700"
-              )}
+              className="rounded-md border border-warning-600/20 bg-warning-50 px-2.5 py-1.5 text-2xs leading-4 text-warning-700"
             >
               {comboWarning}
             </p>

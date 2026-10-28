@@ -495,12 +495,6 @@ export function WordsPage() {
             </span>
           }
         />
-
-        {listQuery.isError && (
-          <InlineError onRetry={() => void listQuery.refetch()}>
-            {apiErrorMessage(listQuery.error)}
-          </InlineError>
-        )}
       </PageContent>
 
       <BulkActionBar

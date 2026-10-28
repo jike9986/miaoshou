@@ -74,7 +74,7 @@ export type { EmptyStateAction, EmptyStateProps, ErrorStateProps, InlineErrorPro
 export { ConfirmDialog, Dialog, useDialogState } from "@/components/ui/dialog";
 export type { ConfirmDialogProps, DialogProps, DialogSize } from "@/components/ui/dialog";
 
-export { Drawer, Sheet } from "@/components/ui/drawer";
+export { Drawer } from "@/components/ui/drawer";
 export type { DrawerProps, DrawerSize } from "@/components/ui/drawer";
 
 export { Tooltip } from "@/components/ui/tooltip";

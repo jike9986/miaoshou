@@ -263,8 +263,7 @@ export function AutomationPage() {
   /* ---------------- 真正执行：串行处理入仓 ---------------- */
   const processItem = useProcessCollectItem();
   const publish = usePublish();
-  const { data: authData } = useAuthStatus();
-  const shopsQuery = useShops(authData?.accountId, { enabled: connected && settings.publishEnabled });
+  const shopsQuery = useShops(status?.accountId, { enabled: connected && settings.publishEnabled });
 
   const startRun = async (): Promise<void> => {
     if (!connected) {

@@ -72,9 +72,6 @@ def require_token(
     raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
 
 
-TokenAuth = Depends(require_token)
-
-
 # --- 操作员身份 -----------------------------------------------------------
 def _authenticate(db: Session, supplied: str) -> Operator:
     """把一串凭据解析成操作员；解析不出就按 401/403 拒。
@@ -309,9 +306,6 @@ def request_credentials(
     if not key or not secret:
         return None
     return key, secret
-
-
-RequestCredentials = Depends(request_credentials)
 
 
 # 请求头里的妙手凭据（共享服务器模式）；桌面端单机时为空
