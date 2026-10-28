@@ -30,6 +30,7 @@ import type { ProductDetailResponse } from "@/lib/types";
 import {
   Badge,
   Button,
+  ConfirmDialog,
   Drawer,
   ErrorState,
   Field,
@@ -80,7 +81,6 @@ export function ProductDetailDrawer({
   const [planOverride, setPlanOverride] = useState<Record<string, "keep" | "translate">>({});
 
   const [title, setTitle] = useState("");
-
   const [groupId, setGroupId] = useState<string>("");
   const [titleError, setTitleError] = useState<string | null>(null);
 
@@ -241,6 +241,15 @@ export function ProductDetailDrawer({
     };
   })();
   const product = data?.product;
+
+  // 换商品时清空分析结果和人工结论：
+  // analyze.data 是 mutation 状态，不会随商品切换自动清——
+  // 打开 A 的分析结果，再打开 B 会看到 A 的图。
+  useEffect(() => {
+    setPlanOverride({});
+    analyze.reset();
+  }, [product?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // 额度只在抽屉打开时查一次，别为每个商品都发请求
   const usage = useImageUsage({ enabled: Boolean(product?.id) });
   // 完整任务列表：详情接口的 imageJobs 没有 publicUrl / uploadError，
@@ -381,11 +390,19 @@ export function ProductDetailDrawer({
     setConflict(null);
   };
 
+  // 删除走确认弹窗：点一下就没了太危险（审查发现的 P1 问题）。
+  // 底部垃圾桶图标和 footer 的「删除商品」按钮现在都走同一个确认流程。
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const deleteThis = (): void => {
+    if (!product) return;
+    setDeleteConfirmOpen(true);
+  };
+  const confirmDelete = (): void => {
     if (!product) return;
     remove.mutate(product.id, {
       onSuccess: () => {
         toast.success("已删除该商品（软删除，发布记录保留）");
+        setDeleteConfirmOpen(false);
         onOpenChange(false);
       },
       onError: (error) => toast.error("删除失败", { description: apiErrorMessage(error) }),
@@ -415,7 +432,10 @@ export function ProductDetailDrawer({
               删除商品
             </Button>
           )}
-          <Button variant="secondary" onClick={() => onOpenChange(false)}>
+          <Button
+            variant="secondary"
+            onClick={() => onOpenChange(false)}
+          >
             关闭
           </Button>
           <Button
@@ -894,6 +914,18 @@ export function ProductDetailDrawer({
           {statusHint(product.status)}
         </div>
       )}
+
+      {/* 删除确认：底部垃圾桶和 footer 删除按钮共用这一个弹窗 */}
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        onOpenChange={setDeleteConfirmOpen}
+        title={`删除「${product?.title ?? "该商品"}」？`}
+        description="删除为软删除：图片结果文件会清理，发布记录保留。"
+        confirmLabel="删除"
+        danger
+        loading={remove.isPending}
+        onConfirm={confirmDelete}
+      />
 
       {/* 并发冲突：别人先改了，停下来问人（绝不自动覆盖、绝不静默重试） */}
       <RevisionConflictDialog

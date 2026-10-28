@@ -835,7 +835,7 @@ export interface PublishLogsResponse extends Page<PublishLog> {
  * ================================================================== */
 
 export type ScheduleFrequency = "daily" | "weekly" | "monthly" | "range";
-export type ScheduleRunStatus = "ok" | "short" | "failed" | "empty";
+export type ScheduleRunStatus = "ok" | "partial" | "failed" | "empty";
 
 export interface ScheduleLastResult {
   status: ScheduleRunStatus | string;

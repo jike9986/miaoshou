@@ -10,14 +10,16 @@
 //   · 审计日志：谁在什么时候动了什么（排查用）
 
 import { useState } from "react";
-import { ScrollText, Users } from "lucide-react";
+import { Globe, Image, ScrollText, Users } from "lucide-react";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { Tabs } from "@/components/ui";
 import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
 import { OperatorsPanel } from "@/features/settings/OperatorsPanel";
 import { AuditLogPanel } from "@/features/settings/AuditLogPanel";
+import { PublishSettingsPanel } from "@/features/settings/PublishSettingsPanel";
+import { ImageServiceCard } from "@/features/automation/ImageServiceCard";
 
-export type SettingsTab = "operators" | "audit";
+export type SettingsTab = "operators" | "publish" | "image" | "audit";
 
 export interface SettingsPageProps {
   /** 从标题栏身份按钮跳进来时直接定位到某个 Tab */
@@ -45,13 +47,18 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
           onChange={(value) => setTab(value as SettingsTab)}
           items={[
             { value: "operators", label: "操作员", icon: <Users className="size-3.5" /> },
+            { value: "publish", label: "发布", icon: <Globe className="size-3.5" /> },
+            { value: "image", label: "图片服务", icon: <Image className="size-3.5" /> },
             { value: "audit", label: "审计日志", icon: <ScrollText className="size-3.5" /> },
           ]}
         />
       </PageHeader>
 
       <PageContent width="table">
-        {tab === "operators" ? <OperatorsPanel /> : <AuditLogPanel />}
+        {tab === "operators" && <OperatorsPanel />}
+        {tab === "publish" && <PublishSettingsPanel />}
+        {tab === "image" && <ImageServiceCard />}
+        {tab === "audit" && <AuditLogPanel />}
       </PageContent>
     </>
   );

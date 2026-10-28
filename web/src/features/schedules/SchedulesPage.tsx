@@ -141,7 +141,7 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
         const label =
           result.status === "ok"
             ? "执行完成"
-            : result.status === "short"
+            : result.status === "partial"
               ? "部分完成"
               : result.status === "empty"
                 ? "没有可处理的商品"
@@ -408,7 +408,7 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
                               meta={
                                 task.lastResult.status === "ok"
                                   ? { label: "成功", tone: "success", dot: "success" }
-                                  : task.lastResult.status === "short"
+                                  : task.lastResult.status === "partial"
                                     ? { label: "部分", tone: "warning", dot: "warning" }
                                     : task.lastResult.status === "empty"
                                       ? { label: "无商品", tone: "neutral", dot: "muted" }

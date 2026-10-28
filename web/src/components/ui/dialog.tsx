@@ -43,7 +43,11 @@ export function useFocusTrap(active: boolean, containerRef: React.RefObject<HTML
 
     return () => {
       document.body.style.overflow = originalOverflow;
-      previous?.focus({ preventScroll: true });
+      // 延迟恢复焦点：等退出动画完成后再还给之前的元素。
+      // 立即恢复会在动画期间把焦点还给触发按钮，导致 onClick 重新打开抽屉。
+      requestAnimationFrame(() => {
+        previous?.focus({ preventScroll: true });
+      });
     };
   }, [active, containerRef, initialRef]);
 }
