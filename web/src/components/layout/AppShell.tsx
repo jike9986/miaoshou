@@ -136,6 +136,7 @@ export function AppShell({
       brand={{ icon: <BrandMark />, name: "奥皇上品" }}
       account={account}
       onAccountClick={onAccountClick}
+      collapseTogglePosition="top"
       showCollapseToggle={!narrow}
       onNavigate={() => setDrawerOpen(false)}
       onCheckUpdate={onCheckUpdate}

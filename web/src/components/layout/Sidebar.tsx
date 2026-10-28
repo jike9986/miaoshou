@@ -344,6 +344,8 @@ export interface SidebarAccount {
   name: string;
   /** 店铺名 / 站点，11/16 muted */
   detail?: string;
+  /** 当前操作员名（11px 更弱一行）：多人共用一台机器时，「现在是谁」必须随时可见 */
+  operator?: string;
   initial?: string;
   avatarUrl?: string | null;
 }
@@ -411,27 +413,30 @@ export function Sidebar({
       className={cn(
         "flex h-full shrink-0 flex-col border-r border-border bg-sidebar",
         "transition-[width] duration-medium ease-out",
-        collapsed ? "w-[var(--sidebar-w-collapsed)]" : "w-[var(--sidebar-w)]",
+        collapsed ? "w-16" : "w-[232px]",
         className
       )}
       data-collapsed={collapsed || undefined}
     >
+      {/* 品牌区：logo 24px + 名称 15px（原 20/13 太弱，撑不起左上角第一视觉位）。
+          收起按钮放这一行右侧 —— 桌面软件惯例（VSCode/Notion/飞书都在顶部），
+          用户找「收起」时视线最先落在左上角。 */}
       <div className={cn("flex h-12 shrink-0 items-center gap-2 pt-2", collapsed ? "justify-center" : "px-3")}>
-        <span className="grid size-5 shrink-0 place-items-center text-brand-600 [&_svg]:size-5">
+        <span className="grid size-6 shrink-0 place-items-center text-brand-600 [&_svg]:size-6 [&_img]:size-6">
           {brand?.icon}
         </span>
         {!collapsed && (
-          <span className="truncate text-sm font-semibold leading-[22px] text-fg">
+          <span className="truncate text-[15px] font-semibold leading-[22px] text-fg">
             {brand?.name ?? "奥皇上品"}
           </span>
         )}
-        {!collapsed && collapseTogglePosition === "top" && showCollapseToggle && (
+        {collapseTogglePosition === "top" && showCollapseToggle && (
           <IconButton
-            label="收起侧边栏"
+            label={collapsed ? "展开侧边栏" : "收起侧边栏"}
             size="sm"
-            icon={<PanelLeft />}
+            icon={<PanelLeft className={cn(collapsed && "rotate-180")} />}
             onClick={toggle}
-            className="ml-auto"
+            className={cn(!collapsed && "ml-auto")}
           />
         )}
       </div>
@@ -473,8 +478,8 @@ export function Sidebar({
           </div>
         )}
 
-        {/* 版本 + 检查更新。老版这块在顶栏有「检查更新」按钮，
-            新版之前完全没有入口，后端 /system/version 一直空转。 */}
+        {/* 版本区：常态只显示「v0.1.5 · 已是最新」一行 11px 小字，
+            有更新时整行变品牌色并浮出操作按钮 —— 平时不打扰，有事才醒目。 */}
         <div className={cn("border-t border-border", collapsed ? "py-2" : "px-2 py-1.5")}>
           <div className={cn("flex items-center", collapsed ? "justify-center px-0" : "gap-1")}>
             <button
@@ -496,7 +501,12 @@ export function Sidebar({
                 strokeWidth={1.75}
               />
               {!collapsed && (
-                <span className="min-w-0 flex-1 truncate text-[11px] leading-4 text-fg-muted">
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate text-[11px] leading-4",
+                    version?.updateAvailable ? "font-medium text-brand-700" : "text-fg-muted"
+                  )}
+                >
                   {versionHint}
                 </span>
               )}
@@ -547,6 +557,11 @@ export function Sidebar({
                   {account.detail && (
                     <span className="block truncate text-[11px] leading-4 text-fg-muted">
                       {account.detail}
+                    </span>
+                  )}
+                  {account.operator && (
+                    <span className="block truncate text-[11px] leading-4 text-fg-muted">
+                      操作员：{account.operator}
                     </span>
                   )}
                 </span>

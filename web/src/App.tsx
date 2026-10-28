@@ -8,6 +8,7 @@ import {
   CalendarClock,
   KeyRound,
   PackageSearch,
+  Settings,
   ShieldBan,
   Zap,
 } from "lucide-react";
@@ -23,10 +24,10 @@ import { AutomationPage } from "@/features/automation/AutomationPage";
 import { SchedulesPage } from "@/features/schedules/SchedulesPage";
 import { WordsPage } from "@/features/words/WordsPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
-import { OperatorIdentityButton } from "@/features/settings/OperatorIdentityButton";
 import { useAuthStatus, useCheckUpdate, useVersion } from "@/lib/queries";
 import { apiErrorMessage } from "@/lib/api";
 import { hasRuntimeToken } from "@/lib/bootstrap";
+import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
 
 /* ------------------------------------------------------------------ *
  * 左侧导航（与路由一一对应）
@@ -45,6 +46,12 @@ const NAV: SidebarNavGroup[] = [
       { to: "/unlock", label: "连接妙手", icon: KeyRound },
     ],
   },
+  {
+    // 设置是一件「正经入口」，不该只藏在标题栏一个像用户名的按钮后面。
+    // 放进侧边栏「系统」组：看得见、点得到、说得清里面是什么。
+    title: "系统",
+    items: [{ to: "/settings", label: "设置", icon: Settings }],
+  },
 ];
 
 // 标题栏中部不再显示面包屑（老版顶部只有 logo + 右侧账号与开始处理），
@@ -62,9 +69,15 @@ function Shell() {
   const versionQuery = useVersion(false);
   const checkUpdate = useCheckUpdate();
   const guest = useAuthGuardStore((state) => state.guest);
+  const operatorIdentity = useOperatorIdentity();
   useAutoUnlock();
 
   const connected = status?.connected ?? false;
+  // 操作员名：已设置显示名字，未设置标注「本机（未设置）」——
+  // 多人共用一台机器时，左下角随时能看到「现在是谁在操作」。
+  const operatorLabel = operatorIdentity
+    ? operatorDisplayName()
+    : `${operatorDisplayName()}（未设置）`;
 
   return (
     <>
@@ -77,19 +90,15 @@ function Shell() {
             ? {
                 name: status?.connectionName ?? "已连接",
                 detail: status?.appIdHint ?? undefined,
+                operator: operatorLabel,
               }
             : guest
-              ? { name: "游客模式", detail: "未连接妙手" }
-              : { name: "未连接", detail: "点击连接妙手" }
+              ? { name: "游客模式", detail: "未连接妙手", operator: operatorLabel }
+              : { name: "未连接", detail: "点击连接妙手", operator: operatorLabel }
         }
         onAccountClick={() => navigate("/unlock")}
         version={versionQuery.data ?? null}
         checkingUpdate={checkUpdate.isPending}
-        // 标题栏右侧的身份按钮：既显示「现在是谁」，也是设置页的入口。
-        // 左侧导航保持四个业务板块不动 —— 设置不是一件「活」，不该占一个常驻导航项。
-        titleBarExtra={
-          <OperatorIdentityButton onClick={() => navigate("/settings")} />
-        }
         onCheckUpdate={() => {
           checkUpdate.mutate(undefined, {
             onSuccess: (data) => {

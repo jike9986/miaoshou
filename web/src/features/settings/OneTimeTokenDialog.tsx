@@ -1,8 +1,8 @@
 // features/settings —— 一次性 token 展示框
 //
-// 后端只存 token 的哈希，明文只在「新建操作员」和「重置 token」这两个响应里出现一次。
-// 关掉弹窗之后谁都拿不回来（连管理员也不行），所以这个框的职责只有一个：
-// 让人当场把它复制走。文案写死，不改。
+// 注意：后端目前按明文存储 token（server/models/operator.py 有明文存储的设计说明），
+// 「只显示一次」指的是界面与 API 只在新建/重置的响应里回传一次，而不是服务端查不到。
+// 这个框的职责仍然是让人当场复制走——弄丢了只能找管理员重置，旧 token 即刻失效。
 
 import { useState } from "react";
 import { Check, Copy, KeyRound } from "lucide-react";
@@ -113,7 +113,7 @@ export function OneTimeTokenDialog({
 
         <div className="flex items-center gap-1.5 text-2xs leading-4 text-fg-muted">
           <KeyRound aria-hidden className="size-3" strokeWidth={1.75} />
-          服务端只保存这串 token 的哈希，任何人都无法再次查看明文。
+          这串 token 只会在本弹窗里出现一次，界面和接口都不再回显；弄丢了只能重置，旧 token 会立刻失效。
           <Badge variant="neutral" size="sm">
             仅此一次
           </Badge>

@@ -79,8 +79,10 @@ export function PageContent({
   scroll = true,
   padding = "p-6",
 }: PageContentProps) {
+  // 注意：Tailwind 对 w-[var(--x)] 会误判为颜色类型而不生成 CSS，
+  // 这里直接写字面值（与 tokens.css 的 --form-max/--content-max 保持同值）。
   const widthClass =
-    width === "form" ? "max-w-[var(--form-max)]" : width === "table" ? "mx-auto max-w-[var(--content-max)]" : "";
+    width === "form" ? "max-w-[880px]" : width === "table" ? "mx-auto max-w-[1600px]" : "";
   return (
     <div className={cn("min-h-0 flex-1", scroll && "overflow-y-auto", padding, className)}>
       <div className={cn("flex flex-col gap-4", widthClass)}>{children}</div>
