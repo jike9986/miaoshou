@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from api.deps import CredentialsHeader, DbSession, OperatorDep, require_writable
+from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from core import errors
 from core.utils import product_key
 from schemas.requests import BatchClaimRequest, ClaimRequest, ProcessRequest
@@ -50,7 +50,8 @@ def collect_box_detail(
                                       shop_id=shopId, mode=mode)
 
 
-@router.post("/{detail_id}/claim", summary="认领进目标店铺采集箱（不发布）")
+@router.post("/{detail_id}/claim", summary="认领进目标店铺采集箱（不发布）",
+             dependencies=[require_permission("claim")])
 def claim(
     detail_id: str,
     payload: ClaimRequest,
@@ -81,7 +82,8 @@ def claim(
     return result
 
 
-@router.post("/{detail_id}/process", summary="处理一件商品并入仓（拉详情→定价→入库）")
+@router.post("/{detail_id}/process", summary="处理一件商品并入仓（拉详情→定价→入库）",
+             dependencies=[require_permission("process")])
 def process(
     detail_id: str,
     payload: ProcessRequest,
@@ -154,7 +156,8 @@ class DeleteCollectRequest(BaseModel):
     detailIds: list[str | int] = Field(default_factory=list)
 
 
-@router.post("/claim", summary="批量认领（按仓库键）；claimed=false 为撤销认领")
+@router.post("/claim", summary="批量认领（按仓库键）；claimed=false 为撤销认领",
+             dependencies=[require_permission("claim")])
 def claim_batch(payload: BatchClaimRequest, db: DbSession,
     operator: OperatorDep,
     credentials: CredentialsHeader = None,
@@ -243,7 +246,8 @@ def claim_batch(payload: BatchClaimRequest, db: DbSession,
     }
 
 
-@router.post("/delete", summary="从采集箱删除商品（如带水印的废品）")
+@router.post("/delete", summary="从采集箱删除商品（如带水印的废品）",
+             dependencies=[require_permission("process")])
 def delete_from_collect_box(payload: DeleteCollectRequest, db: DbSession,
     operator: OperatorDep,
     credentials: CredentialsHeader = None,

@@ -24,7 +24,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
 
-from api.deps import DbSession, OperatorDep, require_writable
+from api.deps import DbSession, OperatorDep, require_permission, require_writable
 from core import errors
 from schemas.common import CamelModel
 from services import audit_service, image_upload, size_chart_service
@@ -62,7 +62,8 @@ def list_size_charts(db: DbSession, site: str | None = None) -> dict[str, Any]:
 # body 里是 JSON `{"url": "...", "name": "..."}` 时改走「只登记地址」分支：
 # 老版上传没有 URL 形态，但新版前端把「上传」和「贴地址」放在同一个弹窗里，
 # 都打这个接口；这样调用方不用先判自己手里是文件还是地址。
-@router.post("/upload", status_code=201, summary="上传本地尺码图到图床并登记")
+@router.post("/upload", status_code=201, summary="上传本地尺码图到图床并登记",
+             dependencies=[require_permission("process")])
 async def upload_size_chart(
     request: Request,
     db: DbSession,
@@ -180,7 +181,8 @@ def size_chart_detail(chart_id: str, db: DbSession) -> dict[str, Any]:
 
 
 # --- 写 -------------------------------------------------------------------
-@router.post("", status_code=201, summary="新建尺寸表")
+@router.post("", status_code=201, summary="新建尺寸表",
+             dependencies=[require_permission("process")])
 def create_size_chart(payload: SizeChartCreate, db: DbSession,
                       operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -204,7 +206,8 @@ def create_size_chart(payload: SizeChartCreate, db: DbSession,
     return result
 
 
-@router.patch("/{chart_id}", summary="改名 / 换图 / 换站点")
+@router.patch("/{chart_id}", summary="改名 / 换图 / 换站点",
+              dependencies=[require_permission("process")])
 def patch_size_chart(chart_id: str, payload: SizeChartPatch, db: DbSession,
                      operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -221,7 +224,8 @@ def patch_size_chart(chart_id: str, payload: SizeChartPatch, db: DbSession,
     return result
 
 
-@router.delete("/{chart_id}", summary="删除尺寸表（只忘书签，图片保留）")
+@router.delete("/{chart_id}", summary="删除尺寸表（只忘书签，图片保留）",
+               dependencies=[require_permission("process")])
 def delete_size_chart(chart_id: str, db: DbSession,
                       operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -239,7 +243,8 @@ def delete_size_chart(chart_id: str, db: DbSession,
 # 老版删除接口的入参是 `{"url": ...}`，没有 id（前端尺码图库就是拿地址删的）。
 # 单独开一条 DELETE /size-charts（无路径段）承接这个形态：放成 /{chart_id}
 # 的 body 分支会跟「id 必须是数字」的校验打架，两条路径各自干净。
-@router.delete("", summary="按地址删除尺寸表（老版 delete-size-chart 形态）")
+@router.delete("", summary="按地址删除尺寸表（老版 delete-size-chart 形态）",
+               dependencies=[require_permission("process")])
 async def delete_size_chart_by_url(request: Request, db: DbSession,
                                    operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)

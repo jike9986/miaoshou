@@ -11,7 +11,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import Field
 from sqlalchemy.orm import Session
 
-from api.deps import CredentialsHeader, DbSession, OperatorDep, require_writable
+from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from api.helpers import parse_bool
 from core import errors
 from core.utils import money, to_decimal
@@ -25,6 +25,7 @@ from schemas.requests import (
 )
 from services import (
     audit_service,
+    operator_service,
     price_template,
     product_service,
     setting_service,
@@ -90,7 +91,12 @@ class ConfirmSaveRequest(CamelModel):
 
 
 
-router = APIRouter(prefix="/warehouse", tags=["成品仓库"])
+router = APIRouter(
+    prefix="/warehouse",
+    tags=["成品仓库"],
+    # 仓库所有写接口要求老师以上；成员保留 GET 与预览类只读操作。
+    dependencies=[require_permission("warehouse")],
+)
 
 
 @router.get("", summary="分页 + 类目 + 分组 + 搜索")
@@ -137,7 +143,8 @@ def list_custom_categories(db: DbSession) -> dict[str, Any]:
     return {"categories": warehouse_service.custom_categories(db)}
 
 
-@router.post("/custom-categories", status_code=201, summary="新建自定义分类标签")
+@router.post("/custom-categories", status_code=201, summary="新建自定义分类标签",
+             dependencies=[require_permission("process")])
 def create_custom_category(payload: CustomCategoryRequest, db: DbSession,
                            operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -152,7 +159,8 @@ def create_custom_category(payload: CustomCategoryRequest, db: DbSession,
     return {"categories": result}
 
 
-@router.patch("/custom-categories", summary="重命名自定义分类标签")
+@router.patch("/custom-categories", summary="重命名自定义分类标签",
+              dependencies=[require_permission("process")])
 def patch_custom_category(payload: CustomCategoryRequest, db: DbSession,
                           operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -170,7 +178,8 @@ def patch_custom_category(payload: CustomCategoryRequest, db: DbSession,
 
 # 删除的名字既可能在 body（`{"name": ...}`）也可能在 query（`?name=`）：
 # 老版前端两种写法都有，两种都认，省得前端改一版。
-@router.delete("/custom-categories", summary="删除自定义分类标签")
+@router.delete("/custom-categories", summary="删除自定义分类标签",
+               dependencies=[require_permission("process")])
 async def delete_custom_category(request: Request, db: DbSession,
                                  name: str | None = None) -> dict[str, Any]:
     require_writable(db)
@@ -267,7 +276,8 @@ def warehouse_detail(
     return warehouse_service.detail(db, ident, include_payload=include)
 
 
-@router.patch("/{ident}", summary="改类目 / 分组 / 标题")
+@router.patch("/{ident}", summary="改类目 / 分组 / 标题",
+              dependencies=[require_permission("process")])
 def patch_product(ident: str, payload: ProductPatch, db: DbSession,
                   operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -304,7 +314,8 @@ def patch_product(ident: str, payload: ProductPatch, db: DbSession,
     return result
 
 
-@router.delete("/{ident}", summary="软删除商品")
+@router.delete("/{ident}", summary="软删除商品",
+               dependencies=[require_permission("process")])
 def delete_product(ident: str, db: DbSession,
                    operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -317,7 +328,8 @@ def delete_product(ident: str, db: DbSession,
     return result
 
 
-@router.post("/batch-category", summary="批量改类目 / 分组（单事务）")
+@router.post("/batch-category", summary="批量改类目 / 分组（单事务）",
+             dependencies=[require_permission("process")])
 def batch_category(payload: BatchCategoryRequest, db: DbSession,
                    operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -375,6 +387,9 @@ def transform(payload: TransformRequest, db: DbSession,
     改价直接覆盖 SKU 的 price / priceIncludeVat，不走定价模板——
     与模板重算是两条路，同时用会互相打架。
     """
+    if not payload.dryRun:
+        operator_service.require_role(operator, "process")
+        require_writable(db)
     if not payload.ids:
         raise errors.validation("请先选择商品", field="ids")
     if (payload.priceMultiplier is not None and payload.targetPrice is not None):
@@ -382,8 +397,6 @@ def transform(payload: TransformRequest, db: DbSession,
     wanted = [str(item).strip() for item in payload.ids if str(item).strip()]
     if not wanted:
         raise errors.validation("请先选择商品", field="ids")
-    if not payload.dryRun:
-        require_writable(db)
 
     from services import transform_service, word_service
 
@@ -473,7 +486,8 @@ def transform(payload: TransformRequest, db: DbSession,
     }
 
 
-@router.post("/batch-delete", summary="批量软删除")
+@router.post("/batch-delete", summary="批量软删除",
+             dependencies=[require_permission("process")])
 def batch_delete(payload: BatchDeleteRequest, db: DbSession,
                  operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -519,7 +533,8 @@ def pre_save_gate(payload: PreSaveGateRequest, db: DbSession,
     return {**result, "identity": identity}
 
 
-@router.post("/confirm-save", summary="两阶段保存：核对过 payloadHash 后再真正入仓")
+@router.post("/confirm-save", summary="两阶段保存：核对过 payloadHash 后再真正入仓",
+             dependencies=[require_permission("process")])
 def confirm_save(payload: ConfirmSaveRequest, db: DbSession,
                  operator: OperatorDep,
                  credentials: CredentialsHeader = None) -> dict[str, Any]:
@@ -798,7 +813,8 @@ def _patch_sku_props(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return values
 
 
-@router.patch("/{ident}/images", summary="改主图 / 详情图 / SKU 属性（只改本地，不推上游）")
+@router.patch("/{ident}/images", summary="改主图 / 详情图 / SKU 属性（只改本地，不推上游）",
+              dependencies=[require_permission("process")])
 def patch_product_images(ident: str, payload: ProductImagesPatch,
                          db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     """把挑好的主图、详情 HTML、SKU 属性写回仓库行的 payload。

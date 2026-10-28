@@ -101,6 +101,23 @@ def test_operator_token_resolves_to_that_person(db):
     assert operator.name == name
 
 
+def test_operator_display_name_cannot_be_used_as_bearer(db):
+    """显示名是公开信息，绝不能当 Bearer 凭据绕过 token 直接登录。"""
+    name = f"公开名字-{_suffix()}"
+    operator_service.create(db, name)
+    db.commit()
+
+    with pytest.raises(errors.AppError) as info:
+        deps.require_token(authorization=f"Bearer {name}", db=db)
+    assert info.value.code == errors.TOKEN_INVALID
+    assert info.value.status == 401
+
+    with pytest.raises(errors.AppError) as info:
+        deps.current_operator(db, authorization=f"Bearer {name}")
+    assert info.value.code == errors.TOKEN_INVALID
+    assert info.value.status == 401
+
+
 def test_declared_operator_name_with_shared_secret(db):
     """`X-Operator` 只报名字时必须另有一个有效凭据，且名字可以百分号编码。
 

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Query
 from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from api.helpers import parse_bool
 from schemas.requests import PublishRequest
-from services import audit_service, publish_service, setting_service
+from services import audit_service, operator_service, publish_service, setting_service
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +31,16 @@ def logs(
     scheduleId: str | None = None,
     since: float | None = None,
     refresh: str | None = None,
+    operator: OperatorDep = None,
 ) -> dict[str, Any]:
     # 默认不在 GET 里打上游（列表要快）；但带 refresh=1 时必须真回源——
     # 否则用户看到的水远是本地快照，平台侧改判永远不会同步过来。
     platform_total: Any = None
     degraded = False
-    if parse_bool(refresh, "refresh", False):
+    refresh_flag = parse_bool(refresh, "refresh", False)
+    if refresh_flag:
+        operator_service.require_role(operator, "publish")
+    if refresh_flag:
         try:
             # 回源沿用本次列表请求的分页与状态筛选：写死 1/20 会把翻到第 3 页
             # 的记录永远留在 processing，状态筛选也被无声丢掉。
@@ -61,7 +65,8 @@ def publish_settings(db: DbSession) -> dict[str, Any]:
     }
 
 
-@router.post("/settings", summary="打开/关闭发布总开关")
+@router.post("/settings", summary="打开/关闭发布总开关",
+             dependencies=[require_permission("admin")])
 def set_publish_settings(payload: dict[str, Any], db: DbSession,
                          operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -185,7 +190,8 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
             "platformTotal": platform_total}
 
 
-@router.post("/logs/refresh", summary="回源平台更新发布状态（best effort）")
+@router.post("/logs/refresh", summary="回源平台更新发布状态（best effort）",
+             dependencies=[require_permission("publish")])
 def refresh_logs(db: DbSession,
                  credentials: CredentialsHeader = None,
                  accountId: str | None = None,

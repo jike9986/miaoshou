@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from api import reference
-from api.deps import CredentialsHeader, DbSession, OperatorDep, require_writable
+from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from api.helpers import parse_bool
 from core import errors
 from core.config import get_settings
@@ -92,7 +92,8 @@ def update_status(db: DbSession) -> dict[str, Any]:
     }
 
 
-@router.post("/update", summary="下载更新包（校验后落盘，可按需安装）")
+@router.post("/update", summary="下载更新包（校验后落盘，可按需安装）",
+             dependencies=[require_permission("admin")])
 def update(payload: dict[str, Any] | None = None, db: DbSession = None) -> dict[str, Any]:
     """POST 才真正下载；`install: true` 时在 Windows 上直接拉起安装包。
 
@@ -263,7 +264,8 @@ def system_settings(db: DbSession) -> dict[str, Any]:
     }
 
 
-@router.post("/settings", summary="切换只读模式 / 发布开关")
+@router.post("/settings", summary="切换只读模式 / 发布开关",
+             dependencies=[require_permission("admin")])
 def patch_system_settings(payload: dict[str, Any], db: DbSession,
                           operator: OperatorDep) -> dict[str, Any]:
     # 改系统设置是管理员专属：只读模式能让所有人立刻写不进去，
@@ -495,7 +497,8 @@ def price_preview(payload: PricePreviewRequest, db: DbSession) -> dict[str, Any]
 
 
 
-@router.post("/templates/select", summary="记住某个账号当前用的是哪套定价模板")
+@router.post("/templates/select", summary="记住某个账号当前用的是哪套定价模板",
+             dependencies=[require_permission("process")])
 def select_template(payload: dict[str, Any], db: DbSession,
                     operator: OperatorDep) -> dict[str, Any]:
     """按账号记当前模板（老版 /api/price-select 的等价物）。
@@ -523,7 +526,8 @@ def select_template(payload: dict[str, Any], db: DbSession,
             "selected": setting_service.selected_templates(db)}
 
 
-@router.post("/templates", summary="保存定价模板（校验后入库）")
+@router.post("/templates", summary="保存定价模板（校验后入库）",
+             dependencies=[require_permission("process")])
 def save_template(payload: dict[str, Any], db: DbSession,
                   operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -550,7 +554,8 @@ def save_template(payload: dict[str, Any], db: DbSession,
     return {"template": normalized, "templates": templates(db)["templates"]}
 
 
-@router.delete("/templates/{name}", summary="删除定价模板")
+@router.delete("/templates/{name}", summary="删除定价模板",
+               dependencies=[require_permission("process")])
 def delete_template(name: str, db: DbSession,
                     operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -599,7 +604,8 @@ def backfill_survey(db: DbSession) -> dict[str, Any]:
     return backfill_service.survey(db)
 
 
-@router.post("/maintenance/backfill", summary="按账号店铺清单回填仓库账号")
+@router.post("/maintenance/backfill", summary="按账号店铺清单回填仓库账号",
+             dependencies=[require_permission("admin")])
 def backfill_apply(db: DbSession, operator: OperatorDep,
                    payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """默认只出报告；`{"apply": true}` 才写库。
@@ -642,7 +648,8 @@ def prune_survey(days: float = 7.0) -> dict[str, Any]:
     return report
 
 
-@router.post("/maintenance/prune", summary="清理运行时缓存（只删图片缓存，不动记录）")
+@router.post("/maintenance/prune", summary="清理运行时缓存（只删图片缓存，不动记录）",
+             dependencies=[require_permission("admin")])
 def prune_run(payload: dict[str, Any] | None = None, db: DbSession = None,
               operator: OperatorDep = None) -> dict[str, Any]:
     """`{"days": 7, "confirm": true}` 才真删。
@@ -715,7 +722,8 @@ def share_status(request: Request, db: DbSession) -> dict[str, Any]:
     return share_service.share_view(db)
 
 
-@router.post("/share", summary="切换共享模式（落库，需重启生效）")
+@router.post("/share", summary="切换共享模式（落库，需重启生效）",
+             dependencies=[require_permission("admin")])
 def set_share(request: Request, payload: dict[str, Any], db: DbSession,
               operator: OperatorDep) -> dict[str, Any]:
     """`{"sharedMode": true}` —— 写进 settings 表，不只改内存。

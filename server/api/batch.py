@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from api.deps import DbSession, OperatorDep, require_writable
+from api.deps import DbSession, OperatorDep, require_permission, require_writable
 from schemas.requests import (
     BatchControlRequest,
     BatchCreateRequest,
@@ -26,7 +26,8 @@ from schemas.requests import (
 )
 from services import audit_service, batch_service
 
-router = APIRouter(prefix="/batch", tags=["批次编排"])
+router = APIRouter(prefix="/batch", tags=["批次编排"],
+                   dependencies=[require_permission("batch")])
 
 
 @router.post("", status_code=201, summary="建批次（同账号同店铺只允许一条未完成的）")

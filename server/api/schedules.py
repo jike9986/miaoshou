@@ -5,13 +5,14 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from api.deps import CredentialsHeader, DbSession, OperatorDep, require_writable
+from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from api.helpers import parse_bool
 from core import errors
 from schemas.requests import ScheduleCreate, SchedulePatch
 from services import account_service, audit_service, schedule_service
 
-router = APIRouter(prefix="/schedules", tags=["定时发布"])
+router = APIRouter(prefix="/schedules", tags=["定时发布"],
+                   dependencies=[require_permission("schedule")])
 
 
 def _task_of(result: Any) -> dict[str, Any]:

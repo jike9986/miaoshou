@@ -1,7 +1,7 @@
 """操作员与审计查询路由。
 
-**不是权限系统**：这里没有角色、没有权限矩阵、没有密码。运营团队共用一台
-装机实例，彼此信任；这些接口只解决「谁做的能查到」。
+操作员名单用于记名，角色用于分级授权：成员只读，老师处理业务，
+管理员额外管理操作员、账号和全局配置。操作员写接口仅管理员可调用。
 
   · `GET  /operators`          —— 谁能被记名（**永不返回 token**）
   · `POST /operators`          —— 加一个人，token 只在这里出现一次
@@ -19,7 +19,7 @@
 401 说明无效（见 OperatorsPanel 的 SwitchIdentityDialog）。如果它挂在
 `require_token` 后面，那么带着**别人的** token 来探测会被共享 secret.key
 那道门先放行，永远返回 200，「这串 token 有没有效」就判不出来了。
-写操作不受影响：每个写接口都带 `OperatorDep`，那一步自己会验凭据。
+写操作由 AdminDep 统一鉴权，并逐个接口留下审计。
 """
 from __future__ import annotations
 
@@ -27,7 +27,14 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from api.deps import DbSession, OperatorDep, OptionalOperatorDep, require_writable
+from api.deps import (
+    AdminDep,
+    DbSession,
+    OperatorDep,
+    OptionalOperatorDep,
+    require_permission,
+    require_writable,
+)
 from core import errors
 from schemas.common import CamelModel
 from services import audit_service, operator_service
@@ -87,19 +94,15 @@ def list_operators(db: DbSession,
 
 @router.post("", status_code=201, summary="新增操作员（返回的 token 只出现这一次）")
 def create_operator(payload: OperatorCreateRequest, db: DbSession,
-                    operator: OperatorDep) -> dict[str, Any]:
+                    operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     is_admin = bool(payload.isAdmin if payload.admin is None else payload.admin)
     role = payload.role if payload.role in operator_service.VALID_ROLES else None
     # 传了角色就按角色来，没传就按 isAdmin 推
     if role is None:
         role = operator_service.ROLE_ADMIN if is_admin else operator_service.ROLE_MEMBER
-    if role == operator_service.ROLE_ADMIN and not bool(operator.is_admin):
-        # 加管理员等于加一个能停用别人的人：普通操作员不该有这个能力。
-        # 这是唯一一处真正的「权限」判定，理由是它挡的是「互相停用打架」，
-        # 不是分级授权。
-        raise errors.forbidden("只有管理员可以新增管理员",
-                              reason="not_admin")
+    # role 优先于旧 isAdmin 字段，两个布尔列必须同步，避免 role_of 把老师误判为管理员。
+    is_admin = role == operator_service.ROLE_ADMIN
     row, token = operator_service.create(db, payload.name, is_admin=is_admin,
                                           role=role)
     db.commit()
@@ -114,7 +117,7 @@ def create_operator(payload: OperatorCreateRequest, db: DbSession,
 
 @router.patch("/{operator_id}", summary="改名 / 重新启用")
 def patch_operator(operator_id: str, payload: OperatorPatchRequest,
-                   db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+                   db: DbSession, operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     if payload.name is None and payload.enabled is None and payload.role is None:
         raise errors.validation("至少提供一个要修改的字段（name / enabled / role）",
@@ -124,7 +127,7 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
         # 改角色：只有管理员能改，且不能把最后一个管理员降成非管理员
         result = operator_service.set_role(
             db, operator_id, payload.role,
-            is_admin_operator=bool(operator.is_admin))
+            is_admin_operator=operator_service.role_of(operator) == operator_service.ROLE_ADMIN)
         db.commit()
         audit_service.record(db, operator=operator, action="operator.set_role",
                              target_kind="operator", target_id=str(operator_id),
@@ -143,7 +146,8 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
     if payload.enabled is not None:
         if payload.enabled:
             result = operator_service.enable(
-                db, operator_id, is_admin_operator=bool(operator.is_admin))
+                db, operator_id,
+                is_admin_operator=operator_service.role_of(operator) == operator_service.ROLE_ADMIN)
             db.commit()
             audit_service.record(db, operator=operator, action="operator.enable",
                                  target_kind="operator", target_id=str(operator_id),
@@ -162,7 +166,8 @@ def _disable(db: DbSession, operator_id: str, operator: Any) -> dict[str, Any]:
         # 停自己 = 立刻把自己锁在门外，而界面上没有任何补救入口。挡的是手滑。
         raise errors.forbidden("不能停用自己的账号", reason="self")
     result = operator_service.disable(
-        db, operator_id, is_admin_operator=bool(operator.is_admin))
+        db, operator_id,
+        is_admin_operator=operator_service.role_of(operator) == operator_service.ROLE_ADMIN)
     db.commit()
     audit_service.record(db, operator=operator, action="operator.disable",
                          target_kind="operator", target_id=str(operator_id),
@@ -173,14 +178,14 @@ def _disable(db: DbSession, operator_id: str, operator: Any) -> dict[str, Any]:
 
 @router.post("/{operator_id}/disable", summary="停用（管理员；不能停自己/最后一个管理员）")
 def disable_operator(operator_id: str, db: DbSession,
-                     operator: OperatorDep) -> dict[str, Any]:
+                     operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     return {"operator": _disable(db, operator_id, operator)}
 
 
 @router.post("/{operator_id}/enable", summary="重新启用（管理员）")
 def enable_operator(operator_id: str, db: DbSession,
-                    operator: OperatorDep) -> dict[str, Any]:
+                    operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     result = operator_service.enable(
         db, operator_id, is_admin_operator=bool(operator.is_admin))
@@ -194,7 +199,7 @@ def enable_operator(operator_id: str, db: DbSession,
 
 @router.post("/{operator_id}/rotate", summary="重发 token（旧 token 立即失效）")
 def rotate_operator(operator_id: str, db: DbSession,
-                    operator: OperatorDep) -> dict[str, Any]:
+                    operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     result, token = operator_service.rotate(db, operator_id)
     db.commit()
@@ -206,7 +211,8 @@ def rotate_operator(operator_id: str, db: DbSession,
     return {"operator": result, "token": token}
 
 
-@audit_router.get("", summary="审计流水（谁做的、什么时候、结果）")
+@audit_router.get("", summary="审计流水（谁做的、什么时候、结果）",
+                  dependencies=[require_permission("admin")])
 def list_audit_logs(
     db: DbSession,
     operator: OperatorDep,

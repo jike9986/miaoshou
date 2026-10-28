@@ -18,10 +18,10 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import Field
 
-from api.deps import CredentialsHeader, DbSession, OperatorDep, require_writable
+from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from core import errors
 from schemas.common import CamelModel
-from services import account_service, audit_service, price_template, sync_service
+from services import account_service, audit_service, operator_service, price_template, sync_service
 from services.account_service import map_upstream_error
 from services.miaoshou import MiaoshouError
 
@@ -61,6 +61,7 @@ class SourceLinkRequest(CamelModel):
 def sync_price_templates(
     payload: PriceTemplateRequest,
     db: DbSession,
+    operator: OperatorDep,
     credentials: CredentialsHeader = None,
 ) -> dict[str, Any]:
     """等价老版 `/api/price-sync`：上游模板名 / 站点 / 币种原样返回给前端。
@@ -69,10 +70,12 @@ def sync_price_templates(
     这是老版 `service_price.sync` 的完整链路。默认 false 保持原有只读语义 ——
     已有的调用方和前端下拉都靠这个「不落库」的承诺。
     """
+    if payload.save:
+        # 保存分支先鉴权再解析账号，成员不会触发任何上游或数据库副作用。
+        operator_service.require_role(operator, "process")
+        require_writable(db)
     account = account_service.resolve_account(db, payload.accountId, credentials)
     if payload.save:
-        # 落库是写操作，必须先过只读闸；预览路径不写库所以不拦。
-        require_writable(db)
         try:
             return sync_service.sync_price_templates(
                 db, site=payload.site, account_id=account.id,
@@ -126,7 +129,8 @@ def preview_price_templates(
         raise map_upstream_error(exc) from None
 
 
-@router.post("/source-links", summary="从已有成品回收 1688 货源链接进池子")
+@router.post("/source-links", summary="从已有成品回收 1688 货源链接进池子",
+             dependencies=[require_permission("carrier")])
 def sync_source_links(payload: SourceLinkRequest, db: DbSession,
                       operator: OperatorDep) -> dict[str, Any]:
     """等价老版 `/api/sync-source-links`：按仓库 id 或全量扫描，回收 offer 链接。"""

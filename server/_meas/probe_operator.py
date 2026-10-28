@@ -158,10 +158,13 @@ def test_identity() -> None:
               who is not None and who.id == zhang.id,
               f"got {getattr(who, 'name', None)!r}")
 
-        # (c) 名字也认（X-Operator: 张三 图省事的用法）
+        # (c) 名字不是登录凭据；只有 X-Operator 声明才允许按名字解析
         by_name = operator_service.resolve(db, "张三")
-        check("identity: operator name resolves to that person",
-              by_name is not None and by_name.id == zhang.id, "name lookup failed")
+        check("identity: operator name cannot be used as bearer credential",
+              by_name is None, "display name unexpectedly resolved as token")
+        declared = operator_service.resolve_declared(db, "张三")
+        check("identity: X-Operator name resolves to declared person",
+              declared is not None and declared.id == zhang.id, "name lookup failed")
 
         # (d) 乱码 → None（由调用方拒）
         check("identity: garbage resolves to None",

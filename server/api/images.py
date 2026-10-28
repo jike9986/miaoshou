@@ -12,6 +12,7 @@ from api.deps import (
     DbSession,
     OperatorDep,
     request_id_of,
+    require_permission,
     require_writable,
 )
 from api.helpers import parse_bool
@@ -24,6 +25,7 @@ from services import (
     audit_service,
     image_review_service,
     image_service,
+    operator_service,
     setting_service,
 )
 
@@ -96,7 +98,8 @@ def review_gate(payload: ImageReviewGateRequest, db: DbSession,
 
 
 
-@router.post("/translate", status_code=202, summary="批量提交图片翻译（幂等 + 预算）")
+@router.post("/translate", status_code=202, summary="批量提交图片翻译（幂等 + 预算）",
+             dependencies=[require_permission("images")])
 def translate(payload: ImageTranslateRequest, db: DbSession,
               operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -141,8 +144,10 @@ def list_jobs(
 
 @router.get("/jobs/{job_id}", summary="单个任务（refresh=true 时向上游查询）")
 def get_job(job_id: str, db: DbSession,
-    credentials: CredentialsHeader = None, refresh: str | None = None) -> dict[str, Any]:
+    credentials: CredentialsHeader = None, refresh: str | None = None,
+    operator: OperatorDep = None) -> dict[str, Any]:
     if parse_bool(refresh, "refresh", False):
+        operator_service.require_role(operator, "images")
         result = image_service.refresh(db, job_id)
         db.commit()
         return result
@@ -159,7 +164,8 @@ def get_job_file(job_id: str, db: DbSession) -> Response:
                         headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
 
-@router.post("/jobs/{job_id}/upload", summary="把结果图传到图床，拿公网地址")
+@router.post("/jobs/{job_id}/upload", summary="把结果图传到图床，拿公网地址",
+             dependencies=[require_permission("images")])
 def upload_job(job_id: str, db: DbSession,
                operator: OperatorDep) -> dict[str, Any]:
     """补传公网地址。
@@ -187,7 +193,8 @@ def usage(db: DbSession) -> dict[str, Any]:
     return image_service.usage(db)
 
 
-@router.post("/reconcile", summary="进程重启后对账（绝不重复提交）")
+@router.post("/reconcile", summary="进程重启后对账（绝不重复提交）",
+             dependencies=[require_permission("images")])
 def reconcile(db: DbSession,
     operator: OperatorDep,
     credentials: CredentialsHeader = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -217,7 +224,8 @@ def limits(db: DbSession) -> dict[str, Any]:
     return {"limits": setting_service.image_limits(db), "usage": image_service.usage(db)}
 
 
-@router.post("/limits", summary="调整图片限流额度")
+@router.post("/limits", summary="调整图片限流额度",
+             dependencies=[require_permission("admin")])
 def set_limits(payload: dict[str, Any], db: DbSession,
                operator: OperatorDep) -> dict[str, Any]:
     """改每分钟 / 每小时 / 每天张数与每日预算。
@@ -343,7 +351,8 @@ def _smoke_png() -> bytes:
             + chunk(b"IEND", b""))
 
 
-@router.post("/verify", summary="真发一次最小付费请求验证密钥（需 confirm）")
+@router.post("/verify", summary="真发一次最小付费请求验证密钥（需 confirm）",
+             dependencies=[require_permission("admin")])
 def verify_key_live(request: Request, db: DbSession, operator: OperatorDep,
                     payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """付费冒烟：发一张 64x64 的纯色图，确认密钥能真的打到上游。

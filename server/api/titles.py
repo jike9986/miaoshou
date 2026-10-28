@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import Field
 
-from api.deps import DbSession, OperatorDep, require_writable
+from api.deps import DbSession, OperatorDep, require_permission, require_writable
 from core import errors
 from schemas.common import CamelModel
 from services import audit_service, title_service
@@ -72,7 +72,8 @@ def preview_titles(payload: TitlePreviewRequest, db: DbSession) -> dict[str, Any
 
 
 # --- 保存 -----------------------------------------------------------------
-@router.post("/save-to-miaoshou", summary="把标题写回妙手草稿并回读确认")
+@router.post("/save-to-miaoshou", summary="把标题写回妙手草稿并回读确认",
+             dependencies=[require_permission("process")])
 def save_to_miaoshou(payload: TitleSaveRequest, db: DbSession,
                      operator: OperatorDep) -> dict[str, Any]:
     """真正改妙手侧标题。
@@ -113,7 +114,8 @@ def save_to_miaoshou(payload: TitleSaveRequest, db: DbSession,
     return result
 
 
-@router.patch("/{ident}", summary="保存单个商品标题（只改本地，不回写妙手草稿）")
+@router.patch("/{ident}", summary="保存单个商品标题（只改本地，不回写妙手草稿）",
+              dependencies=[require_permission("process")])
 def save_title(ident: str, payload: TitlePatchRequest, db: DbSession,
                operator: OperatorDep) -> dict[str, Any]:
     """保存单个商品标题：ident 为数据库 id 或 `{detailId}:{shopId}`。

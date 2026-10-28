@@ -6,11 +6,11 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from api import reference
-from api.deps import CredentialsHeader, DbSession, OperatorDep, require_writable
+from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from api.helpers import parse_bool
 from core import errors
 from schemas.requests import CategorySyncRequest
-from services import account_service, audit_service, category_service, product_service
+from services import account_service, audit_service, category_service, operator_service, product_service
 from services.account_service import account_client, map_upstream_error
 from services.miaoshou import MiaoshouError
 
@@ -26,11 +26,14 @@ def list_categories(
     depth: int = Query(default=2, ge=1, le=6),
     leafOnly: str | None = None,
     refresh: str | None = None,
+    operator: OperatorDep = None,
 ) -> dict[str, Any]:
     account = account_service.get_account(db, accountId) if accountId else None
     site_code = (site or (account.site if account else "") or "MY").upper()
     leaf_flag = parse_bool(leafOnly, "leafOnly", False)
     refresh_flag = parse_bool(refresh, "refresh", False)
+    if refresh_flag:
+        operator_service.require_role(operator, "process")
 
     rows, scope = category_service.scope_rows(db, site_code, account.id if account else None)
     stale = False
@@ -40,6 +43,7 @@ def list_categories(
             if not rows:
                 raise errors.not_connected("尚未连接妙手，且本地没有该类目缓存")
         else:
+            operator_service.require_role(operator, "process")
             client = account_client(target)
             try:
                 category_service.sync(db, client, site=site_code, account_id=target.id)
@@ -69,7 +73,8 @@ def list_categories(
     }
 
 
-@router.post("/sync", summary="从妙手拉类目树入库")
+@router.post("/sync", summary="从妙手拉类目树入库",
+             dependencies=[require_permission("process")])
 def sync_categories(payload: CategorySyncRequest, db: DbSession,
     operator: OperatorDep,
     credentials: CredentialsHeader = None,

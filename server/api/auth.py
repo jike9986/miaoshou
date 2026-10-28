@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from api.deps import DbSession, OperatorDep, optional_account, require_writable
+from api.deps import AdminDep, DbSession, optional_account, require_writable
 from core.config import get_settings
 from core.constants import (
     APP_VERSION,
@@ -26,7 +26,7 @@ router = APIRouter(prefix="/auth", tags=["认证"])
 
 @router.post("/connect", summary="连接妙手账号")
 def connect(payload: ConnectRequest, db: DbSession,
-            operator: OperatorDep) -> dict[str, Any]:
+            operator: AdminDep) -> dict[str, Any]:
     """连接/切换妙手账号。
 
     这条要留痕：账号是**全员共用**的那一个，「下午谁把账号换成了另一个店的」
@@ -86,7 +86,7 @@ def status(db: DbSession) -> dict[str, Any]:
 @router.delete("/disconnect", summary="断开当前连接")
 def disconnect(
     db: DbSession,
-    operator: OperatorDep,
+    operator: AdminDep,
     accountId: str | None = None,
     deleteAccount: bool = False,
 ) -> dict[str, Any]:
@@ -118,7 +118,7 @@ def accounts(db: DbSession) -> dict[str, Any]:
 
 @router.delete("/accounts/{account_id}", summary="删除已保存账号")
 def delete_account(account_id: str, db: DbSession,
-                   operator: OperatorDep) -> dict[str, Any]:
+                   operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     with audit_service.guard(db, operator=operator, action="auth.disconnect",
                              target_kind="account", target_id=str(account_id)):
@@ -139,7 +139,7 @@ class RenameAccountRequest(BaseModel):
 
 @router.patch("/accounts/{account_id}", summary="重命名已保存的连接")
 def rename_account(account_id: str, payload: RenameAccountRequest, db: DbSession,
-                   operator: OperatorDep) -> dict[str, Any]:
+                   operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     with audit_service.guard(db, operator=operator, action="auth.rename",
                              target_kind="account", target_id=str(account_id)):

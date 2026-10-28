@@ -6,11 +6,12 @@ from typing import Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from api.deps import DbSession, OperatorDep, require_writable
+from api.deps import DbSession, OperatorDep, require_permission, require_writable
 from core import errors
 from services import audit_service, carrier_service
 
-router = APIRouter(prefix="/carrier", tags=["载体链接池"])
+router = APIRouter(prefix="/carrier", tags=["载体链接池"],
+                   dependencies=[require_permission("carrier")])
 
 
 class LinkPayload(BaseModel):

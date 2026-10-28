@@ -35,6 +35,14 @@ def _token_from_headers(authorization: str | None, local_token: str | None) -> s
     return (local_token or "").strip()
 
 
+def _same_secret(supplied: str, expected: str) -> bool:
+    """恒定时间比较凭据；非法的非 ASCII token 按「不匹配」处理而非 500。"""
+    try:
+        return secrets.compare_digest(supplied, expected)
+    except TypeError:
+        return False
+
+
 def require_token(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
     x_local_token: Annotated[str | None, Header(alias="X-Local-Token")] = None,
@@ -63,7 +71,7 @@ def require_token(
                               "缺少访问令牌：请带上 Authorization: Bearer <token>",
                               status=401)
     expected = get_settings().local_secret()
-    if secrets.compare_digest(supplied, expected):
+    if _same_secret(supplied, expected):
         return supplied
     operator = operator_service.resolve(db, supplied)
     if operator is not None:
@@ -86,7 +94,7 @@ def _authenticate(db: Session, supplied: str) -> Operator:
     """
     operator = operator_service.resolve(db, supplied)
     if operator is None:
-        if not secrets.compare_digest(supplied, get_settings().local_secret()):
+        if not _same_secret(supplied, get_settings().local_secret()):
             raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
         operator_service.ensure_default(db)
         db.flush()
@@ -117,12 +125,12 @@ def _declared_operator(db: Session, declared: str) -> Operator | None:
     text = (declared or "").strip()
     if not text:
         return None
-    operator = operator_service.resolve(db, text)
+    operator = operator_service.resolve_declared(db, text)
     if operator is not None:
         return operator
     decoded = unquote(text).strip()
     if decoded and decoded != text:
-        return operator_service.resolve(db, decoded)
+        return operator_service.resolve_declared(db, decoded)
     return None
 
 
@@ -197,10 +205,21 @@ def require_permission(permission: str):
     """要求当前操作员有某个权限的依赖工厂。
 
     用法：`@router.post("/publish", dependencies=[require_permission("publish")])`
+    挂载在装饰器上可在业务校验与副作用发生前统一 403。
     """
     def checker(operator: OperatorDep) -> Operator:
         return operator_service.require_role(operator, permission)
+    # 供路由结构回归测试读取实际权限，避免仅靠装饰器文本审计漏路由。
+    setattr(checker, "permission", permission)
     return Depends(checker)
+
+
+def require_admin(operator: OperatorDep) -> Operator:
+    """管理员专属：账号、操作员与全局配置写接口统一走这一入口。"""
+    return operator_service.require_role(operator, "admin")
+
+
+AdminDep = Annotated[Operator, Depends(require_admin)]
 
 
 def optional_operator(

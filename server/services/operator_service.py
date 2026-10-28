@@ -1,9 +1,8 @@
-"""操作员身份服务：解析 token → 是谁，以及管理操作员本身。
+"""操作员身份与三级角色服务：解析 token → 是谁，以及能做什么。
 
-**这不是权限系统。** 运营团队共用一台装机实例，彼此信任，不需要密码、
-角色、权限矩阵。这里只解决一件事：出事之后能回答「这一步是谁点的」。
-`is_admin` 只用来挡两件会波及全员的手滑（停用别人、改共享设置），
-不是分级授权。
+成员只读，老师处理商品/图片/发布，管理员额外管理操作员、账号和全局配置。
+`is_admin` 为旧数据兼容保留，`role_of()` 始终优先识别它，避免老管理员被
+新增的 member 默认列降级。
 
 ── 向后兼容（改这里之前先读完这段）──────────────────────────────────
 0.1 版全实例只有一把 `data_dir/secret.key`，所有客户端都拿它当 Bearer。
@@ -33,7 +32,7 @@ from models.operator import Operator
 
 logger = logging.getLogger(__name__)
 
-# 前端可以直接传显示名，也可以传 token；两种都认（见 resolve）
+# X-Operator 可以声明显示名或 token；登录凭据只认 token（见 resolve/resolve_declared）
 OPERATOR_HEADER = "X-Operator"
 
 # 默认操作员的名字。老客户端没有身份概念，历史记录里统一记成它。
@@ -53,15 +52,18 @@ ROLE_TEACHER = "teacher"
 ROLE_MEMBER = "member"
 VALID_ROLES = {ROLE_ADMIN, ROLE_TEACHER, ROLE_MEMBER}
 
-# 角色权限映射：哪些角色能做哪些事
-# admin: 所有事
-# teacher: 处理商品、发布、认领、批次、定时任务
-# member: 看仓库、看自动化、看词库（只读）
+# 权限语义：成员只读；老师处理商品、图片和发布；管理员额外管理账号、
+# 操作员与全局设置。写词库用 words.update，避免成员拿只读 words 权限写库。
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    ROLE_ADMIN: {"*"},  # 通配
-    ROLE_TEACHER: {"process", "publish", "claim", "batch", "schedule", "warehouse", "words"},
+    ROLE_ADMIN: {"*"},
+    ROLE_TEACHER: {
+        "process", "publish", "claim", "batch", "schedule",
+        "warehouse", "words", "words.update", "images", "carrier",
+    },
     ROLE_MEMBER: {"warehouse", "words"},
 }
+
+
 def role_of(operator: Operator) -> str:
     """操作员的角色。老数据没有 role 字段，is_admin=True 的按 admin 处理。
 
@@ -133,20 +135,27 @@ def ensure_default(db: Session) -> Operator:
 
 # --- 解析 -----------------------------------------------------------------
 def resolve(db: Session, supplied: str) -> Operator | None:
-    """把请求带来的凭据解析成操作员。解析不出返回 None（由调用方决定怎么拒）。
+    """把**凭据**解析成操作员。解析不出返回 None（由调用方决定怎么拒）。
 
-    认三种值：
-      1. 某个操作员的 token  → 那个人（正常路径）
-      2. 某个操作员的显示名  → 那个人（`X-Operator: 张三` 这种图省事的用法）
-      3. 都不是              → None
-
-    名字匹配放在 token 之后：token 是精确的、带熵的，名字可能撞上别人的
-    token 文本（理论上）。先精确后宽松，避免误判。
+    这里只认 token，绝不认显示名：Authorization: Bearer / X-Local-Token
+    都会经过这个函数，若接受名字，任何知道同事名字的人都能直接登录。
+    X-Operator 的可读身份声明由 deps._declared_operator 单独解析。
     """
     text = (supplied or "").strip()
     if not text:
         return None
-    row = db.query(Operator).filter(Operator.token == text).one_or_none()
+    return db.query(Operator).filter(Operator.token == text).one_or_none()
+
+
+def resolve_declared(db: Session, supplied: str) -> Operator | None:
+    """解析 X-Operator 的身份声明：先按 token，再按显示名。
+
+    显示名只能用于「我是谁」的声明，调用方仍须校验请求凭据，不能拿它登录。
+    """
+    text = (supplied or "").strip()
+    if not text:
+        return None
+    row = resolve(db, text)
     if row is not None:
         return row
     return db.query(Operator).filter(Operator.name == text).one_or_none()

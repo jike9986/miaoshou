@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from api.deps import DbSession, OperatorDep, require_writable
+from api.deps import DbSession, OperatorDep, require_permission, require_writable
 from core import errors
 from schemas.requests import WordRequest
 from services import audit_service, word_service
@@ -67,7 +67,8 @@ def list_words_alias(
     return word_service.list_words(db, action=action, q=q, page=page, page_size=pageSize)
 
 
-@alias_router.post("", summary="增删改（/words 别名）")
+@alias_router.post("", summary="增删改（/words 别名）",
+                   dependencies=[require_permission("words.update")])
 async def mutate_words_alias(request: Request, db: DbSession,
                              operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -91,7 +92,8 @@ def list_words(
     return word_service.list_words(db, action=action, q=q, page=page, page_size=pageSize)
 
 
-@router.post("", summary="增删改（add / remove / import / remove-many / clear）")
+@router.post("", summary="增删改（add / remove / import / remove-many / clear）",
+             dependencies=[require_permission("words.update")])
 async def mutate_words(request: Request, db: DbSession,
                        operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -144,7 +146,8 @@ def _slim(result: Any) -> dict[str, Any]:
             if key in result and not isinstance(result[key], list)}
 
 
-@router.post("/building", summary="标记/查询批次运行中（词库写入闸）")
+@router.post("/building", summary="标记/查询批次运行中（词库写入闸）",
+             dependencies=[require_permission("words.update")])
 def mark_building(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """置位/读取「有批次在跑」标志。
 
@@ -158,7 +161,8 @@ def mark_building(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "message": "批次运行中，暂不能修改词库，请等本轮结束"}
 
 
-@router.post("/seed", summary="写入内置词（幂等）")
+@router.post("/seed", summary="写入内置词（幂等）",
+             dependencies=[require_permission("words.update")])
 def seed_words(db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
     added = word_service.seed(db)
@@ -180,7 +184,8 @@ class WordEnabledRequest(BaseModel):
     words: list[str] = Field(default_factory=list)
 
 
-@router.patch("/enabled", summary="启用/停用词条（不删除）")
+@router.patch("/enabled", summary="启用/停用词条（不删除）",
+              dependencies=[require_permission("words.update")])
 def set_word_enabled(payload: WordEnabledRequest, db: DbSession,
                      operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)

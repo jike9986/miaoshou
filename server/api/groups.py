@@ -5,11 +5,12 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from api.deps import DbSession, OperatorDep, require_writable
+from api.deps import DbSession, OperatorDep, require_permission, require_writable
 from schemas.requests import GroupCreate, GroupPatch
 from services import audit_service, group_service
 
-router = APIRouter(prefix="/groups", tags=["分组"])
+router = APIRouter(prefix="/groups", tags=["分组"],
+                   dependencies=[require_permission("warehouse")])
 
 
 @router.get("", summary="分组列表（含商品计数）")
@@ -17,7 +18,8 @@ def list_groups(db: DbSession) -> dict[str, Any]:
     return group_service.list_groups(db)
 
 
-@router.post("", status_code=201, summary="新建分组")
+@router.post("", status_code=201, summary="新建分组",
+             dependencies=[require_permission("process")])
 def create_group(payload: GroupCreate, db: DbSession,
                  operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -37,7 +39,8 @@ def create_group(payload: GroupCreate, db: DbSession,
     return result
 
 
-@router.patch("/{group_id}", summary="改名 / 改颜色 / 改排序")
+@router.patch("/{group_id}", summary="改名 / 改颜色 / 改排序",
+              dependencies=[require_permission("process")])
 def patch_group(group_id: str, payload: GroupPatch, db: DbSession,
                 operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -54,7 +57,8 @@ def patch_group(group_id: str, payload: GroupPatch, db: DbSession,
     return result
 
 
-@router.delete("/{group_id}", summary="删除分组（组内商品解除分组）")
+@router.delete("/{group_id}", summary="删除分组（组内商品解除分组）",
+               dependencies=[require_permission("process")])
 def delete_group(group_id: str, db: DbSession,
                  operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
