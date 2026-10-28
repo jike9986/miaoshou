@@ -116,8 +116,15 @@ def list_warehouse(
 
 
 @router.get("/stats", summary="仓库统计与筛选面板")
-def warehouse_stats(db: DbSession) -> dict[str, Any]:
-    return {"stats": warehouse_service.stats(db),
+def warehouse_stats(db: DbSession, accountId: str | None = None) -> dict[str, Any]:
+    """传 accountId 时只数当前账号的商品（多账号共用时分得清哪些是自己的）。"""
+    account_id: int | None = None
+    if accountId:
+        try:
+            account_id = int(accountId)
+        except (TypeError, ValueError):
+            raise errors.validation("accountId 须为数字", field="accountId") from None
+    return {"stats": warehouse_service.stats(db, account_id=account_id),
             "facets": warehouse_service.facets(db)}
 
 

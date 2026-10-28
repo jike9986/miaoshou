@@ -297,15 +297,16 @@ export function WarehousePage() {
         icon={<RefreshCw className={cn(listQuery.isFetching && "animate-spin")} />}
         onClick={refreshAll}
       />
-      {/* 载体链接池不单独占一个导航板块，入口放在这里：
-          跨店发布要靠它重建载体，池子空了发布直接失败。 */}
+      {/* 跨店发布辅助：同一个商品发到不同店铺时，需要一张「载体链接」来重建。
+          这个名字太技术了，改成用户能懂的说法。 */}
       <Button
         variant="secondary"
         size="md"
         icon={<Link2 />}
+        title="同一个商品要发到不同店铺时，需要先生成载体链接。没有链接时跨店发布会失败。"
         onClick={() => setCarrierOpen(true)}
       >
-        载体链接池
+        跨店发布链接
       </Button>
     </>
   );
@@ -315,8 +316,8 @@ export function WarehousePage() {
       open={carrierOpen}
       onOpenChange={setCarrierOpen}
       size="lg"
-      title="载体链接池"
-      description="跨店发布用它重建载体；池子空了跨店发布会失败。"
+      title="跨店发布链接"
+      description="同一个商品要发到不同店铺时，需要先生成载体链接。池子空了跨店发布会失败。"
     >
       <CarrierPage embedded />
     </Dialog>

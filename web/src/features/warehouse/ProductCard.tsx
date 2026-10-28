@@ -94,11 +94,8 @@ export function ProductCard({ product, selected, onToggle, onOpen, index }: Prod
           {product.title || "（无标题）"}
         </h3>
 
-        <p className="truncate font-mono text-2xs text-fg-muted">
-          {product.detailId}
-          {product.cid ? ` · cid ${product.cid}` : ""}
-        </p>
-
+        {/* 价格 + 分类 + SKU 同一行：价格右侧有空间，分类和 SKU 数挪过去，
+            不再单独占一行（用户说那里空着） */}
         <div className="flex min-h-[24px] items-baseline gap-1.5">
           {price ? (
             <span className="num text-h3 font-semibold text-fg">
@@ -108,40 +105,38 @@ export function ProductCard({ product, selected, onToggle, onOpen, index }: Prod
           ) : (
             <span className="text-sm text-fg-muted">价格未录入</span>
           )}
+          <span className="ml-auto flex items-center gap-2 text-2xs text-fg-muted">
+            {product.categoryName && (
+              <span className="max-w-[80px] truncate" title={product.categoryName}>
+                {product.categoryName}
+              </span>
+            )}
+            <span className="flex items-center gap-0.5" title="SKU 数">
+              <Package className="size-3" strokeWidth={1.75} />
+              <span className="num">{formatCount(product.skuCount)}</span>
+            </span>
+            <span className="flex items-center gap-0.5" title="近 30 天销量">
+              <ShoppingBag className="size-3" strokeWidth={1.75} />
+              <span className="num">{formatCount(product.salesLast30)}</span>
+            </span>
+          </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          {product.categoryName && (
-            <Badge variant="neutral" title={`类目 ${product.categoryName}`}>
-              {product.categoryName}
-            </Badge>
-          )}
-          {groupName && groupName !== "" && (
+        {/* 分组标签：有分组时才显示，没分组不占行 */}
+        {groupName && groupName !== "" && (
+          <div className="flex flex-wrap items-center gap-1.5">
             <Badge variant="brand" title={`分组 ${groupName}`}>
               {groupName}
             </Badge>
-          )}
-          {!product.categoryName && !groupName && (
-            <span className="text-2xs text-fg-muted">未分类</span>
-          )}
-        </div>
+          </div>
+        )}
 
-        <div className="flex items-center gap-3 text-xs text-fg-muted">
-          <span className="flex items-center gap-1" title="SKU 数">
-            <Package className="size-3" strokeWidth={1.75} />
-            <span className="num">{formatCount(product.skuCount)}</span>
-          </span>
-          <span className="flex items-center gap-1" title="近 30 天销量">
-            <ShoppingBag className="size-3" strokeWidth={1.75} />
-            <span className="num">{formatCount(product.salesLast30)}</span>
-          </span>
-          {product.claimed && (
-            <span className="ml-auto flex items-center gap-1">
-              <StatusDot tone="warning" />
-              <span>已认领</span>
-            </span>
-          )}
-        </div>
+        {product.claimed && (
+          <div className="flex items-center gap-1 text-xs text-fg-muted">
+            <StatusDot tone="warning" />
+            <span>已认领</span>
+          </div>
+        )}
 
         {/* 谁改的：只有后端真的给了 updatedBy 才显示。
             没有就不占位（老后端 / 本机未记名时这里不该冒出「未知」）。 */}

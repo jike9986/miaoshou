@@ -212,6 +212,14 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
     items = [serialize(row, account_name=names.get(row.account_id or 0, ""),
                        operator_name=operators.get(row.operator_id or 0, ""))
              for row in rows]
+    # stats 按当前列表的 account_id 过滤：多账号共用时，
+    # 「已认领」显示的是当前账号的数字，不是全账号加总。
+    stats_account_id: int | None = None
+    if account_id not in (None, ""):
+        try:
+            stats_account_id = int(str(account_id))
+        except (TypeError, ValueError):
+            stats_account_id = None
     return {
         "items": items,
         "page": page,
@@ -219,7 +227,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         "total": total,
         "hasMore": page * page_size < total,
         "facets": facets(db),
-        "stats": stats(db),
+        "stats": stats(db, account_id=stats_account_id),
     }
 
 
@@ -450,8 +458,12 @@ def facets(db: Session) -> dict[str, Any]:
     return {"categories": category_list, "groups": group_list, "accounts": account_list}
 
 
-def stats(db: Session) -> dict[str, Any]:
+def stats(db: Session, *, account_id: int | None = None) -> dict[str, Any]:
+    """仓库统计。传 account_id 时只数当前账号的商品——
+    多账号共用一台机器时，「已认领 355 件」是全账号加总，用户分不清哪些是自己的。"""
     base = active_query(db)
+    if account_id is not None:
+        base = base.filter(Product.account_id == account_id)
     total = base.count()
     return {
         "totalProducts": total,
