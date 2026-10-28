@@ -1,0 +1,299 @@
+/* web/src/styles/tokens.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ========== 背景层级 ========== */
+    --canvas: 246 248 249;        /* #F6F8F9 */
+    --canvas-inset: 239 243 244;  /* #EFF3F4 */
+    --sidebar: 241 244 246;       /* #F1F4F6 */
+    --surface: 255 255 255;       /* #FFFFFF */
+    --surface-hover: 248 250 251; /* #F8FAFB */
+    --surface-active: 241 244 246;/* #F1F4F6 */
+    --elevated: 255 255 255;      /* #FFFFFF */
+    --overlay: rgba(12, 20, 24, 0.45); /* 唯一带 alpha 的变量：遮罩不做透明度修饰 */
+
+    /* ========== 边框 ========== */
+    --border-subtle: 237 241 243; /* #EDF1F3 */
+    --border: 225 231 235;        /* #E1E7EB */
+    --border-strong: 203 213 219; /* #CBD5DB */
+
+    /* ========== 文字 ========== */
+    --text-primary: 17 24 28;     /* #11181C  17.9:1 */
+    --text-secondary: 72 86 95;   /* #48565F   7.6:1 */
+    --text-muted: 100 115 126;    /* #64737E   4.9:1 */
+    --text-disabled: 167 180 189; /* #A7B4BD   2.1:1 */
+    --text-inverse: 255 255 255;  /* #FFFFFF */
+    /* 反色浮层底（Tooltip / 批量操作栏 / 深色提示条） */
+    --inverse-surface: 25 31 37;  /* #191F25 */
+
+    /* ========== 品牌 ========== */
+    --brand-50: 239 248 247;   /* #EFF8F7 */
+    --brand-100: 215 239 236;  /* #D7EFEC */
+    --brand-200: 175 223 217;  /* #AFDFD9 */
+    --brand-300: 123 200 192;  /* #7BC8C0 */
+    --brand-400: 69 171 161;   /* #45ABA1 */
+    --brand-500: 30 143 132;   /* #1E8F84 */
+    --brand-600: 11 122 114;   /* #0B7A72  主色 */
+    --brand-700: 9 97 89;      /* #096159 */
+    --brand-800: 8 79 73;      /* #084F49 */
+    --brand-900: 10 64 60;     /* #0A403C */
+    --brand-950: 3 39 36;      /* #032724 */
+
+    /* ========== 状态 ========== */
+    --success-50: 234 247 240;  /* #EAF7F0 */
+    --success-100: 210 238 223; /* #D2EEDF */
+    --success-500: 18 153 106;  /* #12996A */
+    --success-600: 11 127 87;   /* #0B7F57 */
+    --success-700: 8 102 70;    /* #086646 */
+
+    --warning-50: 255 248 235;  /* #FFF8EB */
+    --warning-100: 254 237 208; /* #FEEDD0 */
+    --warning-500: 217 119 6;   /* #D97706 */
+    --warning-600: 180 83 9;    /* #B45309 */
+    --warning-700: 146 64 14;   /* #92400E */
+
+    --danger-50: 253 242 244;   /* #FDF2F4 */
+    --danger-100: 250 224 228;  /* #FAE0E4 */
+    --danger-500: 210 66 88;    /* #D24258 */
+    --danger-600: 192 54 75;    /* #C0364B */
+    --danger-700: 162 42 62;    /* #A22A3E */
+
+    --info-50: 239 246 255;     /* #EFF6FF */
+    --info-100: 219 234 254;    /* #DBEAFE */
+    --info-500: 59 130 246;     /* #3B82F6 */
+    --info-600: 31 111 235;     /* #1F6FEB */
+    --info-700: 26 91 191;      /* #1A5BBF */
+
+    /* ========== 图表 ========== */
+    --chart-1: 11 122 114;
+    --chart-2: 31 111 235;
+    --chart-3: 180 83 9;
+    --chart-4: 124 92 214;
+    --chart-5: 11 127 87;
+    --chart-6: 192 54 75;
+    --chart-7: 14 116 144;
+    --chart-8: 100 115 126;
+
+    /* ========== 焦点环 ========== */
+    --ring: 11 122 114;           /* 用法：rgb(var(--ring) / 0.32) */
+    --ring-danger: 192 54 75;     /* 用法：rgb(var(--ring-danger) / 0.30) */
+
+    /* ========== 圆角 ========== */
+    --radius-xs: 4px;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+    --radius-2xl: 20px;
+
+    /* ========== 阴影 ========== */
+    --shadow-1: 0 1px 2px rgba(16, 24, 32, 0.06), 0 1px 1px rgba(16, 24, 32, 0.04);
+    --shadow-2: 0 4px 12px -2px rgba(16, 24, 32, 0.10), 0 2px 4px -2px rgba(16, 24, 32, 0.06);
+    --shadow-3: 0 16px 40px -8px rgba(16, 24, 32, 0.18), 0 4px 12px -4px rgba(16, 24, 32, 0.08);
+    --shadow-focus: 0 0 0 2px #FFFFFF, 0 0 0 4px rgba(11, 122, 114, 0.32);
+
+    /* ========== 动效 ========== */
+    --dur-instant: 90ms;
+    --dur-fast: 120ms;
+    --dur-exit: 140ms;
+    --dur-card: 160ms;
+    --dur-base: 180ms;
+    --dur-image: 200ms;
+    --dur-medium: 240ms;
+    --dur-slow: 320ms;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-in: cubic-bezier(0.4, 0, 1, 1);
+    --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+    /* ========== 层级 ========== */
+    --z-sticky: 10;
+    --z-titlebar: 30;
+    --z-dropdown: 40;
+    --z-overlay: 50;
+    --z-modal: 60;
+    --z-toast: 70;
+    --z-tooltip: 80;
+
+    /* ========== 布局 ========== */
+    --titlebar-h: 40px;
+    --sidebar-w: 232px;
+    --sidebar-w-collapsed: 64px;
+    --content-pad: 24px;
+    --content-max: 1600px;
+    --form-max: 880px;
+
+    /* ========== 字体 ========== */
+    --font-sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei",
+      "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC",
+      "Noto Sans CJK SC", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", "Cascadia Mono",
+      Consolas, monospace;
+
+    color-scheme: light;
+  }
+
+  .dark {
+    --canvas: 12 16 19;
+    --canvas-inset: 9 12 14;
+    --sidebar: 16 22 26;
+    --surface: 19 26 30;
+    --surface-hover: 25 34 39;
+    --surface-active: 31 42 48;
+    --elevated: 26 34 38;
+    --overlay: rgba(0, 0, 0, 0.62);
+
+    --border-subtle: 30 39 44;
+    --border: 42 53 59;
+    --border-strong: 59 73 80;
+
+    --text-primary: 231 237 240;
+    --text-secondary: 169 184 193;
+    --text-muted: 126 143 153;
+    --text-disabled: 76 91 100;
+    --text-inverse: 6 32 29;
+    --inverse-surface: 38 48 55;  /* 深色下的反色浮层：比 elevated 再亮一档 */
+
+    --brand-600: 56 191 176;  /* #38BFB0 */
+    --brand-700: 76 208 194;  /* 深色下 hover 变亮 */
+    --brand-800: 98 222 209;
+    --brand-50: 12 40 38;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.40);
+    --shadow-2: 0 6px 16px -4px rgba(0, 0, 0, 0.52);
+    --shadow-3: 0 20px 48px -12px rgba(0, 0, 0, 0.68);
+    --shadow-focus: 0 0 0 2px #131A1E, 0 0 0 4px rgba(56, 191, 176, 0.40);
+
+    color-scheme: dark;
+  }
+
+  * {
+    border-color: rgb(var(--border));
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden; /* 桌面应用：滚动只发生在内容区 */
+  }
+
+  body {
+    background-color: rgb(var(--canvas));
+    color: rgb(var(--text-primary));
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 22px;
+    /* Windows 下不要用 -webkit-font-smoothing: antialiased，会让中文字重变细 */
+    font-synthesis: none;
+    text-rendering: optimizeSpeed;
+  }
+
+  ::selection {
+    background: rgb(var(--brand-600) / 0.16);
+    color: rgb(var(--text-primary));
+  }
+
+  /* 滚动条：12px 轨道，8px 滑块，悬停加深 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--border-strong)) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: rgb(var(--border-strong));
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(var(--text-disabled));
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+@layer utilities {
+  .drag-region {
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 1;
+  }
+  /* 下拉/Popover 打开：不引入 tailwindcss-animate 也能用 */
+  .anim-pop-in {
+    animation: pop-in var(--dur-fast) var(--ease-out) both;
+  }
+  .anim-fade-in {
+    animation: fade-in var(--dur-base) var(--ease-out) both;
+  }
+  .anim-fade-out {
+    animation: fade-out var(--dur-fast) var(--ease-in) both;
+  }
+  /* 骨架屏：统一入口，颜色取自 Token */
+  .skeleton {
+    border-radius: 3px;
+    background-image: linear-gradient(
+      90deg,
+      rgb(var(--canvas-inset)) 25%,
+      rgb(var(--surface-hover)) 37%,
+      rgb(var(--canvas-inset)) 63%
+    );
+    background-size: 400% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.97) translateY(-2px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* 骨架屏微光 */
+@keyframes shimmer {
+  0%   { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+/* 仅「审核中」状态点允许的循环动画 */
+@keyframes status-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.86); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "app",
+  "version": "0.1.5",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "tsc -p tsconfig.json && electron .",
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "check": "pnpm typecheck && pnpm lint"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "@types/node": "^22.7.5",
+    "electron": "^31.7.0",
+    "electron-builder": "^25.1.7",
+    "eslint": "^9",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.10",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.72.1"
+  }
+}

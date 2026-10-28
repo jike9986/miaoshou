@@ -1,0 +1,47 @@
+appId: com.aohuang.listing
+productName: 奥皇上品
+copyright: Copyright © 2026 AOHUANG
+directories:
+  output: ../release
+  buildResources: build
+files:
+  - dist/**/*
+  - package.json
+extraResources:
+  - from: ../web/dist
+    to: web
+  # PyInstaller 打好的后端（含 Python 运行时），用户机器无需装 Python
+  - from: ../server/dist/server
+    to: server
+extraFiles:
+  # 启动器必须落在 exe 同级目录（不是 resources/），所以用 extraFiles。
+  # 本机必须命令行带 --no-sandbox 才能起窗口，原因见 build/launch.bat 顶部。
+  - from: build/launch.bat
+    to: launch.bat
+  - from: build/launch.bat
+    to: 启动 奥皇上品.bat
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+  artifactName: 奥皇上品-${version}-Setup.${ext}
+  # exe 用纯 ASCII 名：本机启动脚本/快捷方式要用它拼命令行，
+  # 中文路径在 cmd / makensis 下会被按 GBK 误解码（实测 '奥皇上品' 变成乱码）。
+  # 用户看到的中文全部来自快捷方式名和窗口标题，不受影响。
+  executableName: AohuangShangpin
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 奥皇上品
+  deleteAppDataOnUninstall: false
+  language: "2052"
+  installerLanguages:
+    - zh_CN
+  # 关键：本机 Electron 沙箱在原生层就崩（JS 都没执行），必须让进程命令行
+  # 一开始就带 --no-sandbox。双击 exe 不带参数，所以把参数写进快捷方式里，
+  # 用户点的还是正常的奥皇图标。详见 build/installer.nsh 顶部说明。
+  include: build/installer.nsh

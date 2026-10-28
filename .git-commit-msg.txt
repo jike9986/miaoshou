@@ -1,0 +1,58 @@
+chore: 首次提交 —— tk-desktop 0.1.5 可用基线
+
+这是可回滚的起点。之前整个仓库没有版本控制，所有删除和重构只靠手工快照兜底。
+
+## 这个版本能干什么
+
+Electron + FastAPI 桌面工具，给多个运营共用的上品软件：
+连接妙手 → 采集箱拉取 → 翻译定价 → 入仓 → 批量改类目 → 发布/定时发布。
+
+## 多人共用（本版重点）
+
+- 操作员身份：每人一把 token，明文只在创建时返回一次，列表永不返回
+- 审计留痕：58 条写路由接线，38 个动作，失败也记
+- 乐观锁：revision 冲突返回 409 + 弹窗让人选「刷新」还是「保留我的修改」，绝不自动覆盖
+- 认领互斥：分桶锁保证上游只被调 1 次
+- 局域网共享：AOHUANG_SHARED_MODE=1 监听 0.0.0.0
+- SQLite busy_timeout 提到 15 秒
+
+向后兼容的命门：默认操作员「本机」的 token 就是现有 secret.key，
+老客户端一个字节都不用改。
+
+## 工程规范
+
+- ruff（E,F,W,I,UP,B,SIM,C4,RET）0 问题
+- pytest 89 通过（含真实多线程并发用例）
+- 探针回归 35 个 / 884 条断言
+- tsc 0 错误，eslint 0 error / 24 warning
+- Alembic 3 条迁移，与 create_all 逐列等价
+- CI 3 个 job（python 3.11+3.12 矩阵、web、版本一致性）
+
+## 本版修掉的真实 bug
+
+- 操作员 token 连第一道门都进不来（require_token 只认全局 secret）
+- errors.FORBIDDEN 不存在导致停用自己时 500
+- X-Operator 声明被静默忽略，审计记错人
+- warehouse_service.update 遮蔽 sqlalchemy.update，乐观锁失效
+- 批次 processor 被硬塞 operator_id，自定义实现必 TypeError
+- DEFAULT_NAV 幽灵项（「图片翻译/采集箱又回来了」的真正源头）
+- 定时任务模板默认值被覆盖，错值会被提交
+- size_charts.py 用了 8 处 audit_service 但未 import
+- 版本查询键两套并存，「点检查更新没反应」
+- NEAR_LIMIT_RATIO 同名反义（0.1 vs 0.8）
+
+## 清理
+
+- 删 32 个一次性调试脚本、5 个过期并发脚手架
+- 删 46 项死代码（含 357 行孤儿 ConnectionPanel.tsx）
+- 删 schemas/responses.py（241 行 / 14 类）—— 它缺 revision 字段，
+  接上 response_model 会静默丢掉乐观锁版本号
+
+## 三处「写了没接线」的保护
+
+- 仓库上限：改成容量提示，trim_overflow 默认拒绝执行（它做软删除，
+  自动接线会静默删用户最旧商品）
+- 类目体检：接上，先验后删（坏树被拒时旧数据完好）
+- 40MB 请求体上限：接进中间件，超限 413
+
+验证：355 件真实商品完好，界面端到端 18/18，12 个主要接口全 200。

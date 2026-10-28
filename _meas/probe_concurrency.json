@@ -1,0 +1,272 @@
+{
+ "sqlite": "3.49.1",
+ "python": "3.12.10",
+ "A_light": [
+  {
+   "threads": 10,
+   "busyTimeoutMs": 5000,
+   "statementsPerTxn": 1,
+   "ok": 10,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 0.214,
+   "avgMs": 95.7,
+   "p50Ms": 86.9,
+   "p95Ms": 180.2,
+   "maxMs": 213.6,
+   "throughputTxnPerSec": 46.7
+  },
+  {
+   "threads": 10,
+   "busyTimeoutMs": 15000,
+   "statementsPerTxn": 1,
+   "ok": 10,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 0.216,
+   "avgMs": 97.9,
+   "p50Ms": 88.8,
+   "p95Ms": 182.5,
+   "maxMs": 215.3,
+   "throughputTxnPerSec": 46.4
+  }
+ ],
+ "B_realistic": [
+  {
+   "threads": 10,
+   "busyTimeoutMs": 5000,
+   "statementsPerTxn": 5,
+   "ok": 10,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 0.17,
+   "avgMs": 84.7,
+   "p50Ms": 90.4,
+   "p95Ms": 136.7,
+   "maxMs": 169.6,
+   "throughputTxnPerSec": 58.9
+  },
+  {
+   "threads": 10,
+   "busyTimeoutMs": 15000,
+   "statementsPerTxn": 5,
+   "ok": 10,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 0.234,
+   "avgMs": 108.1,
+   "p50Ms": 107.0,
+   "p95Ms": 200.7,
+   "maxMs": 233.6,
+   "throughputTxnPerSec": 42.7
+  }
+ ],
+ "C_sweep": [
+  {
+   "threads": 4,
+   "busyTimeoutMs": 15000,
+   "statementsPerTxn": 5,
+   "ok": 4,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 0.062,
+   "avgMs": 38.3,
+   "p50Ms": 45.2,
+   "p95Ms": 45.2,
+   "maxMs": 61.5,
+   "throughputTxnPerSec": 64.7
+  },
+  {
+   "threads": 8,
+   "busyTimeoutMs": 15000,
+   "statementsPerTxn": 5,
+   "ok": 8,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 0.154,
+   "avgMs": 74.2,
+   "p50Ms": 74.9,
+   "p95Ms": 121.3,
+   "maxMs": 153.3,
+   "throughputTxnPerSec": 51.9
+  },
+  {
+   "threads": 16,
+   "busyTimeoutMs": 15000,
+   "statementsPerTxn": 5,
+   "ok": 16,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 0.342,
+   "avgMs": 140.5,
+   "p50Ms": 136.6,
+   "p95Ms": 276.8,
+   "maxMs": 341.3,
+   "throughputTxnPerSec": 46.8
+  },
+  {
+   "threads": 32,
+   "busyTimeoutMs": 15000,
+   "statementsPerTxn": 5,
+   "ok": 32,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 0.79,
+   "avgMs": 302.2,
+   "p50Ms": 262.0,
+   "p95Ms": 676.3,
+   "maxMs": 788.7,
+   "throughputTxnPerSec": 40.5
+  },
+  {
+   "threads": 64,
+   "busyTimeoutMs": 15000,
+   "statementsPerTxn": 5,
+   "ok": 64,
+   "locked": 0,
+   "otherErrors": 0,
+   "errorSample": [],
+   "failRate": 0.0,
+   "wallSeconds": 1.759,
+   "avgMs": 720.2,
+   "p50Ms": 657.7,
+   "p95Ms": 1554.1,
+   "maxMs": 1757.6,
+   "throughputTxnPerSec": 36.4
+  }
+ ],
+ "D_serial": {
+  "count": 100,
+  "statementsPerTxn": 5,
+  "seconds": 0.211,
+  "avgMs": 2.11,
+  "throughputTxnPerSec": 473.4
+ },
+ "E_read_write": {
+  "readers": 20,
+  "writerTxns": 50,
+  "readQueries": 7633,
+  "errors": [],
+  "errorCount": 0,
+  "seconds": 0.141,
+  "readQps": 53963.6
+ },
+ "F_busy_timeout": [
+  {
+   "holdSeconds": 1.0,
+   "busyTimeoutMs": 5000,
+   "writers": 10,
+   "ok": 10,
+   "locked": 0,
+   "wallSeconds": 2.06,
+   "maxWaitMs": 2059.3,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 1.0,
+   "busyTimeoutMs": 15000,
+   "writers": 10,
+   "ok": 10,
+   "locked": 0,
+   "wallSeconds": 1.841,
+   "maxWaitMs": 1840.4,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 3.0,
+   "busyTimeoutMs": 5000,
+   "writers": 10,
+   "ok": 10,
+   "locked": 0,
+   "wallSeconds": 3.894,
+   "maxWaitMs": 3893.6,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 3.0,
+   "busyTimeoutMs": 15000,
+   "writers": 10,
+   "ok": 10,
+   "locked": 0,
+   "wallSeconds": 3.57,
+   "maxWaitMs": 3569.2,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 6.0,
+   "busyTimeoutMs": 5000,
+   "writers": 10,
+   "ok": 0,
+   "locked": 10,
+   "wallSeconds": 5.536,
+   "maxWaitMs": 5535.1,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 6.0,
+   "busyTimeoutMs": 15000,
+   "writers": 10,
+   "ok": 10,
+   "locked": 0,
+   "wallSeconds": 6.852,
+   "maxWaitMs": 6851.5,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 9.0,
+   "busyTimeoutMs": 5000,
+   "writers": 10,
+   "ok": 0,
+   "locked": 10,
+   "wallSeconds": 5.522,
+   "maxWaitMs": 5521.4,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 9.0,
+   "busyTimeoutMs": 15000,
+   "writers": 10,
+   "ok": 10,
+   "locked": 0,
+   "wallSeconds": 9.908,
+   "maxWaitMs": 9907.4,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 20.0,
+   "busyTimeoutMs": 5000,
+   "writers": 10,
+   "ok": 0,
+   "locked": 10,
+   "wallSeconds": 5.54,
+   "maxWaitMs": 5539.8,
+   "holderError": []
+  },
+  {
+   "holdSeconds": 20.0,
+   "busyTimeoutMs": 15000,
+   "writers": 10,
+   "ok": 0,
+   "locked": 10,
+   "wallSeconds": 16.423,
+   "maxWaitMs": 16422.2,
+   "holderError": []
+  }
+ ]
+}

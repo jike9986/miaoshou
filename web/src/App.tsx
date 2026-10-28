@@ -1,0 +1,172 @@
+// design-system §5.11 Toaster 挂载点 · §7.1 主框架 · §8.1 路由骨架
+// 业务路由：/automation /warehouse /schedules /words /unlock，另有 /settings（操作员与审计日志）。
+// 与老版一致，采集箱和图片翻译没有独立页面。
+// 未连接妙手时自动跳 /unlock（features/auth/guard），用户选择「稍后连接」后不再强跳。
+
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import {
+  CalendarClock,
+  KeyRound,
+  PackageSearch,
+  ShieldBan,
+  Zap,
+} from "lucide-react";
+import { AppShell, BrandMark } from "@/components/layout/AppShell";
+import type { SidebarNavGroup } from "@/components/layout/Sidebar";
+import { PageContent, PageHeader } from "@/components/layout/PageHeader";
+import { AppToaster, toast } from "@/components/ui/toast";
+import { EmptyState } from "@/components/ui/empty-state";
+import { UnlockPage } from "@/features/auth/UnlockPage";
+import { useAutoUnlock, useAuthGuardStore } from "@/features/auth/guard";
+import { WarehousePage } from "@/features/warehouse/WarehousePage";
+import { AutomationPage } from "@/features/automation/AutomationPage";
+import { SchedulesPage } from "@/features/schedules/SchedulesPage";
+import { WordsPage } from "@/features/words/WordsPage";
+import { SettingsPage } from "@/features/settings/SettingsPage";
+import { OperatorIdentityButton } from "@/features/settings/OperatorIdentityButton";
+import { useAuthStatus, useCheckUpdate, useVersion } from "@/lib/queries";
+import { apiErrorMessage } from "@/lib/api";
+import { hasRuntimeToken } from "@/lib/bootstrap";
+
+/* ------------------------------------------------------------------ *
+ * 左侧导航（与路由一一对应）
+ * ------------------------------------------------------------------ */
+
+// 四项板块，与老版侧边栏一致：自动化 / 违规词库 / 成品仓库 / 定时发布，加「连接妙手」。
+// 采集箱是自动化页商品列表的数据源，图片翻译是处理设置里的开关 —— 都不是独立页面。
+const NAV: SidebarNavGroup[] = [
+  {
+    title: "功能",
+    items: [
+      { to: "/automation", label: "自动化上品", icon: Zap },
+      { to: "/warehouse", label: "成品仓库", icon: PackageSearch },
+      { to: "/schedules", label: "定时发布", icon: CalendarClock },
+      { to: "/words", label: "违规词库", icon: ShieldBan },
+      { to: "/unlock", label: "连接妙手", icon: KeyRound },
+    ],
+  },
+];
+
+// 标题栏中部不再显示面包屑（老版顶部只有 logo + 右侧账号与开始处理），
+// 页面标题交给各自 PageHeader。这里保留表结构仅供将来需要时启用。
+
+/* ------------------------------------------------------------------ *
+ * 壳：账号区 + 顶部店铺下拉 + 自动跳转
+ * ------------------------------------------------------------------ */
+
+function Shell() {
+  const navigate = useNavigate();
+  const { data: status } = useAuthStatus();
+  // 版本：不主动拉清单（refresh=false），点「检查更新」才真去请求，
+  // 免得每次开页都打一次更新服务器。
+  const versionQuery = useVersion(false);
+  const checkUpdate = useCheckUpdate();
+  const guest = useAuthGuardStore((state) => state.guest);
+  useAutoUnlock();
+
+  const connected = status?.connected ?? false;
+
+  return (
+    <>
+      <TokenNotice />
+      <AppShell
+        nav={NAV}
+        brand={{ icon: <BrandMark className="size-4" />, name: "奥皇上品" }}
+        account={
+          connected
+            ? {
+                name: status?.connectionName ?? "已连接",
+                detail: status?.appIdHint ?? undefined,
+              }
+            : guest
+              ? { name: "游客模式", detail: "未连接妙手" }
+              : { name: "未连接", detail: "点击连接妙手" }
+        }
+        onAccountClick={() => navigate("/unlock")}
+        version={versionQuery.data ?? null}
+        checkingUpdate={checkUpdate.isPending}
+        // 标题栏右侧的身份按钮：既显示「现在是谁」，也是设置页的入口。
+        // 左侧导航保持四个业务板块不动 —— 设置不是一件「活」，不该占一个常驻导航项。
+        titleBarExtra={
+          <OperatorIdentityButton onClick={() => navigate("/settings")} />
+        }
+        onCheckUpdate={() => {
+          checkUpdate.mutate(undefined, {
+            onSuccess: (data) => {
+              if (data.updateAvailable) toast.success(`发现新版本 ${data.latest}`);
+              else if (data.ok) toast.success("已是最新版本");
+              else toast.error(data.error ?? "检查更新失败");
+            },
+            onError: (error) => toast.error(apiErrorMessage(error)),
+          });
+        }}
+        // 标题栏不再放账号/店铺切换：账号和店铺已经挪到「开始处理」旁边，
+        // 这里再放一份就是两套重复控件，只会占掉标题栏高度。
+        // 也不传 routeMeta：标题栏中部不显示「功能 / 板块名」面包屑。
+        // 老版顶部只有 logo，页面标题由 PageHeader 负责。
+      />
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * 404 / 令牌缺失
+ * ------------------------------------------------------------------ */
+
+function NotFoundPage() {
+  const navigate = useNavigate();
+  return (
+    <>
+      <PageHeader title="页面不存在" breadcrumb={["奥皇上品", "404"]} />
+      <PageContent width="form">
+        <EmptyState
+          title="没有找到这个页面"
+          description="地址可能已变更，请从左侧导航重新进入。"
+          action={{ label: "返回仓库", onClick: () => navigate("/warehouse", { replace: true }) }}
+          minHeight={320}
+        />
+      </PageContent>
+    </>
+  );
+}
+
+/** 浏览器直开（无 preload 注入 token）时的兜底提示，不是错误，只是说明 */
+function TokenNotice() {
+  if (hasRuntimeToken()) return null;
+  return (
+    <div className="fixed inset-x-0 top-0 z-[70] border-b border-warning-600/20 bg-warning-50 px-6 py-2 text-center text-[13px] leading-5 text-warning-700">
+      未拿到本地访问令牌：桌面端由 Electron 注入；浏览器预览请确认后端已在 8812 端口启动后刷新页面。
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <>
+      <Routes>
+        <Route path="/" element={<Shell />}>
+          <Route index element={<Navigate to="/automation" replace />} />
+          <Route path="automation" element={<AutomationPage />} />
+          <Route path="warehouse" element={<WarehousePage />} />
+          <Route path="schedules" element={<SchedulesPage />} />
+          <Route path="words" element={<WordsPage />} />
+          <Route path="words/*" element={<WordsPage />} />
+          <Route path="unlock" element={<UnlockPage />} />
+          {/* 设置页：只从标题栏的身份按钮进（不在左侧导航里占位） */}
+          <Route path="settings" element={<SettingsPage />} />
+
+          {/* 旧地址兼容：老书签/外部链接不再有独立页面，统一回到新板块 */}
+          {/* 采集箱 / 图片翻译 不是页面：前者是自动化页的数据源，
+              后者是处理设置里的开关。旧地址统一回自动化页。 */}
+          <Route path="collect" element={<Navigate to="/automation" replace />} />
+          <Route path="collect-box" element={<Navigate to="/automation" replace />} />
+          <Route path="images" element={<Navigate to="/automation" replace />} />
+          <Route path="carrier" element={<Navigate to="/warehouse" replace />} />
+          <Route path="publish" element={<Navigate to="/schedules" replace />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Route>
+      </Routes>
+      <AppToaster position="bottom-right" />
+    </>
+  );
+}

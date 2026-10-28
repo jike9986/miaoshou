@@ -1,0 +1,6 @@
+# 同 web/.prettierignore 的理由：Prettier 只在当前工作目录解析 ignore 文件。
+# app/dist 是 tsc 的编译产物，不能被格式化。
+node_modules
+dist
+build
+*.log

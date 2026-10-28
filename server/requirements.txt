@@ -1,0 +1,12 @@
+fastapi==0.115.2
+uvicorn[standard]==0.31.0
+pydantic==2.9.2
+pydantic-settings==2.5.2
+SQLAlchemy==2.0.35
+alembic==1.13.3
+httpx==0.27.2
+python-multipart==0.0.12
+# services/crypto.py 用 Fernet 加密 accounts.app_secret_enc
+cryptography>=42.0.0
+# services/image_upload.py 的 SFTP 上传通道（HTTP 通道不需要）
+paramiko>=3.4,<4

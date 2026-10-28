@@ -1,0 +1,872 @@
+// features/warehouse —— 成品仓库（核心页，api.md §4 / §5）
+// 顶部 KPI · 分类栏 · 工具栏（搜索/每页/排序/刷新/设置分类）· 商品网格 · 多选 · 分页 · 浮动操作条。
+// 批次编排不单独占导航项：作为本页第二个 tab 挂在商品列表旁边（后端 /batch 的
+// 输入就是仓库商品的 detailId，放在一起才不用来回跳）。
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import {
+  Calculator,
+  CheckSquare,
+  Inbox,
+  Layers,
+  ListChecks,
+  PackageSearch,
+  Percent,
+  RefreshCw,
+  SearchX,
+  Send,
+  Trash2,
+  Link2,
+} from "lucide-react";
+import { cn, formatCount } from "@/lib/utils";
+import { ApiError, apiErrorMessage } from "@/lib/api";
+import { LIMITS, toPublishItems } from "@/lib/constants";
+import { listItem } from "@/lib/motion";
+import {
+  useAuthStatus,
+  useBatchDelete,
+  useCreateGroup,
+  useDeleteGroup,
+  useGroups,
+  usePublish,
+  useWarehouseList,
+} from "@/lib/queries";
+import type { GroupFacet, Product } from "@/lib/types";
+import { useSessionStore, useWarehouseStore } from "@/features/stores";
+import { Pagination, TextAction, useDebouncedValue } from "@/features/shared";
+import { PageContent, PageHeader } from "@/components/layout";
+import { CarrierPage } from "@/features/carrier/CarrierPage";
+import {
+  Badge,
+  BulkActionBar,
+  Button,
+  Card,
+  ConfirmDialog,
+  Dialog,
+  EmptyState,
+  ErrorState,
+  Field,
+  IconButton,
+  InlineError,
+  Input,
+  KpiCard,
+  SearchInput,
+  Select,
+  SkeletonCardGrid,
+  StatusDot,
+  Tabs,
+  toast,
+} from "@/components/ui";
+import { CategoryBar } from "@/features/warehouse/CategoryBar";
+import { ProductCard } from "@/features/warehouse/ProductCard";
+import { BatchCategoryDialog } from "@/features/warehouse/BatchCategoryDialog";
+import { CreateBatchDialog } from "@/features/warehouse/CreateBatchDialog";
+import { ProductDetailDrawer } from "@/features/warehouse/ProductDetailDrawer";
+import { PricePreviewDialog } from "@/features/warehouse/PricePreviewDialog";
+import { TransformDialog } from "@/features/warehouse/TransformDialog";
+import { PublishDialog } from "@/features/publish/PublishDialog";
+import { BatchPanel } from "@/features/batch/BatchPanel";
+
+const PAGE_SIZE_OPTIONS = [24, 48, 72, 100];
+const SORT_OPTIONS = [
+  { value: "savedDesc", label: "最近入库" },
+  { value: "savedAsc", label: "最早入库" },
+  { value: "priceAsc", label: "价格从低到高" },
+  { value: "priceDesc", label: "价格从高到低" },
+  { value: "titleAsc", label: "标题 A→Z" },
+];
+
+type WarehouseTab = "products" | "batch";
+
+export function WarehousePage() {
+  const navigate = useNavigate();
+  const reduced = useReducedMotion();
+
+  // tab 记在 URL 上（?tab=batch）：建完批次后 toast 让用户「去批次标签看进度」，
+  // 刷新一下回到商品列表会让人以为进度丢了。
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab: WarehouseTab = searchParams.get("tab") === "batch" ? "batch" : "products";
+  const setTab = useCallback(
+    (value: WarehouseTab) => {
+      const next = new URLSearchParams(searchParams);
+      if (value === "products") next.delete("tab");
+      else next.set("tab", value);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
+
+  const query = useWarehouseStore();
+  const currentShopId = useSessionStore((state) => state.currentShopId);
+  const { data: auth } = useAuthStatus();
+  const connected = auth?.connected ?? false;
+
+  const groupsQuery = useGroups();
+  const createGroup = useCreateGroup();
+  const deleteGroup = useDeleteGroup();
+  const batchDelete = useBatchDelete();
+
+  const [searchDraft, setSearchDraft] = useState(query.searchDraft);
+  const debouncedSearch = useDebouncedValue(searchDraft, 300);
+  const setQ = useWarehouseStore((state) => state.setQ);
+  const setSearchDraftInStore = useWarehouseStore((state) => state.setSearchDraft);
+
+  useEffect(() => {
+    setSearchDraftInStore(debouncedSearch);
+    setQ(debouncedSearch.trim());
+  }, [debouncedSearch, setSearchDraftInStore, setQ]);
+
+  const category = query.category;
+  const listQuery = useWarehouseList({
+    page: query.page,
+    pageSize: query.pageSize,
+    q: query.q || null,
+    claimed: query.claimed,
+    status: query.status,
+    sort: query.sort,
+    cid: category.kind === "cid" ? category.cid : null,
+    categoryId: category.kind === "categoryId" ? category.categoryId : null,
+    groupId: category.kind === "group" ? category.groupId : null,
+  });
+
+  const data = listQuery.data;
+  const items = useMemo(() => data?.items ?? [], [data?.items]);
+  const stats = data?.stats;
+  const facets = data?.facets;
+  const total = data?.total ?? 0;
+
+  /**
+   * 容量提示。上限不会自动清理任何东西（后端 `trim_overflow` 默认拒绝执行），
+   * 所以这里只是「让人知道」，不是「快满了就禁用入仓」——禁用等于把用户
+   * 挡在功能外面，而他并没有要求过这个限制。
+   *
+   * 老后端不返回 maxProducts → 返回 null → 卡片显示原来的 hint，不显示 0/2000。
+   */
+  const capacityHint = useMemo(() => {
+    const max = stats?.maxProducts;
+    if (!max) return null;
+    const used = stats?.totalProducts ?? 0;
+    const remaining = stats?.remaining ?? Math.max(0, max - used);
+    if (stats?.nearLimit) {
+      return `仓库快满了：还剩 ${formatCount(remaining)} 件额度`;
+    }
+    return `本机仓库全部商品 · 上限 ${formatCount(max)} 件`;
+  }, [stats?.maxProducts, stats?.totalProducts, stats?.remaining, stats?.nearLimit]);
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [groupName, setGroupName] = useState("");
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const [deleteGroupTarget, setDeleteGroupTarget] = useState<GroupFacet | null>(null);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [transformOpen, setTransformOpen] = useState(false);
+  const [priceOpen, setPriceOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishIds, setPublishIds] = useState<string[]>([]);
+  const [createBatchOpen, setCreateBatchOpen] = useState(false);
+  // 发布弹窗要靠来源 shopId 判断这单是不是跨店（跨店要建载体，提前告知）
+  const sourceShopIds = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const item of items) map[String(item.id)] = String(item.shopId ?? "");
+    return map;
+  }, [items]);
+
+  const [carrierOpen, setCarrierOpen] = useState(false);
+  // 认领到采集箱走 POST /publish + claimOnly=true（老版同样行为：只认领不发布）
+  const claimOnly = usePublish();
+  const selectedIds = query.selected;
+  const selectedCount = selectedIds.length;
+  const pageIds = items.map((item) => item.id);
+  // 选中商品各自的当前版本号：批量改分类时带上，任何一件被别人改过就整体回滚
+  // 老后端列表不回 revision → 这个 map 是空的 → 请求里不带 expectedRevisions
+  const selectedRevisions = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const item of items) {
+      if (typeof item.revision === "number" && selectedIds.includes(item.id)) {
+        map[item.id] = item.revision;
+      }
+    }
+    return map;
+  }, [items, selectedIds]);
+  const hasSelectedRevisions = Object.keys(selectedRevisions).length > 0;
+  const allSelectedOnPage = pageIds.length > 0 && pageIds.every((id) => selectedIds.includes(id));
+  const someSelectedOnPage = pageIds.some((id) => selectedIds.includes(id));
+
+  const toggleAllOnPage = useCallback(() => {
+    if (allSelectedOnPage) {
+      query.clearSelected();
+      return;
+    }
+    query.selectMany(pageIds);
+  }, [allSelectedOnPage, pageIds, query]);
+
+  const openPublish = (ids: string[]): void => {
+    if (!connected) {
+      toast.warning("发布需要先连接妙手账号");
+      navigate("/unlock", { state: { from: "/warehouse" } });
+      return;
+    }
+    setPublishIds(ids);
+    setPublishOpen(true);
+  };
+
+  const confirmDelete = (): void => {
+    batchDelete.mutate(selectedIds, {
+      onSuccess: (result) => {
+        const failed = result.failures.length;
+        if (failed > 0) {
+          toast.warning(`已删除 ${result.deletedCount} 件，${failed} 件失败`, {
+            description: result.failures[0]?.reason,
+          });
+        } else {
+          toast.success(`已删除 ${result.deletedCount} 件商品`);
+        }
+        query.clearSelected();
+        setDeleteOpen(false);
+      },
+      onError: (error) => {
+        toast.error("批量删除失败", { description: apiErrorMessage(error) });
+      },
+    });
+  };
+
+  const submitCreateGroup = (): void => {
+    const name = groupName.trim();
+    if (!name) {
+      setGroupError("请填写分组名称");
+      return;
+    }
+    if (Array.from(name).length > LIMITS.groupNameLength) {
+      setGroupError(`分组名最多 ${LIMITS.groupNameLength} 个字符`);
+      return;
+    }
+    setGroupError(null);
+    createGroup.mutate(
+      { name },
+      {
+        onSuccess: (result) => {
+          toast.success(`已创建分组「${result.group.name}」`);
+          setCreateOpen(false);
+          setGroupName("");
+          query.setCategory({ kind: "group", groupId: result.group.id, name: result.group.name });
+        },
+        onError: (error) => {
+          const code = error instanceof ApiError ? error.code : null;
+          setGroupError(
+            code === "DUPLICATE_NAME" ? "同名分组已存在，请换一个名字" : apiErrorMessage(error)
+          );
+        },
+      }
+    );
+  };
+
+  const confirmDeleteGroup = (): void => {
+    const target = deleteGroupTarget;
+    if (!target) return;
+    deleteGroup.mutate(target.id, {
+      onSuccess: (result) => {
+        toast.success(`已删除分组「${target.name}」`, {
+          description: `${result.productsUnassigned} 件商品已移出分组`,
+        });
+        if (category.kind === "group" && category.groupId === target.id) {
+          query.setCategory({ kind: "all" });
+        }
+        setDeleteGroupTarget(null);
+      },
+      onError: (error) => {
+        toast.error("删除分组失败", { description: apiErrorMessage(error) });
+        setDeleteGroupTarget(null);
+      },
+    });
+  };
+
+  const refreshAll = (): void => {
+    void listQuery.refetch();
+    void groupsQuery.refetch();
+  };
+
+  const headerActions = (
+    <>
+      <IconButton
+        label="刷新"
+        size="md"
+        variant="secondary"
+        icon={<RefreshCw className={cn(listQuery.isFetching && "animate-spin")} />}
+        onClick={refreshAll}
+      />
+      {/* 载体链接池不单独占一个导航板块，入口放在这里：
+          跨店发布要靠它重建载体，池子空了发布直接失败。 */}
+      <Button
+        variant="secondary"
+        size="md"
+        icon={<Link2 />}
+        onClick={() => setCarrierOpen(true)}
+      >
+        载体链接池
+      </Button>
+    </>
+  );
+
+  const carrierDialog = (
+    <Dialog
+      open={carrierOpen}
+      onOpenChange={setCarrierOpen}
+      size="lg"
+      title="载体链接池"
+      description="跨店发布用它重建载体；池子空了跨店发布会失败。"
+    >
+      <CarrierPage embedded />
+    </Dialog>
+  );
+
+  return (
+    <>
+      <PageHeader
+        title="成品仓库"
+        breadcrumb={["奥皇上品", "功能", "成品仓库"]}
+        description={data ? `共 ${formatCount(total)} 件` : "本地商品库"}
+        actions={headerActions}
+      />
+
+      <PageContent width="table">
+        {/* 批次编排不新增侧边栏导航项：作为本页第二个 tab。
+            批次面板卸载时它的自动推进定时器会被清掉（见 BatchPanel 的 useEffect）。 */}
+        <Tabs
+          value={tab}
+          onChange={(value) => setTab(value as WarehouseTab)}
+          items={[
+            { value: "products", label: "商品列表", icon: <PackageSearch className="size-3.5" /> },
+            { value: "batch", label: "批次", icon: <ListChecks className="size-3.5" /> },
+          ]}
+        />
+
+        {tab === "batch" && (
+          <BatchPanel
+            accountId={auth?.accountId ?? null}
+            onGoToProducts={() => setTab("products")}
+          />
+        )}
+
+        {tab === "products" && (
+          <>
+            {/* KPI */}
+            <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+              <KpiCard
+                label="总商品数"
+                value={formatCount(stats?.totalProducts ?? total)}
+                hint={capacityHint ?? "本机仓库全部商品"}
+                icon={<PackageSearch />}
+              />
+              <KpiCard
+                label="已认领"
+                value={formatCount(stats?.totalClaimed ?? 0)}
+                hint="已认领到店铺采集箱"
+                icon={<Inbox />}
+              />
+              <KpiCard
+                label="已发布"
+                value={formatCount(stats?.totalPublished ?? 0)}
+                hint="平台已接受上架"
+                icon={<Send />}
+              />
+              <KpiCard
+                label="本页选中"
+                value={formatCount(selectedCount)}
+                hint={query.q ? `搜索「${query.q}」` : "跨页保留选择"}
+                icon={<CheckSquare />}
+              />
+            </div>
+
+            {/* 分类栏 */}
+            <CategoryBar
+              categories={facets?.categories ?? []}
+              groups={facets?.groups ?? groupsQuery.data?.groups.map((group) => ({
+                id: group.id,
+                name: group.name,
+                color: group.color,
+                count: group.count,
+              })) ?? []}
+              active={category}
+              total={stats?.totalProducts ?? total}
+              loading={listQuery.isLoading}
+              onSelect={(filter) => query.setCategory(filter)}
+              onCreateGroup={() => {
+                setGroupName("");
+                setGroupError(null);
+                setCreateOpen(true);
+              }}
+              onDeleteGroup={(group) => setDeleteGroupTarget(group)}
+            />
+
+            {/* 工具栏 */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="min-w-[220px] flex-1">
+                <SearchInput
+                  value={searchDraft}
+                  onChange={setSearchDraft}
+                  debounceMs={300}
+                  placeholder="搜索标题 / 明细 id / 类目（≤64 字符）"
+                  shortcut="Ctrl K"
+                  width="md"
+                />
+              </div>
+
+              <Select
+                size="md"
+                aria-label="排序"
+                className="w-[152px]"
+                value={query.sort}
+                onChange={(value) => query.setSort(value as typeof query.sort)}
+                options={SORT_OPTIONS}
+              />
+
+              <Select
+                size="md"
+                aria-label="认领状态"
+                className="w-[132px]"
+                value={query.claimed === null ? "all" : query.claimed ? "claimed" : "unclaimed"}
+                onChange={(value) =>
+                  query.setClaimed(value === "all" ? null : value === "claimed")
+                }
+                options={[
+                  { value: "all", label: "全部状态" },
+                  { value: "claimed", label: "已认领" },
+                  { value: "unclaimed", label: "未认领" },
+                ]}
+              />
+
+              {/* 全选 + 每页条数放同一行右侧：切到每页 100 条时不用滑到列表底部才改得动 */}
+              <div className="ml-auto flex items-center gap-2">
+                <Select
+                  size="md"
+                  aria-label="每页条数"
+                  className="w-[128px] shrink-0"
+                  value={String(query.pageSize)}
+                  onChange={(value) => query.setPageSize(Number(value))}
+                  options={PAGE_SIZE_OPTIONS.map((size) => ({
+                    value: String(size),
+                    label: `每页 ${size}`,
+                  }))}
+                />
+
+                <Button
+                  variant="secondary"
+                  size="md"
+                  icon={<CheckSquare />}
+                  className="shrink-0"
+                  onClick={toggleAllOnPage}
+                  disabled={pageIds.length === 0}
+                  title={allSelectedOnPage ? "取消本页全部选中" : "选中本页全部商品"}
+                >
+                  {allSelectedOnPage ? "取消本页全选" : "全选本页"}
+                  {selectedCount > 0 && <span className="num text-fg-muted">（{selectedCount}）</span>}
+                </Button>
+
+                <Button
+                  variant="secondary"
+                  size="md"
+                  icon={<Calculator />}
+                  className="shrink-0"
+                  disabled={selectedCount === 0}
+                  onClick={() => setPriceOpen(true)}
+                >
+                  价格试算{selectedCount > 0 ? `（${selectedCount}）` : ""}
+                </Button>
+
+                <Button
+                  variant="secondary"
+                  size="md"
+                  icon={<Percent />}
+                  className="shrink-0"
+                  disabled={selectedCount === 0}
+                  onClick={() => setTransformOpen(true)}
+                >
+                  批量改价{selectedCount > 0 ? `（${selectedCount}）` : ""}
+                </Button>
+
+                <Button
+                  variant="primary"
+                  size="md"
+                  icon={<Layers />}
+                  className="shrink-0"
+                  disabled={selectedCount === 0}
+                  onClick={() => setBatchOpen(true)}
+                >
+                  设置分类{selectedCount > 0 ? `（${selectedCount}）` : ""}
+                </Button>
+              </div>
+            </div>
+
+            {(query.q || query.claimed !== null || category.kind !== "all") && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+                <span>当前筛选：</span>
+                {query.q && <Badge variant="neutral">搜索「{query.q}」</Badge>}
+                {query.claimed !== null && (
+                  <Badge variant="neutral">{query.claimed ? "已认领" : "未认领"}</Badge>
+                )}
+                {category.kind !== "all" && <Badge variant="brand">{category.name}</Badge>}
+                <TextAction
+                  onClick={() => {
+                    setSearchDraft("");
+                    query.setQ("");
+                    query.setClaimed(null);
+                    query.setCategory({ kind: "all" });
+                    query.setStatus(null);
+                  }}
+                >
+                  清除筛选
+                </TextAction>
+              </div>
+            )}
+
+            {/* 列表主体 */}
+            {listQuery.isLoading && <SkeletonCardGrid count={query.pageSize > 24 ? 12 : 8} />}
+
+            {listQuery.isError && (
+              <Card>
+                <ErrorState
+                  title="仓库加载失败"
+                  description={apiErrorMessage(listQuery.error)}
+                  errorCode={listQuery.error instanceof ApiError ? listQuery.error.code : null}
+                  onRetry={() => void listQuery.refetch()}
+                  retrying={listQuery.isFetching}
+                />
+              </Card>
+            )}
+
+            {!listQuery.isLoading && !listQuery.isError && items.length === 0 && (
+              <Card>
+                <EmptyState
+                  icon={<SearchX strokeWidth={1.5} />}
+                  title={query.q ? "没有匹配的商品" : "仓库还是空的"}
+                  description={
+                    query.q
+                      ? "试着换一个关键词，或清除筛选后重新查看。"
+                      : "在采集箱里处理商品后，成品会自动进入这里。"
+                  }
+                  action={
+                    query.q
+                      ? {
+                          label: "清除筛选",
+                          onClick: () => {
+                            setSearchDraft("");
+                            query.setQ("");
+                            query.setClaimed(null);
+                            query.setCategory({ kind: "all" });
+                          },
+                        }
+                      : { label: "去采集箱", onClick: () => navigate("/collect") }
+                  }
+                />
+              </Card>
+            )}
+
+            {!listQuery.isLoading && !listQuery.isError && items.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 text-xs text-fg-muted">
+                  <button
+                    type="button"
+                    onClick={toggleAllOnPage}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-sm px-1 py-0.5 transition-colors duration-fast",
+                      "hover:bg-surface-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
+                    )}
+                  >
+                    <StatusDot tone={allSelectedOnPage ? "success" : someSelectedOnPage ? "warning" : "muted"} />
+                    {allSelectedOnPage ? "取消本页全选" : "全选本页"}
+                  </button>
+                  <span aria-hidden>·</span>
+                  <span className="num">本页 {formatCount(items.length)} 件</span>
+                  {listQuery.isFetching && (
+                    <span className="flex items-center gap-1 text-fg-muted">
+                      <RefreshCw className="size-3 animate-spin" />
+                      正在刷新
+                    </span>
+                  )}
+                </div>
+
+                <motion.div
+                  initial={reduced ? undefined : "hidden"}
+                  animate={reduced ? undefined : "show"}
+                  className={cn(
+                    "grid gap-4",
+                    "grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5",
+                    listQuery.isFetching && "opacity-90"
+                  )}
+                  style={{ gridTemplateColumns: undefined }}
+                >
+                  <AnimatePresence initial={false}>
+                    {items.map((product: Product, index: number) => (
+                      <motion.div
+                        key={product.id}
+                        variants={reduced ? undefined : listItem}
+                        custom={index}
+                        layout={false}
+                      >
+                        <ProductCard
+                          product={product}
+                          index={index}
+                          selected={selectedIds.includes(product.id)}
+                          onToggle={query.toggleSelected}
+                          onOpen={(item) => setDetailId(item.id)}
+                        />
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
+                </motion.div>
+              </>
+            )}
+
+            <Pagination
+              page={query.page}
+              pageSize={query.pageSize}
+              total={total}
+              hasMore={data?.hasMore}
+              // 页头统计卡已经显示了「共 355 件」，分页器再写一遍「共 N 条」
+              // 就是同一数字出现两次，用户明确要求去掉。
+              showTotal={false}
+              pageSizeOptions={PAGE_SIZE_OPTIONS.map((size) => ({ value: size, label: String(size) }))}
+              onPageChange={query.setPage}
+              onPageSizeChange={query.setPageSize}
+              disabled={listQuery.isFetching}
+            />
+
+            {listQuery.isError && (
+              <InlineError onRetry={() => void listQuery.refetch()}>
+                {apiErrorMessage(listQuery.error)}
+              </InlineError>
+            )}
+          </>
+        )}
+      </PageContent>
+      {carrierDialog}
+
+      {/* 浮动批量操作条（design-system §5.8）：只在商品列表 tab 出现，
+          看批次时还飘着「已选 12 件」会让人以为选的是批次 */}
+      <BulkActionBar
+        count={tab === "products" ? selectedCount : 0}
+        total={total}
+        unit="件"
+        onClear={query.clearSelected}
+        actions={[
+          {
+            label: "认领到采集箱",
+            icon: <Inbox className="size-3.5" />,
+            onClick: () => {
+              if (!connected) {
+                toast.warning("认领需要先连接妙手账号");
+                navigate("/unlock", { state: { from: "/warehouse" } });
+                return;
+              }
+              if (!currentShopId) {
+                toast.warning("请先选择要认领到的店铺");
+                return;
+              }
+              // 老版行为：原地调接口把这批商品放进店铺采集箱，不跳页、不发布。
+              // 跨店商品由后端自动建载体（publish_service 的 claimOnly 分支）。
+              claimOnly.mutate(
+                {
+                  items: toPublishItems(selectedIds.map((id) => ({ warehouseId: id }))),
+                  shopId: currentShopId,
+                  claimOnly: true,
+                  confirm: true,
+                },
+                {
+                  onSuccess: (result) => {
+                    const done = result.claimed?.length ?? 0;
+                    const failed = result.failures?.length ?? 0;
+                    if (failed > 0) {
+                      toast.warning(
+                        `已认领 ${done} 件，${failed} 件失败`
+                      );
+                    } else {
+                      toast.success(`已认领 ${done} 件到采集箱（未发布）`);
+                    }
+                    query.clearSelected();
+                  },
+                  onError: (error) => toast.error(apiErrorMessage(error)),
+                }
+              );
+            },
+          },
+          {
+            label: "创建批次",
+            icon: <ListChecks className="size-3.5" />,
+            onClick: () => setCreateBatchOpen(true),
+          },
+          {
+            label: "设置分类",
+            icon: <Layers className="size-3.5" />,
+            onClick: () => setBatchOpen(true),
+          },
+          {
+            label: "发布",
+            icon: <Send className="size-3.5" />,
+            onClick: () => openPublish(selectedIds),
+          },
+          {
+            label: "删除",
+            icon: <Trash2 className="size-3.5" />,
+            danger: true,
+            onClick: () => setDeleteOpen(true),
+          },
+        ]}
+      />
+
+      {/* 新建分类 */}
+      <Dialog
+        open={createOpen}
+        onOpenChange={(open) => {
+          setCreateOpen(open);
+          if (!open) {
+            setGroupName("");
+            setGroupError(null);
+          }
+        }}
+        size="sm"
+        title="新建分类"
+        description="分类（自定义分组）只用于仓库内部归类，不影响平台类目。"
+        closeOnOverlay={false}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setCreateOpen(false)}>
+              取消
+            </Button>
+            <Button variant="primary" loading={createGroup.isPending} onClick={submitCreateGroup}>
+              创建
+            </Button>
+          </>
+        }
+      >
+        <Field
+          label="分类名称"
+          required
+          error={groupError}
+          hint={`1–${LIMITS.groupNameLength} 个字符，名称唯一（大小写不敏感）`}
+        >
+          <Input
+            value={groupName}
+            maxLength={LIMITS.groupNameLength}
+            autoFocus
+            placeholder="如：春季新款"
+            invalid={Boolean(groupError)}
+            onChange={(event) => {
+              setGroupName(event.currentTarget.value);
+              setGroupError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") submitCreateGroup();
+            }}
+          />
+        </Field>
+      </Dialog>
+
+      {/* 删除分组 */}
+      <ConfirmDialog
+        open={deleteGroupTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteGroupTarget(null);
+        }}
+        title={`删除分组「${deleteGroupTarget?.name ?? ""}」？`}
+        description="组内商品不会被删除，只会移出该分组。"
+        confirmLabel="删除分组"
+        danger
+        loading={deleteGroup.isPending}
+        onConfirm={confirmDeleteGroup}
+      >
+        {deleteGroupTarget && (
+          <p className="text-[13px] leading-5 text-fg-secondary">
+            当前该分组下有 <span className="num font-medium">{formatCount(deleteGroupTarget.count)}</span> 件商品。
+          </p>
+        )}
+      </ConfirmDialog>
+
+      <TransformDialog
+        open={transformOpen}
+        ids={selectedIds}
+        revisions={hasSelectedRevisions ? selectedRevisions : undefined}
+        onRefresh={() => void listQuery.refetch()}
+        onClose={() => setTransformOpen(false)}
+        onApplied={(result) => {
+          toast.success(`已改价 ${formatCount(result.changedCount)} 件商品`);
+          query.clearSelected();
+        }}
+      />
+
+      {/* 批量删除 */}
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title={`删除已选的 ${selectedCount} 件商品？`}
+        description="软删除：商品从仓库列表移除，发布记录保留。此操作不可逆。"
+        confirmLabel={batchDelete.isPending ? "正在删除…" : `删除 ${selectedCount} 件`}
+        danger
+        loading={batchDelete.isPending}
+        onConfirm={confirmDelete}
+      >
+        <p className="text-[13px] leading-5 text-fg-secondary">
+          单个商品若有图片任务或发布在途中会删除失败，失败项会保留在列表里。
+        </p>
+      </ConfirmDialog>
+
+      <PricePreviewDialog
+        open={priceOpen}
+        onOpenChange={setPriceOpen}
+        ids={selectedIds}
+      />
+
+      <BatchCategoryDialog
+        open={batchOpen}
+        onOpenChange={setBatchOpen}
+        ids={selectedIds}
+        site={auth?.accounts.find((account) => account.id === auth?.accountId)?.site ?? null}
+        connected={connected}
+        revisions={hasSelectedRevisions ? selectedRevisions : undefined}
+        onRefresh={() => void listQuery.refetch()}
+        onDone={() => query.clearSelected()}
+      />
+
+      <CreateBatchDialog
+        open={createBatchOpen}
+        onOpenChange={setCreateBatchOpen}
+        ids={selectedIds}
+        products={items}
+        accountId={auth?.accountId ?? null}
+        onCreated={() => {
+          query.clearSelected();
+          // 建完直接把用户带到批次标签，进度就在眼前，不用自己去找
+          setTab("batch");
+        }}
+      />
+
+      <ProductDetailDrawer
+        productId={detailId}
+        open={detailId !== null}
+        onOpenChange={(open) => {
+          if (!open) setDetailId(null);
+        }}
+        onRequestDelete={(id) => {
+          query.clearSelected();
+          query.toggleSelected(id);
+          setDeleteOpen(true);
+          setDetailId(null);
+        }}
+      />
+
+      <PublishDialog
+        open={publishOpen}
+        onOpenChange={setPublishOpen}
+        warehouseIds={publishIds}
+        sourceShopIds={sourceShopIds}
+        defaultShopId={currentShopId}
+        connected={connected}
+        onSubmitted={() => query.clearSelected()}
+      />
+    </>
+  );
+}
+
+export default WarehousePage;

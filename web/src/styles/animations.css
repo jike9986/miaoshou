@@ -1,0 +1,80 @@
+/* web/src/styles/animations.css
+ * 补充 tokens.css 未覆盖的关键帧与工具类（tokens.css 是设计文档 §2.7 的成品，保持原样不改）。
+ * 只放 tokens.css 里没有的：不确定进度条平移、底部浮条进出。
+ * 时长与缓动遵循 design-system §6.1（进入 ease-out / 退出 ease-in；循环仅限 shimmer、审核中点、不确定进度）。
+ * 注意：本文件不写 @tailwind 指令，也不包 @layer（tokens.css 已声明三件套），
+ * 因此这里的类默认排在 utilities 之后，可直接覆盖同族工具类。
+ */
+
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(333%);
+  }
+}
+
+/* 加载指示器（§5.0）：轨道为同色 30%，旋转头为实色，600ms linear。
+   不使用 border-current/30 —— Tailwind 无法给 currentColor 加透明度。
+   关键帧复用 tokens.css 已定义的 @keyframes spin。 */
+.spinner {
+  display: inline-block;
+  border-style: solid;
+  border-color: color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
+  border-radius: 9999px;
+  animation: spin 600ms linear infinite;
+}
+
+/* 批量操作栏 / 底部浮条（§5.8：fixed bottom-6 left-1/2 -translate-x-1/2）
+   ���入 y +8 → 0 + scale .98 → 1，200ms ease-out；退出 140ms ease-in */
+@keyframes bar-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@keyframes bar-out {
+  from {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, 4px) scale(1);
+  }
+}
+
+.anim-bar-in {
+  animation: bar-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.anim-bar-out {
+  animation: bar-out 140ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+/* design-system §5.14 骨架屏：linear-gradient(90deg,#EDF1F3 25%,#F6F8F9 37%,#EDF1F3 63%)
+   + bg-[length:400%_100%] + shimmer 1.6s linear（颜色走 token，见 tokens-additions.css） */
+.skeleton-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    rgb(var(--skeleton-from)) 25%,
+    rgb(var(--skeleton-to)) 37%,
+    rgb(var(--skeleton-from)) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-bar-in,
+  .anim-bar-out {
+    animation: none;
+  }
+}

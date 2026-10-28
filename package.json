@@ -1,0 +1,26 @@
+{
+  "name": "aohuang-desktop",
+  "version": "0.1.5",
+  "private": true,
+  "description": "奥皇上品 桌面端",
+  "scripts": {
+    "dev": "concurrently -n web,app -c cyan,magenta \"pnpm dev:web\" \"wait-on http://127.0.0.1:5173 && pnpm dev:app\"",
+    "dev:web": "pnpm --filter web dev",
+    "dev:app": "pnpm --filter app dev",
+    "dev:server": "cd server && python -m uvicorn main:app --reload --port 8812",
+    "build:web": "pnpm --filter web build",
+    "build:app": "pnpm --filter app build",
+    "build": "pnpm build:web && pnpm build:app",
+    "check": "pnpm --filter web check && pnpm --filter app check",
+    "lint": "pnpm check",
+    "lint:fix": "pnpm --filter web lint:fix && pnpm --filter app lint:fix",
+    "typecheck": "pnpm --filter web typecheck && pnpm --filter app typecheck",
+    "format": "pnpm --filter web format && pnpm --filter app format",
+    "format:check": "pnpm --filter web format:check && pnpm --filter app format:check"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "wait-on": "^8.0.1"
+  },
+  "packageManager": "pnpm@9.12.0"
+}

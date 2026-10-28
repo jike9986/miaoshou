@@ -1,0 +1,7 @@
+# Prettier 的 .prettierignore 只在「当前工作目录」解析，不会向上找根目录那份。
+# 所以在 web/ 里跑 `prettier --check .` 时，根的 .prettierignore 不生效，dist 会被扫进来。
+# 这里放一份同内容的，保证在 web/ 目录下任何调用方式都不会去格式化构建产物。
+node_modules
+dist
+*.log
+tsconfig.tsbuildinfo

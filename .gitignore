@@ -1,0 +1,58 @@
+# --- 依赖 -------------------------------------------------------------------
+node_modules
+
+# --- 构建产物 ---------------------------------------------------------------
+# 这些都是 `pnpm run build` / electron-builder / PyInstaller 生成的东西，
+# 每个都能从源码重建。进版本库的后果是仓库涨到 1 GB 以上、每次 diff 都是
+# 二进制噪音，而收益是零（没人会去 review 一个 .asar）。
+dist
+dist-electron
+release
+server/dist
+server/build
+# PyInstaller 的中间目录（deploy 时把 TEMP 指到这里）
+_bt
+
+# --- Python -----------------------------------------------------------------
+__pycache__
+*.pyc
+.venv
+# 工程化基建产生的本地缓存
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+# Alembic 迁移脚本目录下的字节码缓存
+server/migrations/versions/__pycache__
+
+# --- 运行时数据 -------------------------------------------------------------
+# 真实数据库、日志、密钥。**绝对不能进仓库**：里面有 355 件商品、
+# 加密过的 AppSecret、以及操作员 token（明文）。
+*.db
+*.db-wal
+*.db-shm
+*.log
+userdata
+# 应用运行期写出来的目录
+.runtime-data
+.smoke
+# 打包/部署时的临时数据目录
+.ci-data
+
+# --- 本机调试残留 -----------------------------------------------------------
+# 手工验证界面时起的 Chrome 调试实例（每个几百 MB）
+.chrome-profile*
+# CDP 探测脚本的输出快照
+ui_check*.json
+*.out
+
+# --- 探针（server/_meas/）的结果快照 ----------------------------------------
+# 它们是本机一次运行的产物，每次跑内容都不同，进版本库只会制造无意义的 diff。
+# 探针源码本身是资产（见 server/_meas/README.md），要留着。
+server/_meas/*.json
+server/_meas/_out/
+
+# --- 系统 -------------------------------------------------------------------
+.DS_Store
+Thumbs.db

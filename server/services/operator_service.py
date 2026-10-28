@@ -1,0 +1,282 @@
+"""操作员身份服务：解析 token → 是谁，以及管理操作员本身。
+
+**这不是权限系统。** 运营团队共用一台装机实例，彼此信任，不需要密码、
+角色、权限矩阵。这里只解决一件事：出事之后能回答「这一步是谁点的」。
+`is_admin` 只用来挡两件会波及全员的手滑（停用别人、改共享设置），
+不是分级授权。
+
+── 向后兼容（改这里之前先读完这段）──────────────────────────────────
+0.1 版全实例只有一把 `data_dir/secret.key`，所有客户端都拿它当 Bearer。
+0.2 加操作员身份时，**绝不能把旧客户端踢回 401**——用户升级后打开界面
+就该继续能用，不该被要求「重新配置身份」，因为界面上根本没有那个地方。
+
+做法是 `ensure_default()`：首次启动建一个叫「本机」的操作员，
+它的 token 就是现有 `secret.key` 的值。于是：
+  · 旧客户端继续发 `Bearer <secret.key>` → 解析成「本机」，一切照旧；
+  · 新客户端发 `X-Operator: 张三` 或某个人的 token → 解析成张三；
+  · 什么都不发 → 仍然是 401（与 0.1 一致，不放松）。
+换句话说：**旧 token 不失效，只是从此有了名字**。
+"""
+from __future__ import annotations
+
+import logging
+import secrets
+from typing import Any
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from core import errors
+from core.config import get_settings
+from core.utils import clean_text, now_ts
+from models.operator import Operator
+
+logger = logging.getLogger(__name__)
+
+# 前端可以直接传显示名，也可以传 token；两种都认（见 resolve）
+OPERATOR_HEADER = "X-Operator"
+
+# 默认操作员的名字。老客户端没有身份概念，历史记录里统一记成它。
+DEFAULT_OPERATOR_NAME = "本机"
+
+# last_seen_at 的写入节流（秒）。一个批量流程能打上百个请求，
+# 每个请求都 UPDATE 一次就是上百次抢写锁，而这个字段的精度要求是「天」级。
+TOUCH_INTERVAL_SECONDS = 60.0
+
+# 显示名长度上限，与 models/operator.py 的 String(64) 对齐
+NAME_MAX_LENGTH = 64
+
+
+# --- 默认操作员 -----------------------------------------------------------
+def ensure_default(db: Session) -> Operator:
+    """保证存在「本机」操作员，且它的 token 等于现有 secret.key。
+
+    为什么复用 secret.key 而不是生成新 token：
+      老用户机器上的 secret.key 已经在用（客户端存着它），换掉等于把每台
+      客户端踢回未授权。而界面上没有任何「重新填 token」的入口——用户只能
+      删数据目录重来，那会连 355 件商品一起删。用现有 secret 当默认操作员的
+      token，老客户端一个字节都不用改，只是从此被记成「本机」。
+
+    幂等：已存在则只做一次「token 与 secret.key 对齐」（用户删过 secret.key
+    重生成的情况下，本机操作员的 token 要跟着走，否则旧 token 会永久失效）。
+    """
+    secret = get_settings().local_secret()
+    row = (db.query(Operator)
+           .filter(Operator.name == DEFAULT_OPERATOR_NAME).one_or_none())
+    if row is None:
+        row = Operator(name=DEFAULT_OPERATOR_NAME, token=secret,
+                       enabled=True, is_admin=True, created_at=now_ts())
+        db.add(row)
+        try:
+            db.flush()
+        except IntegrityError:
+            # 并发首启（两个进程同时 init_db）：另一个已经建好了，读回来即可
+            db.rollback()
+            row = (db.query(Operator)
+                   .filter(Operator.name == DEFAULT_OPERATOR_NAME).one_or_none())
+            if row is None:
+                raise
+        return row
+    if row.token != secret:
+        # secret.key 被删过/换过：跟着对齐，否则老客户端会 401
+        row.token = secret
+        db.flush()
+    return row
+
+
+# --- 解析 -----------------------------------------------------------------
+def resolve(db: Session, supplied: str) -> Operator | None:
+    """把请求带来的凭据解析成操作员。解析不出返回 None（由调用方决定怎么拒）。
+
+    认三种值：
+      1. 某个操作员的 token  → 那个人（正常路径）
+      2. 某个操作员的显示名  → 那个人（`X-Operator: 张三` 这种图省事的用法）
+      3. 都不是              → None
+
+    名字匹配放在 token 之后：token 是精确的、带熵的，名字可能撞上别人的
+    token 文本（理论上）。先精确后宽松，避免误判。
+    """
+    text = (supplied or "").strip()
+    if not text:
+        return None
+    row = db.query(Operator).filter(Operator.token == text).one_or_none()
+    if row is not None:
+        return row
+    return db.query(Operator).filter(Operator.name == text).one_or_none()
+
+
+def require_enabled(operator: Operator | None) -> Operator:
+    """停用的操作员等同于没有身份：给出明确原因，别让用户对着 401 猜。"""
+    if operator is None:
+        raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
+    if not operator.enabled:
+        raise errors.AppError(
+            errors.TOKEN_INVALID,
+            f"操作员「{operator.name}」已被停用，请联系管理员重新启用或换用其它身份",
+            status=403, details={"operatorId": operator.id, "enabled": False})
+    return operator
+
+
+# --- 管理 -----------------------------------------------------------------
+def _clean_name(name: Any) -> str:
+    text = clean_text(str(name or "")).strip()
+    if not text:
+        raise errors.validation("操作员名字不能为空", field="name")
+    if len(text) > NAME_MAX_LENGTH:
+        raise errors.validation(f"操作员名字不能超过 {NAME_MAX_LENGTH} 个字符",
+                                field="name", value=len(text))
+    return text
+
+
+def create(db: Session, name: Any, *, is_admin: bool = False) -> tuple[Operator, str]:
+    """新建操作员，返回 (操作员, 明文 token)。
+
+    明文 token **只在这里返回一次**，之后任何接口都不再给出（包括列表）。
+    理由：它顺着日志、截图、群聊扩散出去之后，审计就白做了——
+    「谁做的」变成「谁都有可能」。
+    """
+    text = _clean_name(name)
+    exists = db.query(Operator).filter(Operator.name == text).one_or_none()
+    if exists is not None:
+        raise errors.duplicate_name(f"操作员「{text}」已存在", name=text)
+    token = secrets.token_urlsafe(32)
+    row = Operator(name=text, token=token, enabled=True,
+                   is_admin=bool(is_admin), created_at=now_ts())
+    db.add(row)
+    db.flush()
+    return row, token
+
+
+def list_all(db: Session) -> list[dict[str, Any]]:
+    """列表。**不含 token**——这里多一个字段，前面所有努力都白费。"""
+    rows = db.query(Operator).order_by(Operator.id.asc()).all()
+    return [serialize(row) for row in rows]
+
+
+def serialize(row: Operator) -> dict[str, Any]:
+    """序列化。**不含 token**——这里多一个字段，前面所有努力都白费。
+
+    字段名与前端 `Operator` 类型对齐（admin / lastActiveAt / builtin），
+    同时保留 `isAdmin` / `lastSeenAt` 两个同义别名：老调用方按 snake→camel
+    直觉取的是后者，改名会静默变成 undefined。
+    """
+    return {
+        "id": str(row.id),
+        "name": row.name or "",
+        "enabled": bool(row.enabled),
+        "admin": bool(row.is_admin),
+        "isAdmin": bool(row.is_admin),
+        "createdAt": row.created_at,
+        "lastActiveAt": row.last_seen_at,
+        "lastSeenAt": row.last_seen_at,
+        # 内置「本机」：它代表「没设置身份时的默认身份」，界面上不该给它
+        # 「停用 / 重置」按钮——停掉它等于让所有老客户端 401。
+        "builtin": (row.name or "") == DEFAULT_OPERATOR_NAME,
+    }
+
+
+def get(db: Session, operator_id: Any) -> Operator:
+    try:
+        ident = int(str(operator_id))
+    except (TypeError, ValueError):
+        raise errors.not_found(f"操作员 {operator_id} 不存在",
+                               operatorId=str(operator_id)) from None
+    row = db.query(Operator).filter(Operator.id == ident).one_or_none()
+    if row is None:
+        raise errors.not_found(f"操作员 {operator_id} 不存在", operatorId=str(operator_id))
+    return row
+
+
+def rename(db: Session, operator_id: Any, name: Any) -> dict[str, Any]:
+    row = get(db, operator_id)
+    text = _clean_name(name)
+    clash = (db.query(Operator)
+             .filter(Operator.name == text, Operator.id != row.id).one_or_none())
+    if clash is not None:
+        raise errors.duplicate_name(f"操作员「{text}」已存在", name=text)
+    row.name = text
+    db.flush()
+    # 注意：**不回填历史审计里的 operator_name**。审计表的 operator_name 是
+    # 当时的快照，改名之后历史仍应显示当时的名字——否则「谁做的」会被后来的
+    # 改名改写，审计就不成立了。
+    return serialize(row)
+
+
+def disable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[str, Any]:
+    """停用。不是删除：删了之后历史日志的 operator_id 会变 NULL。
+
+    两道保护，都是挡手滑：
+      · 只有管理员能停用别人（普通操作员互相停用会直接打架）；
+      · 不能停用自己，也不能停用最后一个启用中的管理员——
+        否则没人能再停用/启用任何人，也没人能改共享设置。
+    """
+    if not is_admin_operator:
+        raise errors.AppError(
+            "FORBIDDEN", "只有管理员可以停用操作员", status=403,
+            details={"reason": "not_admin"})
+    row = get(db, operator_id)
+    if row.enabled and bool(row.is_admin):
+        remaining = (db.query(Operator)
+                     .filter(Operator.is_admin.is_(True),
+                             Operator.enabled.is_(True),
+                             Operator.id != row.id).count())
+        if remaining == 0:
+            raise errors.AppError(
+                "FORBIDDEN", "这是最后一个启用中的管理员，停用后将无人能管理操作员",
+                status=409, details={"reason": "last_admin"})
+    row.enabled = False
+    db.flush()
+    return serialize(row)
+
+
+def enable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[str, Any]:
+    """重新启用（停用的反操作，同一条路由的两个方向）。"""
+    if not is_admin_operator:
+        raise errors.AppError(
+            "FORBIDDEN", "只有管理员可以启用操作员", status=403,
+            details={"reason": "not_admin"})
+    row = get(db, operator_id)
+    row.enabled = True
+    db.flush()
+    return serialize(row)
+
+
+def rotate(db: Session, operator_id: Any) -> tuple[dict[str, Any], str]:
+    """重发 token，旧 token 立即失效（换电脑 / 怀疑泄露）。
+
+    不在这里强制「只有管理员能重发」：运营场景里张三换电脑后让李四帮忙点
+    一下是常态，卡这一下没有安全收益（两人本来就能看到同一台机器上的数据）。
+    """
+    row = get(db, operator_id)
+    token = secrets.token_urlsafe(32)
+    row.token = token
+    db.flush()
+    return serialize(row), token
+
+
+def touch(db: Session, operator: Operator | None) -> None:
+    """更新 last_seen_at，节流到 60 秒一次。
+
+    两个刻意的选择：
+      · **用自己的短会话**，不污染请求会话。挂在请求会话上的话，这个 UPDATE
+        会在下一次 commit 时和业务写入一起提交——业务失败回滚会把「张三来过」
+        一起回滚掉（无所谓），但反过来，这个纯统计字段写失败会连累业务提交
+        （有所谓）。分开写，互不牵连。
+      · **绝不抛异常**：last_seen_at 只是「这人最近还来不来」的参考，
+        它写不进去不该让任何请求失败。
+    """
+    if operator is None or operator.id is None:
+        return
+    now = now_ts()
+    last = operator.last_seen_at or 0.0
+    if now - last < TOUCH_INTERVAL_SECONDS:
+        return
+    try:
+        from db.session import session_scope
+
+        with session_scope() as own:
+            row = own.query(Operator).filter(Operator.id == operator.id).one_or_none()
+            if row is not None:
+                row.last_seen_at = now
+    except Exception:  # noqa: BLE001 - 统计字段，失败不影响业务
+        logger.debug("last_seen_at 更新失败 operator_id=%s", operator.id, exc_info=True)

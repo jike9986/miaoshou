@@ -1,0 +1,91 @@
+// design-system §7.1 页面头（56px，px-6，border-b，bg-canvas/85 backdrop-blur-[2px]，sticky top-0 z-10）
+// 标题 18/26 600；可选面包屑 12/18 muted 在标题上方（mb-1）；右侧操作区 gap-2，主按钮 md。
+
+import type { ReactNode } from "react";
+import { cn } from "@/lib/utils";
+
+export interface PageHeaderProps {
+  title: ReactNode;
+  /** 面包屑（文字数组，最后一项为当前页） */
+  breadcrumb?: string[];
+  description?: ReactNode;
+  /** 右侧操作区（主按钮在右，同屏只允许一个 primary） */
+  actions?: ReactNode;
+  /** 标题下方的扩展区（筛选栏、Tab） */
+  children?: ReactNode;
+  className?: string;
+  /** 底部是否显示 1px 分割线（默认显示） */
+  bordered?: boolean;
+}
+
+export function PageHeader({
+  title,
+  breadcrumb,
+  description,
+  actions,
+  children,
+  className,
+  bordered = true,
+}: PageHeaderProps) {
+  return (
+    <header
+      className={cn(
+        "sticky top-0 z-10 shrink-0 bg-canvas/85 backdrop-blur-[2px]",
+        bordered && "border-b border-border",
+        className
+      )}
+    >
+      <div className="flex h-14 items-center gap-4 px-6">
+        <div className="min-w-0 flex-1">
+          {breadcrumb && breadcrumb.length > 0 && (
+            <nav aria-label="面包屑" className="mb-1 flex items-center gap-1.5 text-xs leading-[18px] text-fg-muted">
+              {breadcrumb.map((item, index) => (
+                <span key={`${item}-${index}`} className="flex items-center gap-1.5">
+                  {index > 0 && <span aria-hidden className="text-border-strong">/</span>}
+                  <span className={cn(index === breadcrumb.length - 1 && "text-fg-secondary")}>{item}</span>
+                </span>
+              ))}
+            </nav>
+          )}
+          <div className="flex min-w-0 items-baseline gap-3">
+            <h1 className="truncate text-[18px] font-semibold leading-[26px] text-fg">{title}</h1>
+            {description && (
+              <p className="truncate text-[13px] leading-5 text-fg-muted">{description}</p>
+            )}
+          </div>
+        </div>
+        {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+      </div>
+      {children && <div className="px-6 pb-3">{children}</div>}
+    </header>
+  );
+}
+
+/** 页面内容容器：唯一滚动容器 + 24px 内边距（§7.1） */
+export interface PageContentProps {
+  children: ReactNode;
+  className?: string;
+  /** 内容最大宽度：表格页 1600 居中 / 表单页 880 左对齐 */
+  width?: "table" | "form" | "full";
+  /** 是否允许滚动（表格页自管理滚动时传 false） */
+  scroll?: boolean;
+  padding?: string;
+}
+
+export function PageContent({
+  children,
+  className,
+  width = "table",
+  scroll = true,
+  padding = "p-6",
+}: PageContentProps) {
+  const widthClass =
+    width === "form" ? "max-w-[var(--form-max)]" : width === "table" ? "mx-auto max-w-[var(--content-max)]" : "";
+  return (
+    <div className={cn("min-h-0 flex-1", scroll && "overflow-y-auto", padding, className)}>
+      <div className={cn("flex flex-col gap-4", widthClass)}>{children}</div>
+    </div>
+  );
+}
+
+export default PageHeader;

@@ -1,0 +1,296 @@
+{
+ "total": 30,
+ "pass": 30,
+ "fail": 0,
+ "generatedAt": "2026-10-28 20:31:37",
+ "python": "3.12.10",
+ "sqlite": "3.49.1",
+ "cases": [
+  {
+   "name": "数据目录指向临时目录（不碰真实 app.db）",
+   "ok": true,
+   "detail": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\aohuang-share-probe-o9m1jroa"
+  },
+  {
+   "name": "GET /system/share/health 不带 token 返回 200",
+   "ok": true,
+   "detail": "HTTP 200"
+  },
+  {
+   "name": "health 含 ok / serverVersion / uptimeSeconds / dbWritable / operatorCount",
+   "ok": true,
+   "detail": "['bindHost', 'dbBusy', 'dbWritable', 'name', 'ok', 'operatorCount', 'port', 'serverVersion', 'sharedMode', 'uptimeSeconds']"
+  },
+  {
+   "name": "health 不泄露 dbPath",
+   "ok": true,
+   "detail": "['bindHost', 'dbBusy', 'dbWritable', 'name', 'ok', 'operatorCount', 'port', 'serverVersion', 'sharedMode', 'uptimeSeconds']"
+  },
+  {
+   "name": "GET /system/share 无 token 返回 401",
+   "ok": true,
+   "detail": "HTTP 401"
+  },
+  {
+   "name": "GET /system/share 带 token 返回 200",
+   "ok": true,
+   "detail": "HTTP 200"
+  },
+  {
+   "name": "share 含全部约定字段",
+   "ok": true,
+   "detail": "缺 []"
+  },
+  {
+   "name": "lanAddresses 过滤掉 127.x / 169.254.x",
+   "ok": true,
+   "detail": "['192.168.1.34', '198.18.0.1']"
+  },
+  {
+   "name": "lanAddresses 至少一个非回环地址（本机只有回环则允许为空）",
+   "ok": true,
+   "detail": "2 个: ['192.168.1.34', '198.18.0.1']"
+  },
+  {
+   "name": "shareUrls 与 lanAddresses 一一对应",
+   "ok": true,
+   "detail": "['http://192.168.1.34:8812', 'http://198.18.0.1:8812']"
+  },
+  {
+   "name": "walEnabled 为 true",
+   "ok": true,
+   "detail": "True"
+  },
+  {
+   "name": "busyTimeoutMs 已上报",
+   "ok": true,
+   "detail": "5000 ms"
+  },
+  {
+   "name": "dbSizeBytes > 0",
+   "ok": true,
+   "detail": "543656 bytes"
+  },
+  {
+   "name": "POST /system/share 返回 200",
+   "ok": true,
+   "detail": "HTTP 200"
+  },
+  {
+   "name": "POST /system/share 返回 restartRequired=true",
+   "ok": true,
+   "detail": "True"
+  },
+  {
+   "name": "POST /system/share 给出重启后地址",
+   "ok": true,
+   "detail": "0.0.0.0"
+  },
+  {
+   "name": "sharedMode 真的写进 settings 表",
+   "ok": true,
+   "detail": "True"
+  },
+  {
+   "name": "POST sharedMode=false 也能落库",
+   "ok": true,
+   "detail": "HTTP 200 {'sharedMode': False, 'bindHost': '127.0.0.1', 'port': 8812, 'restartRequired': True, 'appliesAfterRestart': True, 'previousBindHost': '0.0.0.0', 'note': '监听地址是 uvicorn 的启动参数，改完必须重启后端才生效；重启后应监听 127.0.0.1:8812。客户端不需要跟着重启，但重启窗口内会短暂断连。', 'lanAddresses': ['192.168.1.34', '198.18.0.1'], 'shareUrls': ['http://192.168.1.34:8812', 'http://198.18.0.1:8812']}"
+  },
+  {
+   "name": "POST sharedMode 非法值返回 400",
+   "ok": true,
+   "detail": "HTTP 400"
+  },
+  {
+   "name": "clientCount 至少 1（刚才的请求被记下）",
+   "ok": true,
+   "detail": "1"
+  },
+  {
+   "name": "activeOperators 里不含 token 字段",
+   "ok": true,
+   "detail": "[{\"clientId\": \"testclient\", \"ip\": \"testclient\", \"clientVersion\": \"\", \"firstSeen\": 1793190696.517, \"requests\": 15, \"authenticated\": true, \"lastSeen\": 1793190696.593, \"idleSeconds\": 0.0}]"
+  },
+  {
+   "name": "并发写 10 线程 / busy_timeout=5000ms 成功 10 失败 0 锁冲突 0",
+   "ok": true,
+   "detail": "wall=0.148s avg=76.0ms max=146.6ms"
+  },
+  {
+   "name": "并发写 10 线程 / busy_timeout=15000ms 成功 10 失败 0 锁冲突 0",
+   "ok": true,
+   "detail": "wall=0.218s avg=98.9ms max=217.8ms"
+  },
+  {
+   "name": "并发写 20 线程 / busy_timeout=15000ms 成功 20 失败 0 锁冲突 0",
+   "ok": true,
+   "detail": "wall=0.898s avg=280.0ms max=896.4ms"
+  },
+  {
+   "name": "串行写 20 次全成功",
+   "ok": true,
+   "detail": "20/20, 总计 0.048s, 单次 2.38ms"
+  },
+  {
+   "name": "VACUUM INTO 产物 integrity_check=ok",
+   "ok": true,
+   "detail": "ok"
+  },
+  {
+   "name": "VACUUM INTO 商品数与源库一致",
+   "ok": true,
+   "detail": "备份 60 / 源 60"
+  },
+  {
+   "name": "VACUUM INTO 产物是独立单文件（无 -wal 依赖）",
+   "ok": true,
+   "detail": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\aohuang-share-probe-o9m1jroa\\backups\\app-20260101-000000.db"
+  },
+  {
+   "name": "WAL 里确实有未 checkpoint 的数据（对照实验前提成立）",
+   "ok": true,
+   "detail": "wal=28872B copy=60 活库=65"
+  },
+  {
+   "name": "裸 copy .db 会漏掉 WAL 里的行（证明不能直接 copy）",
+   "ok": true,
+   "detail": "copy=60 vacuum=65 source=65 wal=28872B"
+  }
+ ],
+ "measurements": {
+  "dataDir": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\aohuang-share-probe-o9m1jroa",
+  "tokenPresent": true,
+  "shareHealth": {
+   "ok": true,
+   "serverVersion": "0.1.5",
+   "uptimeSeconds": 0.4,
+   "dbWritable": true,
+   "dbBusy": false,
+   "operatorCount": 1,
+   "sharedMode": true,
+   "bindHost": "0.0.0.0",
+   "port": 8812,
+   "name": "aohuang-listing-server"
+  },
+  "share": {
+   "sharedMode": true,
+   "bindHost": "0.0.0.0",
+   "port": 8812,
+   "portRange": [
+    8812,
+    8822
+   ],
+   "lanAddresses": [
+    "192.168.1.34",
+    "198.18.0.1"
+   ],
+   "clientCount": 1,
+   "activeOperators": [
+    {
+     "clientId": "testclient",
+     "ip": "testclient",
+     "clientVersion": "",
+     "firstSeen": 1793190696.517,
+     "requests": 5,
+     "authenticated": true,
+     "lastSeen": 1793190696.532,
+     "idleSeconds": 0.0
+    }
+   ],
+   "dbPath": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\aohuang-share-probe-o9m1jroa\\app.db",
+   "dbSizeBytes": 543656,
+   "walEnabled": true,
+   "dbWritable": true,
+   "dbBusy": false,
+   "dbError": "",
+   "busyTimeoutMs": 5000,
+   "serverVersion": "0.1.5",
+   "shareUrls": [
+    "http://192.168.1.34:8812",
+    "http://198.18.0.1:8812"
+   ],
+   "restartRequired": false,
+   "warnings": []
+  },
+  "lanAddresses": [
+   "192.168.1.34",
+   "198.18.0.1"
+  ],
+  "postShare": {
+   "sharedMode": true,
+   "bindHost": "0.0.0.0",
+   "port": 8812,
+   "restartRequired": true,
+   "appliesAfterRestart": true,
+   "previousBindHost": "127.0.0.1",
+   "note": "监听地址是 uvicorn 的启动参数，改完必须重启后端才生效；重启后应监听 0.0.0.0:8812。客户端不需要跟着重启，但重启窗口内会短暂断连。",
+   "lanAddresses": [
+    "192.168.1.34",
+    "198.18.0.1"
+   ],
+   "shareUrls": [
+    "http://192.168.1.34:8812",
+    "http://198.18.0.1:8812"
+   ]
+  },
+  "clientCount": 1,
+  "concurrent": [
+   {
+    "threads": 10,
+    "busyTimeoutMs": 5000,
+    "success": 10,
+    "failed": 0,
+    "locked": 0,
+    "otherErrors": [],
+    "wallSeconds": 0.148,
+    "avgMs": 76.0,
+    "p50Ms": 83.3,
+    "maxMs": 146.6
+   },
+   {
+    "threads": 10,
+    "busyTimeoutMs": 15000,
+    "success": 10,
+    "failed": 0,
+    "locked": 0,
+    "otherErrors": [],
+    "wallSeconds": 0.218,
+    "avgMs": 98.9,
+    "p50Ms": 91.2,
+    "maxMs": 217.8
+   },
+   {
+    "threads": 20,
+    "busyTimeoutMs": 15000,
+    "success": 20,
+    "failed": 0,
+    "locked": 0,
+    "otherErrors": [],
+    "wallSeconds": 0.898,
+    "avgMs": 280.0,
+    "p50Ms": 196.5,
+    "maxMs": 896.4
+   }
+  ],
+  "serial": {
+   "count": 20,
+   "seconds": 0.048,
+   "avgMs": 2.38
+  },
+  "vacuum": {
+   "seconds": 0.012,
+   "sizeBytes": 237568,
+   "integrity": "ok",
+   "backupRows": 60,
+   "sourceRows": 60,
+   "journalMode": "delete"
+  },
+  "walComparison": {
+   "walSizeBytes": 28872,
+   "rawCopyRows": 60,
+   "vacuumRows": 65,
+   "liveRows": 65,
+   "sourceRows": 65
+  }
+ }
+}

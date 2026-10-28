@@ -1,0 +1,161 @@
+{
+ "sqlite": "3.49.1",
+ "python": "3.12.10",
+ "local": {
+  "mode": "wal",
+  "write": {
+   "processes": 4,
+   "perProcess": 10,
+   "ok": 40,
+   "expected": 40,
+   "errors": [],
+   "errorCount": 0,
+   "wallSeconds": 0.185
+  },
+  "readback": {
+   "integrity": "ok",
+   "rows": 40,
+   "journalMode": "wal"
+  }
+ },
+ "unc": {
+  "root": "\\\\localhost\\C$\\Windows\\Temp\\aohuang-netfs-probe",
+  "mode": "wal",
+  "write": {
+   "processes": 4,
+   "perProcess": 10,
+   "ok": 40,
+   "expected": 40,
+   "errors": [],
+   "errorCount": 0,
+   "wallSeconds": 0.419
+  },
+  "readback": {
+   "integrity": "ok",
+   "rows": 40,
+   "journalMode": "wal"
+  },
+  "filesIdle": [
+   "app.db"
+  ],
+  "filesLive": [
+   "app.db",
+   "app.db-shm",
+   "app.db-wal"
+  ]
+ },
+ "mapped": {
+  "root": "Z:Windows\\Temp\\aohuang-netfs-probe-mapped",
+  "mode": "wal",
+  "write": {
+   "processes": 4,
+   "perProcess": 10,
+   "ok": 40,
+   "expected": 40,
+   "errors": [],
+   "errorCount": 0,
+   "wallSeconds": 0.421
+  },
+  "readback": {
+   "integrity": "ok",
+   "rows": 40,
+   "journalMode": "wal"
+  }
+ },
+ "interrupt": {
+  "rowsAfterInterrupt": 0,
+  "integrity": "ok",
+  "recoverable": true,
+  "error": ""
+ },
+ "latency": {
+  "rows": [
+   {
+    "label": "local",
+    "rounds": 200,
+    "seconds": 0.406,
+    "avgMs": 2.03,
+    "vsLocal": 1.0
+   },
+   {
+    "label": "unc",
+    "rounds": 200,
+    "seconds": 0.408,
+    "avgMs": 2.04,
+    "vsLocal": 1.0
+   }
+  ]
+ },
+ "results": [
+  {
+   "name": "本地盘 WAL 生效",
+   "ok": true,
+   "detail": "journal_mode=wal"
+  },
+  {
+   "name": "本地盘 4 进程 × 10 写全部成功",
+   "ok": true,
+   "detail": "40/40 wall=0.185s err=0"
+  },
+  {
+   "name": "本地盘 integrity_check=ok",
+   "ok": true,
+   "detail": "ok rows=40"
+  },
+  {
+   "name": "UNC 路径可写",
+   "ok": true,
+   "detail": "\\\\localhost\\C$\\Windows\\Temp\\aohuang-netfs-probe"
+  },
+  {
+   "name": "UNC 上 journal_mode=WAL 设置成功（返回 wal）",
+   "ok": true,
+   "detail": "journal_mode=wal"
+  },
+  {
+   "name": "UNC 4 进程 × 10 写全部成功",
+   "ok": true,
+   "detail": "40/40 wall=0.419s err=0 []"
+  },
+  {
+   "name": "UNC integrity_check=ok",
+   "ok": true,
+   "detail": "ok rows=40"
+  },
+  {
+   "name": "UNC 上 WAL 落盘文件齐全（连接活着时能看到 -wal）",
+   "ok": true,
+   "detail": "空闲后=['app.db'] 写入中=['app.db', 'app.db-shm', 'app.db-wal']"
+  },
+  {
+   "name": "映射盘符可用",
+   "ok": true,
+   "detail": "Z: -> \\\\localhost\\C$（本次新建）"
+  },
+  {
+   "name": "映射盘 4 进程 × 10 写全部成功",
+   "ok": true,
+   "detail": "40/40 wall=0.421s err=0 []"
+  },
+  {
+   "name": "映射盘 integrity_check=ok",
+   "ok": true,
+   "detail": "ok rows=40"
+  },
+  {
+   "name": "未提交事务在网络盘上不可见（原子性）",
+   "ok": true,
+   "detail": "rows=0 integrity=ok childExit=9"
+  },
+  {
+   "name": "中断后库仍可写（能恢复）",
+   "ok": true,
+   "detail": "ok"
+  },
+  {
+   "name": "网络盘写入延迟对比本地盘",
+   "ok": true,
+   "detail": "local 2.03ms/txn (×1.0) | unc 2.04ms/txn (×1.0)"
+  }
+ ]
+}

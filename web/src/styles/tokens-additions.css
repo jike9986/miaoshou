@@ -1,0 +1,39 @@
+/* web/src/styles/tokens-additions.css
+ * 补齐 tokens.css 缺失的两个 token（design-system §2.2 中性色阶梯里的中性 900/950）。
+ * tokens.css 是设计文档 §2.7 的成品，保持原样不改；这里以增量方式补 Token，
+ * 让 Tooltip / 批量操作栏等「反色浮层」不必在组件里写字面色值（§8.2 验收：不得硬编码）。
+ */
+
+:root {
+  /* --neutral-900 #191F25 —— 反色浮层底色（Tooltip、批量操作栏） */
+  --surface-inverse: 25 31 37;
+  /* 反色浮层上的 hover 提亮（white/10 等效，供需要实色时使用） */
+  --surface-inverse-hover: 41 48 55;
+}
+
+.dark {
+  /* 深色主题下浮层与画布反差已经足够，浮层直接用 elevated */
+  --surface-inverse: 26 34 38;
+  --surface-inverse-hover: 36 46 53;
+}
+
+/* design-system §5.2 输入框内高光：把文档里的字面量收成 Token，避免组件里出现裸 rgba */
+:root {
+  --shadow-inset: inset 0 1px 0 rgba(16, 24, 32, 0.02);
+}
+
+.dark {
+  --shadow-inset: inset 0 1px 0 rgba(0, 0, 0, 0.24);
+}
+
+/* design-system §5.14 骨架屏微光：颜色串取自文档（#EDF1F3 / #F6F8F9），
+   写成 Token 后组件只引用变量，换主题时不用改组件。 */
+:root {
+  --skeleton-from: 237 241 243; /* --border-subtle #EDF1F3 */
+  --skeleton-to: 246 248 249; /* --canvas #F6F8F9 */
+}
+
+.dark {
+  --skeleton-from: 30 39 44;
+  --skeleton-to: 25 34 39;
+}
