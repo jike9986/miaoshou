@@ -37,7 +37,7 @@ import {
   KpiCard,
   SearchInput,
   Select,
-  SkeletonTable,
+  SkeletonRows,
   Switch,
   Tabs,
   Textarea,
@@ -338,7 +338,7 @@ export function WordsPage() {
         />
 
         {listQuery.isLoading && (
-          <SkeletonTable rows={8} columns={["w-10", "flex-1", "w-[88px]", "w-[88px]", "w-[104px]", "w-[72px]"]} />
+          <SkeletonRows rows={6} />
         )}
 
         {listQuery.isError && (
@@ -379,120 +379,93 @@ export function WordsPage() {
         )}
 
         {!listQuery.isLoading && !listQuery.isError && items.length > 0 && (
-          <div className="overflow-hidden rounded-lg border border-border bg-surface">
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-sm">
-                <thead>
-                  <tr className="h-10 bg-canvas-inset/85 backdrop-blur-[2px]">
-                    <th className="sticky top-0 w-[48px] border-b border-border pl-4 text-left">
-                      <Checkbox
-                        checked={allSelected}
-                        indeterminate={!allSelected && selected.length > 0}
-                        onChange={() => {
-                          if (allSelected) store.clearWords();
-                          else store.setWords(pageWords);
-                        }}
-                        aria-label="全选本页"
-                      />
-                    </th>
-                    <th className="sticky top-0 border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
-                      词
-                    </th>
-                    <th className="sticky top-0 w-[96px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
-                      分类
-                    </th>
-                    <th className="sticky top-0 w-[88px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
-                      来源
-                    </th>
-                    <th className="sticky top-0 w-[96px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
-                      启用
-                    </th>
-                    <th className="sticky top-0 w-[80px] border-b border-border px-3 pr-4 text-right text-xs font-medium text-fg-muted">
-                      操作
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((item) => {
-                    const checked = selected.includes(item.word);
-                    return (
-                      <tr
-                        key={item.id}
-                        className={cn(
-                          "border-b border-border-subtle transition-colors duration-fast last:border-0",
-                          checked ? "bg-brand-50" : "hover:bg-surface-hover"
-                        )}
-                      >
-                        <td className="py-2.5 pl-4">
-                          <Checkbox
-                            checked={checked}
-                            onChange={() => store.toggleWord(item.word)}
-                            aria-label={`选择 ${item.word}`}
-                          />
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span className="text-[13px] font-medium text-fg">{item.word}</span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <Badge variant={item.action === "remove" ? "danger" : "warning"}>
-                            {item.action === "remove" ? "删除" : "复核"}
-                          </Badge>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span className="text-xs text-fg-muted">
-                            {item.source === "seed" ? "内置" : item.source === "import" ? "导入" : "手动"}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          {/*
-                            停用不再等于删除：PATCH /violation-words/enabled 只翻 enabled 位，
-                            词条仍在库里，随时可以再打开（审查 P2-10）。
-                          */}
-                          <Switch
-                            checked={item.enabled}
-                            aria-label={`${item.enabled ? "停用" : "启用"} ${item.word}`}
-                            disabled={toggleEnabled.isPending}
-                            onChange={(checked) => {
-                              toggleEnabled.mutate(
-                                { enabled: checked, words: [item.word] },
-                                {
-                                  onSuccess: () =>
-                                    toast.success(
-                                      checked ? `已启用「${item.word}」` : `已停用「${item.word}」`,
-                                      {
-                                        description: checked
-                                          ? "标题清理会重新命中该词"
-                                          : "词条保留在库中，随时可以再启用",
-                                      }
-                                    ),
-                                  onError: (error) =>
-                                    toast.error(checked ? "启用失败" : "停用失败", {
-                                      description: apiErrorMessage(error),
-                                    }),
-                                }
-                              );
-                            }}
-                          />
-                        </td>
-                        <td className="px-3 py-2.5 pr-4 text-right">
-                          <IconButton
-                            label={`删除 ${item.word}`}
-                            size="sm"
-                            variant="danger"
-                            icon={<Trash2 />}
-                            onClick={() => {
-                              store.setWords([item.word]);
-                              setDeleteOpen(true);
-                            }}
-                          />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          <>
+            {/* 全选/清空操作条 */}
+            <div className="flex items-center gap-2">
+              <Checkbox
+                checked={allSelected}
+                indeterminate={!allSelected && selected.length > 0}
+                onChange={() => {
+                  if (allSelected) store.clearWords();
+                  else store.setWords(pageWords);
+                }}
+                aria-label="全选本页"
+                label="全选"
+              />
+              {selected.length > 0 && (
+                <span className="text-xs text-fg-muted">已选 {selected.length} 个</span>
+              )}
             </div>
-          </div>
+
+            {/* 标签流式布局：一词一个胶囊，多个一行排满。
+                一词一行的表格在几十上百个词时全是空白，翻页翻到手酸。 */}
+            <div className="flex flex-wrap gap-2">
+              {items.map((item) => {
+                const checked = selected.includes(item.word);
+                return (
+                  <span
+                    key={item.id}
+                    className={cn(
+                      "group inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[13px] transition-colors duration-fast",
+                      checked
+                        ? "border-brand-600/60 bg-brand-50"
+                        : item.enabled
+                          ? "border-border bg-surface hover:border-border-strong"
+                          : "border-border-subtle bg-canvas-inset/50 text-fg-muted line-through"
+                    )}
+                  >
+                    <Checkbox
+                      checked={checked}
+                      onChange={() => store.toggleWord(item.word)}
+                      aria-label={`选择 ${item.word}`}
+                      size="sm"
+                    />
+                    <span className="font-medium">{item.word}</span>
+                    <Badge
+                      variant={item.action === "remove" ? "danger" : "warning"}
+                      size="sm"
+                    >
+                      {item.action === "remove" ? "删" : "审"}
+                    </Badge>
+                    <span className="text-2xs text-fg-muted">
+                      {item.source === "seed" ? "内置" : item.source === "import" ? "导入" : "手动"}
+                    </span>
+                    <Switch
+                      checked={item.enabled}
+                      aria-label={`${item.enabled ? "停用" : "启用"} ${item.word}`}
+                      disabled={toggleEnabled.isPending}
+                      onChange={(checked) => {
+                        toggleEnabled.mutate(
+                          { enabled: checked, words: [item.word] },
+                          {
+                            onSuccess: () =>
+                              toast.success(
+                                checked ? `已启用「${item.word}」` : `已停用「${item.word}」`
+                              ),
+                            onError: (error) =>
+                              toast.error(checked ? "启用失败" : "停用失败", {
+                                description: apiErrorMessage(error),
+                              }),
+                          }
+                        );
+                      }}
+                    />
+                    <button
+                      type="button"
+                      title={`删除 ${item.word}`}
+                      className="ml-0.5 rounded-full p-0.5 text-fg-muted opacity-0 transition-opacity hover:text-danger-600 group-hover:opacity-100"
+                      onClick={() => {
+                        store.setWords([item.word]);
+                        setDeleteOpen(true);
+                      }}
+                    >
+                      <Trash2 className="size-3" strokeWidth={1.75} />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          </>
         )}
 
         <Pagination

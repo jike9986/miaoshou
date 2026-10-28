@@ -4,7 +4,7 @@
 
 import { useEffect, useId, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { ArrowRight, Eye, EyeOff, KeyRound, Link2, ShieldCheck } from "lucide-react";
+import { ArrowRight, Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn, formatRelative } from "@/lib/utils";
@@ -13,7 +13,6 @@ import { useAuthStatus, useConnectAccount, useShops } from "@/lib/queries";
 import { useSessionStore } from "@/features/stores";
 import { useAuthGuardStore } from "@/features/auth/guard";
 import {
-  Badge,
   Button,
   Card,
   CardDescription,
@@ -27,6 +26,7 @@ import {
   StatusBadge,
   toast,
 } from "@/components/ui";
+import { PageContent, PageHeader } from "@/components/layout";
 
 /* ------------------------------------------------------------------ *
  * 账号 + 店铺切换（已连接时显示的「账号切换」控件）
@@ -277,8 +277,13 @@ export function UnlockPage() {
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto bg-canvas">
-      <div className="mx-auto flex min-h-full max-w-[880px] flex-col justify-center px-8 py-12">
+    <>
+      <PageHeader
+        title="连接妙手"
+        breadcrumb={["奥皇上品", "功能", "连接妙手"]}
+        description="填写妙手开放平台的 AppID / AppSecret，连接后可拉取店铺、采集箱与类目。"
+      />
+      <PageContent width="form">
         <motion.div
           variants={reduced ? undefined : fadeUp}
           initial={reduced ? undefined : "hidden"}
@@ -286,18 +291,6 @@ export function UnlockPage() {
           transition={{ duration: 0.18, ease: ease.out }}
           className="w-full"
         >
-          <div className="mb-6 flex items-center gap-3">
-            <span className="grid size-11 place-items-center rounded-xl bg-brand-50 text-brand-600">
-              <Link2 className="size-5" strokeWidth={1.75} />
-            </span>
-            <div>
-              <h1 className="text-h1 text-fg">连接妙手</h1>
-              <p className="mt-0.5 text-sm text-fg-muted">
-                填写妙手开放平台的 AppID / AppSecret，连接后可拉取店铺、采集箱与类目。
-              </p>
-            </div>
-          </div>
-
           <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
             <Card padding="normal">
               <CardTitle>账号凭据</CardTitle>
@@ -417,29 +410,6 @@ export function UnlockPage() {
             </Card>
 
             <div className="flex flex-col gap-4">
-              <Card padding="normal">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="size-4 text-success-600" strokeWidth={1.75} />
-                  <CardTitle className="text-h3">安全说明</CardTitle>
-                </div>
-                <ul className="mt-3 flex flex-col gap-2 text-[13px] leading-5 text-fg-secondary">
-                  <li>• 凭据保存在本机数据目录，不上传任何第三方。</li>
-                  <li>• 接口响应只回显 AppID 后 4 位（…4e）。</li>
-                  <li>• 只读模式下连接会被拒绝（403 READ_ONLY_MODE）。</li>
-                </ul>
-                {status && (
-                  <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border-subtle pt-3">
-                    <Badge variant={status.publishEnabled ? "success" : "neutral"}>
-                      {status.publishEnabled ? "允许发布" : "发布未开启"}
-                    </Badge>
-                    <Badge variant={status.readOnly ? "warning" : "neutral"}>
-                      {status.readOnly ? "只读模式" : "可写"}
-                    </Badge>
-                    <span className="num text-2xs text-fg-muted">v{status.serverVersion}</span>
-                  </div>
-                )}
-              </Card>
-
               {accounts.length > 0 && (
                 <Card padding="normal">
                   <CardTitle className="text-h3">已保存账号</CardTitle>
@@ -485,8 +455,8 @@ export function UnlockPage() {
             </div>
           </div>
         </motion.div>
-      </div>
-    </div>
+      </PageContent>
+    </>
   );
 }
 
