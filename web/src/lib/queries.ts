@@ -1443,6 +1443,58 @@ export function useDeleteTemplate(): UseMutationResult<DeleteTemplateResponse, E
 }
 
 /* ================================================================== *
+ * 工作流默认值（重量增量 / 包裹尺寸 / 尺码图地址）
+ *
+ * 后端 workflow.defaults 是入仓时真正读取的那份配置
+ * （save_from_collect_box → _workflow_setting）。前端处理设置面板
+ * 改了这三个值就同步写到这里，保证「界面上调的参数，处理时真的生效」。
+ * ================================================================== */
+
+export interface WorkflowDefaults {
+  weightIncrement?: number;
+  packageDimensions?: {
+    packageLength: number;
+    packageWidth: number;
+    packageHeight: number;
+  };
+  sizeChartUrl?: string;
+}
+
+export interface SystemSettingsResponse {
+  workflowDefaults?: WorkflowDefaults;
+  readOnly?: boolean;
+  publishEnabled?: boolean;
+}
+
+export function useWorkflowDefaults(enabled = true): UseQueryResult<SystemSettingsResponse> {
+  return useQuery({
+    queryKey: ["system", "settings"],
+    queryFn: () => api.get<SystemSettingsResponse>("/system/settings"),
+    enabled,
+    staleTime: 60_000,
+  });
+}
+
+/** POST /system/settings 的 workflowDefaults 分支：只覆盖传入的键。 */
+export function useSaveWorkflowDefaults(): UseMutationResult<
+  SystemSettingsResponse,
+  Error,
+  WorkflowDefaults
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (patch) =>
+      api.post<SystemSettingsResponse, { workflowDefaults: WorkflowDefaults }>(
+        "/system/settings",
+        { workflowDefaults: patch }
+      ),
+    onSuccess: (data) => {
+      client.setQueryData(["system", "settings"], data);
+    },
+  });
+}
+
+/* ================================================================== *
  * §16 标题清理（api.md §16）
  * ================================================================== */
 

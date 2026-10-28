@@ -50,8 +50,10 @@ export interface AutomationSettings {
   priceTemplateEnabled: boolean;
   /** 定价模板名（来自 GET /system/templates） */
   template: string;
-  /** 发布到店铺开关 */
+  /** 发布到店铺开关（开启后，处理成功的商品自动认领到所选店铺的采集箱，不直接上架） */
   publishEnabled: boolean;
+  /** 发布目标店铺（publishEnabled=true 时认领到这家店的采集箱） */
+  publishShopId: string;
   /** 选中的尺码图（GET /size-charts 的 id） */
   sizeChartId: string | null;
 }
@@ -72,6 +74,7 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
   priceTemplateEnabled: false,
   template: "",
   publishEnabled: false,
+  publishShopId: "",
   sizeChartId: null,
 };
 
@@ -96,6 +99,7 @@ const PERSISTED_KEYS: Array<keyof AutomationSettings> = [
   "priceTemplateEnabled",
   "template",
   "publishEnabled",
+  "publishShopId",
   "sizeChartId",
 ];
 

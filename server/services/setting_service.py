@@ -110,6 +110,14 @@ def workflow_defaults(db: Session) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def save_workflow_defaults(db: Session, cleaned: dict[str, Any]) -> dict[str, Any]:
+    """合并写入工作流默认值（只覆盖传入的键，其余保持原值）。"""
+    current = workflow_defaults(db)
+    merged = {**current, **cleaned}
+    put(db, WORKFLOW_DEFAULTS_KEY, merged)
+    return merged
+
+
 def price_templates(db: Session) -> dict[str, Any]:
     value = get(db, PRICING_TEMPLATES_KEY) or {}
     return value if isinstance(value, dict) else {}

@@ -249,60 +249,80 @@ export function ProductPicker({
 
         {connected && !loading && !errorMessage && items.length > 0 && (
           <ul
-            className="grid min-w-0 content-start gap-2
-                       [grid-template-columns:repeat(auto-fill,minmax(206px,1fr))]"
+            className="grid min-w-0 content-start gap-2.5
+                       [grid-template-columns:repeat(auto-fill,minmax(128px,1fr))]"
           >
             {items.map((item) => {
               const stage = stages[item.key];
               const checked = selectedKeys.has(item.key);
               return (
                 <li key={item.key}>
-                  <label
+                  {/* 竖版卡片：方图在上、两行标题在下，勾选框浮在图左上角。
+                      一行 3 个的横版在宽屏下把标题挤得只剩几个字，竖版让图成为主角。 */}
+                  <div
                     className={cn(
-                      // 卡片：勾选框 + 56px 大图 + 标题。只有这两样。
-                      "grid min-h-[68px] cursor-pointer grid-cols-[18px_52px_minmax(0,1fr)] items-center gap-2.5",
-                      "rounded-md border bg-surface px-2.5 py-2 transition-colors duration-fast",
+                      "group relative flex cursor-pointer flex-col overflow-hidden rounded-md border bg-surface",
+                      "transition-[border-color,box-shadow] duration-fast",
                       checked
-                        ? "border-brand-600/60 bg-brand-50"
+                        ? "border-brand-600 ring-2 ring-brand-600/24"
                         : cn(
-                            "hover:border-border-strong hover:bg-surface-hover",
+                            "hover:border-border-strong hover:shadow-1",
                             CARD_STATE_CLASS[stage ?? "queued"]
                           ),
                       disabled && "cursor-not-allowed opacity-60"
                     )}
                   >
-                    <Checkbox
-                      checked={checked}
-                      onChange={() => onToggle(item)}
+                    <label className="relative block cursor-pointer">
+                      <span className="absolute left-1.5 top-1.5 z-[1] rounded bg-surface/90 p-0.5 shadow-1">
+                        <Checkbox
+                          checked={checked}
+                          onChange={() => onToggle(item)}
+                          disabled={disabled}
+                          aria-label={`选择 ${item.title || item.detailId}`}
+                        />
+                      </span>
+                      <span className="block aspect-square w-full overflow-hidden bg-canvas-inset">
+                        <RemoteImage src={item.imageUrl} alt={item.title} />
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => onToggle(item)}
                       disabled={disabled}
-                      aria-label={`选择 ${item.title || item.detailId}`}
-                    />
-                    <span className="size-[52px] shrink-0 overflow-hidden rounded-sm border border-border bg-canvas-inset">
-                      <RemoteImage src={item.imageUrl} alt={item.title} />
-                    </span>
-                    {/* 标题：单行截断，不换行 */}
-                    <span
-                      className="min-w-0 truncate text-xs font-medium leading-[1.4] text-fg"
-                      title={
-                        // 卡片上不放文字（会挤掉标题），把「哪一步完成了」放进悬停提示：
-                        // 老版用「文字完成 · 图片待处理」表达的就是这个信息。
-                        (() => {
-                          const done = progress?.[item.key];
-                          const base = item.title || "";
-                          if (!done) return base;
-                          const parts = [
-                            done.textDone ? "文字已完成" : null,
-                            done.imagesDone ? "图片已完成" : null,
-                            done.imageFailures ? `图片 ${done.imageFailures} 张失败` : null,
-                          ].filter(Boolean);
-                          return parts.length ? `${base}
-${parts.join(" · ")}` : base;
-                        })()
-                      }
+                      title={(() => {
+                        const done = progress?.[item.key];
+                        const base = item.title || "";
+                        if (!done) return base;
+                        const parts = [
+                          done.textDone ? "文字已完成" : null,
+                          done.imagesDone ? "图片已完成" : null,
+                          done.imageFailures ? `图片 ${done.imageFailures} 张失败` : null,
+                        ].filter(Boolean);
+                        return parts.length ? `${base}\n${parts.join(" · ")}` : base;
+                      })()}
+                      className={cn(
+                        "block w-full px-2 pb-1.5 pt-1 text-left",
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32"
+                      )}
                     >
-                      {item.title || "（无标题）"}
-                    </span>
-                  </label>
+                      {/* 两行标题，超出省略 —— 比单行多露一倍信息，又不至于撑高卡片 */}
+                      <span className="line-clamp-2 min-h-[32px] text-xs font-medium leading-4 text-fg">
+                        {item.title || "（无标题）"}
+                      </span>
+                    </button>
+                    {stage && stage !== "queued" && (
+                      <span
+                        className={cn(
+                          "absolute right-1.5 top-1.5 rounded px-1 py-0.5 text-[10px] font-medium leading-3",
+                          stage === "running" && "bg-info-600 text-white",
+                          stage === "done" && "bg-success-600 text-white",
+                          stage === "failed" && "bg-danger-600 text-white"
+                        )}
+                      >
+                        {stage === "running" ? "处理中" : stage === "done" ? "完成" : "失败"}
+                      </span>
+                    )}
+                  </div>
                 </li>
               );
             })}

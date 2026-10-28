@@ -221,6 +221,32 @@ def _bootstrap_templates(db: DbSession) -> dict[str, Any]:
             "selectedName": setting_service.selected_template_name(db)}
 
 
+def _validate_workflow_defaults(raw: dict[str, Any]) -> dict[str, Any]:
+    """工作流默认值的白名单校验（POST /system/settings 的 workflowDefaults 分支）。
+
+    前端处理设置面板改重量/包裹尺寸/尺码图后，经这里落到 workflow.defaults，
+    入仓时 save_from_collect_box 的 _workflow_setting 会读到同一份值——
+    这就是「界面上调了参数，处理时真的生效」的那条链路。
+    """
+    cleaned: dict[str, Any] = {}
+    if "weightIncrement" in raw:
+        try:
+            weight = float(raw["weightIncrement"])
+        except (TypeError, ValueError):
+            raise errors.validation("重量增量须为数字", field="weightIncrement") from None
+        if not 0 <= weight <= 5:
+            raise errors.validation("重量增量须在 0–5 kg 之间", field="weightIncrement")
+        cleaned["weightIncrement"] = weight
+    if "packageDimensions" in raw:
+        # 复用服务层的同一套校验与键名规则（packageLength/Width/Height，0–300）
+        cleaned["packageDimensions"] = warehouse_service.normalize_package_dimensions(
+            raw["packageDimensions"])
+    if "sizeChartUrl" in raw:
+        cleaned["sizeChartUrl"] = warehouse_service.normalize_size_chart_url(
+            raw["sizeChartUrl"])
+    return cleaned
+
+
 @router.get("/settings", summary="只读模式与发布开关")
 def system_settings(db: DbSession) -> dict[str, Any]:
     settings = get_settings()
@@ -254,6 +280,15 @@ def patch_system_settings(payload: dict[str, Any], db: DbSession,
         value = parse_bool(payload.get("publishEnabled"), "publishEnabled")
         setting_service.set_publish_enabled(db, value)
         changed["publishEnabled"] = bool(value)
+    if "workflowDefaults" in payload:
+        raw = payload.get("workflowDefaults")
+        if not isinstance(raw, dict):
+            raise errors.validation("workflowDefaults 必须是对象", field="workflowDefaults")
+        # 只接受白名单键，做服务端校验：非法值在这里就 422，
+        # 不能等到入仓时才让 normalize_package_dimensions 抛「请填写包裹长宽高」。
+        cleaned = _validate_workflow_defaults(raw)
+        setting_service.save_workflow_defaults(db, cleaned)
+        changed["workflowDefaults"] = sorted(cleaned)
     db.commit()
     if changed:
         # 共享设置一改全员受影响（只读模式能让所有人立刻写不进去），

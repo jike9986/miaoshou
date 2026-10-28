@@ -68,7 +68,7 @@ import {
   type AutomationSettings,
   type SizeChart,
 } from "@/features/automation/types";
-import { ImageServiceCard } from "@/features/automation/ImageServiceCard";
+
 
 export interface ProcessSettingsProps {
   settings: AutomationSettings;
@@ -77,9 +77,8 @@ export interface ProcessSettingsProps {
   connected: boolean;
   /** 打开定价模板弹窗（GET /system/templates） */
   onOpenTemplates: () => void;
-  /** 跳转成品仓库——真正的发布确认弹窗（PublishDialog）在那里，
-   *  它只接受 warehouseId，本页手里只有 detailId，所以走跳转而不在本页造弹窗 */
-  onOpenPublish: () => void;
+  /** 店铺列表（发布到店铺的目标选择器用） */
+  shops?: Array<{ shopId: string; name: string; siteName: string }>;
   /** 运行中：全部控件禁用 */
   disabled?: boolean;
   className?: string;
@@ -90,7 +89,7 @@ export function ProcessSettings({
   onChange,
   connected,
   onOpenTemplates,
-  onOpenPublish,
+  shops = [],
   disabled = false,
   className,
 }: ProcessSettingsProps) {
@@ -180,12 +179,9 @@ export function ProcessSettings({
     if (settings.priceTemplateEnabled && !settings.textEnabled) {
       return "定价模板需要先开启文字处理，否则不会生效。";
     }
-    if (settings.publishEnabled) {
-      return "发布已开启：保存后会直接上架到店铺，不可撤销。";
-    }
     return null;
   })();
-  const comboDanger = settings.publishEnabled && Boolean(comboWarning);
+  const comboDanger = false;
 
   return (    <>
       <div
@@ -211,9 +207,9 @@ export function ProcessSettings({
               {comboWarning}
             </p>
           )}
-          {/* 1. 语言 + 四个开关同排（老版 switch-group 原样） */}
-          <div className="flex flex-col gap-2">
-            <Field label="商品文字语言" className="w-[150px] shrink-0">
+          {/* 第一行：语言 + 文字/图片开关 + 定价模板 + 发布到店铺（用户要求同行） */}
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+            <Field label="商品文字语言" className="w-[140px] shrink-0">
               <Select
                 value={settings.language}
                 onChange={(value) =>
@@ -227,63 +223,97 @@ export function ProcessSettings({
               />
             </Field>
 
-            <div className="flex flex-nowrap items-center gap-x-2.5">
-              <span className="flex h-6 shrink-0 items-center">
-                <Switch
-                  checked={settings.textEnabled}
-                  onChange={(checked) => onChange({ textEnabled: checked })}
-                  label="文字"
-                  disabled={disabled}
-                />
-              </span>
-              <span className="flex h-6 shrink-0 items-center">
-                <Switch
-                  checked={settings.imagesEnabled}
-                  onChange={(checked) => onChange({ imagesEnabled: checked })}
-                  label="图片"
-                  disabled={disabled}
-                />
-              </span>
+            <span className="flex h-8 shrink-0 items-center">
+              <Switch
+                checked={settings.textEnabled}
+                onChange={(checked) => onChange({ textEnabled: checked })}
+                label="文字"
+                disabled={disabled}
+              />
+            </span>
+            <span className="flex h-8 shrink-0 items-center">
+              <Switch
+                checked={settings.imagesEnabled}
+                onChange={(checked) => onChange({ imagesEnabled: checked })}
+                label="图片"
+                disabled={disabled}
+              />
+            </span>
 
-              <span className="flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap">
-                <Checkbox
-                  checked={settings.priceTemplateEnabled}
-                  onChange={(checked) => onChange({ priceTemplateEnabled: checked })}
-                  label="定价模板"
-                  size="sm"
-                  disabled={disabled}
-                />
+            {/* 定价模板：勾选框保留，「选择」融合进文字（点文字也能打开） */}
+            <span className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap">
+              <Checkbox
+                checked={settings.priceTemplateEnabled}
+                onChange={(checked) => onChange({ priceTemplateEnabled: checked })}
+                size="sm"
+                disabled={disabled}
+              />
+              <button
+                type="button"
+                onClick={onOpenTemplates}
+                className={cn(
+                  "text-[13px] font-medium leading-[18px] transition-colors duration-fast",
+                  settings.priceTemplateEnabled
+                    ? "text-fg hover:text-brand-700"
+                    : "text-fg-muted hover:text-fg",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
+                )}
+              >
+                定价模板
+                {settings.priceTemplateEnabled && settings.template && (
+                  <span className="ml-1 text-brand-700">· {settings.template}</span>
+                )}
+              </button>
+            </span>
+
+            {/* 发布到店铺：勾选框保留，文字点开店铺选择器 */}
+            <span className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap">
+              <Checkbox
+                checked={settings.publishEnabled}
+                onChange={(checked) => onChange({ publishEnabled: checked })}
+                size="sm"
+                disabled={disabled}
+              />
+              <span className="relative">
                 <button
                   type="button"
-                  onClick={onOpenTemplates}
-                  className="text-xs leading-[18px] text-brand-700 underline-offset-2 transition-colors duration-fast hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
+                  disabled={disabled || !settings.publishEnabled}
+                  className={cn(
+                    "text-[13px] font-medium leading-[18px] transition-colors duration-fast",
+                    settings.publishEnabled
+                      ? "text-fg hover:text-brand-700"
+                      : "text-fg-muted",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32",
+                    (!settings.publishEnabled || disabled) && "cursor-default"
+                  )}
                 >
-                  选择
+                  发布到店铺
+                  {settings.publishEnabled && settings.publishShopId && (
+                    <span className="ml-1 text-brand-700">
+                      · {shops.find((s) => s.shopId === settings.publishShopId)?.name ?? settings.publishShopId}
+                    </span>
+                  )}
                 </button>
+                {settings.publishEnabled && shops.length > 0 && (
+                  <Select
+                    size="sm"
+                    aria-label="选择目标店铺"
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                    value={settings.publishShopId}
+                    onChange={(value) => onChange({ publishShopId: value })}
+                    options={[
+                      { value: "", label: "选择店铺…" },
+                      ...shops.map((s) => ({ value: s.shopId, label: `${s.name}（${s.siteName}）` })),
+                    ]}
+                  />
+                )}
               </span>
-
-              <span className="flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap">
-                <Checkbox
-                  checked={settings.publishEnabled}
-                  onChange={(checked) => onChange({ publishEnabled: checked })}
-                  label="发布到店铺"
-                  size="sm"
-                  disabled={disabled}
-                />
-                <button
-                  type="button"
-                  onClick={onOpenPublish}
-                  className="text-xs leading-[18px] text-brand-700 underline-offset-2 transition-colors duration-fast hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
-                >
-                  设置
-                </button>
-              </span>
-            </div>
+            </span>
           </div>
 
-          {/* 2. 图片数量 + 并发 */}
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="主图数量">
+          {/* 第二行：主图数量（用户要求：主图跟语言一行） + 重量 + 长宽高 */}
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+            <Field label="主图数量" className="w-[100px] shrink-0">
               <NumberInput
                 value={settings.mainImageCount}
                 onChange={(value) => onChange({ mainImageCount: value ?? 1 })}
@@ -295,40 +325,7 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="详情图数量">
-              <NumberInput
-                value={settings.detailImageCount}
-                onChange={(value) => onChange({ detailImageCount: value ?? 1 })}
-                min={1}
-                max={9}
-                step={1}
-                decimals={0}
-                suffix="张"
-                disabled={disabled}
-              />
-            </Field>
-            <Field label="图片并发数">
-              <NumberInput
-                value={settings.imageConcurrency}
-                onChange={(value) => onChange({ imageConcurrency: value ?? 1 })}
-                min={1}
-                max={9}
-                step={1}
-                decimals={0}
-                suffix="并发"
-                disabled={disabled}
-              />
-            </Field>
-          </div>
-
-          {/* 2.5 图片服务：密钥配没配、从哪读的、要不要花钱验一次。
-              放在数量设置下面、重量设置上面 —— 它在逻辑上属于「图片」这一组，
-              而重量/包裹尺寸是物流参数，隔开更符合阅读顺序。 */}
-          <ImageServiceCard disabled={disabled} />
-
-          {/* 3. 重量 + 包裹尺寸 */}
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="重量增加">
+            <Field label="重量增加" className="w-[100px] shrink-0">
               <NumberInput
                 value={settings.weightExtraKg}
                 onChange={(value) => onChange({ weightExtraKg: value ?? 0 })}
@@ -340,7 +337,7 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹长">
+            <Field label="包裹长" className="w-[90px] shrink-0">
               <NumberInput
                 value={settings.lengthCm}
                 onChange={(value) => onChange({ lengthCm: value ?? 0.01 })}
@@ -352,7 +349,7 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹宽">
+            <Field label="包裹宽" className="w-[90px] shrink-0">
               <NumberInput
                 value={settings.widthCm}
                 onChange={(value) => onChange({ widthCm: value ?? 0.01 })}
@@ -364,7 +361,7 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹高">
+            <Field label="包裹高" className="w-[90px] shrink-0">
               <NumberInput
                 value={settings.heightCm}
                 onChange={(value) => onChange({ heightCm: value ?? 0.01 })}
@@ -477,7 +474,7 @@ export function ProcessSettings({
                     loading="lazy"
                     draggable={false}
                     referrerPolicy="no-referrer"
-                    className="size-full object-cover"
+                    className="size-full object-contain"
                   />
                 </button>
                 <div className="flex min-w-0 flex-col gap-1">
@@ -546,7 +543,7 @@ export function ProcessSettings({
                         loading="lazy"
                         draggable={false}
                         referrerPolicy="no-referrer"
-                        className="aspect-[4/5] w-full object-cover"
+                        className="aspect-[4/5] w-full object-contain"
                       />
                       <span className="absolute inset-x-0 bottom-0 truncate bg-inverse/85 px-1 py-0.5 text-[10px] leading-4 text-fg-inverse">
                         {chart.name}
@@ -563,19 +560,9 @@ export function ProcessSettings({
                       )}
                     </button>
 
-                    {/* 项目默认图：标出来 + 删除按钮禁用，原因写在 title 里 */}
-                    <div className="flex items-center justify-between gap-1 border-t border-border-subtle px-1 py-1">
-                      {isDefault ? (
-                        <Badge
-                          variant="brand"
-                          size="sm"
-                          title="项目默认尺码图不能删除"
-                        >
-                          项目默认
-                        </Badge>
-                      ) : (
-                        <span />
-                      )}
+                    {/* 项目默认图：标出来 + 删除按钮禁用，原因写在 title 里。
+                        默认图的图片名本身就含「默认」，底部不再重复放 Badge —— 两个「默认」叠着很奇怪。 */}
+                    <div className="flex items-center justify-end gap-1 border-t border-border-subtle px-1 py-1">
                       <IconButton
                         label={
                           isDefault ? "项目默认尺码图不能删除" : `删除尺码图「${chart.name}」`

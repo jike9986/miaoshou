@@ -25,11 +25,20 @@
 //   · 采集箱每页 >20 —— 服务端校验 pageSize 必须 1–20，超出会 400
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Pencil, Play, Square, Tag } from "lucide-react";
 import { apiErrorMessage } from "@/lib/api";
 import { formatCount } from "@/lib/utils";
-import { useAuthStatus, useCollectBoxList, useProcessCollectItem, useTemplates } from "@/lib/queries";
+import {
+  useAuthStatus,
+  useCollectBoxList,
+  useProcessCollectItem,
+  usePublish,
+  useShops,
+  useTemplates,
+  useWorkflowDefaults,
+  useSaveWorkflowDefaults,
+} from "@/lib/queries";
+import { useSizeCharts, pickCharts, pickDefaultUrl, buildDefaultSizeChart } from "@/features/automation/useSizeCharts";
 import { PriceTemplateDialog } from "@/features/warehouse/PriceTemplateDialog";
 import type { CollectBoxItem } from "@/lib/types";
 import { PageContent, PageHeader } from "@/components/layout";
@@ -47,7 +56,6 @@ import {
 import { ProcessSettings } from "@/features/automation/ProcessSettings";
 import { ProductPicker } from "@/features/automation/ProductPicker";
 import { ProgressPanel } from "@/features/automation/ProgressPanel";
-import { DiagnosePanel } from "@/features/automation/DiagnosePanel";
 import { AccountSwitcher } from "@/features/auth/UnlockPage";
 import {
   IDLE_RUN,
@@ -80,7 +88,6 @@ const DATE_FORMAT = new Intl.DateTimeFormat("zh-CN", {
 });
 
 export function AutomationPage() {
-  const navigate = useNavigate();
   const { data: status } = useAuthStatus();
   const connected = status?.connected ?? false;
 
@@ -115,6 +122,54 @@ export function AutomationPage() {
     setSettings((prev) => ({ ...prev, ...patch }));
   }, []);
 
+  /* ---------- 工作流默认值同步（重量/包裹尺寸/尺码图 → 后端） ----------
+     后端 save_from_collect_box 读的是 workflow.defaults，不是这里的 localStorage。
+     改动这三个值时必须同步过去，否则「界面上调了参数，处理时用的还是旧值」。 */
+  const workflowQuery = useWorkflowDefaults(connected);
+  const saveWorkflow = useSaveWorkflowDefaults();
+  const sizeChartsQuery = useSizeCharts(connected);
+  const chartList = useMemo(() => pickCharts(sizeChartsQuery.data), [sizeChartsQuery.data]);
+  const defaultChartUrl = pickDefaultUrl(sizeChartsQuery.data);
+  const fallbackChart = buildDefaultSizeChart(defaultChartUrl);
+
+  // 首次拿到后端值时回填本地显示（后端为准），之后本地改动再推上去
+  const syncedFromServer = useRef(false);
+  useEffect(() => {
+    if (syncedFromServer.current || !workflowQuery.data?.workflowDefaults) return;
+    const server = workflowQuery.data.workflowDefaults;
+    const patch: Partial<AutomationSettings> = {};
+    if (typeof server.weightIncrement === "number") patch.weightExtraKg = server.weightIncrement;
+    if (server.packageDimensions) {
+      patch.lengthCm = server.packageDimensions.packageLength;
+      patch.widthCm = server.packageDimensions.packageWidth;
+      patch.heightCm = server.packageDimensions.packageHeight;
+    }
+    if (Object.keys(patch).length > 0) setSettings((prev) => ({ ...prev, ...patch }));
+    syncedFromServer.current = true;
+  }, [workflowQuery.data]);
+
+  // 本地改动 → 推送到后端（防抖 800ms，避免拖动数字时连打）
+  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!connected || !syncedFromServer.current) return;
+    if (pushTimer.current) clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(() => {
+      const selectedChart = chartList.find((c) => c.id === settings.sizeChartId);
+      const chartUrl = selectedChart?.url ?? (settings.sizeChartId === null ? (fallbackChart?.url ?? "") : "");
+      saveWorkflow.mutate({
+        weightIncrement: settings.weightExtraKg,
+        packageDimensions: {
+          packageLength: settings.lengthCm,
+          packageWidth: settings.widthCm,
+          packageHeight: settings.heightCm,
+        },
+        sizeChartUrl: chartUrl,
+      });
+    }, 800);
+    return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.weightExtraKg, settings.lengthCm, settings.widthCm, settings.heightCm, settings.sizeChartId, connected]);
+
   // 每次改动都落盘。放在 effect 里而不是 patchSettings 内：模板/尺码图可能
   // 由别处 setSettings 改，统一在这里兜住。
   useEffect(() => {
@@ -136,11 +191,6 @@ export function AutomationPage() {
   /* ---------------- 勾选（跨页快照） ---------------- */
   const [selection, setSelection] = useState<Map<string, SelectionEntry>>(() => new Map());
   const selectedKeys = useMemo(() => new Set(selection.keys()), [selection]);
-  // 诊断面板只认 detailId/shopId，其余字段用不上
-  const selectedList = useMemo(
-    () => [...selection.values()].map(({ detailId, shopId }) => ({ detailId, shopId })),
-    [selection]
-  );
 
   const toggleItem = useCallback((item: CollectBoxItem) => {
     setSelection((prev) => {
@@ -212,6 +262,9 @@ export function AutomationPage() {
 
   /* ---------------- 真正执行：串行处理入仓 ---------------- */
   const processItem = useProcessCollectItem();
+  const publish = usePublish();
+  const { data: authData } = useAuthStatus();
+  const shopsQuery = useShops(authData?.accountId, { enabled: connected && settings.publishEnabled });
 
   const startRun = async (): Promise<void> => {
     if (!connected) {
@@ -221,6 +274,13 @@ export function AutomationPage() {
     const targets = [...selection.values()];
     if (targets.length === 0) {
       toast.warning("请先勾选要处理的商品");
+      return;
+    }
+    // 发布开启但没选目标店铺：先拦住，别等处理完才发现没地方认领
+    if (settings.publishEnabled && !settings.publishShopId) {
+      toast.warning("请先选择要发布到哪家店铺", {
+        description: "在处理设置里勾选「发布到店铺」后，点文字选择目标店铺。",
+      });
       return;
     }
 
@@ -306,6 +366,36 @@ export function AutomationPage() {
             imageFailures: result.images?.failed ?? 0,
           },
         }));
+
+        // 发布到店铺：处理成功后自动认领到所选店铺的采集箱（不直接上架）。
+        // 这是用户要的效果——处理完的东西出现在妙手采集箱里，人工确认后再上架。
+        if (settings.publishEnabled && settings.publishShopId) {
+          const warehouseId = result.product?.id;
+          if (warehouseId) {
+            setRun((prev) => ({ ...prev, stage: `认领到店铺：${target.title || target.detailId}` }));
+            try {
+              await publish.mutateAsync({
+                items: [{ warehouseId: String(warehouseId) }],
+                shopId: settings.publishShopId,
+                confirm: true,
+                claimOnly: true,
+              });
+            } catch (claimError) {
+              // 认领失败不算处理失败：商品已在仓库里，可以稍后从仓库手动认领。
+              // 但要让用户知道这件事没做成，不能假装一切都好。
+              const reason = apiErrorMessage(claimError);
+              toast.warning(`「${target.title || target.detailId}」已入仓，但认领到店铺失败`, {
+                description: reason,
+              });
+              failures.push({
+                key: target.key,
+                title: (target.title || "") + "（认领失败）",
+                detailId: target.detailId,
+                reason: `入仓成功，认领失败：${reason}`,
+              });
+            }
+          }
+        }
       } catch (error) {
         failed += 1;
         failedKeys.push(target.key);
@@ -485,7 +575,7 @@ export function AutomationPage() {
                     onChange={patchSettings}
                     connected={connected}
                     onOpenTemplates={() => setTemplatesOpen(true)}
-                    onOpenPublish={() => navigate("/warehouse")}
+                    shops={shopsQuery.data?.shops ?? []}
                     disabled={running}
                   />
                 </div>
@@ -493,11 +583,12 @@ export function AutomationPage() {
             </div>
 
             {/* 右：固定 320px 进度列。
+                DiagnosePanel 移除 —— 用户说运行日志/诊断没用，
+                失败明细已经在 ProgressPanel 里留了，诊断面板是重复信息。
                 以前这里是 overflow-y-auto，内容一更新（进度百分比跳动）浏览器就会
                 把滚动位置往最近的锚点拽，看起来就是「右边的栏自己在动」。
                 改成 overflow-hidden + overscroll-contain，列表再变化也不动。 */}
             <div className="min-h-0 overflow-hidden overscroll-contain pb-1">
-              <DiagnosePanel selected={selectedList} />
               <ProgressPanel
                 run={run}
                 settings={settings}

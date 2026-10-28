@@ -9,7 +9,7 @@
 //   2. 任务摘要卡：已选商品、文字处理、图片处理、定价模板、发布到店铺、目标语言
 
 import { useEffect, useState } from "react";
-import { Activity, Gauge, ListChecks, ScrollText } from "lucide-react";
+import { Activity, Gauge, ListChecks } from "lucide-react";
 import { cn, formatCount, formatDuration } from "@/lib/utils";
 import { Badge, Card, CardTitle, Progress, Separator, StatusBadge } from "@/components/ui";
 import {
@@ -17,7 +17,6 @@ import {
   type AutomationSettings,
   type RunState,
 } from "@/features/automation/types";
-import { useLogTail } from "@/lib/queries";
 
 export interface ProgressPanelProps {
   run: RunState;
@@ -144,7 +143,7 @@ export function ProgressPanel({
           />
           <p className="num -mt-1.5 text-2xs text-fg-muted">
             {settings.imagesEnabled
-              ? `${formatCount(imageDone)} / ${formatCount(run.imagePlanned)} 张 · 并发 ${settings.imageConcurrency}`
+              ? `${formatCount(imageDone)} / ${formatCount(run.imagePlanned)} 张`
               : "已关闭：不处理主图与详情图"}
           </p>
         </div>
@@ -215,7 +214,13 @@ export function ProgressPanel({
           />
           <SummaryRow
             label="发布到店铺"
-            value={settings.publishEnabled ? "开" : "关"}
+            value={
+              settings.publishEnabled
+                ? settings.publishShopId
+                  ? `认领到 ${settings.publishShopId}`
+                  : "开（未选店铺）"
+                : "关"
+            }
             tone={settings.publishEnabled ? "on" : "off"}
           />
           <Separator className="my-0.5" />
@@ -236,7 +241,6 @@ export function ProgressPanel({
         </p>
       </Card>
 
-      <LogCard />
     </div>
   );
 }
@@ -257,43 +261,6 @@ function Stat({
         {value}
       </dd>
     </div>
-  );
-}
-
-/** 运行日志：对照老版 index.html#logs 的排查窗口。
-    默认折叠 —— 正常跑的时候没人看它，出问题才展开。 */
-function LogCard() {
-  const [open, setOpen] = useState(false);
-  const logs = useLogTail(open);
-  const lines = logs.data?.lines ?? [];
-
-  return (
-    <Card padding="normal">
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        className="flex w-full items-center justify-between gap-2 text-left"
-      >
-        <span className="flex items-center gap-1.5">
-          <ScrollText className="size-4 text-fg-muted" strokeWidth={1.75} />
-          <CardTitle>运行日志</CardTitle>
-        </span>
-        <span className="text-2xs text-fg-muted">{open ? "收起" : "展开"}</span>
-      </button>
-      {open && (
-        <div className="mt-2">
-          {logs.isLoading ? (
-            <p className="text-2xs text-fg-muted">读取中…</p>
-          ) : lines.length === 0 ? (
-            <p className="text-2xs text-fg-muted">还没有日志。</p>
-          ) : (
-            <pre className="max-h-56 overflow-auto rounded border border-line bg-surface-sunken px-2 py-1.5 font-mono text-2xs leading-4 text-fg-muted">
-              {lines.join("\n")}
-            </pre>
-          )}
-        </div>
-      )}
-    </Card>
   );
 }
 
