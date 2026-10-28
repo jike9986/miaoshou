@@ -47,15 +47,19 @@ class OperatorCreateRequest(CamelModel):
     # 前端字段叫 admin（见 web/src/lib/types.ts 的 OperatorCreateRequest）。
     # 两个都收：老调用方按 isAdmin，界面按 admin。
     admin: bool | None = None
+    # 三级角色：admin / teacher / member。优先级高于 isAdmin。
+    role: str | None = None
 
 
 class OperatorPatchRequest(CamelModel):
-    """改名 / 重新启用。两个字段都可选，但至少要给一个。"""
+    """改名 / 重新启用 / 改角色。三个字段都可选，但至少要给一个。"""
 
     name: str | None = None
     # 前端「重新启用」走的就是 PATCH {enabled: true}：后端只有 /disable 一个
     # 动作接口，启用没必要再开一个语义重复的路由（/enable 保留给脚本用）。
     enabled: bool | None = None
+    # 改角色：admin / teacher / member
+    role: str | None = None
 
 
 @router.get("", summary="操作员列表（不含 token）")
@@ -86,17 +90,23 @@ def create_operator(payload: OperatorCreateRequest, db: DbSession,
                     operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
     is_admin = bool(payload.isAdmin if payload.admin is None else payload.admin)
-    if is_admin and not bool(operator.is_admin):
+    role = payload.role if payload.role in operator_service.VALID_ROLES else None
+    # 传了角色就按角色来，没传就按 isAdmin 推
+    if role is None:
+        role = operator_service.ROLE_ADMIN if is_admin else operator_service.ROLE_MEMBER
+    if role == operator_service.ROLE_ADMIN and not bool(operator.is_admin):
         # 加管理员等于加一个能停用别人的人：普通操作员不该有这个能力。
         # 这是唯一一处真正的「权限」判定，理由是它挡的是「互相停用打架」，
         # 不是分级授权。
         raise errors.forbidden("只有管理员可以新增管理员",
                               reason="not_admin")
-    row, token = operator_service.create(db, payload.name, is_admin=is_admin)
+    row, token = operator_service.create(db, payload.name, is_admin=is_admin,
+                                          role=role)
     db.commit()
     audit_service.record(db, operator=operator, action="operator.create",
                          target_kind="operator", target_id=str(row.id),
-                         detail={"name": row.name, "admin": bool(row.is_admin)})
+                         detail={"name": row.name, "admin": bool(row.is_admin),
+                                 "role": role})
     db.commit()
     # token 明文只在这一次响应里出现；之后（包括 GET /operators）永不再给
     return {"operator": operator_service.serialize(row), "token": token}
@@ -106,10 +116,20 @@ def create_operator(payload: OperatorCreateRequest, db: DbSession,
 def patch_operator(operator_id: str, payload: OperatorPatchRequest,
                    db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
-    if payload.name is None and payload.enabled is None:
-        raise errors.validation("至少提供一个要修改的字段（name / enabled）",
+    if payload.name is None and payload.enabled is None and payload.role is None:
+        raise errors.validation("至少提供一个要修改的字段（name / enabled / role）",
                                 field="name")
     result: dict[str, Any] = {}
+    if payload.role is not None:
+        # 改角色：只有管理员能改，且不能把最后一个管理员降成非管理员
+        result = operator_service.set_role(
+            db, operator_id, payload.role,
+            is_admin_operator=bool(operator.is_admin))
+        db.commit()
+        audit_service.record(db, operator=operator, action="operator.set_role",
+                             target_kind="operator", target_id=str(operator_id),
+                             detail={"name": result["name"], "role": payload.role})
+        db.commit()
     if payload.name is not None:
         row = operator_service.get(db, operator_id)
         old_name = row.name

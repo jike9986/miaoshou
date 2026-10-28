@@ -22,6 +22,7 @@ from services import (
     account_service,
     audit_service,
     batch_service,
+    operator_service,
     setting_service,
     system_service,
     warehouse_service,
@@ -265,6 +266,9 @@ def system_settings(db: DbSession) -> dict[str, Any]:
 @router.post("/settings", summary="切换只读模式 / 发布开关")
 def patch_system_settings(payload: dict[str, Any], db: DbSession,
                           operator: OperatorDep) -> dict[str, Any]:
+    # 改系统设置是管理员专属：只读模式能让所有人立刻写不进去，
+    # 发布开关能控制全员的发布能力——普通操作员不该有这个能力。
+    operator_service.require_role(operator, "settings")
     # 关闭只读模式本身属于「恢复可写」，不能反过来被只读守卫拦住
     turning_off_readonly = ("securityReadOnly" in payload
                             and parse_bool(payload.get("securityReadOnly"),

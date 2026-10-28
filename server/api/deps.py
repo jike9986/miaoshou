@@ -196,6 +196,16 @@ def current_operator(
 OperatorDep = Annotated[Operator, Depends(current_operator)]
 
 
+def require_permission(permission: str):
+    """要求当前操作员有某个权限的依赖工厂。
+
+    用法：`@router.post("/publish", dependencies=[require_permission("publish")])`
+    """
+    def checker(operator: OperatorDep) -> Operator:
+        return operator_service.require_role(operator, permission)
+    return Depends(checker)
+
+
 def optional_operator(
     db: DbSession,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,

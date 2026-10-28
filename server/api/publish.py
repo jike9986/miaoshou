@@ -84,6 +84,8 @@ def set_publish_settings(payload: dict[str, Any], db: DbSession,
 def publish(payload: PublishRequest, db: DbSession,
             operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
+    # 发布需要 teacher 以上权限（member 只能看）
+    operator_service.require_role(operator, "publish")
     body = payload.model_dump(by_alias=False, exclude_none=True)
     # confirm 必须是字面量 true：这里再落一次，避免 Pydantic 真值转换影响判定
     body["confirm"] = payload.confirm is True

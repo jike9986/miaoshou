@@ -1950,6 +1950,24 @@ export function useToggleOperator(): UseMutationResult<
   });
 }
 
+export function useSetRole(): UseMutationResult<
+  { operator: Operator },
+  Error,
+  { id: string; role: "admin" | "teacher" | "member" }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, role }: { id: string; role: "admin" | "teacher" | "member" }) =>
+      api.patch<{ operator: Operator }, { role: string }>(
+        `/operators/${encodeURIComponent(id)}`,
+        { role }
+      ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.operators.all });
+    },
+  });
+}
+
 export function useRotateOperator(): UseMutationResult<
   OperatorTokenResponse,
   Error,

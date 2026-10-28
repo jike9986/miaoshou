@@ -47,6 +47,53 @@ TOUCH_INTERVAL_SECONDS = 60.0
 NAME_MAX_LENGTH = 64
 
 
+# 三级角色定义
+ROLE_ADMIN = "admin"
+ROLE_TEACHER = "teacher"
+ROLE_MEMBER = "member"
+VALID_ROLES = {ROLE_ADMIN, ROLE_TEACHER, ROLE_MEMBER}
+
+# 角色权限映射：哪些角色能做哪些事
+# admin: 所有事
+# teacher: 处理商品、发布、认领、批次、定时任务
+# member: 看仓库、看自动化、看词库（只读）
+ROLE_PERMISSIONS: dict[str, set[str]] = {
+    ROLE_ADMIN: {"*"},  # 通配
+    ROLE_TEACHER: {"process", "publish", "claim", "batch", "schedule", "warehouse", "words"},
+    ROLE_MEMBER: {"warehouse", "words"},
+}
+def role_of(operator: Operator) -> str:
+    """操作员的角色。老数据没有 role 字段，is_admin=True 的按 admin 处理。
+
+    注意：`role` 列的默认值是 "member"，所以 `operator.role` 永远不为 None。
+    必须优先看 `is_admin`：它是老库里唯一可信的权限标记。
+    """
+    if operator.is_admin:
+        return ROLE_ADMIN
+    if operator.role and operator.role in VALID_ROLES:
+        return operator.role
+    return ROLE_MEMBER
+
+
+def can(operator: Operator, permission: str) -> bool:
+    """检查操作员是否有某个权限。"""
+    role = role_of(operator)
+    perms = ROLE_PERMISSIONS.get(role, set())
+    return "*" in perms or permission in perms
+
+
+def require_role(operator: Operator, permission: str) -> Operator:
+    """要求操作员有某个权限，没有就 403。"""
+    if not can(operator, permission):
+        role = role_of(operator)
+        raise errors.AppError(
+            "FORBIDDEN",
+            f"当前角色（{role}）没有「{permission}」权限，请联系管理员",
+            status=403,
+            details={"role": role, "permission": permission})
+    return operator
+
+
 # --- 默认操作员 -----------------------------------------------------------
 def ensure_default(db: Session) -> Operator:
     """保证存在「本机」操作员，且它的 token 等于现有 secret.key。
@@ -128,7 +175,8 @@ def _clean_name(name: Any) -> str:
     return text
 
 
-def create(db: Session, name: Any, *, is_admin: bool = False) -> tuple[Operator, str]:
+def create(db: Session, name: Any, *, is_admin: bool = False,
+           role: str | None = None) -> tuple[Operator, str]:
     """新建操作员，返回 (操作员, 明文 token)。
 
     明文 token **只在这里返回一次**，之后任何接口都不再给出（包括列表）。
@@ -139,9 +187,12 @@ def create(db: Session, name: Any, *, is_admin: bool = False) -> tuple[Operator,
     exists = db.query(Operator).filter(Operator.name == text).one_or_none()
     if exists is not None:
         raise errors.duplicate_name(f"操作员「{text}」已存在", name=text)
+    # 角色优先于 is_admin：传了角色就按角色来，没传就按 is_admin 推
+    resolved_role = role if role in VALID_ROLES else (ROLE_ADMIN if is_admin else ROLE_MEMBER)
     token = secrets.token_urlsafe(32)
     row = Operator(name=text, token=token, enabled=True,
-                   is_admin=bool(is_admin), created_at=now_ts())
+                   is_admin=(resolved_role == ROLE_ADMIN),
+                   role=resolved_role, created_at=now_ts())
     db.add(row)
     db.flush()
     return row, token
@@ -166,6 +217,7 @@ def serialize(row: Operator) -> dict[str, Any]:
         "enabled": bool(row.enabled),
         "admin": bool(row.is_admin),
         "isAdmin": bool(row.is_admin),
+        "role": role_of(row),
         "createdAt": row.created_at,
         "lastActiveAt": row.last_seen_at,
         "lastSeenAt": row.last_seen_at,
@@ -237,6 +289,33 @@ def enable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[st
             details={"reason": "not_admin"})
     row = get(db, operator_id)
     row.enabled = True
+    db.flush()
+    return serialize(row)
+
+
+def set_role(db: Session, operator_id: Any, role: str, *,
+             is_admin_operator: bool) -> dict[str, Any]:
+    """改角色。只有管理员能改，且不能把最后一个管理员降成非管理员。"""
+    if not is_admin_operator:
+        raise errors.AppError(
+            "FORBIDDEN", "只有管理员可以改角色", status=403,
+            details={"reason": "not_admin"})
+    if role not in VALID_ROLES:
+        raise errors.validation(f"角色无效：{role}，可选 admin/teacher/member",
+                                field="role", value=role)
+    row = get(db, operator_id)
+    # 不能把最后一个启用中的管理员降成非管理员
+    if role != ROLE_ADMIN and bool(row.is_admin) and row.enabled:
+        remaining = (db.query(Operator)
+                     .filter(Operator.is_admin.is_(True),
+                             Operator.enabled.is_(True),
+                             Operator.id != row.id).count())
+        if remaining == 0:
+            raise errors.AppError(
+                "FORBIDDEN", "这是最后一个启用中的管理员，不能降级",
+                status=409, details={"reason": "last_admin"})
+    row.role = role
+    row.is_admin = (role == ROLE_ADMIN)
     db.flush()
     return serialize(row)
 

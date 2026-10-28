@@ -1234,6 +1234,8 @@ export interface Operator {
   name: string;
   /** 管理员能改名 / 停用 / 重置别人的 token */
   admin: boolean;
+  /** 三级角色：admin / teacher / member */
+  role?: "admin" | "teacher" | "member";
   /** 停用后该 token 立即失效，但历史记录保留 */
   enabled: boolean;
   /** 最后一次带该 token 发起请求的时间（Unix 秒）；从未用过为 null */
@@ -1253,6 +1255,7 @@ export interface OperatorsResponse {
 export interface OperatorCreateRequest {
   name: string;
   admin?: boolean;
+  role?: "admin" | "teacher" | "member";
 }
 
 /** POST /operators、POST /operators/{id}/rotate 的响应 —— token 只在这里出现一次 */
@@ -1263,6 +1266,7 @@ export interface OperatorTokenResponse {
 
 export interface OperatorPatchRequest {
   name?: string;
+  role?: "admin" | "teacher" | "member";
 }
 
 /** GET /audit-logs 的查询参数 */

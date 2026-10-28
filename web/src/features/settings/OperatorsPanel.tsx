@@ -31,6 +31,7 @@ import {
   useOperators,
   useRenameOperator,
   useRotateOperator,
+  useSetRole,
   useToggleOperator,
 } from "@/lib/queries";
 import {
@@ -51,6 +52,7 @@ import {
   IconButton,
   InlineError,
   Input,
+  Select,
   SkeletonRows,
   Separator,
   toast,
@@ -274,6 +276,7 @@ function CreateOperatorDialog({
   onToken: (token: string, name: string) => void;
 }) {
   const [name, setName] = useState("");
+  const [role, setRole] = useState<"admin" | "teacher" | "member">("member");
   const [error, setError] = useState<string | null>(null);
   const create = useCreateOperator();
 
@@ -289,10 +292,11 @@ function CreateOperatorDialog({
     }
     setError(null);
     create.mutate(
-      { name: trimmed },
+      { name: trimmed, role },
       {
         onSuccess: (result) => {
           setName("");
+          setRole("member");
           onOpenChange(false);
           // token 只在这里出现一次，立刻交给一次性展示框
           onToken(result.token, result.operator.name);
@@ -312,6 +316,7 @@ function CreateOperatorDialog({
       onOpenChange={(next) => {
         if (!next) {
           setName("");
+          setRole("member");
           setError(null);
         }
         onOpenChange(next);
@@ -335,27 +340,40 @@ function CreateOperatorDialog({
         </>
       }
     >
-      <Field
-        label="名字"
-        required
-        error={error}
-        hint="用真名或岗位名，审计日志里会直接显示这个名字。"
-      >
-        <Input
-          value={name}
-          autoFocus
-          maxLength={32}
-          placeholder="如：张三"
-          invalid={Boolean(error)}
-          onChange={(event) => {
-            setName(event.currentTarget.value);
-            setError(null);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") submit();
-          }}
-        />
-      </Field>
+      <div className="flex flex-col gap-3">
+        <Field
+          label="名字"
+          required
+          error={error}
+          hint="用真名或岗位名，审计日志里会直接显示这个名字。"
+        >
+          <Input
+            value={name}
+            autoFocus
+            maxLength={32}
+            placeholder="如：张三"
+            invalid={Boolean(error)}
+            onChange={(event) => {
+              setName(event.currentTarget.value);
+              setError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") submit();
+            }}
+          />
+        </Field>
+        <Field label="角色" hint="管理员：能做所有事；老师：能处理商品和发布；成员：只能看仓库和词库。">
+          <Select
+            value={role}
+            onChange={(value) => setRole(value as "admin" | "teacher" | "member")}
+            options={[
+              { value: "member", label: "成员（只读）" },
+              { value: "teacher", label: "老师（处理+发布）" },
+              { value: "admin", label: "管理员（全部权限）" },
+            ]}
+          />
+        </Field>
+      </div>
     </Dialog>
   );
 }
@@ -463,6 +481,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
   const operatorsQuery = useOperators();
   const rotate = useRotateOperator();
   const toggle = useToggleOperator();
+  const setRole = useSetRole();
   const identity = useOperatorIdentity();
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -595,8 +614,8 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                   <th className="border-b border-border px-4 text-left text-xs font-medium text-fg-muted">
                     名字
                   </th>
-                  <th className="w-[96px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
-                    管理员
+                  <th className="w-[120px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
+                    角色
                   </th>
                   <th className="w-[148px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
                     最后活跃
@@ -637,12 +656,18 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                         <p className="mt-0.5 truncate font-mono text-2xs text-fg-muted">{item.id}</p>
                       </td>
                       <td className="px-3 py-2.5">
-                        {item.admin ? (
+                        {item.role === "admin" ? (
                           <Badge variant="brand" icon={<ShieldCheck className="size-3" />}>
                             管理员
                           </Badge>
+                        ) : item.role === "teacher" ? (
+                          <Badge variant="info" size="sm">
+                            老师
+                          </Badge>
                         ) : (
-                          <span className="text-xs text-fg-muted">普通</span>
+                          <Badge variant="neutral" size="sm">
+                            成员
+                          </Badge>
                         )}
                       </td>
                       <td className="px-3 py-2.5">
@@ -677,6 +702,29 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                           )}
                           {canManageOthers && (
                             <>
+                              <Tooltip content="改角色">
+                                <Select
+                                  size="sm"
+                                  className="w-[100px]"
+                                  value={item.role ?? "member"}
+                                  onChange={(value) => {
+                                    setRole.mutate(
+                                      { id: item.id, role: value as "admin" | "teacher" | "member" },
+                                      {
+                                        onSuccess: () =>
+                                          toast.success(`已把「${item.name}」改为${value === "admin" ? "管理员" : value === "teacher" ? "老师" : "成员"}`),
+                                        onError: (error) =>
+                                          toast.error("改角色失败", { description: apiErrorMessage(error) }),
+                                      }
+                                    );
+                                  }}
+                                  options={[
+                                    { value: "member", label: "成员" },
+                                    { value: "teacher", label: "老师" },
+                                    { value: "admin", label: "管理员" },
+                                  ]}
+                                />
+                              </Tooltip>
                               <Tooltip content="重置 token（旧 token 立刻失效）">
                                 <IconButton
                                   label={`重置 ${item.name} 的 token`}
