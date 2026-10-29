@@ -14,6 +14,7 @@ import time
 import unicodedata
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
@@ -146,6 +147,9 @@ def serialize(row: ViolationWord) -> dict[str, Any]:
         "normalized": row.normalized,
         "action": "remove",
         "source": row.source,
+        "siteScope": row.site_scope,
+        "sourceUrl": row.source_url,
+        "ruleVersion": row.rule_version,
         "enabled": bool(row.enabled),
         "createdAt": row.created_at,
     }
@@ -188,6 +192,9 @@ def export_words(db: Session) -> dict[str, Any]:
                 "word": row.word,
                 "action": row.action,
                 "source": row.source,
+                "siteScope": row.site_scope,
+                "sourceUrl": row.source_url,
+                "ruleVersion": row.rule_version,
                 "enabled": bool(row.enabled),
                 "createdAt": row.created_at,
             }
@@ -213,7 +220,27 @@ def _check_limit(db: Session, adding: int, action: str) -> None:
         )
 
 
-def add(db: Session, word: Any, *, action: str = "remove", source: str = "manual"
+def _provenance(site_scope: Any = None, source_url: Any = None,
+                rule_version: Any = None) -> tuple[str | None, str | None, str | None]:
+    from core.constants import SITE_LANGUAGES
+
+    site = str(site_scope or "").strip().upper() or None
+    if site and site not in SITE_LANGUAGES:
+        raise errors.validation("站点必须是当前支持的目标站点", field="siteScope", value=site)
+    url = str(source_url or "").strip() or None
+    parsed_url = urlparse(url) if url else None
+    if url and (len(url) > 512 or parsed_url.scheme != "https"
+                or not parsed_url.hostname or any(char.isspace() for char in url)):
+        raise errors.validation("规则出处必须是有效的 HTTPS 链接", field="sourceUrl")
+    version = str(rule_version or "").strip() or None
+    if version and len(version) > 64:
+        raise errors.validation("规则版本不能超过 64 个字符", field="ruleVersion")
+    return site, url, version
+
+
+def add(db: Session, word: Any, *, action: str = "remove", source: str = "manual",
+        site_scope: Any = None, source_url: Any = None,
+        rule_version: Any = None
         ) -> dict[str, Any]:
     if action not in ACTIONS:
         raise errors.validation("category 只能是 remove", field="category", value=action)
@@ -230,8 +257,10 @@ def add(db: Session, word: Any, *, action: str = "remove", source: str = "manual
         raise errors.AppError(errors.DUPLICATE_WORD, f"「{text}」已在词库里",
                               status=409, details={"existing": existing.action})
     _check_limit(db, 1, action)
+    site, url, version = _provenance(site_scope, source_url, rule_version)
     row = ViolationWord(word=text, normalized=normalized, action=action,
-                        source=source, enabled=True, created_at=now_ts())
+                        source=source, site_scope=site, source_url=url,
+                        rule_version=version, enabled=True, created_at=now_ts())
     db.add(row)
     db.flush()
     return {"word": serialize(row), "counts": _counts(db)}
@@ -315,7 +344,8 @@ def normalize_input(words: Any) -> tuple[list[Any], bool, list[str]]:
 
 
 def import_words(db: Session, words: Any, *, action: str = "remove",
-                 mode: str = "append") -> dict[str, Any]:
+                 mode: str = "append", site_scope: Any = None,
+                 source_url: Any = None, rule_version: Any = None) -> dict[str, Any]:
     """批量导入。返回 added / skipped（被跳过的词本身）/ truncated / processed。
 
     skipped 给的是**词**而不是计数：用户要从几百条里知道哪条没进去。
@@ -326,6 +356,7 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
     if mode not in ("append", "replace"):
         raise errors.validation("mode 只能是 append / replace", field="mode", value=mode)
     require_idle()
+    default_provenance = _provenance(site_scope, source_url, rule_version)
 
     if isinstance(words, dict):
         items = words.get("items")
@@ -335,7 +366,7 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
         if len(items) > WORD_LIMIT:
             raise errors.validation("JSON 词库备份超过词库容量上限", field="words")
 
-        restored: list[tuple[str, str, str, bool, float]] = []
+        restored: list[tuple[str, str, str, bool, float, str | None, str | None, str | None]] = []
         seen: set[str] = set()
         for index, item in enumerate(items):
             if not isinstance(item, dict):
@@ -356,6 +387,8 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
                     "JSON 备份词条 source 无效",
                     field=f"words.items.{index}.source",
                 )
+            provenance = _provenance(item.get("siteScope"), item.get("sourceUrl"),
+                                     item.get("ruleVersion"))
             enabled = item.get("enabled")
             if not isinstance(enabled, bool):
                 raise errors.validation("JSON 备份词条 enabled 必须是布尔值",
@@ -366,7 +399,8 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
                 raise errors.validation("JSON 备份词条 createdAt 无效",
                                         field=f"words.items.{index}.createdAt")
             # Legacy review entries now follow the product's remove-only behavior.
-            restored.append((text, normalized, source, enabled, float(created_at)))
+            restored.append((text, normalized, source, enabled, float(created_at),
+                             *provenance))
 
         if mode == "replace":
             db.query(ViolationWord).delete(synchronize_session=False)
@@ -382,10 +416,11 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
                 details={"limit": WORD_LIMIT, "current": len(existing),
                          "adding": len(fresh)},
             )
-        for text, normalized, source, enabled, created_at in fresh:
+        for text, normalized, source, enabled, created_at, site, url, version in fresh:
             db.add(ViolationWord(
                 word=text, normalized=normalized,
                 action="remove", source=source, enabled=enabled,
+                site_scope=site, source_url=url, rule_version=version,
                 created_at=created_at,
             ))
         db.flush()
@@ -460,7 +495,10 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
                 )
     for normalized, text in fresh.items():
         db.add(ViolationWord(word=text, normalized=normalized, action=action,
-                             source="import", enabled=True, created_at=now_ts()))
+                             source="import", site_scope=default_provenance[0],
+                             source_url=default_provenance[1],
+                             rule_version=default_provenance[2],
+                             enabled=True, created_at=now_ts()))
     db.flush()
     return {
         "added": len(fresh),
@@ -526,7 +564,10 @@ def apply_action(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
         raise errors.validation("action 不能为空", field="action")
     if action == "add":
         require_idle()
-        result = add(db, payload.get("word"), action=category)
+        result = add(db, payload.get("word"), action=category,
+                     site_scope=payload.get("site_scope"),
+                     source_url=payload.get("source_url"),
+                     rule_version=payload.get("rule_version"))
         return {"items": [result["word"]], "added": 1, "removed": 0, "skipped": [],
                 "counts": result["counts"]}
     if action == "remove":
@@ -541,7 +582,10 @@ def apply_action(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
         if raw in (None, "", []):
             raise errors.validation("words 必须是非空数组或纯文本", field="words")
         result = import_words(db, raw, action=category,
-                              mode=str(payload.get("mode") or "append"))
+                              mode=str(payload.get("mode") or "append"),
+                              site_scope=payload.get("site_scope"),
+                              source_url=payload.get("source_url"),
+                              rule_version=payload.get("rule_version"))
         return {"items": [], "added": result["added"], "removed": 0,
                 "skipped": result["skipped"], "skippedCount": result["skippedCount"],
                 "truncated": result["truncated"], "processed": result["processed"],

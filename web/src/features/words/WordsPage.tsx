@@ -3,6 +3,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import {
+  ExternalLink,
   Download,
   Plus,
   SearchX,
@@ -13,7 +14,7 @@ import { cn, formatCount } from "@/lib/utils";
 import { api, ApiError, apiErrorMessage } from "@/lib/api";
 import { queryKeys } from "@/lib/queryKeys";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { LIMITS } from "@/lib/constants";
+import { LIMITS, SITE_LANGUAGES } from "@/lib/constants";
 import { useMutateWords, useViolationWords } from "@/lib/queries";
 import { useWordsStore } from "@/features/stores";
 import { useOperatorIdentity } from "@/lib/operator";
@@ -46,6 +47,9 @@ interface WordBackupItem {
   word: string;
   action: "remove" | "review";
   source: string;
+  siteScope?: string | null;
+  sourceUrl?: string | null;
+  ruleVersion?: string | null;
   enabled: boolean;
   createdAt: number;
 }
@@ -55,6 +59,20 @@ interface WordBackup {
   version: 1;
   items: WordBackupItem[];
 }
+
+const SITE_LABELS: Record<string, string> = {
+  MY: "马来西亚",
+  SG: "新加坡",
+  PH: "菲律宾",
+  TH: "泰国",
+  VN: "越南",
+  ID: "印尼",
+};
+
+const SITE_OPTIONS = Object.entries(SITE_LANGUAGES).map(([value]) => ({
+  value,
+  label: SITE_LABELS[value] ?? value,
+}));
 
 export function WordsPage() {
   const identity = useOperatorIdentity();
@@ -88,12 +106,18 @@ export function WordsPage() {
 
   const [addOpen, setAddOpen] = useState(false);
   const [singleWord, setSingleWord] = useState("");
+  const [singleSiteScope, setSingleSiteScope] = useState("");
+  const [singleSourceUrl, setSingleSourceUrl] = useState("");
+  const [singleRuleVersion, setSingleRuleVersion] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
 
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [importReplace, setImportReplace] = useState(false);
+  const [importSiteScope, setImportSiteScope] = useState("");
+  const [importSourceUrl, setImportSourceUrl] = useState("");
+  const [importRuleVersion, setImportRuleVersion] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
 
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -163,11 +187,21 @@ export function WordsPage() {
     }
     setAddError(null);
     mutate.mutate(
-      { action: "add", word, category: "remove" },
+      {
+        action: "add",
+        word,
+        category: "remove",
+        siteScope: singleSiteScope || null,
+        sourceUrl: singleSourceUrl.trim() || null,
+        ruleVersion: singleRuleVersion.trim() || null,
+      },
       {
         onSuccess: () => {
           toast.success(`已添加「${word}」`);
           setSingleWord("");
+          setSingleSiteScope("");
+          setSingleSourceUrl("");
+          setSingleRuleVersion("");
           setAddOpen(false);
         },
         onError: (error) => {
@@ -208,6 +242,9 @@ export function WordsPage() {
         words: parsedImportBackup ?? parsedImportWords,
         category: "remove",
         mode: importReplace ? "replace" : "append",
+        siteScope: importSiteScope || null,
+        sourceUrl: importSourceUrl.trim() || null,
+        ruleVersion: importRuleVersion.trim() || null,
       },
       {
         onSuccess: (result) => {
@@ -452,6 +489,21 @@ export function WordsPage() {
                     <span className="text-2xs text-fg-muted">
                       {item.source === "seed" ? "内置" : item.source === "import" ? "导入" : "手动"}
                     </span>
+                    {item.siteScope && (
+                      <span className="text-2xs text-fg-muted">{SITE_LABELS[item.siteScope] ?? item.siteScope}</span>
+                    )}
+                    {item.sourceUrl && (
+                      <a
+                        href={item.sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="打开规则出处"
+                        aria-label={`${item.word} 的规则出处`}
+                        className="text-fg-muted hover:text-brand-700"
+                      >
+                        <ExternalLink className="size-3" />
+                      </a>
+                    )}
                     <Switch
                       checked={item.enabled}
                       aria-label={`${item.enabled ? "停用" : "启用"} ${item.word}`}
@@ -541,12 +593,15 @@ export function WordsPage() {
           setAddOpen(open);
           if (!open) {
             setSingleWord("");
+            setSingleSiteScope("");
+            setSingleSourceUrl("");
+            setSingleRuleVersion("");
             setAddError(null);
           }
         }}
         size="sm"
         title="添加违规词"
-        description="处理商品标题时命中的词会按分类处理。"
+        description="命中的词会从商品标题中清理；规则来源用于追溯，不代表已完成官方核验。"
         closeOnOverlay={false}
         footer={
           <>
@@ -575,6 +630,35 @@ export function WordsPage() {
               }}
             />
           </Field>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="适用站点">
+              <Select
+                value={singleSiteScope}
+                onChange={setSingleSiteScope}
+                options={SITE_OPTIONS}
+                placeholder="未指定"
+              />
+            </Field>
+            <Field label="规则版本">
+              <input
+                value={singleRuleVersion}
+                maxLength={64}
+                placeholder="可选"
+                className="h-9 rounded-sm border border-border bg-surface px-3 text-sm text-fg"
+                onChange={(event) => setSingleRuleVersion(event.currentTarget.value)}
+              />
+            </Field>
+          </div>
+          <Field label="规则出处 URL" hint="仅接受 HTTPS 链接；没有可靠出处时留空。">
+            <input
+              type="url"
+              value={singleSourceUrl}
+              maxLength={512}
+              placeholder="https://…"
+              className="h-9 rounded-sm border border-border bg-surface px-3 text-sm text-fg"
+              onChange={(event) => setSingleSourceUrl(event.currentTarget.value)}
+            />
+          </Field>
         </div>
       </Dialog>
 
@@ -585,6 +669,9 @@ export function WordsPage() {
           setImportOpen(open);
           if (!open) {
             setImportText("");
+            setImportSiteScope("");
+            setImportSourceUrl("");
+            setImportRuleVersion("");
             setImportError(null);
           }
         }}
@@ -671,6 +758,39 @@ export function WordsPage() {
           </Field>
 
           <div className="grid gap-3">
+            {!parsedImportBackup && (
+              <>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="适用站点">
+                    <Select
+                      value={importSiteScope}
+                      onChange={setImportSiteScope}
+                      options={SITE_OPTIONS}
+                      placeholder="未指定"
+                    />
+                  </Field>
+                  <Field label="规则版本">
+                    <input
+                      value={importRuleVersion}
+                      maxLength={64}
+                      placeholder="可选"
+                      className="h-9 rounded-sm border border-border bg-surface px-3 text-sm text-fg"
+                      onChange={(event) => setImportRuleVersion(event.currentTarget.value)}
+                    />
+                  </Field>
+                </div>
+                <Field label="规则出处 URL" hint="仅接受 HTTPS 链接；没有可靠出处时留空。">
+                  <input
+                    type="url"
+                    value={importSourceUrl}
+                    maxLength={512}
+                    placeholder="https://…"
+                    className="h-9 rounded-sm border border-border bg-surface px-3 text-sm text-fg"
+                    onChange={(event) => setImportSourceUrl(event.currentTarget.value)}
+                  />
+                </Field>
+              </>
+            )}
             <Field label="导入模式" hint="替换会清空现有词条，再恢复备份中的内容">
               <Select
                 value={importReplace ? "replace" : "append"}

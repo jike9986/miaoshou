@@ -1021,6 +1021,9 @@ export interface ViolationWord {
   normalized: string;
   action: WordCategory | string;
   source: WordSource | string;
+  siteScope?: string | null;
+  sourceUrl?: string | null;
+  ruleVersion?: string | null;
   enabled: boolean;
   createdAt: number;
 }
@@ -1042,6 +1045,9 @@ export interface WordsMutationRequest {
   /** 数组或纯文本都接受，纯文本按换行/逗号/顿号/分号/制表符切分 */
   words?: string[] | string;
   category?: WordCategory;
+  siteScope?: string | null;
+  sourceUrl?: string | null;
+  ruleVersion?: string | null;
   mode?: "append" | "replace";
   confirm?: true;
 }

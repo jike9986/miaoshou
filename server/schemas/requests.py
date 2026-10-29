@@ -178,6 +178,9 @@ class WordRequest(CamelModel):
     action: WordAction
     word: str | None = Field(default=None, max_length=64)
     words: list[str] | None = None
+    site_scope: str | None = Field(default=None, max_length=8)
+    source_url: str | None = Field(default=None, max_length=512)
+    rule_version: str | None = Field(default=None, max_length=64)
     category: WordCategory = "remove"
     mode: Literal["append", "replace"] = "append"
     confirm: bool = False

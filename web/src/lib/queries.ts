@@ -1459,11 +1459,17 @@ export interface WordsMutationBody {
       word: string;
       action: "remove" | "review";
       source: string;
+      siteScope?: string | null;
+      sourceUrl?: string | null;
+      ruleVersion?: string | null;
       enabled: boolean;
       createdAt: number;
     }>;
   };
   category?: WordCategory;
+  siteScope?: string | null;
+  sourceUrl?: string | null;
+  ruleVersion?: string | null;
   mode?: "append" | "replace";
   confirm?: true;
 }

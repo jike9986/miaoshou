@@ -78,7 +78,10 @@ def test_word_backup_export_is_available_to_teacher_and_denied_to_member(client,
         row for row in exported.json()["items"]
         if row["word"] == "backup permission check"
     )
-    assert set(item) == {"word", "action", "source", "enabled", "createdAt"}
+    assert set(item) == {
+        "word", "action", "source", "siteScope", "sourceUrl", "ruleVersion",
+        "enabled", "createdAt",
+    }
     assert item["source"] == "manual"
     assert item["enabled"] is True
 
@@ -97,6 +100,30 @@ def test_word_backup_export_is_available_to_teacher_and_denied_to_member(client,
     denied = client.get(API + "/violation-words/export", headers=auth(tokens, "member"))
     assert denied.status_code == 403, denied.text
 
+
+def test_word_rule_provenance_is_bound_over_http_and_in_list(client, tokens):
+    suffix = uuid.uuid4().hex[:8]
+    word = f"source-{suffix}"
+    created = client.post(
+        API + "/violation-words",
+        json={
+            "action": "add",
+            "word": word,
+            "siteScope": "my",
+            "sourceUrl": "https://example.org/policy",
+            "ruleVersion": "2026-10",
+        },
+        headers=auth(tokens, "teacher"),
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["items"][0]["siteScope"] == "MY"
+
+    listed = client.get(API + "/violation-words", params={"q": word},
+                        headers=auth(tokens, "teacher"))
+    assert listed.status_code == 200, listed.text
+    item = listed.json()["items"][0]
+    assert item["sourceUrl"] == "https://example.org/policy"
+    assert item["ruleVersion"] == "2026-10"
 
 @pytest.mark.parametrize(("method", "path"), [
     ("POST", "/collect-box/123/process"),

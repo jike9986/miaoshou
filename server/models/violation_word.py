@@ -19,6 +19,9 @@ class ViolationWord(Base):
     action: Mapped[str] = mapped_column(String(8), default="remove")
     # manual / import / seed
     source: Mapped[str] = mapped_column(String(16), default="manual")
+    site_scope: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    rule_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enabled: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[float] = mapped_column(Float, default=now_ts)
 
