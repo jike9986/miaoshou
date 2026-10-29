@@ -5,13 +5,14 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Link2, Server } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
-import { ApiError, apiErrorMessage } from "@/lib/api";
+import { ApiError, apiErrorMessage, resolveApiBase } from "@/lib/api";
+import { getSavedApiBase, saveApiBase } from "@/lib/serverAddress";
 import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword } from "@/lib/queries";
-import { setOperator, useOperatorIdentity } from "@/lib/operator";
+import { clearOperator, setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
 import {
   Button,
@@ -251,29 +252,37 @@ export function UnlockPage() {
 
   if (isLoading) {
     return (
-      <div className="grid min-h-0 flex-1 place-items-center bg-canvas p-8">
-        <div className="w-full max-w-[440px] space-y-3">
-          <Skeleton className="h-6 w-40" />
-          <Skeleton className="h-44 w-full" rounded="rounded-lg" />
-          <Skeleton className="h-9 w-full" rounded="rounded-md" />
-        </div>
-      </div>
+      <>
+        <PageHeader title="连接妙手" />
+        <PageContent width="form">
+          <ServerAddressControl />
+          <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />
+          <div className="mt-4 space-y-3">
+            <Skeleton className="h-6 w-40" />
+            <Skeleton className="h-44 w-full" rounded="rounded-lg" />
+          </div>
+        </PageContent>
+      </>
     );
   }
 
   if (isError) {
     return (
       <div className="grid min-h-0 flex-1 place-items-center bg-canvas p-8">
-        <Card className="w-full max-w-[520px]" padding="normal">
-          <ErrorState
-            title="读取连接状态失败"
-            description={apiErrorMessage(error)}
-            errorCode={error instanceof ApiError ? error.code : null}
-            onRetry={() => void refetch()}
-            retrying={isFetching}
-            minHeight={200}
-          />
-        </Card>
+        <div className="w-full max-w-[520px] space-y-4">
+          <ServerAddressControl />
+          <Card padding="normal">
+            <ErrorState
+              title="读取连接状态失败"
+              description={apiErrorMessage(error)}
+              errorCode={error instanceof ApiError ? error.code : null}
+              onRetry={() => void refetch()}
+              retrying={isFetching}
+              minHeight={160}
+            />
+          </Card>
+          <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />
+        </div>
       </div>
     );
   }
@@ -282,6 +291,7 @@ export function UnlockPage() {
     <>
       <PageHeader title="连接妙手" />
       <PageContent width="form">
+        <ServerAddressControl />
         <div className="mb-4 flex gap-2" role="group" aria-label="登录方式">
           <Button variant={!accountMode ? "primary" : "secondary"} size="sm" onClick={() => setAccountMode(false)}>绑定妙手</Button>
           <Button variant={accountMode ? "primary" : "secondary"} size="sm" onClick={() => setAccountMode(true)}>软件账号登录</Button>
@@ -435,6 +445,54 @@ export function UnlockPage() {
         )}
       </PageContent>
     </>
+  );
+}
+
+function ServerAddressControl() {
+  const [address, setAddress] = useState(() => getSavedApiBase());
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const save = (): void => {
+    setError(null);
+    try {
+      const current = getSavedApiBase();
+      const next = saveApiBase(address);
+      if (current === next) return;
+      setSaving(true);
+      clearOperator();
+      window.location.reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "保存服务端地址失败");
+    }
+  };
+
+  return (
+    <Card className="mb-4" padding="normal">
+      <CardTitle className="text-h3">服务端地址</CardTitle>
+      <p className="mt-1 text-[13px] leading-5 text-fg-secondary">
+        当前：{getSavedApiBase() || resolveApiBase() || "本机服务"}
+      </p>
+      <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
+        <Field label="HTTPS 服务地址" className="min-w-0 flex-1" error={error}>
+          <Input
+            type="url"
+            value={address}
+            autoComplete="url"
+            spellCheck={false}
+            placeholder="留空使用本机服务，例如 https://api.example.com"
+            invalid={Boolean(error)}
+            onChange={(event) => setAddress(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") save();
+            }}
+          />
+        </Field>
+        <Button variant="secondary" icon={<Server />} loading={saving} onClick={save}>
+          保存地址
+        </Button>
+      </div>
+    </Card>
   );
 }
 

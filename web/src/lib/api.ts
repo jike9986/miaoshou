@@ -3,6 +3,7 @@
 
 import type { ApiErrorCode, ApiErrorPayload } from "@/lib/types";
 import { operatorToken } from "@/lib/operator";
+import { getSavedApiBase } from "@/lib/serverAddress";
 
 /* ------------------------------------------------------------------ *
  * 运行时配置
@@ -15,12 +16,14 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
  * 后端 base（不含 /api/v1）。
- * 优先级：window.__DSH_BOOT__.apiBase（Electron 注入的实探端口）→ ?apiBase= 查询参数 →
+ * 优先级：用户保存的地址 → window.__DSH_BOOT__.apiBase（Electron 注入的实探端口）→ ?apiBase= 查询参数 →
  * window.__AOHUANG_API_BASE__（旧注入点）→ VITE_API_BASE（.env.development）→
  * dev 走 Vite 代理（空串，相对路径）→ 生产兜底本机 8812。
  */
 export function resolveApiBase(): string {
   if (typeof window === "undefined") return DEFAULT_API_BASE;
+  const savedBase = getSavedApiBase();
+  if (savedBase) return savedBase;
   const boot = window.__DSH_BOOT__;
   if (boot?.apiBase) return boot.apiBase.replace(/\/+$/, "");
   // Electron 生产模式用 file:// 加载页面，没有 Vite 代理，地址通过查询参数传入。
@@ -30,6 +33,19 @@ export function resolveApiBase(): string {
   const envBase = import.meta.env.VITE_API_BASE;
   if (envBase) return envBase.replace(/\/+$/, "");
   return import.meta.env.DEV ? DEFAULT_API_BASE : FALLBACK_API_BASE;
+}
+
+function isDefaultApiTarget(): boolean {
+  if (typeof window === "undefined") return true;
+  if (getSavedApiBase()) return false;
+  if (new URLSearchParams(window.location.search).get("apiBase")) return false;
+  if (window.__AOHUANG_API_BASE__) return false;
+  if (import.meta.env.VITE_API_BASE) return false;
+  return true;
+}
+
+function requestToken(): string | null {
+  return operatorToken() ?? (isDefaultApiTarget() ? resolveToken() : null);
 }
 
 /** token 来源：preload 注入的内存值（api.md §0.2，不落 localStorage） */
@@ -246,8 +262,9 @@ async function request<T, B = unknown>(
 ): Promise<T> {
   const { query, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal, idempotencyKey } = options;
 
-  const token = operatorToken() ?? resolveToken();
-  if (!token) {
+  const isSoftwareLogin = method === "POST" && path === "/auth/login";
+  const token = isSoftwareLogin ? null : requestToken();
+  if (!isSoftwareLogin && !token) {
     throw new ApiError({
       code: "BOOT_MISSING",
       message: API_ERROR_TEXT.BOOT_MISSING ?? "缺少启动参数",
@@ -269,11 +286,11 @@ async function request<T, B = unknown>(
   const requestId = createRequestId();
   const finalHeaders: Record<string, string> = {
     Accept: "application/json",
-    Authorization: `Bearer ${token}`,
     "X-Client-Version": resolveClientVersion(),
     "X-Request-Id": requestId,
     ...headers,
   };
+  if (token) finalHeaders.Authorization = `Bearer ${token}`;
   if (body !== undefined) finalHeaders["Content-Type"] = "application/json; charset=utf-8";
   if (idempotencyKey) finalHeaders["Idempotency-Key"] = idempotencyKey;
 
@@ -422,7 +439,7 @@ export const api = {
     options: RequestOptions & { fileName?: string } = {}
   ): Promise<T> => {
     const { fileName, headers = {}, timeoutMs = 120_000, signal } = options;
-    const token = operatorToken() ?? resolveToken();
+    const token = requestToken();
     if (!token) {
       throw new ApiError({
         code: "BOOT_MISSING",
