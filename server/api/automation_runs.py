@@ -69,6 +69,7 @@ def get_run(run_id: str, db: DbSession, operator: OperatorDep) -> dict[str, Any]
 
 @router.post("/{run_id}/recover", dependencies=[require_permission("process")])
 def recover_run(run_id: str, db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    require_writable(db)
     run = automation_run_service.get(db, run_id, operator)
     return {"run": automation_run_service.recover(db, run)}
 
@@ -86,6 +87,7 @@ def start_item(run_id: str, item_id: str, db: DbSession,
              dependencies=[require_permission("process")])
 def process_result(run_id: str, item_id: str, payload: ProcessResultRequest,
                    db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    require_writable(db)
     run = automation_run_service.get(db, run_id, operator)
     return {"run": automation_run_service.finish_process(
         db, run, item_id, status=payload.status, reason=payload.reason,
@@ -105,6 +107,7 @@ def start_publish(run_id: str, item_id: str, db: DbSession,
              dependencies=[require_permission("publish")])
 def publish_result(run_id: str, item_id: str, payload: PublishResultRequest,
                    db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    require_writable(db)
     run = automation_run_service.get(db, run_id, operator)
     return {"run": automation_run_service.finish_publish(
         db, run, item_id, status=payload.status, reason=payload.reason,

@@ -12,7 +12,7 @@ from models.account import Account
 from models.automation_run import AutomationRunItem
 from models.product import Product
 from models.publish_log import PublishLog
-from services import operator_service
+from services import operator_service, setting_service
 
 API = "/api/v1"
 
@@ -116,6 +116,76 @@ def test_recovery_marks_inflight_item_unknown_and_blocks_reprocessing(client, se
     repeated = client.post(
         API + f"/automation-runs/{run_id}/items/{item_id}/start", headers=auth)
     assert repeated.status_code == 409, repeated.text
+
+
+def test_automation_state_writes_respect_read_only_mode(client, setup):
+    auth = headers(str(setup["teacher_token"]))
+    publish_run = create_run(client, setup, publish_enabled=True)
+    publish_item = publish_run["items"][0]
+    assert client.post(
+        API + f"/automation-runs/{publish_run['id']}/items/{publish_item['id']}/start",
+        headers=auth,
+    ).status_code == 200
+    product = create_automation_product(
+        setup, publish_item["detailId"], publish_item["shopId"])
+    processed = client.post(
+        API + f"/automation-runs/{publish_run['id']}/items/{publish_item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True}}, headers=auth,
+    )
+    assert processed.status_code == 200, processed.text
+    assert client.post(
+        API + f"/automation-runs/{publish_run['id']}/items/{publish_item['id']}/publish-start",
+        headers=auth,
+    ).status_code == 200
+
+    recovery_run = create_run(client, setup)
+    recovery_item = recovery_run["items"][0]
+    assert client.post(
+        API + f"/automation-runs/{recovery_run['id']}/items/{recovery_item['id']}/start",
+        headers=auth,
+    ).status_code == 200
+
+    db = SessionLocal()
+    try:
+        setting_service.set_read_only(db, True)
+        db.commit()
+    finally:
+        db.close()
+
+    try:
+        process_result = client.post(
+            API + f"/automation-runs/{recovery_run['id']}/items/"
+            f"{recovery_item['id']}/process-result",
+            json={"status": "failed", "reason": "should not persist"}, headers=auth,
+        )
+        publish_result = client.post(
+            API + f"/automation-runs/{publish_run['id']}/items/{publish_item['id']}/publish-result",
+            json={"status": "failed", "reason": "should not persist"}, headers=auth,
+        )
+        recover = client.post(
+            API + f"/automation-runs/{recovery_run['id']}/recover", headers=auth)
+        assert process_result.status_code == 403, process_result.text
+        assert publish_result.status_code == 403, publish_result.text
+        assert recover.status_code == 403, recover.text
+    finally:
+        db = SessionLocal()
+        try:
+            setting_service.set_read_only(db, False)
+            db.commit()
+        finally:
+            db.close()
+
+    unchanged = client.get(
+        API + f"/automation-runs/{recovery_run['id']}", headers=auth)
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["run"]["items"][0]["processStatus"] == "running"
+    publish_unchanged = client.get(
+        API + f"/automation-runs/{publish_run['id']}", headers=auth)
+    assert publish_unchanged.status_code == 200, publish_unchanged.text
+    publish_state = publish_unchanged.json()["run"]["items"][0]
+    assert publish_state["processStatus"] == "succeeded"
+    assert publish_state["publishStatus"] == "running"
 
 
 def test_succeeded_item_cannot_be_started_again(client, setup):
