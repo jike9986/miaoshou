@@ -65,6 +65,19 @@ def login(payload: LoginRequest, db: DbSession) -> dict[str, Any]:
             "token": token, "mustChangePassword": operator.must_change_password}
 
 
+@login_router.get("/credentials-status")
+def credentials_status(db: DbSession) -> dict[str, bool]:
+    """Expose only whether one-time teacher login setup is still available."""
+    initialized = (db.query(Operator.id)
+                   .filter(Operator.username.is_not(None),
+                           Operator.password_hash.is_not(None),
+                           Operator.enabled.is_(True),
+                           Operator.role.in_((operator_service.ROLE_TEACHER,
+                                              operator_service.ROLE_ADMIN)))
+                   .first() is not None)
+    return {"initialized": initialized}
+
+
 @router.post("/change-password")
 def change_password(payload: ChangePasswordRequest, db: DbSession,
                     operator: OperatorDep) -> dict[str, Any]:

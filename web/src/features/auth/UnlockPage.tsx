@@ -11,7 +11,7 @@ import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage, resolveApiBase } from "@/lib/api";
 import { getSavedApiBase, saveApiBase } from "@/lib/serverAddress";
-import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword, useInitializeSoftwareCredentials } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useSoftwareCredentialsStatus, useChangeSoftwarePassword, useInitializeSoftwareCredentials } from "@/lib/queries";
 import { clearOperator, setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
 import {
@@ -164,6 +164,7 @@ export function UnlockPage() {
 
   const existingIdentity = useOperatorIdentity();
   const { data: status, isLoading, isError, error, refetch, isFetching } = useAuthStatus(Boolean(existingIdentity));
+  const credentialsStatus = useSoftwareCredentialsStatus(!existingIdentity);
   const connect = useConnectAccount();
 
   const [appId, setAppId] = useState("");
@@ -198,7 +199,11 @@ export function UnlockPage() {
         <PageHeader title="软件账号登录" />
         <PageContent width="form">
           <ServerAddressControl />
-          <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} allowInitialize />
+          <SoftwareAccountPanel
+            redirectTo={redirectTo}
+            onBack={() => undefined}
+            allowInitialize={credentialsStatus.data?.initialized === false}
+          />
         </PageContent>
       </>
     );

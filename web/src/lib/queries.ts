@@ -135,6 +135,15 @@ export function useSoftwareLogin(): UseMutationResult<
   });
 }
 
+export function useSoftwareCredentialsStatus(enabled = true): UseQueryResult<{ initialized: boolean }> {
+  return useQuery({
+    queryKey: [...queryKeys.auth.all, "credentials-status"],
+    queryFn: () => api.get<{ initialized: boolean }>("/auth/credentials-status"),
+    enabled,
+    staleTime: 60_000,
+  });
+}
+
 export function useChangeSoftwarePassword(): UseMutationResult<
   { ok: true; token: string; mustChangePassword: false },
   Error,

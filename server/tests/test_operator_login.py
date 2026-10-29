@@ -148,6 +148,9 @@ def test_login_failure_is_uniform_and_roles_cannot_manage_teachers(client, token
 
 
 def test_legacy_token_can_initialize_password_login(client, tokens):
+    before = client.get(API + "/auth/credentials-status")
+    assert before.status_code == 200, before.text
+    assert before.json() == {"initialized": False}
     db = SessionLocal()
     try:
         legacy = operator_service.ensure_default(db)
@@ -163,6 +166,9 @@ def test_legacy_token_can_initialize_password_login(client, tokens):
     )
     assert initialized.status_code == 200, initialized.text
     assert initialized.json()["operator"]["name"] == "legacy-admin"
+    after = client.get(API + "/auth/credentials-status")
+    assert after.status_code == 200, after.text
+    assert after.json() == {"initialized": True}
     db = SessionLocal()
     try:
         builtin = operator_service.ensure_default(db)
