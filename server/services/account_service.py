@@ -21,6 +21,22 @@ from services import crypto
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
 
+def request_operator(db: Session) -> tuple[int, str] | None:
+    value = db.info.get("account_request_operator")
+    if (isinstance(value, tuple) and len(value) == 2
+            and isinstance(value[0], int) and isinstance(value[1], str)):
+        return value
+    return None
+
+
+def _assert_account_access(db: Session, account: Account) -> None:
+    context = request_operator(db)
+    if context is None or context[1] != "member":
+        return
+    if account.owner_operator_id != context[0]:
+        raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的妙手账号", status=403)
+
+
 # --- 读 -------------------------------------------------------------------
 def list_accounts(db: Session) -> list[Account]:
     return db.query(Account).order_by(Account.id.asc()).all()
@@ -33,7 +49,10 @@ def get_account(db: Session, account_id: Any) -> Account | None:
         ident = int(str(account_id))
     except (TypeError, ValueError):
         return None
-    return db.query(Account).filter(Account.id == ident).one_or_none()
+    row = db.query(Account).filter(Account.id == ident).one_or_none()
+    if row is not None:
+        _assert_account_access(db, row)
+    return row
 
 
 def require_account(db: Session, account_id: Any = None) -> Account:
@@ -43,6 +62,14 @@ def require_account(db: Session, account_id: Any = None) -> Account:
         if account is None:
             raise errors.not_found(f"账号 {account_id} 不存在", accountId=str(account_id))
         return account
+    context = request_operator(db)
+    if context is not None and context[1] == "member":
+        account = (db.query(Account).filter(
+            Account.owner_operator_id == context[0], Account.status == "active")
+            .order_by(Account.last_used.desc().nullslast(), Account.id.desc()).first())
+        if account is None:
+            raise errors.not_connected()
+        return account
     current = current_account(db)
     if current is None:
         raise errors.not_connected()
@@ -50,6 +77,11 @@ def require_account(db: Session, account_id: Any = None) -> Account:
 
 
 def current_account(db: Session) -> Account | None:
+    context = request_operator(db)
+    if context is not None and context[1] == "member":
+        return (db.query(Account).filter(
+            Account.owner_operator_id == context[0], Account.status == "active")
+            .order_by(Account.last_used.desc().nullslast(), Account.id.desc()).first())
     default = (db.query(Account).filter(Account.is_default.is_(True))
                .order_by(Account.id.desc()).first())
     if default is not None:
@@ -264,7 +296,8 @@ def name_taken(db: Session, name: str, *, exclude_id: int | None = None) -> bool
 
 def connect(db: Session, *, app_id: str | None, app_secret: str | None,
             account_id: Any = None, name: str | None = None, save: bool = True,
-            auto_scan: bool = True) -> dict[str, Any]:
+            auto_scan: bool = True, owner_operator_id: int | None = None,
+            bound_by_operator_id: int | None = None) -> dict[str, Any]:
     """连接妙手账号：验凭据（shop_list）→ 加密存账号 → 可选预取采集箱首屏。"""
     existing: Account | None = None
     if account_id not in (None, ""):
@@ -338,6 +371,10 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
     account.secret_hint = secret_hint
     account.site = site or account.site or "MY"
     account.status = "active"
+    if owner_operator_id is not None:
+        account.owner_operator_id = owner_operator_id
+        account.bound_by_operator_id = bound_by_operator_id
+        account.bound_at = stamp
     account.last_verified_at = stamp
     account.last_used = stamp
     account.shops = json.dumps(shops, ensure_ascii=False)
@@ -366,6 +403,11 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
     return {
         "connected": True,
         "accountId": str(account.id),
+        "ownerOperatorId": (str(account.owner_operator_id)
+                             if account.owner_operator_id else None),
+        "boundByOperatorId": (str(account.bound_by_operator_id)
+                               if account.bound_by_operator_id else None),
+        "boundAt": account.bound_at,
         "connectionName": account.name,
         "appIdHint": account.app_id_hint,
         "secretHint": account.secret_hint,
@@ -416,6 +458,11 @@ def touch(db: Session, account: Account) -> None:
 
 
 def account_summaries(db: Session) -> list[dict[str, Any]]:
+    context = request_operator(db)
+    query = db.query(Account)
+    if context is not None and context[1] == "member":
+        query = query.filter(Account.owner_operator_id == context[0])
+    rows = query.order_by(Account.id.asc()).all()
     return [
         {
             "id": str(row.id),
@@ -426,8 +473,13 @@ def account_summaries(db: Session) -> list[dict[str, Any]]:
             "isDefault": bool(row.is_default),
             "status": row.status or "active",
             "lastVerifiedAt": row.last_verified_at,
+            "ownerOperatorId": str(row.owner_operator_id) if row.owner_operator_id else None,
+            "boundByOperatorId": (
+                str(row.bound_by_operator_id) if row.bound_by_operator_id else None
+            ),
+            "boundAt": row.bound_at,
         }
-        for row in list_accounts(db)
+        for row in rows
     ]
 
 
@@ -493,6 +545,10 @@ def ephemeral_account(credentials: tuple[str, str] | None) -> Account | None:
 def resolve_account(db: Session, account_id: Any = None,
                     credentials: tuple[str, str] | None = None) -> Account:
     """优先用请求自带的凭据，其次用库里保存的账号。"""
+    context = request_operator(db)
+    if context is not None and context[1] == "member" and credentials is not None:
+        raise errors.AppError(errors.FORBIDDEN,
+                              "学员请求必须使用已绑定的妙手账号", status=403)
     transient = ephemeral_account(credentials)
     if transient is not None:
         return transient

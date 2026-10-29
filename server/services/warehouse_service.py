@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from sqlalchemy import func, or_, select
 from sqlalchemy import update as sql_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core import errors
@@ -26,7 +27,6 @@ from core.constants import (
     WAREHOUSE_MAX_ITEMS,
 )
 from core.utils import (
-    as_id_str,
     money,
     now_ts,
     product_key,
@@ -36,6 +36,7 @@ from models.category import Category
 from models.group import Group
 from models.image_job import ImageJob
 from models.product import Product
+from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
 from models.setting import CUSTOM_CATEGORIES_KEY
 from services import (
@@ -68,7 +69,9 @@ logger = logging.getLogger(__name__)
 
 # --- 序列化 ---------------------------------------------------------------
 def serialize(product: Product, *, account_name: str = "",
-              include_payload: bool = False, operator_name: str = "") -> dict[str, Any]:
+              include_payload: bool = False, operator_name: str = "",
+              claim: ProductClaim | None = None,
+              operator_id: int | None = None) -> dict[str, Any]:
     images = product.images if isinstance(product.images, list) else []
     body: dict[str, Any] = {
         "id": str(product.id),
@@ -105,9 +108,12 @@ def serialize(product: Product, *, account_name: str = "",
         # 乐观锁版本号。前端改完要把它原样带回来（PATCH 的 expectedRevision），
         # 服务端比对不上就 409 —— 这就是「两个人同时改同一件商品」的拦截点。
         "revision": int(product.revision or 0),
-        "claimed": bool(product.claimed),
-        "claimedAt": product.claimed_at,
-        "claimedShopId": product.claimed_shop_id,
+        "claimed": bool(claim) if operator_id is not None else bool(product.claimed),
+        "claimedAt": claim.claimed_at if claim else (
+            product.claimed_at if operator_id is None else None),
+        "claimedShopId": product.claimed_shop_id if operator_id is None else None,
+        "claimStatus": claim.status if claim else None,
+        "legacyClaimed": bool(product.claimed),
         "collected": product.collected if isinstance(product.collected, dict) else {},
         "salesLast30": int(product.sales_last_30 or 0),
         "stock": int(product.stock or 0),
@@ -158,7 +164,8 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                   category_id: Any = None, cid: Any = None, group_id: Any = None,
                   group: str | None = None, q: str | None = None,
                   account_id: Any = None, status: str | None = None,
-                  claimed: bool | None = None, sort: str = "savedDesc"
+                  claimed: bool | None = None, sort: str = "savedDesc",
+                  operator_id: int | None = None
                   ) -> dict[str, Any]:
     if page < 1:
         raise errors.validation("页码必须不小于 1", field="page", value=page)
@@ -196,7 +203,14 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
     if status:
         query = query.filter(Product.status == status)
     if claimed is not None:
-        query = query.filter(Product.claimed.is_(bool(claimed)))
+        if operator_id is None:
+            query = query.filter(Product.claimed.is_(bool(claimed)))
+        else:
+            owned_claim = db.query(ProductClaim.id).filter(
+                ProductClaim.product_id == Product.id,
+                ProductClaim.owner_operator_id == operator_id,
+            ).exists()
+            query = query.filter(owned_claim if claimed else ~owned_claim)
     needle = str(q or "").strip()
     if needle:
         pattern = f"%{needle}%"
@@ -209,8 +223,15 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
             .offset((page - 1) * page_size).limit(page_size).all())
     names = account_names(db)
     operators = operator_names(db)
+    claims = {}
+    if operator_id is not None and rows:
+        claims = {row.product_id: row for row in db.query(ProductClaim).filter(
+            ProductClaim.owner_operator_id == operator_id,
+            ProductClaim.product_id.in_([item.id for item in rows]),
+        ).all()}
     items = [serialize(row, account_name=names.get(row.account_id or 0, ""),
-                       operator_name=operators.get(row.operator_id or 0, ""))
+                       operator_name=operators.get(row.operator_id or 0, ""),
+                       claim=claims.get(row.id), operator_id=operator_id)
              for row in rows]
     # stats 按当前列表的 account_id 过滤：多账号共用时，
     # 「已认领」显示的是当前账号的数字，不是全账号加总。
@@ -227,7 +248,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         "total": total,
         "hasMore": page * page_size < total,
         "facets": facets(db),
-        "stats": stats(db, account_id=stats_account_id),
+        "stats": stats(db, account_id=stats_account_id, operator_id=operator_id),
     }
 
 
@@ -459,7 +480,8 @@ def facets(db: Session) -> dict[str, Any]:
     return {"categories": category_list, "groups": group_list, "accounts": account_list}
 
 
-def stats(db: Session, *, account_id: int | None = None) -> dict[str, Any]:
+def stats(db: Session, *, account_id: int | None = None,
+          operator_id: int | None = None) -> dict[str, Any]:
     """仓库统计。传 account_id 时只数当前账号的商品——
     多账号共用一台机器时，「已认领 355 件」是全账号加总，用户分不清哪些是自己的。"""
     base = active_query(db).filter(Product.automation_result.is_(False))
@@ -468,7 +490,13 @@ def stats(db: Session, *, account_id: int | None = None) -> dict[str, Any]:
     total = base.count()
     return {
         "totalProducts": total,
-        "totalClaimed": base.filter(Product.claimed.is_(True)).count(),
+        "totalClaimed": (
+            base.filter(Product.claimed.is_(True)).count() if operator_id is None else
+            base.filter(db.query(ProductClaim.id).filter(
+                ProductClaim.product_id == Product.id,
+                ProductClaim.owner_operator_id == operator_id,
+            ).exists()).count()
+        ),
         "totalPublished": base.filter(Product.status == "published").count(),
         # 容量信息一起给出，界面才能在快满时提示。
         # 这是 `trim_overflow` 的替代方案，理由见那个函数的 docstring。
@@ -519,13 +547,21 @@ def admit_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
 
 
 # --- 详情 -----------------------------------------------------------------
-def detail(db: Session, ident: Any, *, include_payload: bool = False) -> dict[str, Any]:
+def detail(db: Session, ident: Any, *, include_payload: bool = False,
+           operator_id: int | None = None) -> dict[str, Any]:
     product = resolve_product(db, ident)
     names = account_names(db)
     operators = operator_names(db)
+    claim = None
+    if operator_id is not None:
+        claim = db.query(ProductClaim).filter(
+            ProductClaim.product_id == product.id,
+            ProductClaim.owner_operator_id == operator_id,
+        ).one_or_none()
     body = serialize(product, account_name=names.get(product.account_id or 0, ""),
                      include_payload=include_payload,
-                     operator_name=operators.get(product.operator_id or 0, ""))
+                     operator_name=operators.get(product.operator_id or 0, ""),
+                     claim=claim, operator_id=operator_id)
     history = (db.query(PublishLog).filter(PublishLog.product_id == product.id)
                .order_by(PublishLog.requested_at.desc()).limit(20).all())
     jobs = (db.query(ImageJob).filter(ImageJob.product_id == product.id)
@@ -552,6 +588,33 @@ def detail(db: Session, ident: Any, *, include_payload: bool = False) -> dict[st
             "createdAt": row.created_at,
         } for row in jobs],
     }
+
+
+def claim_product(db: Session, ident: Any, owner_operator_id: int) -> ProductClaim:
+    product = resolve_product(db, ident)
+    if product.automation_result:
+        raise errors.validation("自动化结果加入成品仓库后才能认领", field="id")
+    existing = db.query(ProductClaim).filter(
+        ProductClaim.product_id == product.id,
+        ProductClaim.owner_operator_id == owner_operator_id,
+    ).one_or_none()
+    if existing is not None:
+        return existing
+
+    row = ProductClaim(product_id=product.id, owner_operator_id=owner_operator_id)
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+        return row
+    except IntegrityError:
+        existing = db.query(ProductClaim).filter(
+            ProductClaim.product_id == product.id,
+            ProductClaim.owner_operator_id == owner_operator_id,
+        ).one_or_none()
+        if existing is None:
+            raise
+        return existing
 
 
 # --- 写 -------------------------------------------------------------------

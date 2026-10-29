@@ -11,7 +11,8 @@ from core.config import get_settings
 from db.session import SessionLocal, init_db
 from main import app
 from models.product import Product
-from services import operator_service
+from models.product_claim import ProductClaim
+from services import operator_service, warehouse_service
 
 API = "/api/v1"
 
@@ -86,7 +87,6 @@ def test_member_cannot_write_business_data(client, tokens, method, path):
 
 
 @pytest.mark.parametrize(("method", "path"), [
-    ("POST", "/auth/connect"),
     ("DELETE", "/auth/disconnect"),
     ("PATCH", "/auth/accounts/123"),
     ("POST", "/operators"),
@@ -287,6 +287,130 @@ def test_automation_results_are_hidden_until_teacher_imports_them(client, tokens
     assert repeated.status_code == 400, repeated.text
 
 
+def test_product_claims_are_per_member_and_preserve_legacy_claims(client, tokens):
+    suffix = uuid.uuid4().hex[:8]
+    db = SessionLocal()
+    try:
+        product = Product(
+            warehouse_key=f"{suffix}:claim", detail_id=suffix, shop_id="claim",
+            title="Shared finished product", claimed=True,
+            claimed_at=123.0, claimed_shop_id="legacy-shop", payload={},
+        )
+        db.add(product)
+        second, second_token = operator_service.create(
+            db, f"second-claim-{suffix}", role=operator_service.ROLE_MEMBER)
+        db.commit()
+        product_id = str(product.id)
+        second_id = second.id
+    finally:
+        db.close()
+
+    first_headers = auth(tokens, "member")
+    second_headers = {"Authorization": f"Bearer {second_token}"}
+    path = API + f"/warehouse/{product_id}"
+
+    before = client.get(path, headers=first_headers).json()["product"]
+    assert before["claimed"] is False
+    assert before["claimStatus"] is None
+    assert before["legacyClaimed"] is True
+
+    first_claim = client.post(path + "/claim", headers=first_headers)
+    assert first_claim.status_code == 200, first_claim.text
+    first_view = client.get(path, headers=first_headers).json()["product"]
+    second_view = client.get(path, headers=second_headers).json()["product"]
+    assert first_view["claimed"] is True
+    assert second_view["claimed"] is False
+    second_unclaimed = client.get(
+        API + "/warehouse?claimed=false", headers=second_headers)
+    assert product_id in {row["id"] for row in second_unclaimed.json()["items"]}
+
+    repeated = client.post(path + "/claim", headers=first_headers)
+    second_claim = client.post(path + "/claim", headers=second_headers)
+    assert repeated.status_code == 200, repeated.text
+    assert first_claim.json()["id"] == repeated.json()["id"]
+    assert second_claim.status_code == 200, second_claim.text
+    assert first_claim.json()["id"] != second_claim.json()["id"]
+
+    first_view = client.get(path, headers=first_headers).json()["product"]
+    second_view = client.get(path, headers=second_headers).json()["product"]
+    assert first_view["claimed"] is True
+    assert second_view["claimed"] is True
+    assert first_view["claimStatus"] == second_view["claimStatus"] == "claimed"
+    assert first_view["legacyClaimed"] is True
+
+    first_list = client.get(API + "/warehouse?claimed=true", headers=first_headers)
+    second_list = client.get(API + "/warehouse?claimed=true", headers=second_headers)
+    assert first_list.status_code == second_list.status_code == 200
+    assert product_id in {row["id"] for row in first_list.json()["items"]}
+    assert product_id in {row["id"] for row in second_list.json()["items"]}
+
+    db = SessionLocal()
+    try:
+        claims = db.query(ProductClaim).filter(
+            ProductClaim.product_id == int(product_id)).all()
+        assert {row.owner_operator_id for row in claims} == {
+            int(first_claim.json()["ownerOperatorId"]), second_id}
+        assert len(claims) == 2
+        legacy_product = db.query(Product).filter(Product.id == int(product_id)).one()
+        assert legacy_product.claimed is True
+        assert legacy_product.claimed_at == 123.0
+        assert legacy_product.claimed_shop_id == "legacy-shop"
+    finally:
+        db.close()
+
+
+def test_product_claim_service_isolates_owners_and_keeps_legacy_fields(client):
+    del client  # initialize the isolated database
+    suffix = uuid.uuid4().hex[:8]
+    db = SessionLocal()
+    try:
+        first, _ = operator_service.create(
+            db, f"claim-service-a-{suffix}", role=operator_service.ROLE_MEMBER)
+        second, _ = operator_service.create(
+            db, f"claim-service-b-{suffix}", role=operator_service.ROLE_MEMBER)
+        product = Product(
+            warehouse_key=f"{suffix}:service", detail_id=suffix, shop_id="service",
+            claimed=True, claimed_at=123.0, claimed_shop_id="legacy-shop", payload={},
+        )
+        db.add(product)
+        db.flush()
+
+        first_claim = warehouse_service.claim_product(db, product.id, first.id)
+        duplicate = warehouse_service.claim_product(db, product.id, first.id)
+        assert first_claim.id == duplicate.id
+
+        first_products = warehouse_service.list_products(
+            db, claimed=True, operator_id=first.id)["items"]
+        second_unclaimed = warehouse_service.list_products(
+            db, claimed=False, operator_id=second.id)["items"]
+        first_body = warehouse_service.detail(
+            db, product.id, operator_id=first.id)["product"]
+        second_body = warehouse_service.detail(
+            db, product.id, operator_id=second.id)["product"]
+        assert str(product.id) in {item["id"] for item in first_products}
+        assert str(product.id) in {item["id"] for item in second_unclaimed}
+        assert first_body["claimed"] is True
+        assert second_body["claimed"] is False
+        assert first_body["claimStatus"] == "claimed"
+        assert second_body["claimStatus"] is None
+        assert first_body["legacyClaimed"] is second_body["legacyClaimed"] is True
+
+        second_claim = warehouse_service.claim_product(db, product.id, second.id)
+        assert second_claim.id != first_claim.id
+        assert warehouse_service.detail(
+            db, product.id, operator_id=second.id)["product"]["claimed"] is True
+        assert warehouse_service.detail(
+            db, product.id, operator_id=second.id)["product"]["claimStatus"] == "claimed"
+        assert warehouse_service.stats(db, operator_id=first.id)["totalClaimed"] == 1
+        assert warehouse_service.stats(db, operator_id=second.id)["totalClaimed"] == 1
+        assert product.claimed is True
+        assert product.claimed_at == 123.0
+        assert product.claimed_shop_id == "legacy-shop"
+    finally:
+        db.rollback()
+        db.close()
+
+
 # 这些 POST 只计算/识别，不写业务数据，成员可以调用。
 READ_ONLY_POSTS = {
     "/api/v1/warehouse/price-preview",
@@ -301,11 +425,15 @@ READ_ONLY_POSTS = {
 DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/warehouse/transform"),
     ("POST", "/api/v1/sync/price-templates"),
+    # Binding is available to a member only for their own operator owner id.
+    ("POST", "/api/v1/auth/connect"),
     # 这些路由在处理函数内校验当前 OperatorDep 的角色/状态。
     ("POST", "/api/v1/operators/students"),
     ("POST", "/api/v1/operators/{operator_id}/reset-password"),
     ("POST", "/api/v1/auth/change-password"),
     ("POST", "/api/v1/auth/initialize-credentials"),
+    # Member claim creation is an intentional owner-scoped write.
+    ("POST", "/api/v1/warehouse/{ident}/claim"),
     # 登录是唯一公开的写入路由，认证失败统一返回 401。
     ("POST", "/api/v1/auth/login"),
 }

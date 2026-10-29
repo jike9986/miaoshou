@@ -580,7 +580,9 @@ def run_once(db: Session, batch_id: str, *,
         item.updated_at = now_ts()
         batch.status = STATUS_RUNNING
         batch.updated_at = now_ts()
-        db.flush()
+        # The intent must survive a process crash while the processor is running.
+        # A flush alone is rolled back when the request session closes after a crash.
+        db.commit()
 
         run = processor
         if run is None:

@@ -13,6 +13,7 @@ from models.category import Category
 from models.group import Group
 from models.image_job import ImageJob
 from models.product import Product
+from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
 from models.schedule import Schedule
 from models.schedule_log import ScheduleLog
@@ -34,6 +35,7 @@ __all__ = [
     "Group",
     "ImageJob",
     "Product",
+    "ProductClaim",
     "PublishLog",
     "Schedule",
     "ScheduleLog",

@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import Float, Index, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.utils import now_ts
@@ -15,6 +15,11 @@ class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_operator_id: Mapped[int | None] = mapped_column(
+        ForeignKey("operators.id", ondelete="SET NULL"))
+    bound_by_operator_id: Mapped[int | None] = mapped_column(
+        ForeignKey("operators.id", ondelete="SET NULL"))
+    bound_at: Mapped[float | None] = mapped_column(Float)
     # 操作者可见的连接名，唯一（应用层按 casefold 判重）
     name: Mapped[str] = mapped_column(String(64), default="")
     app_key: Mapped[str] = mapped_column(String(256), default="")

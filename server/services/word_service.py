@@ -10,6 +10,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from collections.abc import Iterable
 from typing import Any
 
@@ -576,21 +577,57 @@ def _word_pattern(word: str) -> re.Pattern[str]:
     """
     # Ignore separators already present in the entry and allow them between every
     # character, so both "free shipping" and obfuscated "f-r-e-e s-h-i-p-p-i-n-g" match.
-    characters = [char for char in str(word or "").casefold()
+    normalized_word = unicodedata.normalize("NFKC", str(word or "")).casefold()
+    characters = [char for char in normalized_word
                   if char not in " \t\r\n-‐‑‒–—"]
     separator = r"[\s\-‐‑‒–—]*"
-    pattern = separator.join(re.escape(char) for char in characters) or re.escape(word)
-    if word[0].isascii() and word[0].isalnum():
+    pattern = separator.join(re.escape(char) for char in characters) or re.escape(normalized_word)
+    if normalized_word and normalized_word[0].isascii() and normalized_word[0].isalnum():
         pattern = r"(?<![A-Za-z0-9_])" + pattern
-    if word[-1].isascii() and word[-1].isalnum():
+    if normalized_word and normalized_word[-1].isascii() and normalized_word[-1].isalnum():
         pattern += r"(?![A-Za-z0-9_])"
     return re.compile(pattern, flags=re.IGNORECASE)
+
+
+def _nfkc_view(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Return the NFKC matching view and source span for each output character."""
+    current = ""
+    source_spans: list[tuple[int, int]] = []
+    prefix = ""
+    for index, char in enumerate(text):
+        prefix += char
+        normalized = unicodedata.normalize("NFKC", prefix)
+        common_prefix = 0
+        while (common_prefix < min(len(current), len(normalized))
+               and current[common_prefix] == normalized[common_prefix]):
+            common_prefix += 1
+        common_suffix = 0
+        max_suffix = min(len(current) - common_prefix, len(normalized) - common_prefix)
+        while (common_suffix < max_suffix
+               and current[len(current) - common_suffix - 1]
+               == normalized[len(normalized) - common_suffix - 1]):
+            common_suffix += 1
+
+        old_end = len(current) - common_suffix
+        new_end = len(normalized) - common_suffix
+        changed_spans = source_spans[common_prefix:old_end]
+        start = min((span[0] for span in changed_spans), default=index)
+        end = max((span[1] for span in changed_spans), default=index + 1)
+        end = max(end, index + 1)
+        source_spans = (
+            source_spans[:common_prefix]
+            + [(start, end)] * (new_end - common_prefix)
+            + (source_spans[len(current) - common_suffix:] if common_suffix else [])
+        )
+        current = normalized
+    return current, source_spans
 
 
 def clean_title(title: str, words: Iterable[tuple[str, str]]) -> tuple[str, list[str]]:
     """按词库清理标题：remove 直接删，review 只记录不改。"""
     text = str(title or "")
     removed: list[str] = []
+    match_text, source_indexes = _nfkc_view(text)
     # 长词优先：词库同时有「包邮」和「包邮费」时，先删短的会留下孤立的「费」。
     targets = [(n, a) for n, a in words if n]
     targets.sort(key=lambda pair: (-len(pair[0]), pair[0]))
@@ -598,10 +635,21 @@ def clean_title(title: str, words: Iterable[tuple[str, str]]) -> tuple[str, list
         if action != "remove":
             continue
         pattern = _word_pattern(normalized)
-        if not pattern.search(text):
+        matches = list(pattern.finditer(match_text))
+        if not matches:
             continue
         # 替换成空格而不是空串：中文词删掉后两侧会粘在一起（「跑步鞋包邮包」→「跑步鞋包」）
-        text = pattern.sub(" ", text)
+        covered: set[int] = set()
+        for match in matches:
+            start, end = match.span()
+            if start < end:
+                match_spans = source_indexes[start:end]
+                source_start = min(span[0] for span in match_spans)
+                source_end = max(span[1] for span in match_spans)
+                covered.update(range(source_start, source_end))
+        text = "".join(" " if index in covered else char
+                       for index, char in enumerate(text))
+        match_text, source_indexes = _nfkc_view(text)
         removed.append(normalized)
     # 删词后常留下空括号/空分隔符（【包邮】→【】），一并清掉
     text = re.sub(r"[【\[（(]\s*[】\]）)]", " ", text)
@@ -615,7 +663,7 @@ def clean_title(title: str, words: Iterable[tuple[str, str]]) -> tuple[str, list
 
 def matched_words(text: str, words: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
     """Return title-word hits using the same separator-tolerant rule as cleaning."""
-    value = str(text or "")
+    value = unicodedata.normalize("NFKC", str(text or ""))
     hits: list[tuple[str, str]] = []
     for normalized, action in words:
         if normalized and _word_pattern(normalized).search(value):

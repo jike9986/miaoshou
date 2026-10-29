@@ -26,3 +26,24 @@ def test_review_hits_use_the_same_variant_matching_rule() -> None:
     )
 
     assert hits == [("adidas originals", "review")]
+
+
+def test_nfkc_full_width_title_matches_half_width_word() -> None:
+    words = [("nike 2024", "remove")]
+    ordinary_title = "Nike-2024 running shoes"
+    full_width_title = "Ｎ-ＩＫＥ－２０２４ running shoes"
+
+    assert word_service.matched_words(ordinary_title, words) == word_service.matched_words(
+        full_width_title, words
+    ) == [("nike 2024", "remove")]
+    assert word_service.clean_title(ordinary_title, words) == word_service.clean_title(
+        full_width_title, words
+    ) == ("running shoes", ["nike 2024"])
+
+
+def test_nfkc_full_width_word_matches_half_width_title() -> None:
+    words = [("ＮＩＫＥ－２０２４", "remove")]
+    title = "Nike 2024 running shoes"
+
+    assert word_service.matched_words(title, words) == [("ＮＩＫＥ－２０２４", "remove")]
+    assert word_service.clean_title(title, words) == ("running shoes", ["ＮＩＫＥ－２０２４"])

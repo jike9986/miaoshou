@@ -16,6 +16,7 @@ WordCategory = Literal["remove", "review"]
 
 class ConnectRequest(CamelModel):
     accountId: str | None = None
+    studentOperatorId: str | None = None
     name: str | None = Field(default=None, max_length=60)
     appId: str | None = Field(default=None, max_length=256)
     appSecret: str | None = Field(default=None, max_length=512)

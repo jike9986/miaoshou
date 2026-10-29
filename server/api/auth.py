@@ -6,7 +6,14 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from api.deps import AdminDep, DbSession, OperatorDep, optional_account, require_writable
+from api.deps import (
+    AdminDep,
+    DbSession,
+    OperatorDep,
+    optional_account,
+    require_permission,
+    require_writable,
+)
 from core import errors
 from core.config import get_settings
 from core.constants import (
@@ -82,14 +89,36 @@ def initialize_credentials(payload: InitializeCredentialsRequest, db: DbSession,
     return {"ok": True}
 
 
-@router.post("/connect", summary="连接妙手账号")
+@router.post("/connect", summary="连接妙手账号",
+             dependencies=[require_permission("account.bind")])
 def connect(payload: ConnectRequest, db: DbSession,
-            operator: AdminDep) -> dict[str, Any]:
+            operator: OperatorDep) -> dict[str, Any]:
     """连接/切换妙手账号。
 
-    这条要留痕：账号是**全员共用**的那一个，「下午谁把账号换成了另一个店的」
-    会让所有人的操作落到别的店铺去。审计只记账号名与 id，**不记 AppSecret**。
+    账号按学员归属；教师代绑时记录操作者和学员。审计只记账号名与 id，**不记 AppSecret**。
     """
+    role = operator_service.role_of(operator)
+    if role == operator_service.ROLE_MEMBER:
+        if payload.studentOperatorId not in (None, "", str(operator.id)):
+            raise errors.AppError(errors.FORBIDDEN, "学员只能绑定自己的妙手账号", status=403)
+        owner = operator
+    else:
+        if role not in {operator_service.ROLE_TEACHER, operator_service.ROLE_ADMIN}:
+            raise errors.AppError(errors.FORBIDDEN, "无权绑定妙手账号", status=403)
+        if payload.studentOperatorId in (None, ""):
+            raise errors.validation("代绑时必须指定学员账号", field="studentOperatorId")
+        owner = operator_service.get(db, payload.studentOperatorId)
+        if operator_service.role_of(owner) != operator_service.ROLE_MEMBER:
+            raise errors.validation("妙手账号只能绑定到学员账号", field="studentOperatorId")
+    if payload.accountId not in (None, ""):
+        existing = account_service.get_account(db, payload.accountId)
+        if (existing is not None
+                and existing.owner_operator_id != owner.id
+                and not (role == operator_service.ROLE_ADMIN
+                         and existing.owner_operator_id is None)):
+            # 管理员可显式把未归属的历史 key 认领到学员；已有归属不可被教师抢占。
+            raise errors.AppError(errors.FORBIDDEN,
+                                  "妙手账号已绑定到其他学员", status=403)
     require_writable(db)
     with audit_service.guard(db, operator=operator, action="auth.connect",
                              target_kind="account",
@@ -102,6 +131,8 @@ def connect(payload: ConnectRequest, db: DbSession,
             name=payload.name,
             save=payload.save,
             auto_scan=payload.autoScan,
+            owner_operator_id=owner.id,
+            bound_by_operator_id=operator.id,
         )
     db.commit()
     account = result.get("account") or {}
@@ -110,7 +141,8 @@ def connect(payload: ConnectRequest, db: DbSession,
                          target_id=str(account.get("id") or payload.accountId or ""),
                          detail={"name": str(account.get("name") or payload.name or "")[:64],
                                  "autoScan": bool(payload.autoScan),
-                                 "saved": bool(payload.save)})
+                                 "saved": bool(payload.save),
+                                 "ownerOperatorId": str(owner.id)})
     db.commit()
     return result
 

@@ -102,6 +102,7 @@ router = APIRouter(
 @router.get("", summary="分页 + 类目 + 分组 + 搜索")
 def list_warehouse(
     db: DbSession,
+    operator: OperatorDep,
     page: int = Query(default=1, ge=1),
     pageSize: int = Query(default=24, ge=1, le=100),
     categoryId: str | None = None,
@@ -118,7 +119,7 @@ def list_warehouse(
     return warehouse_service.list_products(
         db, page=page, page_size=pageSize, category_id=categoryId, cid=cid,
         group_id=groupId, group=group, q=q, account_id=accountId, status=status,
-        claimed=claimed_flag, sort=sort)
+        claimed=claimed_flag, sort=sort, operator_id=operator.id)
 
 
 @router.get("/automation-results", summary="自动化处理成功记录",
@@ -155,7 +156,8 @@ def import_automation_results(payload: AutomationResultsImportRequest,
 
 
 @router.get("/stats", summary="仓库统计与筛选面板")
-def warehouse_stats(db: DbSession, accountId: str | None = None) -> dict[str, Any]:
+def warehouse_stats(db: DbSession, operator: OperatorDep,
+                    accountId: str | None = None) -> dict[str, Any]:
     """传 accountId 时只数当前账号的商品（多账号共用时分得清哪些是自己的）。"""
     account_id: int | None = None
     if accountId:
@@ -163,7 +165,8 @@ def warehouse_stats(db: DbSession, accountId: str | None = None) -> dict[str, An
             account_id = int(accountId)
         except (TypeError, ValueError):
             raise errors.validation("accountId 须为数字", field="accountId") from None
-    return {"stats": warehouse_service.stats(db, account_id=account_id),
+    return {"stats": warehouse_service.stats(
+                db, account_id=account_id, operator_id=operator.id),
             "facets": warehouse_service.facets(db)}
 
 
@@ -302,11 +305,28 @@ def price_preview(payload: PricePreviewRequest, db: DbSession) -> dict[str, Any]
 def warehouse_detail(
     ident: str,
     db: DbSession,
+    operator: OperatorDep,
     credentials: CredentialsHeader = None,
     includePayload: str | None = None,
 ) -> dict[str, Any]:
     include = parse_bool(includePayload, "includePayload", False)
-    return warehouse_service.detail(db, ident, include_payload=include)
+    return warehouse_service.detail(db, ident, include_payload=include,
+                                    operator_id=operator.id)
+
+
+@router.post("/{ident}/claim", summary="认领成品商品",
+             dependencies=[require_permission("product_claim")])
+def claim_product(ident: str, db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    require_writable(db)
+    claim = warehouse_service.claim_product(db, ident, operator.id)
+    db.commit()
+    return {
+        "id": str(claim.id),
+        "productId": str(claim.product_id),
+        "ownerOperatorId": str(claim.owner_operator_id),
+        "status": claim.status,
+        "claimedAt": claim.claimed_at,
+    }
 
 
 @router.patch("/{ident}", summary="改类目 / 分组 / 标题",

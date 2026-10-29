@@ -209,6 +209,8 @@ def current_operator(
     operator_service.require_enabled(operator)
     # 节流到 60 秒一次，且用自己的会话，不影响本请求的事务
     operator_service.touch(db, operator)
+    db.info["account_request_operator"] = (
+        int(operator.id), operator_service.role_of(operator))
     return operator
 
 
@@ -234,7 +236,7 @@ def require_permission(permission: str):
     def checker(operator: OperatorDep) -> Operator:
         return operator_service.require_role(operator, permission)
     # 供路由结构回归测试读取实际权限，避免仅靠装饰器文本审计漏路由。
-    setattr(checker, "permission", permission)
+    checker.permission = permission
     return Depends(checker)
 
 
