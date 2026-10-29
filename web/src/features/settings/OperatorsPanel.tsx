@@ -579,6 +579,14 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
   return (
     <div className={cn("flex flex-col gap-4", className)}>
       <StudentAccountsPanel />
+      <details className="group rounded-md border border-border bg-surface">
+        <summary className="flex min-h-10 cursor-pointer list-none items-center px-3 text-[13px] font-medium text-fg-secondary marker:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32">
+          兼容身份维护
+        </summary>
+        <div className="flex flex-col gap-4 border-t border-border p-3">
+          <p className="text-xs leading-[18px] text-fg-muted">
+            用于维护旧版操作员令牌。学员登录请使用上方的软件用户名和密码。
+          </p>
       <IdentityCard onSwitch={() => setSwitchOpen(true)} onCreated={() => setCreateOpen(true)} />
 
       <Card padding="none">
@@ -838,6 +846,8 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
 
       {/* 兜底提示：万一有人把一次性框截图丢了，这里再提醒一次不可恢复 */}
       <span className="sr-only">{ONE_TIME_TOKEN_NOTICE}</span>
+        </div>
+      </details>
     </div>
   );
 }

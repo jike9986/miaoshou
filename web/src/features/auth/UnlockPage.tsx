@@ -179,7 +179,7 @@ export function UnlockPage() {
   const accounts = useMemo(() => status?.accounts ?? [], [status?.accounts]);
   const redirectTo = useMemo(() => {
     const state = location.state as { from?: string } | null;
-    return state?.from && state.from !== "/unlock" ? state.from : "/warehouse";
+    return state?.from && state.from !== "/unlock" ? state.from : "/automation";
   }, [location.state]);
 
   // 已连接时自动进入目标页。
