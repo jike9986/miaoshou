@@ -9,7 +9,7 @@
 就该继续能用，不该被要求「重新配置身份」，因为界面上根本没有那个地方。
 
 做法是 `ensure_default()`：首次启动建一个叫「本机」的操作员，
-它的 token 就是现有 `secret.key` 的值。于是：
+它的客户端凭据仍是现有 `secret.key`，数据库只保存该凭据的 SHA-256 摘要。于是：
   · 旧客户端继续发 `Bearer <secret.key>` → 解析成「本机」，一切照旧；
   · 新客户端发 `X-Operator: 张三` 或某个人的 token → 解析成张三；
   · 什么都不发 → 仍然是 401（与 0.1 一致，不放松）。
@@ -49,6 +49,7 @@ NAME_MAX_LENGTH = 64
 USERNAME_MAX_LENGTH = 64
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 128
+TOKEN_HASH_PREFIX = "sha256:"
 
 
 # 三级角色定义
@@ -99,6 +100,10 @@ def verify_password(password: str, encoded: str | None) -> bool:
         return False
 
 
+def hash_token(token: str) -> str:
+    return TOKEN_HASH_PREFIX + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def role_of(operator: Operator) -> str:
     """操作员的角色。老数据没有 role 字段，is_admin=True 的按 admin 处理。
 
@@ -133,7 +138,7 @@ def require_role(operator: Operator, permission: str) -> Operator:
 
 # --- 默认操作员 -----------------------------------------------------------
 def ensure_default(db: Session) -> Operator:
-    """保证存在「本机」操作员，且它的 token 等于现有 secret.key。
+    """保证存在「本机」操作员，且它的 token 摘要匹配现有 secret.key。
 
     为什么复用 secret.key 而不是生成新 token：
       老用户机器上的 secret.key 已经在用（客户端存着它），换掉等于把每台
@@ -141,14 +146,14 @@ def ensure_default(db: Session) -> Operator:
       删数据目录重来，那会连 355 件商品一起删。用现有 secret 当默认操作员的
       token，老客户端一个字节都不用改，只是从此被记成「本机」。
 
-    幂等：已存在则只做一次「token 与 secret.key 对齐」（用户删过 secret.key
+    幂等：已存在则只做一次「token 摘要与 secret.key 对齐」（用户删过 secret.key
     重生成的情况下，本机操作员的 token 要跟着走，否则旧 token 会永久失效）。
     """
     secret = get_settings().local_secret()
     row = (db.query(Operator)
            .filter(Operator.name == DEFAULT_OPERATOR_NAME).one_or_none())
     if row is None:
-        row = Operator(name=DEFAULT_OPERATOR_NAME, token=secret,
+        row = Operator(name=DEFAULT_OPERATOR_NAME, token=hash_token(secret),
                        enabled=True, is_admin=True, created_at=now_ts())
         db.add(row)
         try:
@@ -161,11 +166,25 @@ def ensure_default(db: Session) -> Operator:
             if row is None:
                 raise
         return row
-    if row.token != secret:
+    if row.token != hash_token(secret):
         # secret.key 被删过/换过：跟着对齐，否则老客户端会 401
-        row.token = secret
+        row.token = hash_token(secret)
         db.flush()
     return row
+
+
+def migrate_legacy_tokens(db: Session) -> int:
+    """Replace stored bearer tokens with SHA-256 digests while preserving clients."""
+    rows = db.query(Operator).all()
+    changed = 0
+    for row in rows:
+        if not row.token or row.token.startswith(TOKEN_HASH_PREFIX):
+            continue
+        row.token = hash_token(row.token)
+        changed += 1
+    if changed:
+        db.flush()
+    return changed
 
 
 # --- 解析 -----------------------------------------------------------------
@@ -179,7 +198,16 @@ def resolve(db: Session, supplied: str) -> Operator | None:
     text = (supplied or "").strip()
     if not text:
         return None
-    return db.query(Operator).filter(Operator.token == text).one_or_none()
+    row = db.query(Operator).filter(Operator.token == hash_token(text)).one_or_none()
+    if row is not None:
+        return row
+    # Existing installations are migrated on startup; this fallback also covers
+    # databases accessed before that migration hook runs.
+    row = db.query(Operator).filter(Operator.token == text).one_or_none()
+    if row is not None:
+        row.token = hash_token(text)
+        db.flush()
+    return row
 
 
 def resolve_declared(db: Session, supplied: str) -> Operator | None:
@@ -234,7 +262,7 @@ def create(db: Session, name: Any, *, is_admin: bool = False,
     # 角色优先于 is_admin：传了角色就按角色来，没传就按 is_admin 推
     resolved_role = role if role in VALID_ROLES else (ROLE_ADMIN if is_admin else ROLE_MEMBER)
     token = secrets.token_urlsafe(32)
-    row = Operator(name=text, token=token, enabled=True,
+    row = Operator(name=text, token=hash_token(token), enabled=True,
                    is_admin=(resolved_role == ROLE_ADMIN),
                    role=resolved_role, created_at=now_ts())
     db.add(row)
@@ -248,7 +276,8 @@ def create_student(db: Session, name: Any, username: Any, password: str) -> Oper
         raise errors.validation("用户名已存在", field="username")
     row = Operator(
         name=_clean_name(name), username=clean_username,
-        password_hash=hash_password(password), token=secrets.token_urlsafe(32),
+        password_hash=hash_password(password),
+        token=hash_token(secrets.token_urlsafe(32)),
         enabled=True, is_admin=False, role=ROLE_MEMBER,
         must_change_password=True, created_at=now_ts(),
     )
@@ -265,8 +294,9 @@ def authenticate_password(db: Session, username: Any, password: str) -> tuple[Op
     row = db.query(Operator).filter(Operator.username == clean_username).one_or_none()
     if row is None or not row.enabled or not verify_password(password, row.password_hash):
         return None
-    row.token = secrets.token_urlsafe(32)
-    return row, row.token
+    token = secrets.token_urlsafe(32)
+    row.token = hash_token(token)
+    return row, token
 
 
 def set_password(db: Session, row: Operator, password: str, *, must_change: bool,
@@ -282,7 +312,7 @@ def set_password(db: Session, row: Operator, password: str, *, must_change: bool
     row.password_hash = hash_password(password)
     row.must_change_password = must_change
     if rotate_token:
-        row.token = secrets.token_urlsafe(32)
+        row.token = hash_token(secrets.token_urlsafe(32))
 
 
 def list_all(db: Session) -> list[dict[str, Any]]:
@@ -415,7 +445,7 @@ def rotate(db: Session, operator_id: Any) -> tuple[dict[str, Any], str]:
     """
     row = get(db, operator_id)
     token = secrets.token_urlsafe(32)
-    row.token = token
+    row.token = hash_token(token)
     db.flush()
     return serialize(row), token
 

@@ -226,6 +226,12 @@ async def lifespan(_app: FastAPI):
     settings = get_settings()
     settings.ensure_dirs()
     init_db()
+    from db.session import SessionLocal
+    from services.operator_service import migrate_legacy_tokens
+
+    with SessionLocal() as db:
+        migrate_legacy_tokens(db)
+        db.commit()
     _seed_words()
     # 首次启动就把本机 token 落盘。require_token 是惰性调用 local_secret()，
     # 而「没带 token」的请求会先在 header 检查处 401、根本走不到生成那一步 ——

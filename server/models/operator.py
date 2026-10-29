@@ -10,15 +10,9 @@
   · `is_admin` 只用于「停用别人 / 改共享设置」这两件会波及全员的事，
     不是分级授权——它挡的是手滑，不是恶意。
 
-`token` 为什么存明文（而不是像密码那样哈希）：
-  1. 这是本机 SQLite 文件，不对外监听（main.run 绑 127.0.0.1），
-     能读到这张表的人已经能读到全部商品数据和 `secret.key`；
-  2. 运营场景需要「张三换电脑了，管理员帮他再看一眼 token」这种支持，
-     哈希之后只能重发，等于每次换机都打断一次工作；
-  3. 现有的 `secret.key` 本来就是明文躺在 data_dir 里，这里哈希并不提高
-     任何实际安全性，只是制造不一致。
-明文 token 只在创建（POST /operators）和重发（rotate）的响应里出现一次，
-`GET /operators` 永不返回它——避免它顺着日志/截图扩散。
+`token` 列只保存 bearer token 的 SHA-256 摘要。新 token 的明文只在创建、登录或
+重发响应里返回一次；无法找回时应重发，而不是从数据库恢复旧凭据。启动时会把
+现有明文值原位转换为摘要，既有客户端无需重新登录。
 
 时间字段统一存 Unix 秒（REAL），与 docs/api.md 0.1 约定一致。
 """
@@ -41,7 +35,7 @@ class Operator(Base):
     password_hash: Mapped[str | None] = mapped_column(String(256))
     must_change_password: Mapped[bool] = mapped_column(
         default=False, server_default="0", nullable=False)
-    # 每人一个 token，唯一。明文存储的理由见模块 docstring。
+    # 每人一个 token 的 SHA-256 摘要，唯一；明文只在创建/登录/重发响应中出现。
     token: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     # 停用（离职/换人）而不是删除：删了之后 audit_logs.operator_id 会变 NULL，
     # 只剩冗余的 operator_name 可查——停用能保住关联，也保住历史。

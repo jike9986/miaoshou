@@ -85,7 +85,7 @@ def test_only_secret_key_resolves_to_builtin_operator(db):
 
     assert operator.name == operator_service.DEFAULT_OPERATOR_NAME
     # token 与 secret.key 对齐，是老客户端一个字节都不用改的前提
-    assert operator.token == get_settings().local_secret()
+    assert operator.token == operator_service.hash_token(get_settings().local_secret())
     assert operator.id == local.id
 
 
@@ -99,6 +99,20 @@ def test_operator_token_resolves_to_that_person(db):
 
     assert operator.id == row.id
     assert operator.name == name
+    assert row.token == operator_service.hash_token(token)
+
+
+def test_legacy_plaintext_token_is_migrated_and_remains_valid(db):
+    raw = f"legacy-{_suffix()}"
+    row = Operator(name=f"Legacy-{_suffix()}", token=raw,
+                   enabled=True, is_admin=False, role=operator_service.ROLE_MEMBER)
+    db.add(row)
+    db.flush()
+
+    assert operator_service.migrate_legacy_tokens(db) == 1
+    assert row.token == operator_service.hash_token(raw)
+    assert operator_service.migrate_legacy_tokens(db) == 0
+    assert operator_service.resolve(db, raw) is row
 
 
 def test_operator_display_name_cannot_be_used_as_bearer(db):

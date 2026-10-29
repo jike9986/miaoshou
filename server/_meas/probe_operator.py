@@ -147,8 +147,9 @@ def test_identity() -> None:
         check("identity: secret.key resolves to builtin operator",
               me is not None and me.name == operator_service.DEFAULT_OPERATOR_NAME,
               f"got {getattr(me, 'name', None)!r}")
-        check("identity: builtin token equals secret.key",
-              me is not None and me.token == secret, "token mismatch")
+        check("identity: builtin token digest matches secret.key",
+              me is not None and me.token == operator_service.hash_token(secret),
+              "token digest mismatch")
         check("identity: builtin is admin (needed to manage others)",
               me is not None and bool(me.is_admin), "not admin")
 
