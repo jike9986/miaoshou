@@ -113,7 +113,10 @@ def translate(payload: ImageTranslateRequest, db: DbSession,
     with audit_service.guard(db, operator=operator, action="image.translate",
                              target_kind="image", target_id=batch_key):
         result = image_service.translate(
-            db, body, operator_id=getattr(operator, "id", None))
+            db, body, operator_id=getattr(operator, "id", None),
+            owner_operator_id=(operator.id
+                               if operator_service.role_of(operator)
+                               == operator_service.ROLE_MEMBER else None))
     db.commit()
     audit_service.record(db, operator=operator, action="image.translate",
                          target_kind="image",
@@ -132,32 +135,48 @@ def translate(payload: ImageTranslateRequest, db: DbSession,
 @router.get("/jobs", summary="任务列表")
 def list_jobs(
     db: DbSession,
+    operator: OperatorDep,
     batchId: str | None = None,
     productId: str | None = None,
     status: str | None = None,
     page: int = Query(default=1, ge=1),
     pageSize: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, Any]:
+    owner_id = (operator.id if operator_service.role_of(operator)
+                == operator_service.ROLE_MEMBER else None)
     return image_service.list_jobs(db, batch_id=batchId, product_id=productId,
-                                   status=status, page=page, page_size=pageSize)
+                                   status=status, page=page, page_size=pageSize,
+                                   operator_id=owner_id)
+
+
+def _require_job_access(job_id: str, db: DbSession, operator: OperatorDep):
+    job = image_service.get_job(db, job_id)
+    if (operator_service.role_of(operator) == operator_service.ROLE_MEMBER
+            and job.operator_id != operator.id):
+        raise errors.not_found(f"图片任务 {job_id} 不存在", id=str(job_id))
+    return job
 
 
 @router.get("/jobs/{job_id}", summary="单个任务（refresh=true 时向上游查询）")
 def get_job(job_id: str, db: DbSession,
     credentials: CredentialsHeader = None, refresh: str | None = None,
     operator: OperatorDep = None) -> dict[str, Any]:
-    if parse_bool(refresh, "refresh", False):
+    should_refresh = parse_bool(refresh, "refresh", False)
+    if should_refresh:
         operator_service.require_role(operator, "images")
+    job = _require_job_access(job_id, db, operator)
+    if should_refresh:
         result = image_service.refresh(db, job_id)
         db.commit()
         return result
-    job = image_service.get_job(db, job_id)
     return {"job": image_service.serialize(job),
             "progress": image_service._progress(job)}
 
 
 @router.get("/jobs/{job_id}/file", summary="结果图（inline）")
-def get_job_file(job_id: str, db: DbSession) -> Response:
+def get_job_file(job_id: str, db: DbSession,
+                 operator: OperatorDep) -> Response:
+    _require_job_access(job_id, db, operator)
     path, filename = image_service.result_file(db, job_id)
     extension = filename.rsplit(".", 1)[-1].lower()
     return FileResponse(path, media_type=_MIME.get(extension, "application/octet-stream"),

@@ -6,13 +6,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.config import get_settings
+from core.errors import AppError
 from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
 from models.batch import Batch
+from models.image_job import ImageJob
 from models.product import Product
 from models.publish_log import PublishLog
-from services import account_service, operator_service, setting_service
+from services import account_service, image_service, operator_service, setting_service
 
 API = "/api/v1"
 
@@ -311,3 +313,95 @@ def test_teacher_must_target_a_student_to_bind_key(client, identities, monkeypat
     assert bound.status_code == 200, bound.text
     assert bound.json()["ownerOperatorId"] == str(identities["second_id"])
     assert bound.json()["boundByOperatorId"] == str(identities["teacher_id"])
+
+
+def test_teacher_can_assign_legacy_unowned_key_to_student(client, identities, monkeypatch):
+    monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
+    db = SessionLocal()
+    try:
+        legacy = Account(
+            name="unowned legacy key", app_key="legacy-owned-key",
+            app_secret_enc=account_service.crypto.encrypt("legacy-secret"),
+            app_id_hint="key", secret_hint="cret", status="active", shops="[]",
+            is_default=False,
+        )
+        db.add(legacy)
+        db.commit()
+        legacy_id = str(legacy.id)
+    finally:
+        db.close()
+
+    response = client.post(
+        API + "/auth/connect",
+        json={"accountId": legacy_id,
+              "studentOperatorId": str(identities["second_id"]),
+              "autoScan": False},
+        headers=_headers(identities["teacher_token"]),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["ownerOperatorId"] == str(identities["second_id"])
+    assert response.json()["boundByOperatorId"] == str(identities["teacher_id"])
+
+
+def test_image_jobs_and_result_files_are_isolated_by_operator(client, identities):
+    db = SessionLocal()
+    try:
+        own_id = uuid.uuid4().hex
+        foreign_id = uuid.uuid4().hex
+        db.add_all([
+            ImageJob(id=own_id, operator_id=identities["first_id"],
+                     batch_id=f"own-{own_id[:8]}", status="ready"),
+            ImageJob(id=foreign_id, operator_id=identities["second_id"],
+                     batch_id=f"other-{foreign_id[:8]}", status="ready"),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    first_headers = _headers(identities["first_token"])
+    jobs = client.get(API + "/images/jobs", headers=first_headers)
+    assert jobs.status_code == 200, jobs.text
+    visible_ids = {row["id"] for row in jobs.json()["items"]}
+    assert own_id in visible_ids
+    assert foreign_id not in visible_ids
+
+    own_detail = client.get(API + f"/images/jobs/{own_id}", headers=first_headers)
+    foreign_detail = client.get(API + f"/images/jobs/{foreign_id}", headers=first_headers)
+    foreign_file = client.get(
+        API + f"/images/jobs/{foreign_id}/file", headers=first_headers)
+    assert own_detail.status_code == 200, own_detail.text
+    assert foreign_detail.status_code == 404, foreign_detail.text
+    assert foreign_file.status_code == 404, foreign_file.text
+
+    teacher_jobs = client.get(
+        API + "/images/jobs", headers=_headers(identities["teacher_token"]))
+    assert teacher_jobs.status_code == 200, teacher_jobs.text
+    teacher_ids = {row["id"] for row in teacher_jobs.json()["items"]}
+    assert {own_id, foreign_id} <= teacher_ids
+
+
+def test_member_cannot_reuse_another_operators_image_translation(client, identities,
+                                                                 monkeypatch):
+    del client
+    raw = b"same-image-content"
+    monkeypatch.setattr(image_service, "_api_key", lambda: "configured")
+    monkeypatch.setattr(image_service, "_fetch_source", lambda _url: raw)
+    monkeypatch.setattr(image_service, "_shrink", lambda data: data)
+    monkeypatch.setattr(image_service, "_image_type", lambda _data: "png")
+    digest = image_service.image_job_id(
+        raw, image_service.IMAGE_MODEL, image_service.TRANSLATION_PROMPT, "1:1")
+    db = SessionLocal()
+    try:
+        db.add(ImageJob(id=digest, operator_id=identities["second_id"],
+                        batch_id="foreign-image", status="ready"))
+        db.commit()
+        with pytest.raises(AppError) as caught:
+            image_service.translate(
+                    db, {"items": [{"url": "https://example.test/image.png",
+                                    "source": "main"}]},
+                operator_id=identities["first_id"],
+                owner_operator_id=identities["first_id"],
+            )
+        assert caught.value.status == 403
+    finally:
+        db.close()

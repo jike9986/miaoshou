@@ -114,9 +114,10 @@ def connect(payload: ConnectRequest, db: DbSession,
         existing = account_service.get_account(db, payload.accountId)
         if (existing is not None
                 and existing.owner_operator_id != owner.id
-                and not (role == operator_service.ROLE_ADMIN
+                and not (role in {operator_service.ROLE_ADMIN,
+                                  operator_service.ROLE_TEACHER}
                          and existing.owner_operator_id is None)):
-            # 管理员可显式把未归属的历史 key 认领到学员；已有归属不可被教师抢占。
+            # 教师可显式把未归属的历史 key 认领到学员；已有归属不可被抢占。
             raise errors.AppError(errors.FORBIDDEN,
                                   "妙手账号已绑定到其他学员", status=403)
     require_writable(db)

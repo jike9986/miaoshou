@@ -471,7 +471,8 @@ def get_job(db: Session, job_id: str) -> ImageJob:
 
 
 def list_jobs(db: Session, *, batch_id: str | None = None, product_id: Any = None,
-              status: str | None = None, page: int = 1, page_size: int = 50
+              status: str | None = None, page: int = 1, page_size: int = 50,
+              operator_id: int | None = None
               ) -> dict[str, Any]:
     if status is not None and status not in STATUSES:
         raise errors.validation("任务状态无效", field="status", value=status)
@@ -480,6 +481,8 @@ def list_jobs(db: Session, *, batch_id: str | None = None, product_id: Any = Non
     if not 1 <= page_size <= 100:
         raise errors.validation("每页数量必须在 1 到 100 之间", field="pageSize", value=page_size)
     query = db.query(ImageJob)
+    if operator_id is not None:
+        query = query.filter(ImageJob.operator_id == operator_id)
     if batch_id:
         query = query.filter(ImageJob.batch_id == str(batch_id))
     if product_id not in (None, ""):
@@ -624,7 +627,8 @@ def upload_job_result(db: Session, job_id: str) -> dict[str, Any]:
 
 
 def translate(db: Session, payload: Mapping[str, Any],
-              *, operator_id: int | None = None) -> dict[str, Any]:
+              *, operator_id: int | None = None,
+              owner_operator_id: int | None = None) -> dict[str, Any]:
     """POST /images/translate：批量提交（幂等 + 预算 + 限流）。
 
     `operator_id` 只落在**新建**的 job 上：一行 job 代表「这张图是谁先提交的」，
@@ -725,6 +729,10 @@ def translate(db: Session, payload: Mapping[str, Any],
                 details={"index": index, "url": url})
         digest = image_job_id(raw, IMAGE_MODEL, prompt, size)
         existing = db.query(ImageJob).filter(ImageJob.id == digest).one_or_none()
+        if (existing is not None and owner_operator_id is not None
+                and existing.operator_id != owner_operator_id):
+            raise errors.AppError(errors.FORBIDDEN,
+                                  "该图片任务不属于当前学员，不能复用", status=403)
         if existing is not None and existing.status == "ready":
             results.append({**serialize(existing), "reused": True})
             reused += 1
