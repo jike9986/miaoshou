@@ -146,6 +146,15 @@ export function WarehousePage() {
   const items = useMemo(() => data?.items ?? [], [data?.items]);
   const facets = data?.facets;
   const total = data?.total ?? 0;
+  const hasActiveWarehouseFilter = query.claimed !== null || query.status !== null
+    || query.qualityStatus !== null || category.kind !== "all";
+
+  const clearWarehouseFilters = (): void => {
+    query.setClaimed(null);
+    query.setStatus(null);
+    query.setQualityStatus(null);
+    query.setCategory({ kind: "all" });
+  };
 
   const [createOpen, setCreateOpen] = useState(false);
   const [groupName, setGroupName] = useState("");
@@ -679,9 +688,17 @@ export function WarehousePage() {
               <Card>
                 <EmptyState
                   icon={<SearchX strokeWidth={1.5} />}
-                  title="仓库还是空的"
-                  description="在采集箱里处理商品后，成品会自动进入这里。"
-                  action={{ label: "去采集箱", onClick: () => navigate("/collect") }}
+                  title={hasActiveWarehouseFilter ? "没有符合条件的商品" : "成品仓库暂无商品"}
+                  description={hasActiveWarehouseFilter
+                    ? "当前筛选没有匹配商品，可以清除筛选后重新查看。"
+                    : isMember
+                      ? "共享成品由老师核对后加入；入仓后即可认领并按自己的店铺改价发布。"
+                      : "自动化处理成功的商品不会自动入仓，请在自动化结果中核对后选择加入。"}
+                  action={hasActiveWarehouseFilter
+                    ? { label: "清除筛选", onClick: clearWarehouseFilters }
+                    : isTeacher
+                      ? { label: "查看自动化结果", onClick: () => setTab("automation") }
+                      : undefined}
                 />
               </Card>
             )}
