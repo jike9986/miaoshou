@@ -974,7 +974,7 @@ export interface ScheduleRunResult {
  * 违规词库（api.md §10）
  * ================================================================== */
 
-export type WordCategory = "remove" | "review";
+export type WordCategory = "remove";
 export type WordAction = "add" | "remove" | "import" | "remove-many" | "clear";
 export type WordSource = "seed" | "manual";
 

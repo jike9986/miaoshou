@@ -9,8 +9,8 @@
 //   · 操作员：当前身份 + 名单 + 一次性 token（管理动作都在这里）
 //   · 审计日志：谁在什么时候动了什么（排查用）
 
-import { useState } from "react";
 import { Info, SlidersHorizontal, ScrollText, Users } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { Tabs, tabId, tabPanelId } from "@/components/ui";
 import { useOperatorIdentity } from "@/lib/operator";
@@ -28,8 +28,14 @@ export interface SettingsPageProps {
   initialTab?: SettingsTab;
 }
 
+const SETTINGS_TABS: SettingsTab[] = ["operators", "processing", "audit", "about"];
+
 export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
-  const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const tab = SETTINGS_TABS.includes(requestedTab as SettingsTab)
+    ? (requestedTab as SettingsTab)
+    : initialTab;
   const identity = useOperatorIdentity();
   const operatorsQuery = useOperators();
   const role = operatorsQuery.data?.current?.role ?? identity?.role;
@@ -55,7 +61,13 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
       >
         <Tabs
           value={activeTab}
-          onChange={(value) => setTab(value as SettingsTab)}
+          onChange={(value) => {
+            setSearchParams((current) => {
+              const next = new URLSearchParams(current);
+              next.set("tab", value);
+              return next;
+            }, { replace: true });
+          }}
           idBase="settings"
           items={[...settingsTabs]}
         />

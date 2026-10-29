@@ -78,7 +78,7 @@ function Shell() {
     notifiedVersion.current = version.latest;
     toast.info(`发现新版本 ${version.latest}`, {
       description: "更新详情和安装操作可在设置中查看。",
-      action: { label: "打开设置", onClick: () => navigate("/settings") },
+      action: { label: "查看更新", onClick: () => navigate("/settings?tab=about") },
       duration: 8000,
     });
   }, [versionQuery.data, navigate]);
