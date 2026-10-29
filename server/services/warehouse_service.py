@@ -32,6 +32,7 @@ from core.utils import (
     product_key,
 )
 from models.account import Account
+from models.automation_run import AutomationRun, AutomationRunItem
 from models.category import Category
 from models.group import Group
 from models.image_job import ImageJob
@@ -649,11 +650,24 @@ def stats(db: Session, *, account_id: int | None = None,
     }
 
 
+def _successful_automation_product_ids(db: Session):
+    return (db.query(AutomationRunItem.product_id)
+            .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
+            .join(Product, Product.id == AutomationRunItem.product_id)
+            .filter(
+                AutomationRunItem.process_status == "succeeded",
+                AutomationRun.account_id == Product.account_id,
+                AutomationRunItem.detail_id == Product.detail_id,
+                AutomationRunItem.source_shop_id == Product.shop_id,
+            ))
+
+
 def list_automation_results(db: Session, *, page: int = 1, page_size: int = 24
                             ) -> dict[str, Any]:
     if page < 1 or not 1 <= page_size <= 100:
         raise errors.validation("分页参数无效", field="page")
-    query = active_query(db).filter(Product.automation_result.is_(True))
+    query = (active_query(db).filter(Product.automation_result.is_(True))
+             .filter(Product.id.in_(_successful_automation_product_ids(db))))
     total = query.count()
     rows = (query.order_by(Product.saved_at.desc(), Product.id.desc())
             .offset((page - 1) * page_size).limit(page_size).all())
@@ -675,9 +689,17 @@ def admit_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
     if not wanted or len(wanted) > 100:
         raise errors.validation("请选择 1 到 100 件自动化处理结果", field="ids")
     products = [resolve_product(db, ident) for ident in wanted]
-    invalid = [product.id for product in products if not product.automation_result]
+    successful_items = {
+        row[0] for row in _successful_automation_product_ids(db)
+        .filter(AutomationRunItem.product_id.in_([product.id for product in products]))
+        .all()
+    }
+    invalid = [product.id for product in products
+               if not product.automation_result or product.id not in successful_items]
     if invalid:
-        raise errors.validation("部分商品已入仓或不属于自动化处理结果", field="ids",
+        raise errors.validation(
+            "部分商品没有对应的成功自动化处理记录，不能加入成品仓库",
+            field="ids",
                                 value=[str(value) for value in invalid])
     available = stats(db)["remaining"]
     if len(products) > available:

@@ -10,6 +10,7 @@ from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
 from models.automation_run import AutomationRunItem
+from models.image_job import ImageJob
 from models.product import Product
 from models.publish_log import PublishLog
 from services import operator_service, setting_service
@@ -60,14 +61,24 @@ def headers(token: str) -> dict[str, str]:
 
 
 def create_run(client: TestClient, setup: dict[str, object], *,
-               publish_enabled: bool = False) -> dict:
+               publish_enabled: bool = False,
+               images_enabled: bool | None = None) -> dict:
+    if images_enabled is None:
+        images_enabled = publish_enabled
     detail_id = str(uuid.uuid4().int % 10**12)
     source_shop_id = str(uuid.uuid4().int % 10**12)
+    settings = {"textEnabled": True, "imagesEnabled": images_enabled,
+                "publishEnabled": publish_enabled}
+    if publish_enabled:
+        settings.update({
+            "priceTemplateEnabled": True,
+            "template": "Test template",
+        })
     response = client.post(
         API + "/automation-runs",
         json={
             "accountId": setup["account_id"], "shopId": "22",
-            "settings": {"textEnabled": True, "publishEnabled": publish_enabled},
+            "settings": settings,
             "items": [{"key": f"{detail_id}:{source_shop_id}",
                        "detailId": detail_id, "shopId": source_shop_id,
                        "title": "Test item"}],
@@ -109,7 +120,14 @@ def test_recovery_marks_inflight_item_unknown_and_blocks_reprocessing(client, se
 
     recovered = client.post(API + f"/automation-runs/{run_id}/recover", headers=auth)
     assert recovered.status_code == 200, recovered.text
-    item = recovered.json()["run"]["items"][0]
+    recovered_run = recovered.json()["run"]
+    assert recovered_run["accountId"] == setup["account_id"]
+    assert recovered_run["shopId"] == "22"
+    assert recovered_run["settings"] == {
+        "textEnabled": True, "imagesEnabled": False, "publishEnabled": False,
+    }
+    item = recovered_run["items"][0]
+    assert item["shopId"] != recovered_run["shopId"]
     assert item["processStatus"] == "needs_review"
     assert "核对" in item["processReason"]
 
@@ -131,7 +149,8 @@ def test_automation_state_writes_respect_read_only_mode(client, setup):
     processed = client.post(
         API + f"/automation-runs/{publish_run['id']}/items/{publish_item['id']}/process-result",
         json={"status": "succeeded", "productId": str(product.id),
-              "result": {"saved": True, "draftVerified": True}}, headers=auth,
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"requested": 0, "submitted": 0, "failed": 0}}}, headers=auth,
     )
     assert processed.status_code == 200, processed.text
     assert client.post(
@@ -242,18 +261,40 @@ def test_failed_process_closes_queued_publish_and_run(client, setup):
     assert result["status"] == "partial"
 
 
-def test_publish_enabled_run_requires_at_least_one_processing_step(client, setup):
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"textEnabled": False, "imagesEnabled": True,
+         "priceTemplateEnabled": True, "template": "Template A", "publishEnabled": True},
+        {"textEnabled": True, "imagesEnabled": False,
+         "priceTemplateEnabled": True, "template": "Template A", "publishEnabled": True},
+        {"textEnabled": True, "imagesEnabled": True,
+         "priceTemplateEnabled": False, "template": "Template A", "publishEnabled": True},
+        {"textEnabled": True, "imagesEnabled": True,
+         "priceTemplateEnabled": True, "template": "  ", "publishEnabled": True},
+    ],
+    ids=["text-required", "images-required", "template-required", "template-name-required"],
+)
+def test_publish_enabled_run_requires_complete_processing_settings(client, setup, settings):
     response = client.post(
         API + "/automation-runs",
         json={
             "accountId": setup["account_id"], "shopId": "22",
-            "settings": {"textEnabled": False, "imagesEnabled": False,
-                         "publishEnabled": True},
+            "settings": settings,
             "items": [{"key": "101:11", "detailId": "101", "shopId": "11"}],
         },
         headers=headers(str(setup["teacher_token"])),
     )
     assert response.status_code == 400, response.text
+
+
+def test_publish_enabled_run_accepts_complete_processing_settings(client, setup):
+    run = create_run(client, setup, publish_enabled=True)
+
+    assert run["settings"]["textEnabled"] is True
+    assert run["settings"]["imagesEnabled"] is True
+    assert run["settings"]["priceTemplateEnabled"] is True
+    assert run["settings"]["template"] == "Test template"
 
 
 def test_publish_requires_saved_and_verified_automation_product(client, setup):
@@ -298,6 +339,61 @@ def test_publish_requires_saved_and_verified_automation_product(client, setup):
 
 
 @pytest.mark.parametrize(
+    ("job_status", "expected_status"),
+    [
+        ("failed", 409),
+        ("queued", 409),
+        ("submitted", 409),
+        ("unknown", 409),
+        ("ready", 200),
+    ],
+)
+def test_publish_requires_all_product_image_jobs_ready(
+    client, setup, job_status, expected_status,
+):
+    run = create_run(client, setup, publish_enabled=True, images_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
+    failed_result = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"requested": 1, "submitted": 0, "failed": 1}}},
+        headers=auth,
+    )
+    assert failed_result.status_code == 409, failed_result.text
+
+    processed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"requested": 1, "submitted": 1, "failed": 0}}},
+        headers=auth,
+    )
+    assert processed.status_code == 200, processed.text
+    db = SessionLocal()
+    try:
+        db.add(ImageJob(
+            id=uuid.uuid4().hex, product_id=product.id, detail_id=item["detailId"],
+            source="main", status=job_status,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    blocked = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        headers=auth,
+    )
+    assert blocked.status_code == expected_status, blocked.text
+
+
+@pytest.mark.parametrize(
     "mismatch",
     ["detail", "shop"],
     ids=["different-detail", "different-source-shop"],
@@ -320,7 +416,8 @@ def test_publish_rejects_automation_product_from_another_run_item(
     result = client.post(
         API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
         json={"status": "succeeded", "productId": str(product.id),
-              "result": {"saved": True, "draftVerified": True}}, headers=auth,
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"requested": 0, "submitted": 0, "failed": 0}}}, headers=auth,
     )
 
     assert result.status_code == 409, result.text
@@ -336,7 +433,8 @@ def test_skipped_publish_can_be_recorded_as_needs_review(client, setup):
     processed = client.post(
         API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
         json={"status": "succeeded", "productId": str(product.id),
-              "result": {"saved": True, "draftVerified": True}}, headers=auth,
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"requested": 0, "submitted": 0, "failed": 0}}}, headers=auth,
     )
     assert processed.status_code == 200, processed.text
 
@@ -360,7 +458,8 @@ def test_recovery_closes_unstarted_publish_after_successful_processing(client, s
     processed = client.post(
         API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
         json={"status": "succeeded", "productId": str(product.id),
-              "result": {"saved": True, "draftVerified": True}}, headers=auth,
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"requested": 0, "submitted": 0, "failed": 0}}}, headers=auth,
     )
     assert processed.status_code == 200, processed.text
 
@@ -401,7 +500,10 @@ def test_publish_receipt_updates_only_matching_automation_item(
         processed = client.post(
             API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
             json={"status": "succeeded", "productId": str(product.id),
-                  "result": {"saved": True, "draftVerified": True}}, headers=auth,
+                  "result": {"saved": True, "draftVerified": True,
+                             "images": {"requested": 0, "submitted": 0,
+                                        "failed": 0}}},
+            headers=auth,
         )
         assert processed.status_code == 200, processed.text
         assert client.post(

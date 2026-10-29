@@ -11,6 +11,7 @@ from core import errors
 from core.utils import now_ts
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
+from models.image_job import ImageJob
 from models.operator import Operator
 from models.product import Product
 from models.publish_log import PublishLog
@@ -93,10 +94,15 @@ def create(db: Session, operator: Operator, *, account_id: Any, shop_id: Any,
     if not shop_text.isdigit():
         raise errors.validation("shopId 必须是数字", field="shopId")
     wants_publish = settings.get("publishEnabled") is True
-    if wants_publish and not (
-        settings.get("textEnabled") is True or settings.get("imagesEnabled") is True
-    ):
-        raise errors.validation("发布前请至少开启文字或图片处理", field="settings")
+    if wants_publish:
+        if settings.get("textEnabled") is not True:
+            raise errors.validation("开启正式发布前必须启用文字处理", field="settings")
+        if settings.get("imagesEnabled") is not True:
+            raise errors.validation("开启正式发布前必须启用图片处理", field="settings")
+        template = settings.get("template")
+        if (settings.get("priceTemplateEnabled") is not True
+                or not isinstance(template, str) or not template.strip()):
+            raise errors.validation("开启正式发布前必须启用并选择定价模板", field="settings")
 
     clean: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -222,9 +228,12 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
             and (product_id in (None, "")
                  or not isinstance(result, Mapping)
                  or result.get("saved") is not True
-                 or result.get("draftVerified") is not True)):
+                 or result.get("draftVerified") is not True
+                 or (run.settings.get("imagesEnabled") is True
+                     and (not isinstance(result.get("images"), Mapping)
+                          or result["images"].get("failed") != 0)))):
         raise errors.AppError(
-            "CONFLICT", "发布前需确认商品已保存并通过草稿读回核验", status=409)
+            "CONFLICT", "发布前需确认商品已保存、草稿读回通过且图片处理无失败", status=409)
     product_pk = None
     if product_id not in (None, ""):
         text = str(product_id)
@@ -289,6 +298,14 @@ def start_publish(db: Session, run: AutomationRun, item_id: Any) -> dict[str, An
             or product.revision != server_verification.get("productRevision")):
         raise errors.AppError(
             "CONFLICT", "商品自处理核验后发生变化，请重新处理并核对", status=409)
+    if run.settings.get("imagesEnabled") is True:
+        unfinished_images = db.query(ImageJob.id).filter(
+            ImageJob.product_id == product.id,
+            ImageJob.status != "ready",
+        ).first()
+        if unfinished_images:
+            raise errors.AppError(
+                "CONFLICT", "图片翻译任务尚未全部完成，请完成并核对后再发布", status=409)
     changed = (db.query(AutomationRunItem).filter(
         AutomationRunItem.id == row.id,
         AutomationRunItem.publish_status == "queued",

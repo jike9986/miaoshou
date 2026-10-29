@@ -66,6 +66,7 @@ import { ProgressPanel } from "@/features/automation/ProgressPanel";
 import { AccountSwitcher } from "@/features/auth/UnlockPage";
 import { useSessionStore } from "@/features/stores";
 import {
+  DEFAULT_SETTINGS,
   IDLE_RUN,
   loadSettings,
   saveSettings,
@@ -222,7 +223,8 @@ export function AutomationPage() {
   const [progress, setProgress] = useState<Record<string, ItemProgress>>({});
   const [run, setRun] = useState<RunState>(IDLE_RUN);
   const createRunMutation = useCreateAutomationRun();
-  const latestRunQuery = useLatestAutomationRun(status?.accountId ?? null, currentShopId, connected);
+  // 查找该妙手账号最近的任务，不按当前店铺过滤；任务恢复后沿用它自己的目标店铺。
+  const latestRunQuery = useLatestAutomationRun(status?.accountId ?? null, null, connected);
   const recoverRunMutation = useRecoverAutomationRun();
   const startRunItemMutation = useStartAutomationRunItem();
   const recordProcessMutation = useAutomationRunProcessResult();
@@ -237,6 +239,15 @@ export function AutomationPage() {
   const running = run.phase === "running";
   // 两个开关都关着就没有可执行内容：按钮置灰并说明原因（老版 summary-warning）
   const somethingEnabled = settings.textEnabled || settings.imagesEnabled;
+  const publishConfigIssue = settings.publishEnabled
+    ? !settings.textEnabled
+      ? "正式发布前请开启文字处理。"
+      : !settings.imagesEnabled
+        ? "正式发布前请开启图片处理。"
+        : !settings.priceTemplateEnabled || !settings.template?.trim()
+          ? "正式发布前请启用并选择定价模板。"
+          : null
+    : null;
   const stopRef = useRef(false);
 
   /* ---------------- 客户端筛选 ---------------- */
@@ -397,6 +408,10 @@ export function AutomationPage() {
       });
       return;
     }
+    if (publishConfigIssue) {
+      toast.warning(publishConfigIssue);
+      return;
+    }
     const savedRun = latestRunQuery.data?.run;
     if (latestRunQuery.isLoading || recoverRunMutation.isPending
       || recoveringRunId.current !== null
@@ -404,16 +419,6 @@ export function AutomationPage() {
       toast.info("正在恢复上次任务，请稍后再开始");
       return;
     }
-    // 发布开启但没选目标店铺：先拦住，别等处理完才发现没地方认领
-    if (settings.publishEnabled && !currentShopId) {
-      toast.warning("请先在顶部选择当前店铺");
-      return;
-    }
-    if (settings.publishEnabled && !shopsQuery.data?.shops.some((shop) => shop.shopId === currentShopId)) {
-      toast.warning("当前店铺不可用，请重新选择店铺");
-      return;
-    }
-
     let durableRun: AutomationRunRecord | null = null;
     if (persistentRunId.current && savedRun?.id === persistentRunId.current) {
       const queued = new Set(savedRun.items.filter((item) => item.processStatus === "queued").map((item) => item.key));
@@ -433,10 +438,6 @@ export function AutomationPage() {
       }
       const resumesSavedRun = targets.length > 0 && targets.every((target) => queued.has(target.key));
       if (resumesSavedRun) {
-        if (settings.publishEnabled && currentShopId !== savedRun.shopId) {
-          toast.warning("此任务目标店铺与顶部当前店铺不同，请切回原店铺后继续");
-          return;
-        }
         durableRun = savedRun;
       } else if (targets.some((target) => queued.has(target.key))) {
         toast.warning("请单独选择上次任务的待处理商品，或取消选择后开始新任务");
@@ -444,6 +445,15 @@ export function AutomationPage() {
       }
     }
     if (!durableRun) {
+      // 新任务使用当前页面上下文；恢复任务则完全使用下方的持久化快照。
+      if (settings.publishEnabled && !currentShopId) {
+        toast.warning("请先在顶部选择当前店铺");
+        return;
+      }
+      if (settings.publishEnabled && !shopsQuery.data?.shops.some((shop) => shop.shopId === currentShopId)) {
+        toast.warning("当前店铺不可用，请重新选择店铺");
+        return;
+      }
       const targetShopId = currentShopId ?? targets[0].shopId;
       try {
         durableRun = (await createRunMutation.mutateAsync({
@@ -461,8 +471,20 @@ export function AutomationPage() {
       persistentItems.current = new Map(durableRun.items.map((item) => [item.key, item.id]));
     }
 
-    const imagesPerProduct = settings.mainImageCount + settings.skuImageCount + settings.detailImageCount;
-    const plannedImages = settings.imagesEnabled ? targets.length * imagesPerProduct : 0;
+    const runSettings = {
+      ...DEFAULT_SETTINGS,
+      ...Object.fromEntries(Object.entries(durableRun.settings).filter(([key, value]) =>
+        key in DEFAULT_SETTINGS && typeof value === typeof DEFAULT_SETTINGS[key as keyof AutomationSettings])),
+    } as AutomationSettings;
+    if (runSettings.publishEnabled && (
+      !runSettings.textEnabled || !runSettings.imagesEnabled
+      || !runSettings.priceTemplateEnabled || !runSettings.template?.trim()
+    )) {
+      toast.warning("此任务的发布配置不完整，请检查文字、图片和定价模板设置后重新创建任务。");
+      return;
+    }
+    const imagesPerProduct = runSettings.mainImageCount + runSettings.skuImageCount + runSettings.detailImageCount;
+    const plannedImages = runSettings.imagesEnabled ? targets.length * imagesPerProduct : 0;
     stopRef.current = false;
     setStages(Object.fromEntries(targets.map((target) => [target.key, "queued" as ItemStage])));
     setRun({
@@ -522,29 +544,36 @@ export function AutomationPage() {
           detailId: target.detailId,
           request: {
             shopId: target.shopId,
-            language: settings.textEnabled ? settings.language : null,
+            accountId: durableRun.accountId,
+            language: runSettings.textEnabled ? runSettings.language : null,
             template:
-              settings.priceTemplateEnabled && settings.template ? settings.template : null,
+              runSettings.priceTemplateEnabled && runSettings.template ? runSettings.template : null,
             save: true,
             // 勾了「图片」才提交翻译；不勾就是纯文字处理
-            processImages: settings.imagesEnabled,
-            mainImageCount: settings.mainImageCount,
-            skuImageCount: settings.skuImageCount,
-            detailImageCount: settings.detailImageCount,
+            processImages: runSettings.imagesEnabled,
+            mainImageCount: runSettings.mainImageCount,
+            skuImageCount: runSettings.skuImageCount,
+            detailImageCount: runSettings.detailImageCount,
           },
         });
         processResponseReceived = true;
-        if (settings.publishEnabled && (
+        if (runSettings.publishEnabled && (
           result.saved !== true
           || result.product?.draftVerified !== true
           || !result.product?.id
         )) {
           throw new Error("商品草稿未通过保存与读回核验，已阻止发布；请检查妙手商品记录后再继续。");
         }
+        const failedImages = runSettings.imagesEnabled && (result.images?.failed ?? 0) > 0;
+        const imageFailureReason = failedImages
+          ? `图片处理失败 ${result.images?.failed} 张，已阻止发布；请先重试失败图片并核对结果。`
+          : "";
         await recordProcessMutation.mutateAsync({
-          runId, itemId, status: "succeeded", productId: result.product?.id ? String(result.product.id) : null,
+          runId, itemId, status: failedImages ? "failed" : "succeeded",
+          reason: imageFailureReason,
+          productId: result.product?.id ? String(result.product.id) : null,
           result: {
-            textDone: settings.textEnabled,
+            textDone: runSettings.textEnabled,
             images: result.images ?? null,
             saved: result.saved,
             draftVerified: result.product?.draftVerified,
@@ -553,26 +582,49 @@ export function AutomationPage() {
         // 只有真的提交了翻译任务才算「图片处理完成」。
         // 之前这里加的是商品自带图片数，勾不勾「图片」数字都涨，等于假数据。
         imageDone += result.images?.submitted ?? 0;
-        if (settings.imagesEnabled && result.images && result.images.failed > 0) {
+        if (runSettings.imagesEnabled && result.images && result.images.failed > 0) {
           imageFailures += result.images.failed;
         }
         setStages((prev) => ({ ...prev, [target.key]: "done" }));
         // 记下这一步到底做成了什么：文字译了没、图片交上去几张、失败几张。
         // 只记一个 done，界面就没法区分「全好了」和「文字好了图片全挂」。
-        if (settings.textEnabled) textDone += 1;
+        if (runSettings.textEnabled) textDone += 1;
         setProgress((prev) => ({
           ...prev,
           [target.key]: {
-            textDone: settings.textEnabled,
-            imagesDone: settings.imagesEnabled
+            textDone: runSettings.textEnabled,
+            imagesDone: runSettings.imagesEnabled
               ? (result.images?.failed ?? 0) === 0 && (result.images?.submitted ?? 0) > 0
               : false,
             imageFailures: result.images?.failed ?? 0,
           },
         }));
 
+        if (failedImages) {
+          failed += 1;
+          failedKeys.push(target.key);
+          failures.push({
+            key: target.key,
+            title: target.title || "",
+            detailId: target.detailId,
+            reason: imageFailureReason,
+          });
+          setStages((prev) => ({ ...prev, [target.key]: "failed" }));
+          done += 1;
+          setRun((prev) => ({
+            ...prev,
+            done,
+            failed,
+            imageDone,
+            textDone,
+            failedKeys: [...failedKeys],
+            failures: [...failures],
+          }));
+          continue;
+        }
+
         // 异步图片任务尚未回写处理结果时，不发布旧图版本。
-        if (settings.publishEnabled && currentShopId) {
+        if (runSettings.publishEnabled) {
           const warehouseId = result.product?.id;
           if (warehouseId) {
             const pendingImages = (result.images?.submitted ?? 0) > 0;
@@ -596,6 +648,7 @@ export function AutomationPage() {
                 await startPublishMutation.mutateAsync({ runId, itemId });
                 const response = await publish.mutateAsync({
                   items: [{ warehouseId: String(warehouseId) }],
+                  accountId: durableRun.accountId,
                   shopId: durableRun.shopId,
                   confirm: true,
                   claimOnly: false,
@@ -791,7 +844,7 @@ export function AutomationPage() {
               <Button
                 variant="primary"
                 icon={<Play />}
-                disabled={!connected || selection.size === 0 || !somethingEnabled
+                disabled={!connected || selection.size === 0 || !somethingEnabled || Boolean(publishConfigIssue)
                   || preparingRun || latestRunQuery.isLoading || recoverRunMutation.isPending}
                 loading={preparingRun}
                 title={
@@ -803,6 +856,8 @@ export function AutomationPage() {
                       ? "正在准备任务或恢复上次任务"
                       : !somethingEnabled
                         ? "文字和图片处理都关着，没有可执行的内容"
+                        : publishConfigIssue
+                          ? publishConfigIssue
                         : `串行处理 ${selection.size} 件商品`
                 }
                 onClick={() => void startRun()}

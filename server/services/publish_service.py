@@ -34,6 +34,7 @@ from core.utils import (
     redact,
 )
 from models.account import Account
+from models.automation_run import AutomationRun, AutomationRunItem
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
@@ -126,6 +127,37 @@ def _already_published_blocker(db: Session, *, account: Account,
             details={"detailId": row.detail_id, "shopId": row.shop_id,
                      "warehouseId": str(row.product_id) if row.product_id else None},
         )
+
+
+def _require_started_automation_publish(db: Session, *, entries: list[dict[str, Any]],
+                                        account: Account, target_shop_id: str) -> None:
+    """Automation results can only publish through a started, matching run item."""
+    products = [entry["product"] for entry in entries
+                if isinstance(entry.get("product"), Product)
+                and entry["product"].automation_result]
+    if not products:
+        return
+    if any(product.account_id != account.id for product in products):
+        raise errors.AppError(
+            "CONFLICT", "自动化商品所属账号与发布账号不一致", status=409)
+
+    product_ids = {product.id for product in products}
+    rows = (db.query(AutomationRunItem, AutomationRun)
+            .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
+            .filter(
+                AutomationRunItem.product_id.in_(product_ids),
+                AutomationRunItem.process_status == "succeeded",
+                AutomationRunItem.publish_status == "running",
+                AutomationRun.account_id == account.id,
+                AutomationRun.shop_id == str(target_shop_id),
+            ).all())
+    eligible = {
+        item.product_id for item, run in rows
+        if isinstance(run.settings, dict) and run.settings.get("publishEnabled") is True
+    }
+    if product_ids - eligible:
+        raise errors.AppError(
+            "CONFLICT", "自动化商品必须由已启动的匹配自动化任务发布", status=409)
 
 
 # --- 记录 -----------------------------------------------------------------
@@ -528,6 +560,8 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     if operator_id is not None:
         operator_name = warehouse_service.operator_names(db).get(int(operator_id), "")
     entries = _resolve_items(db, items)
+    _require_started_automation_publish(
+        db, entries=entries, account=account, target_shop_id=target_shop_id)
     claim_only = payload.get("claimOnly") is True
     if member_publish:
         if claim_only:

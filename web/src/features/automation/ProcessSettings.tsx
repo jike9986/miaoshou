@@ -169,9 +169,19 @@ export function ProcessSettings({
   // 全关时点「开始处理」什么都不会发生，但按钮是亮的——
   // 用户会以为在跑，等半天发现没动。运行前就把话说清楚。
   const comboWarning = ((): string | null => {
+    if (settings.publishEnabled && !settings.textEnabled) {
+      return "正式发布前必须开启文字处理。";
+    }
+    if (settings.publishEnabled && !settings.imagesEnabled) {
+      return "正式发布前必须开启图片处理。";
+    }
+    if (settings.publishEnabled
+      && (!settings.priceTemplateEnabled || !settings.template?.trim())) {
+      return "正式发布前必须启用并选择定价模板。";
+    }
     if (!settings.textEnabled && !settings.imagesEnabled) {
       return settings.publishEnabled
-        ? "发布前请至少开启文字或图片处理。"
+        ? "正式发布前必须开启文字和图片处理。"
         : "文字处理和图片处理都关着，没有可执行的内容。";
     }
     if (settings.priceTemplateEnabled && !settings.textEnabled) {

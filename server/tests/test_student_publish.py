@@ -7,6 +7,7 @@ import pytest
 from core import errors
 from db.session import SessionLocal, init_db
 from models.account import Account
+from models.automation_run import AutomationRun, AutomationRunItem
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
@@ -47,6 +48,26 @@ def _product(db, suffix: str, account: Account) -> Product:
     db.add(row)
     db.flush()
     return row
+
+
+def _automation_run(db, suffix: str, operator, account: Account,
+                    product: Product, *, publish_status: str) -> AutomationRunItem:
+    run = AutomationRun(
+        id=f"arun_{suffix}", owner_operator_id=operator.id,
+        account_id=account.id, shop_id="123", status="running",
+        settings={"publishEnabled": True},
+    )
+    db.add(run)
+    db.flush()
+    item = AutomationRunItem(
+        run_id=run.id, key=f"{product.detail_id}:{product.shop_id}",
+        detail_id=product.detail_id, source_shop_id=product.shop_id,
+        product_id=product.id, process_status="succeeded",
+        publish_status=publish_status,
+    )
+    db.add(item)
+    db.flush()
+    return item
 
 
 def _publish_payload(product: Product, account: Account, **overrides):
@@ -118,6 +139,37 @@ def test_member_can_publish_claimed_product_with_template_without_mutating_share
     assert product.claimed_shop_id is None
     log = db.query(PublishLog).filter(PublishLog.product_id == product.id).one()
     assert log.operator_id == operator.id
+
+
+def test_automation_result_cannot_publish_before_run_item_is_started(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    teacher, account = _identity(db, suffix, role=operator_service.ROLE_TEACHER)
+    product = _product(db, suffix, account)
+    product.automation_result = True
+    _automation_run(db, suffix, teacher, account, product, publish_status="queued")
+    _stub_member_publish(monkeypatch, db, account)
+
+    with pytest.raises(errors.AppError) as exc:
+        publish_service.publish(
+            db, _publish_payload(product, account), operator_id=teacher.id)
+
+    assert exc.value.status == 409
+
+
+def test_automation_result_can_publish_after_run_item_is_started(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    teacher, account = _identity(db, suffix, role=operator_service.ROLE_TEACHER)
+    product = _product(db, suffix, account)
+    product.automation_result = True
+    _automation_run(db, suffix, teacher, account, product, publish_status="running")
+    _stub_member_publish(monkeypatch, db, account)
+
+    result = publish_service.publish(
+        db, _publish_payload(product, account), operator_id=teacher.id)
+
+    assert result["published"] == [product.detail_id]
 
 
 def test_member_cannot_republish_successful_product_to_same_shop(publish_db, monkeypatch):
