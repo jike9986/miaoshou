@@ -167,13 +167,16 @@ def items_of(db: Session, batch_id: str) -> list[BatchItem]:
             .all())
 
 
-def list_batches(db: Session, account_id: Any = None, limit: int = 50) -> dict[str, Any]:
+def list_batches(db: Session, account_id: Any = None, limit: int = 50,
+                 operator_id: int | None = None) -> dict[str, Any]:
     query = db.query(Batch)
     if account_id not in (None, ""):
         text = str(account_id)
         if not text.isdigit():
             raise errors.validation("accountId 必须是数字", field="accountId", value=account_id)
         query = query.filter(Batch.account_id == int(text))
+    if operator_id is not None:
+        query = query.filter(Batch.operator_id == operator_id)
     total = query.count()
     count = max(1, min(int(limit or 50), 200))
     rows = query.order_by(Batch.created_at.desc(), Batch.id.desc()).limit(count).all()

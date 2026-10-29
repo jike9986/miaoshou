@@ -27,7 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pencil, Play, Square, Tag } from "lucide-react";
 import { apiErrorMessage } from "@/lib/api";
 import { formatCount, cn } from "@/lib/utils";
-import { useIsNarrow } from "@/hooks/useMediaQuery";
+import { useIsNarrow, useMediaQuery } from "@/hooks/useMediaQuery";
 import {
   useAuthStatus,
   useCollectBoxList,
@@ -99,6 +99,8 @@ export function AutomationPage() {
   const connected = status?.connected ?? false;
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const narrow = useIsNarrow();
+  const shortViewport = useMediaQuery("(max-height: 760px)");
+  const scrollLayout = narrow || shortViewport;
 
   /* ---------------- 列表查询参数 ---------------- */
   const [page, setPage] = useState(1);
@@ -815,21 +817,31 @@ export function AutomationPage() {
       {/* PageContent 外层默认 display:block，这里改成 flex 列，内层才能被撑成一屏高度 */}
       <PageContent
         width="full"
-        scroll={narrow}
+        scroll={scrollLayout}
         padding="p-4"
         className={cn(
           "flex flex-col [&>div]:flex [&>div]:min-h-0 [&>div]:flex-1 [&>div]:flex-col [&>div]:gap-3",
-          narrow ? "overflow-y-auto" : "overflow-hidden"
+          scrollLayout && "[&>div]:min-h-max [&>div]:flex-none",
+          scrollLayout ? "overflow-y-auto" : "overflow-hidden"
         )}
       >
         <div className="flex min-h-0 flex-1 flex-col gap-3">
           {/* 左主操作区 + 右侧固定进度列。本页不再放「连接妙手」面板：
               左侧导航已有独立板块，这里重复一份只会占掉列表高度。 */}
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div className={cn(
+            "grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]",
+            scrollLayout && "min-h-max flex-none",
+          )}>
             {/* 左：选品（弹性撑满剩余高度）+ 处理设置（自然高度，超高自己滚） */}
-            <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden max-lg:overflow-visible">
+            <div className={cn(
+              "flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden max-lg:overflow-visible",
+              scrollLayout && "min-h-max flex-none overflow-visible",
+            )}>
               <ProductPicker
-                className="min-h-[300px] min-w-0 flex-1 max-lg:flex-none"
+                className={cn(
+                  "min-h-[300px] min-w-0 flex-1 max-lg:flex-none",
+                  scrollLayout && "flex-none",
+                )}
                 connected={connected}
                 items={visibleItems}
                 total={total}
@@ -865,7 +877,7 @@ export function AutomationPage() {
               <Card
                 padding="normal"
                 className="shrink-0 overflow-y-auto max-lg:max-h-none max-lg:overflow-visible"
-                style={narrow ? undefined : { maxHeight: "calc(100% - 312px)" }}
+                style={scrollLayout ? undefined : { maxHeight: "calc(100% - 312px)" }}
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="flex min-w-0 items-center gap-2">
@@ -894,7 +906,10 @@ export function AutomationPage() {
                 以前这里是 overflow-y-auto，内容一更新（进度百分比跳动）浏览器就会
                 把滚动位置往最近的锚点拽，看起来就是「右边的栏自己在动」。
                 改成 overflow-hidden + overscroll-contain，列表再变化也不动。 */}
-            <div className="min-h-0 overflow-hidden overscroll-contain pb-1 max-lg:shrink-0 max-lg:overflow-visible">
+            <div className={cn(
+              "min-h-0 overflow-hidden overscroll-contain pb-1 max-lg:shrink-0 max-lg:overflow-visible",
+              scrollLayout && "overflow-visible",
+            )}>
               <ProgressPanel
                 run={run}
                 settings={settings}

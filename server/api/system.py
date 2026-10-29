@@ -185,7 +185,8 @@ def update(payload: dict[str, Any] | None = None, db: DbSession = None) -> dict[
 
 
 @router.get("/bootstrap", summary="首屏聚合：一次拿齐启动所需的状态")
-def system_bootstrap(db: DbSession, credentials: CredentialsHeader = None) -> dict[str, Any]:
+def system_bootstrap(db: DbSession, operator: OperatorDep,
+                     credentials: CredentialsHeader = None) -> dict[str, Any]:
     """等价老版 `/api/bootstrap`：一次请求拿齐首屏要的所有状态。
 
     老版是单进程内存态，一个 bootstrap 就够；新版拆成了十几个接口，
@@ -220,8 +221,10 @@ def system_bootstrap(db: DbSession, credentials: CredentialsHeader = None) -> di
     for key, loader in (
         ("accounts", lambda: account_service.account_summaries(db)),
         ("templates", lambda: _bootstrap_templates(db)),
-        ("stats", lambda: warehouse_service.stats(db)),
-        ("batches", lambda: batch_service.list_batches(db, limit=5)),
+        ("stats", lambda: warehouse_service.stats(db, operator_id=operator.id)),
+        ("batches", lambda: batch_service.list_batches(
+            db, limit=5, operator_id=operator.id if operator_service.role_of(operator)
+            == operator_service.ROLE_MEMBER else None)),
     ):
         try:
             view[key] = loader()

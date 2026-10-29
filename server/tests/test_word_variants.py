@@ -17,6 +17,15 @@ def test_removal_matches_spaces_and_inserted_hyphens() -> None:
     assert removed == ["free shipping", "nike"]
 
 
+@pytest.mark.parametrize("separator", ["\u200b", "\u00ad"])
+def test_invisible_separators_do_not_bypass_word_matching(separator: str) -> None:
+    title = f"free{separator}shipping shoes"
+    words = [("free shipping", "remove")]
+
+    assert word_service.matched_words(title, words) == words
+    assert word_service.clean_title(title, words) == ("shoes", ["free shipping"])
+
+
 def test_ascii_word_boundaries_still_protect_unrelated_words() -> None:
     cleaned, removed = word_service.clean_title(
         "freedom shoes", [("free", "remove")],

@@ -9,6 +9,7 @@ from core.config import get_settings
 from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
+from models.batch import Batch
 from models.product import Product
 from models.publish_log import PublishLog
 from services import account_service, operator_service, setting_service
@@ -241,6 +242,53 @@ def test_member_reads_are_scoped_to_owned_account(client, identities):
     assert {str(own_id), str(foreign_id)} <= set(
         teacher_templates.json()["selected"])
     assert own_id != foreign_id
+
+
+def test_member_bootstrap_hides_other_members_accounts_and_batches(client, identities):
+    db = SessionLocal()
+    try:
+        own_account = Account(
+            name="bootstrap own", app_key="bootstrap-own", app_secret_enc="",
+            owner_operator_id=identities["first_id"], shops="[]", is_default=False,
+        )
+        foreign_account = Account(
+            name="bootstrap foreign", app_key="bootstrap-foreign", app_secret_enc="",
+            owner_operator_id=identities["second_id"], shops="[]", is_default=False,
+        )
+        db.add_all([own_account, foreign_account])
+        db.flush()
+        own_account_id = str(own_account.id)
+        foreign_account_id = str(foreign_account.id)
+        own_batch_id = f"bootstrap-own-{uuid.uuid4().hex[:8]}"
+        foreign_batch_id = f"bootstrap-foreign-{uuid.uuid4().hex[:8]}"
+        db.add_all([
+            Batch(id=own_batch_id,
+                  account_id=own_account.id, operator_id=identities["first_id"],
+                  shop_id="own-shop", detail_ids=["101"], settings={}, results=[]),
+            Batch(id=foreign_batch_id,
+                  account_id=foreign_account.id, operator_id=identities["second_id"],
+                  shop_id="foreign-shop", detail_ids=["202"], settings={}, results=[]),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get(API + "/system/bootstrap",
+                          headers=_headers(identities["first_token"]))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    visible_accounts = {row["id"] for row in body["accounts"]}
+    assert own_account_id in visible_accounts
+    assert foreign_account_id not in visible_accounts
+    visible_batches = {row["id"] for row in body["batches"]["items"]}
+    assert own_batch_id in visible_batches
+    assert foreign_batch_id not in visible_batches
+
+    teacher_response = client.get(
+        API + "/system/bootstrap", headers=_headers(identities["teacher_token"]))
+    assert teacher_response.status_code == 200, teacher_response.text
+    teacher_batches = {row["id"] for row in teacher_response.json()["batches"]["items"]}
+    assert {own_batch_id, foreign_batch_id} <= teacher_batches
 
 
 def test_teacher_must_target_a_student_to_bind_key(client, identities, monkeypatch):

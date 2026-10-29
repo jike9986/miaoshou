@@ -75,6 +75,7 @@ import { ProductDetailDrawer } from "@/features/warehouse/ProductDetailDrawer";
 import { PricePreviewDialog } from "@/features/warehouse/PricePreviewDialog";
 import { TransformDialog } from "@/features/warehouse/TransformDialog";
 import { PublishDialog } from "@/features/publish/PublishDialog";
+import { partitionMemberSelection } from "@/features/warehouse/warehouseSelection";
 import { BatchPanel } from "@/features/batch/BatchPanel";
 
 const PAGE_SIZE_OPTIONS = [24, 48, 72, 100];
@@ -157,21 +158,23 @@ export function WarehousePage() {
   const [createBatchOpen, setCreateBatchOpen] = useState(false);
   // 选中时保存来源店铺，翻页后也能向发布弹窗提供完整的跨店判断数据。
   const [sourceShopIds, setSourceShopIds] = useState<Record<string, string>>({});
+  // 学员的认领/发布动作跨页时也需要知道所选商品当前的认领状态。
+  const [selectedClaimed, setSelectedClaimed] = useState<Record<string, boolean>>({});
 
   const [carrierOpen, setCarrierOpen] = useState(false);
   const claimSharedProduct = useMutation({
     mutationFn: async (ids: string[]) => {
-      let claimed = 0;
+      const claimedIds: string[] = [];
       const failures: string[] = [];
       for (const id of ids) {
         try {
           await api.post(`/warehouse/${encodeURIComponent(id)}/claim`);
-          claimed += 1;
+          claimedIds.push(id);
         } catch (error) {
           failures.push(apiErrorMessage(error));
         }
       }
-      return { claimed, failures };
+      return { claimedIds, failures };
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["warehouse"] });
@@ -182,9 +185,8 @@ export function WarehousePage() {
   const selectedIds = query.selected;
   const selectedCount = selectedIds.length;
   const pageIds = items.map((item) => item.id);
-  const selectedItems = items.filter((item) => selectedIds.includes(item.id));
-  const memberClaimableIds = selectedItems.filter((item) => !item.claimed).map((item) => item.id);
-  const memberPublishableIds = selectedItems.filter((item) => item.claimed).map((item) => item.id);
+  const { claimable: memberClaimableIds, publishable: memberPublishableIds } =
+    partitionMemberSelection(selectedIds, selectedClaimed);
   // 选中商品各自的当前版本号：批量改分类时带上，任何一件被别人改过就整体回滚
   // 老后端列表不回 revision → 这个 map 是空的 → 请求里不带 expectedRevisions
   const selectedRevisions = useMemo(() => {
@@ -203,6 +205,7 @@ export function WarehousePage() {
   const clearWarehouseSelection = useCallback(() => {
     clearSelected();
     setSourceShopIds({});
+    setSelectedClaimed({});
   }, [clearSelected]);
 
   const toggleWarehouseSelection = useCallback((id: string) => {
@@ -213,8 +216,14 @@ export function WarehousePage() {
         delete next[id];
         return next;
       });
+      setSelectedClaimed((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
     } else if (item) {
       setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
+      setSelectedClaimed((current) => ({ ...current, [id]: item.claimed }));
     }
     toggleSelected(id);
   }, [items, selectedIds, toggleSelected]);
@@ -222,6 +231,7 @@ export function WarehousePage() {
   const selectWarehouseItem = useCallback((id: string) => {
     const item = items.find((candidate) => candidate.id === id);
     if (item) setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
+    if (item) setSelectedClaimed((current) => ({ ...current, [id]: item.claimed }));
     toggleSelected(id);
   }, [items, toggleSelected]);
 
@@ -229,6 +239,11 @@ export function WarehousePage() {
     if (allSelectedOnPage) {
       deselectMany(pageIds);
       setSourceShopIds((current) => {
+        const next = { ...current };
+        for (const id of pageIds) delete next[id];
+        return next;
+      });
+      setSelectedClaimed((current) => {
         const next = { ...current };
         for (const id of pageIds) delete next[id];
         return next;
@@ -241,6 +256,11 @@ export function WarehousePage() {
       for (const item of items) next[item.id] = String(item.shopId ?? "");
       return next;
     });
+    setSelectedClaimed((current) => {
+      const next = { ...current };
+      for (const item of items) next[item.id] = item.claimed;
+      return next;
+    });
   }, [allSelectedOnPage, deselectMany, items, pageIds, selectMany]);
 
   // Store filter/page-size changes clear its selection internally; keep the local snapshots in sync.
@@ -250,16 +270,25 @@ export function WarehousePage() {
       const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
+    setSelectedClaimed((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
   }, [selectedIds]);
 
   const claimSelectedForMember = async (): Promise<void> => {
-    const { claimed, failures } = await claimSharedProduct.mutateAsync(memberClaimableIds);
+    const { claimedIds, failures } = await claimSharedProduct.mutateAsync(memberClaimableIds);
+    setSelectedClaimed((current) => {
+      const next = { ...current };
+      for (const id of claimedIds) next[id] = true;
+      return next;
+    });
     if (failures.length > 0) {
-      toast.warning(`已认领 ${claimed} 件，${failures.length} 件失败`, {
+      toast.warning(`已认领 ${claimedIds.length} 件，${failures.length} 件失败`, {
         description: failures[0],
       });
     } else {
-      toast.success(`已认领 ${claimed} 件成品`);
+      toast.success(`已认领 ${claimedIds.length} 件成品`);
     }
   };
 

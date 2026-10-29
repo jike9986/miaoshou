@@ -580,7 +580,8 @@ def _word_pattern(word: str) -> re.Pattern[str]:
     normalized_word = unicodedata.normalize("NFKC", str(word or "")).casefold()
     characters = [char for char in normalized_word
                   if char not in " \t\r\n-‐‑‒–—"]
-    separator = r"[\s\-‐‑‒–—]*"
+    # Invisible formatting separators can be inserted to evade literal checks.
+    separator = r"[\s\-‐‑‒–—\u00ad\u200b-\u200f\u2060\ufeff]*"
     pattern = separator.join(re.escape(char) for char in characters) or re.escape(normalized_word)
     if normalized_word and normalized_word[0].isascii() and normalized_word[0].isalnum():
         pattern = r"(?<![A-Za-z0-9_])" + pattern
