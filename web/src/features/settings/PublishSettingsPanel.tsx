@@ -71,7 +71,7 @@ export function PublishSettingsPanel() {
 
       {status && enabled && (
         <p className="mt-2 text-2xs text-fg-muted">
-          开启后，自动化页处理成功的商品可以认领到所选店铺的采集箱（仍需人工确认后上架）。
+          自动化任务会将处理完成的商品正式发布到任务目标店铺；只有妙手回执确认成功后才记为发布成功，未确认的结果会保留待核对状态。
         </p>
       )}
     </Card>

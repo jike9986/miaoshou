@@ -76,6 +76,8 @@ export interface ProcessSettingsProps {
   connected: boolean;
   /** 打开定价模板弹窗（GET /system/templates） */
   onOpenTemplates: () => void;
+  /** 当前任务固定的目标店铺；没有任务时显示当前店铺或未选择状态 */
+  publishShopName: string;
   /** 运行中：全部控件禁用 */
   disabled?: boolean;
   className?: string;
@@ -86,6 +88,7 @@ export function ProcessSettings({
   onChange,
   connected,
   onOpenTemplates,
+  publishShopName,
   disabled = false,
   className,
 }: ProcessSettingsProps) {
@@ -245,7 +248,7 @@ export function ProcessSettings({
               />
             </span>
 
-            {/* 四个功能开关统一样式；模板名和店铺名是可点击入口，用品牌色区别普通文字 */}
+            {/* 定价模板是唯一可点击入口；发布开关旁显示固定目标店铺 */}
             <span className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap">
               <Switch
                 checked={settings.priceTemplateEnabled}
@@ -281,15 +284,11 @@ export function ProcessSettings({
                 aria-label="开启发布到店铺"
                 disabled={disabled}
               />
-              <span className="relative inline-flex h-8 items-center">
-                <span
-                  className={cn(
-                    "pointer-events-none text-[13px] font-medium leading-[18px] text-brand-700 underline decoration-brand-600/30 underline-offset-4",
-                  (disabled || !connected) && "opacity-60"
-                  )}
-                >
+              <span className="inline-flex h-8 items-center gap-1 whitespace-nowrap text-[13px] leading-[18px]">
+                <span className={cn("font-medium text-fg", (disabled || !connected) && "opacity-60")}>
                   发布到店铺
                 </span>
+                <span className="text-fg-muted">· {publishShopName}</span>
               </span>
             </span>
           </div>

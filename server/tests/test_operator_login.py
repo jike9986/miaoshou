@@ -196,9 +196,12 @@ def test_operator_list_hides_usernames_from_anonymous_and_members(client, tokens
     anonymous = client.get(API + "/operators").json()
     assert all("username" not in row for row in anonymous["operators"])
     assert "username" not in anonymous["current"]
+    assert [row["id"] for row in anonymous["operators"]] == [
+        anonymous["current"]["id"]]
 
     member = client.get(API + "/operators", headers=auth(tokens, "member")).json()
     assert all("username" not in row for row in member["operators"])
+    assert [row["id"] for row in member["operators"]] == [member["current"]["id"]]
     teacher = client.get(API + "/operators", headers=auth(tokens, "teacher")).json()
     assert f"private-{suffix}" in {row.get("username") for row in teacher["operators"]}
 

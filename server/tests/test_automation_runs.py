@@ -97,7 +97,7 @@ def create_automation_product(setup: dict[str, object], detail_id: str,
             warehouse_key=f"run-product-{uuid.uuid4().hex}",
             account_id=int(setup["account_id"]), detail_id=detail_id, shop_id=shop_id,
             title="Automation test", status="ready", automation_result=True,
-            claimed=False, collected={}, payload={},
+            claimed=False, collected={}, payload={}, draft_verified_revision=1,
         )
         db.add(product)
         db.commit()
@@ -215,9 +215,11 @@ def test_succeeded_item_cannot_be_started_again(client, setup):
     assert client.post(
         API + f"/automation-runs/{run_id}/items/{item_id}/start", headers=auth
     ).status_code == 200
+    item = run["items"][0]
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
     finished = client.post(
         API + f"/automation-runs/{run_id}/items/{item_id}/process-result",
-        json={"status": "succeeded", "productId": None,
+        json={"status": "succeeded", "productId": str(product.id),
               "result": {"textDone": True}}, headers=auth,
     )
     assert finished.status_code == 200, finished.text
@@ -226,6 +228,66 @@ def test_succeeded_item_cannot_be_started_again(client, setup):
     repeated = client.post(
         API + f"/automation-runs/{run_id}/items/{item_id}/start", headers=auth)
     assert repeated.status_code == 409, repeated.text
+
+
+def test_process_success_rejects_client_claim_without_verified_product(client, setup):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+
+    db = SessionLocal()
+    try:
+        product = Product(
+            warehouse_key=f"unverified-{uuid.uuid4().hex}",
+            account_id=int(setup["account_id"]), detail_id=item["detailId"],
+            shop_id=item["shopId"], title="Unverified", automation_result=True,
+            status="ready", claimed=False, collected={}, payload={},
+        )
+        db.add(product)
+        db.commit()
+        product_id = product.id
+    finally:
+        db.close()
+
+    forged = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product_id),
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"failed": 0}}},
+        headers=auth,
+    )
+    assert forged.status_code == 409, forged.text
+    current = client.get(API + f"/automation-runs/{run['id']}", headers=auth)
+    assert current.json()["run"]["items"][0]["processStatus"] == "running"
+
+
+def test_process_success_rejects_stale_verified_revision(client, setup):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
+    db = SessionLocal()
+    try:
+        row = db.query(Product).filter_by(id=product.id).one()
+        row.revision += 1
+        db.commit()
+    finally:
+        db.close()
+
+    stale = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"failed": 0}}},
+        headers=auth,
+    )
+    assert stale.status_code == 409, stale.text
 
 
 def test_student_cannot_read_another_operators_run(client, setup):
@@ -448,6 +510,92 @@ def test_skipped_publish_can_be_recorded_as_needs_review(client, setup):
     assert result["status"] == "needs_review"
 
 
+def test_client_cannot_finish_automation_publish_as_succeeded(client, setup):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
+    processed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": False, "draftVerified": False,
+                         "images": {"failed": 0}}},
+        headers=auth,
+    )
+    assert processed.status_code == 200, processed.text
+    recorded_result = processed.json()["run"]["items"][0]["processResult"]
+    assert recorded_result["saved"] is True
+    assert recorded_result["draftVerified"] is True
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        headers=auth,
+    ).status_code == 200
+
+    forged = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-result",
+        json={"status": "succeeded", "result": {"batchId": "forged"}},
+        headers=auth,
+    )
+    assert forged.status_code == 409, forged.text
+    current = client.get(API + f"/automation-runs/{run['id']}", headers=auth)
+    assert current.json()["run"]["items"][0]["publishStatus"] == "running"
+
+
+def test_successful_automation_results_require_current_verified_revision(client, setup):
+    run = create_run(client, setup)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
+    db = SessionLocal()
+    try:
+        row = db.query(Product).filter_by(id=product.id).one()
+        row.revision += 1
+        db.commit()
+    finally:
+        db.close()
+
+    forged = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True}},
+        headers=auth,
+    )
+    assert forged.status_code == 409, forged.text
+
+
+def test_publish_receipt_endpoint_rejects_client_success_status(client, setup):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"images": {"failed": 0}}},
+        headers=auth,
+    ).status_code == 200
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        headers=auth,
+    ).status_code == 200
+
+    response = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-result",
+        json={"status": "succeeded", "result": {"batchId": "fake"}},
+        headers=auth,
+    )
+    assert response.status_code == 409, response.text
+
+
 def test_recovery_closes_unstarted_publish_after_successful_processing(client, setup):
     run = create_run(client, setup, publish_enabled=True)
     item = run["items"][0]
@@ -493,7 +641,7 @@ def test_publish_receipt_updates_only_matching_automation_item(
             account_id=int(setup["account_id"]), detail_id=detail_id,
             shop_id=item["shopId"],
             title="Receipt test", status="ready", automation_result=True, claimed=False,
-            collected={}, payload={},
+            collected={}, payload={}, draft_verified_revision=1,
         )
         db.add(product)
         db.commit()

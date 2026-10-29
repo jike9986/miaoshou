@@ -387,6 +387,44 @@ def test_teacher_can_assign_legacy_unowned_key_to_student(client, identities, mo
     assert response.json()["boundByOperatorId"] == str(identities["teacher_id"])
 
 
+def test_app_key_cannot_be_bound_to_multiple_students_but_owner_can_reconnect(
+        client, identities, monkeypatch):
+    monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
+    app_key = f"shared-key-{uuid.uuid4().hex[:8]}"
+    app_secret = "private-app-secret"
+
+    first = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
+        headers=_headers(identities["first_token"]),
+    )
+    assert first.status_code == 200, first.text
+    first_account_id = first.json()["accountId"]
+
+    duplicate = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
+        headers=_headers(identities["second_token"]),
+    )
+    assert duplicate.status_code == 409, duplicate.text
+    assert app_secret not in duplicate.text
+
+    reconnected = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
+        headers=_headers(identities["first_token"]),
+    )
+    assert reconnected.status_code == 200, reconnected.text
+    assert reconnected.json()["accountId"] == first_account_id
+    assert reconnected.json()["ownerOperatorId"] == str(identities["first_id"])
+
+    db = SessionLocal()
+    try:
+        assert db.query(Account).filter(Account.app_key == app_key).count() == 1
+    finally:
+        db.close()
+
+
 def test_image_jobs_and_result_files_are_isolated_by_operator(client, identities):
     db = SessionLocal()
     try:

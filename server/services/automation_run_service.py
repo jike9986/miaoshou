@@ -224,16 +224,6 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
     if row.process_status not in {"running", "needs_review"}:
         raise errors.AppError("CONFLICT", "该商品不处于可记录处理结果的状态",
                               status=409)
-    if (status == "succeeded" and run.settings.get("publishEnabled") is True
-            and (product_id in (None, "")
-                 or not isinstance(result, Mapping)
-                 or result.get("saved") is not True
-                 or result.get("draftVerified") is not True
-                 or (run.settings.get("imagesEnabled") is True
-                     and (not isinstance(result.get("images"), Mapping)
-                          or result["images"].get("failed") != 0)))):
-        raise errors.AppError(
-            "CONFLICT", "发布前需确认商品已保存、草稿读回通过且图片处理无失败", status=409)
     product_pk = None
     if product_id not in (None, ""):
         text = str(product_id)
@@ -241,7 +231,10 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
             raise errors.validation("productId 必须是数字", field="productId")
         product_pk = int(text)
     server_verification: dict[str, Any] | None = None
-    if status == "succeeded" and run.settings.get("publishEnabled") is True:
+    if status == "succeeded":
+        if product_pk is None:
+            raise errors.AppError(
+                "CONFLICT", "处理成功必须关联已保存并核验的商品", status=409)
         product = db.query(Product).filter(
             Product.id == product_pk,
             Product.account_id == run.account_id,
@@ -249,9 +242,18 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
             Product.detail_id == row.detail_id,
             Product.shop_id == row.source_shop_id,
         ).one_or_none()
-        if product is None or product.updated_at < row.updated_at:
+        if (product is None or product.updated_at < row.updated_at
+                or product.draft_verified_revision is None
+                or product.draft_verified_revision != product.revision):
             raise errors.AppError(
-                "CONFLICT", "发布目标不是本次处理后保存的自动化商品", status=409)
+                "CONFLICT", "商品没有与当前版本匹配的妙手草稿读回核验", status=409)
+        if (run.settings.get("publishEnabled") is True
+                and run.settings.get("imagesEnabled") is True
+                and (not isinstance(result, Mapping)
+                     or not isinstance(result.get("images"), Mapping)
+                     or result["images"].get("failed") != 0)):
+            raise errors.AppError(
+                "CONFLICT", "发布前需确认图片处理无失败", status=409)
         server_verification = {
             "productId": str(product.id),
             "productUpdatedAt": product.updated_at,
@@ -260,7 +262,12 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
     row.process_status = status
     row.process_reason = str(reason or "")[:2000]
     row.product_id = product_pk
-    row.process_result = dict(result or {})
+    row.process_result = {
+        key: value for key, value in (result or {}).items()
+        if key not in {"_serverVerification", "saved", "draftVerified"}
+    }
+    if status == "succeeded":
+        row.process_result.update({"saved": True, "draftVerified": True})
     if server_verification is not None:
         row.process_result["_serverVerification"] = server_verification
     if row.publish_status == "queued" and status in {"failed", "needs_review"}:
@@ -295,7 +302,8 @@ def start_publish(db: Session, run: AutomationRun, item_id: Any) -> dict[str, An
     ).one_or_none()
     if (product is None
             or product.updated_at != server_verification.get("productUpdatedAt")
-            or product.revision != server_verification.get("productRevision")):
+            or product.revision != server_verification.get("productRevision")
+            or product.draft_verified_revision != product.revision):
         raise errors.AppError(
             "CONFLICT", "商品自处理核验后发生变化，请重新处理并核对", status=409)
     if run.settings.get("imagesEnabled") is True:
@@ -325,6 +333,9 @@ def finish_publish(db: Session, run: AutomationRun, item_id: Any, *, status: str
                     reason: str = "", result: Mapping[str, Any] | None = None) -> dict[str, Any]:
     if status not in {"succeeded", "failed", "needs_review"}:
         raise errors.validation("发布结果状态无效", field="status")
+    if status == "succeeded":
+        raise errors.AppError(
+            "CONFLICT", "发布成功状态只能由妙手发布回执确认", status=409)
     row = _get_item(db, run, item_id)
     if row.publish_status not in {"running", "needs_review"} and not (
         row.publish_status == "queued" and status == "needs_review"

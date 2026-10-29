@@ -137,18 +137,17 @@ def list_operators(db: DbSession,
     if current is None:
         current = operator_service.ensure_default(db)
         db.flush()
-    rows = operator_service.list_all(db)
     can_manage_accounts = bool(
         operator is not None
         and operator_service.role_of(operator) in {
             operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER})
     current_data = operator_service.serialize(current)
-    if not can_manage_accounts:
-        for row in rows:
-            row.pop("username", None)
-            row.pop("hasLoginCredentials", None)
+    if can_manage_accounts:
+        rows = operator_service.list_all(db)
+    else:
         current_data.pop("username", None)
         current_data.pop("hasLoginCredentials", None)
+        rows = [current_data]
     return {
         # 两个键名都给：前端 types.ts 里是 operators，任务书写的是 items
         "operators": rows,

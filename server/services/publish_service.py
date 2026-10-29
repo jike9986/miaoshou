@@ -140,6 +140,9 @@ def _require_started_automation_publish(db: Session, *, entries: list[dict[str, 
     if any(product.account_id != account.id for product in products):
         raise errors.AppError(
             "CONFLICT", "自动化商品所属账号与发布账号不一致", status=409)
+    if any(product.draft_verified_revision != product.revision for product in products):
+        raise errors.AppError(
+            "CONFLICT", "自动化商品没有与当前版本匹配的妙手草稿读回核验", status=409)
 
     product_ids = {product.id for product in products}
     rows = (db.query(AutomationRunItem, AutomationRun)

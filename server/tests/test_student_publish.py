@@ -147,6 +147,7 @@ def test_automation_result_cannot_publish_before_run_item_is_started(publish_db,
     teacher, account = _identity(db, suffix, role=operator_service.ROLE_TEACHER)
     product = _product(db, suffix, account)
     product.automation_result = True
+    product.draft_verified_revision = product.revision
     _automation_run(db, suffix, teacher, account, product, publish_status="queued")
     _stub_member_publish(monkeypatch, db, account)
 
@@ -163,6 +164,7 @@ def test_automation_result_can_publish_after_run_item_is_started(publish_db, mon
     teacher, account = _identity(db, suffix, role=operator_service.ROLE_TEACHER)
     product = _product(db, suffix, account)
     product.automation_result = True
+    product.draft_verified_revision = product.revision
     _automation_run(db, suffix, teacher, account, product, publish_status="running")
     _stub_member_publish(monkeypatch, db, account)
 

@@ -10,12 +10,12 @@ from sqlalchemy import (
     JSON,
     Float,
     ForeignKey,
-    false,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -115,6 +115,9 @@ class Product(Base):
     revision: Mapped[int] = mapped_column(
         Integer, default=1, server_default="1", nullable=False
     )
+    # Set only after the processed payload has been read back from Miaoshou.
+    # A value is valid only for the exact local product revision it records.
+    draft_verified_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("account_id", "detail_id", "shop_id", name="uq_products_identity"),

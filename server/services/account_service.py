@@ -331,6 +331,19 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
             raise errors.validation("App Secret 不能为空", field="appSecret")
         if len(app_secret) > 512:
             raise errors.validation("App Secret 长度不能超过 512", field="appSecret")
+        if owner_operator_id is not None:
+            other_owner = (db.query(Account.id)
+                           .filter(Account.app_key == app_id,
+                                   Account.owner_operator_id.isnot(None),
+                                   Account.owner_operator_id != owner_operator_id)
+                           .first())
+            if other_owner is not None:
+                raise errors.AppError(
+                    "CONFLICT", "这个妙手账号已绑定到其他学员", status=409)
+            existing = (db.query(Account)
+                        .filter(Account.app_key == app_id,
+                                Account.owner_operator_id == owner_operator_id)
+                        .order_by(Account.id.asc()).first())
 
     label = clean_text(name, 60)
     if label and name_taken(db, label, exclude_id=existing.id if existing else None):

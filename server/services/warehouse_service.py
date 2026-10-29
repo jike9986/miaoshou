@@ -656,6 +656,7 @@ def _successful_automation_product_ids(db: Session):
             .join(Product, Product.id == AutomationRunItem.product_id)
             .filter(
                 AutomationRunItem.process_status == "succeeded",
+                Product.draft_verified_revision == Product.revision,
                 AutomationRun.account_id == Product.account_id,
                 AutomationRunItem.detail_id == Product.detail_id,
                 AutomationRunItem.source_shop_id == Product.shop_id,
@@ -1935,6 +1936,14 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         if images:
             product.cover = images[0]
         db.flush()
+
+    # Bind the upstream readback result to this exact product revision. A local
+    # image replacement happens after the upstream save, so it invalidates proof.
+    product.draft_verified_revision = (
+        int(product.revision) if draft_verified and not image_applied.get("replaced")
+        else None
+    )
+    db.flush()
 
     names = account_names(db)
     operators = operator_names(db)

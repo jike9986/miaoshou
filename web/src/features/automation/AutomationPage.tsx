@@ -225,6 +225,7 @@ export function AutomationPage() {
   const createRunMutation = useCreateAutomationRun();
   // 查找该妙手账号最近的任务，不按当前店铺过滤；任务恢复后沿用它自己的目标店铺。
   const latestRunQuery = useLatestAutomationRun(status?.accountId ?? null, null, connected);
+  const shopsQuery = useShops(status?.accountId, { enabled: connected });
   const recoverRunMutation = useRecoverAutomationRun();
   const startRunItemMutation = useStartAutomationRunItem();
   const recordProcessMutation = useAutomationRunProcessResult();
@@ -237,6 +238,12 @@ export function AutomationPage() {
   const startingRunRef = useRef(false);
   const [preparingRun, setPreparingRun] = useState(false);
   const running = run.phase === "running";
+  const savedRun = latestRunQuery.data?.run;
+  const targetShopId = savedRun?.shopId ?? currentShopId;
+  const targetShopName = shopsQuery.data?.shops.find((shop) => shop.shopId === targetShopId)?.name;
+  const publishShopName = savedRun
+    ? targetShopName ?? "任务目标店铺"
+    : targetShopName ?? (currentShopId ? "当前店铺" : "未选择店铺");
   // 两个开关都关着就没有可执行内容：按钮置灰并说明原因（老版 summary-warning）
   const somethingEnabled = settings.textEnabled || settings.imagesEnabled;
   const publishConfigIssue = settings.publishEnabled
@@ -389,8 +396,7 @@ export function AutomationPage() {
   /* ---------------- 真正执行：串行处理入仓 ---------------- */
   const processItem = useProcessCollectItem();
   const publish = usePublish();
-  // 店铺名称用于任务反馈；发布目标跟随顶部当前店铺。
-  const shopsQuery = useShops(status?.accountId, { enabled: connected });
+  // 新任务跟随顶部店铺，恢复任务继续使用创建时保存的目标店铺。
 
   const executeRun = async (): Promise<void> => {
     if (!connected) {
@@ -949,6 +955,7 @@ export function AutomationPage() {
                     onChange={patchSettings}
                     connected={connected}
                     onOpenTemplates={() => setTemplatesOpen(true)}
+                    publishShopName={publishShopName}
                     disabled={running}
                   />
                 </div>

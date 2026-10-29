@@ -272,18 +272,23 @@ def test_automation_results_are_hidden_until_teacher_imports_them(client, tokens
         pending = Product(
             warehouse_key=f"{suffix}:1", detail_id=suffix, shop_id="1",
             title="Processed item", status="published", payload={},
-            account_id=account.id, automation_result=True,
+            account_id=account.id, automation_result=True, draft_verified_revision=1,
         )
         failed = Product(
             warehouse_key=f"{suffix}:failed", detail_id=f"{suffix}2", shop_id="2",
             title="Failed item", status="ready", payload={},
             account_id=account.id, automation_result=True,
         )
+        forged = Product(
+            warehouse_key=f"{suffix}:forged", detail_id=f"{suffix}3", shop_id="3",
+            title="Unverified item", status="ready", payload={},
+            account_id=account.id, automation_result=True,
+        )
         regular = Product(
             warehouse_key=f"{suffix}:2", detail_id=suffix, shop_id="2",
             title="Finished item", status="ready", payload={},
         )
-        db.add_all([pending, failed, regular])
+        db.add_all([pending, failed, forged, regular])
         db.flush()
         successful_run = AutomationRun(
             id=f"arun_{uuid.uuid4().hex}", owner_operator_id=teacher.id,
@@ -304,10 +309,15 @@ def test_automation_results_are_hidden_until_teacher_imports_them(client, tokens
                 run_id=failed_run.id, key=f"{suffix}2:2", detail_id=f"{suffix}2",
                 source_shop_id="2", process_status="failed", product_id=failed.id,
             ),
+            AutomationRunItem(
+                run_id=successful_run.id, key=f"{suffix}3:3", detail_id=f"{suffix}3",
+                source_shop_id="3", process_status="succeeded", product_id=forged.id,
+            ),
         ])
         db.commit()
         pending_id = str(pending.id)
         failed_id = str(failed.id)
+        forged_id = str(forged.id)
         regular_id = str(regular.id)
     finally:
         db.close()
@@ -321,11 +331,16 @@ def test_automation_results_are_hidden_until_teacher_imports_them(client, tokens
     assert results.status_code == 200, results.text
     assert pending_id in {item["id"] for item in results.json()["items"]}
     assert failed_id not in {item["id"] for item in results.json()["items"]}
+    assert forged_id not in {item["id"] for item in results.json()["items"]}
 
     rejected = client.post(
         API + "/warehouse/automation-results/import",
         json={"ids": [failed_id]}, headers=teacher)
     assert rejected.status_code == 400, rejected.text
+    forged_rejected = client.post(
+        API + "/warehouse/automation-results/import",
+        json={"ids": [forged_id]}, headers=teacher)
+    assert forged_rejected.status_code == 400, forged_rejected.text
 
     warehouse = client.get(API + "/warehouse", headers=teacher)
     assert warehouse.status_code == 200, warehouse.text
