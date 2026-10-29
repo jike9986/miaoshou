@@ -43,8 +43,8 @@ export const buttonVariants = cva(
       },
       size: {
         sm: "h-7 rounded-sm px-2.5 text-[13px] leading-5 gap-1.5 [&_svg]:size-3.5",
-        md: "h-9 rounded-md px-3.5 text-sm gap-2 [&_svg]:size-4",
-        lg: "h-11 rounded-[10px] px-5 text-[15px] gap-2 [&_svg]:size-[18px]",
+        md: "h-9 rounded-md px-3.5 text-base gap-2 [&_svg]:size-4",
+        lg: "h-11 rounded-[10px] px-5 text-base gap-2 [&_svg]:size-[18px]",
       },
       /** 占满父容器（抽屉底部整行主操作） */
       block: { true: "w-full", false: "" },

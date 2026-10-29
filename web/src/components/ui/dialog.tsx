@@ -1,5 +1,5 @@
 // design-system §5.12 弹窗(Dialog) · §4.5 层级(overlay 50 / modal 60) · §6.2 动效
-// 遮罩 opacity 0→1 160ms；内容 scale .96→1 + y 4→0 200ms out；关闭 140ms in。
+// 遮罩与内容只做进入动画；关闭立即卸载，避免透明退出层残留并阻挡页面。
 // 焦点锁定在弹窗内、Esc 关闭、危险确认默认聚焦「取消」、表单类弹窗点遮罩不关闭。
 
 import {
@@ -12,7 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ease, overlayFade, scaleIn } from "@/lib/motion";
@@ -26,7 +26,12 @@ import { Button } from "@/components/ui/button";
 const FOCUSABLE =
   'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
-export function useFocusTrap(active: boolean, containerRef: React.RefObject<HTMLElement>, initialRef?: React.RefObject<HTMLElement>) {
+export function useFocusTrap(
+  active: boolean,
+  containerRef: React.RefObject<HTMLElement>,
+  initialRef?: React.RefObject<HTMLElement>,
+  initialSelector?: string
+) {
   useEffect(() => {
     if (!active) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -34,7 +39,9 @@ export function useFocusTrap(active: boolean, containerRef: React.RefObject<HTML
     // 打开时聚焦第一个可交互元素，或指定的初始焦点
     const target =
       initialRef?.current ??
-      (containerRef.current?.querySelector<HTMLElement>(`${FOCUSABLE}:not([data-focus-skip])`) ?? null);
+      (initialSelector ? containerRef.current?.querySelector<HTMLElement>(initialSelector) : null) ??
+      containerRef.current?.querySelector<HTMLElement>(`${FOCUSABLE}:not([data-focus-skip])`) ??
+      null;
     target?.focus({ preventScroll: true });
 
     // 锁定背景滚动
@@ -49,7 +56,7 @@ export function useFocusTrap(active: boolean, containerRef: React.RefObject<HTML
         previous?.focus({ preventScroll: true });
       });
     };
-  }, [active, containerRef, initialRef]);
+  }, [active, containerRef, initialRef, initialSelector]);
 }
 
 export function useTabTrap(containerRef: React.RefObject<HTMLElement>) {
@@ -121,13 +128,12 @@ export function Dialog({
   contentClassName,
 }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
   const descId = useId();
   const reduced = useReducedMotion();
   const onKeyDown = useTabTrap(panelRef);
 
-  useFocusTrap(open, panelRef, initialFocus === "cancel" ? cancelRef : undefined);
+  useFocusTrap(open, panelRef, undefined, initialFocus === "cancel" ? "[data-dialog-cancel]" : undefined);
 
   const handleClose = useCallback(() => onOpenChange(false), [onOpenChange]);
 
@@ -149,13 +155,11 @@ export function Dialog({
     ? {
         hidden: { opacity: 0 },
         show: { opacity: 1, transition: { duration: 0.2, ease: ease.out } },
-        exit: { opacity: 0, transition: { duration: 0.14, ease: ease.in } },
       }
     : scaleIn;
 
   return createPortal(
-    <AnimatePresence>
-      {open && (
+    open ? (
         <div
           className="fixed inset-0 z-[50]"
           role="dialog"
@@ -164,11 +168,10 @@ export function Dialog({
           aria-describedby={description ? descId : undefined}
         >
           <motion.div
-            className="absolute inset-0 bg-overlay/45 backdrop-blur-[2px]"
+            className="absolute inset-0 bg-overlay backdrop-blur-[2px]"
             variants={overlayFade}
             initial="hidden"
             animate="show"
-            exit="exit"
             onClick={closeOnOverlay ? handleClose : undefined}
           />
           <div className="pointer-events-none absolute inset-0 grid place-items-center p-6">
@@ -220,8 +223,7 @@ export function Dialog({
             </motion.div>
           </div>
         </div>
-      )}
-    </AnimatePresence>,
+      ) : null,
     document.body
   );
 }
@@ -268,7 +270,7 @@ export function ConfirmDialog({
       footer={
         <>
           {/* 危险确认默认聚焦「取消」：首个按钮即取消，符合 §5.12 的焦点要求 */}
-          <Button variant="secondary" onClick={() => onOpenChange(false)}>
+          <Button data-dialog-cancel variant="secondary" onClick={() => onOpenChange(false)}>
             {cancelLabel}
           </Button>
           <Button variant={danger ? "danger" : "primary"} loading={loading} onClick={onConfirm}>

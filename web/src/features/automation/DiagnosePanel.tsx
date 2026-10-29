@@ -93,14 +93,14 @@ export function DiagnosePanel({ selected }: DiagnosePanelProps) {
                 key={`${entry.code}-${index}`}
                 className={
                   isWarning
-                    ? "flex items-start gap-1.5 rounded border border-line bg-surface-sunken px-2 py-1"
-                    : "flex items-start gap-1.5 rounded border border-warning-200 bg-warning-50 px-2 py-1.5"
+                    ? "flex items-start gap-1.5 rounded border border-border bg-canvas-inset px-2 py-1"
+                    : "flex items-start gap-1.5 rounded border border-warning-600/20 bg-warning-50 px-2 py-1.5"
                 }
               >
                 <AlertTriangle
                   className={
                     isWarning
-                      ? "mt-0.5 size-3 shrink-0 text-fg-subtle"
+                      ? "mt-0.5 size-3 shrink-0 text-fg-muted"
                       : "mt-0.5 size-3 shrink-0 text-warning-700"
                   }
                   strokeWidth={2}

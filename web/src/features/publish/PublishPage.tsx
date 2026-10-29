@@ -140,7 +140,7 @@ export function PublishPage({ embedded = false }: { embedded?: boolean } = {}) {
           {/* 搜索：老版 publish-record-search，按 detailId / 标题 / 店铺过滤。
               发布记录一多就得靠这个找「那件到底成没成」。 */}
           <div className="relative w-[220px]">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-subtle" />
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-muted" />
             <Input
               size="md"
               className="pl-8"

@@ -52,6 +52,20 @@ export function Tabs<Value extends string = string>({
 }: TabsProps<Value>) {
   const layoutId = useId();
   const reduced = useReducedMotion();
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const moveFocus = (fromIndex: number, delta: 1 | -1 | "home" | "end"): void => {
+    const enabled = items.map((item, index) => ({ item, index })).filter(({ item }) => !item.disabled);
+    if (enabled.length === 0) return;
+    const target =
+      delta === "home"
+        ? enabled[0]
+        : delta === "end"
+          ? enabled[enabled.length - 1]
+          : enabled[(enabled.findIndex(({ index }) => index === fromIndex) + delta + enabled.length) % enabled.length];
+    tabRefs.current[target.index]?.focus();
+    onChange(target.item.value);
+  };
 
   return (
     <div
@@ -62,16 +76,35 @@ export function Tabs<Value extends string = string>({
       )}
     >
       <div role="tablist" aria-label={ariaLabel} className="flex items-center gap-1">
-        {items.map((item) => {
+        {items.map((item, index) => {
           const active = item.value === value;
           return (
             <button
+              ref={(node) => {
+                tabRefs.current[index] = node;
+              }}
               key={item.value}
               role="tab"
               type="button"
               aria-selected={active}
+              tabIndex={active ? 0 : -1}
               disabled={item.disabled}
               onClick={() => onChange(item.value)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowRight") {
+                  event.preventDefault();
+                  moveFocus(index, 1);
+                } else if (event.key === "ArrowLeft") {
+                  event.preventDefault();
+                  moveFocus(index, -1);
+                } else if (event.key === "Home") {
+                  event.preventDefault();
+                  moveFocus(index, "home");
+                } else if (event.key === "End") {
+                  event.preventDefault();
+                  moveFocus(index, "end");
+                }
+              }}
               className={cn(
                 "relative flex h-9 items-center gap-1.5 rounded-sm px-3 text-sm",
                 "transition-colors duration-fast ease-in-out",

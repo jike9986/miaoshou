@@ -359,7 +359,7 @@ export function PriceTemplateDialog({ open, onOpenChange }: PriceTemplateDialogP
           <button
             type="button"
             onClick={() => setAdvancedOpen((prev) => !prev)}
-            className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium text-fg-secondary transition-colors hover:bg-black/[0.03]"
+            className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium text-fg-secondary transition-colors hover:bg-surface-hover"
           >
             <span>一般无需修改</span>
             <ChevronDown

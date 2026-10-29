@@ -129,13 +129,13 @@ export function ImageJobRow({ job, disabled = false, className }: ImageJobRowPro
 
       {/* ready 但没有地址也没有错误：说明当时没传过（历史任务），按钮已经给了 */}
       {!publicUrl && !uploadError && job.status === "ready" && (
-        <p className="text-2xs leading-4 text-fg-subtle">
+        <p className="text-2xs leading-4 text-fg-muted">
           这个任务还没有公网地址；上游平台与导出需要公网链接，点「传到图床」补一个。
         </p>
       )}
 
       {publicUrl && job.uploadedAt ? (
-        <p className="text-2xs leading-4 text-fg-subtle">
+        <p className="text-2xs leading-4 text-fg-muted">
           已上传 · {formatDate(job.uploadedAt, "MM-DD HH:mm")}
         </p>
       ) : null}

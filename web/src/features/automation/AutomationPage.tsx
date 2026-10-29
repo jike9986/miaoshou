@@ -27,7 +27,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pencil, Play, Square, Tag } from "lucide-react";
 import { apiErrorMessage } from "@/lib/api";
-import { formatCount } from "@/lib/utils";
+import { formatCount, cn } from "@/lib/utils";
+import { useIsNarrow } from "@/hooks/useMediaQuery";
 import {
   useAuthStatus,
   useCollectBoxList,
@@ -87,6 +88,7 @@ const DATE_FORMAT = new Intl.DateTimeFormat("zh-CN", {
 export function AutomationPage() {
   const { data: status } = useAuthStatus();
   const connected = status?.connected ?? false;
+  const narrow = useIsNarrow();
 
   /* ---------------- 列表查询参数 ---------------- */
   const [page, setPage] = useState(1);
@@ -297,6 +299,7 @@ export function AutomationPage() {
     let imageDone = 0;
     let textDone = 0;
     let imageFailures = 0;
+    let claimFailures = 0;
     const failedKeys: string[] = [];
     const failures: RunFailure[] = [];
 
@@ -377,9 +380,7 @@ export function AutomationPage() {
               // 认领失败不算处理失败：商品已在仓库里，可以稍后从仓库手动认领。
               // 但要让用户知道这件事没做成，不能假装一切都好。
               const reason = apiErrorMessage(claimError);
-              toast.warning(`「${target.title || target.detailId}」已入仓，但认领到店铺失败`, {
-                description: reason,
-              });
+              claimFailures += 1;
               failures.push({
                 key: target.key,
                 title: (target.title || "") + "（认领失败）",
@@ -401,9 +402,6 @@ export function AutomationPage() {
           reason,
         });
         setStages((prev) => ({ ...prev, [target.key]: "failed" }));
-        toast.error(`处理失败：${target.title || target.detailId}`, {
-          description: reason,
-        });
       }
 
       done += 1;
@@ -427,7 +425,7 @@ export function AutomationPage() {
       imageDone,
       textDone,
       failedKeys,
-      stage: failed > 0 ? `完成，${failed} 件失败` : "全部完成",
+      stage: failures.length > 0 ? `完成，${failures.length} 项需检查` : "全部完成",
       endedAt: Date.now(),
     }));
 
@@ -437,9 +435,15 @@ export function AutomationPage() {
       });
     }
 
-    if (failed > 0) {
-      toast.warning(`已处理 ${succeeded} 件，${failed} 件失败`, {
-        description: "可在筛选里选「失败」逐条重试",
+    if (failed > 0 || claimFailures > 0) {
+      toast.warning(`已处理 ${succeeded} 件，${failed + claimFailures} 项需要检查`, {
+        description: [
+          failed > 0 ? `${failed} 件处理失败` : null,
+          claimFailures > 0 ? `${claimFailures} 件已入仓但认领失败` : null,
+          "失败明细保留在右侧「处理状态」面板，可筛选「失败」逐条重试",
+        ]
+          .filter(Boolean)
+          .join("；"),
       });
     } else {
       toast.success(`已处理入仓 ${succeeded} 件`);
@@ -496,18 +500,21 @@ export function AutomationPage() {
       {/* PageContent 外层默认 display:block，这里改成 flex 列，内层才能被撑成一屏高度 */}
       <PageContent
         width="full"
-        scroll={false}
+        scroll={narrow}
         padding="p-4"
-        className="flex flex-col overflow-hidden [&>div]:flex [&>div]:min-h-0 [&>div]:flex-1 [&>div]:flex-col [&>div]:gap-3"
+        className={cn(
+          "flex flex-col [&>div]:flex [&>div]:min-h-0 [&>div]:flex-1 [&>div]:flex-col [&>div]:gap-3",
+          narrow ? "overflow-y-auto" : "overflow-hidden"
+        )}
       >
         <div className="flex min-h-0 flex-1 flex-col gap-3">
           {/* 左主操作区 + 右侧固定进度列。本页不再放「连接妙手」面板：
               左侧导航已有独立板块，这里重复一份只会占掉列表高度。 */}
-          <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_320px] gap-3">
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
             {/* 左：选品（弹性撑满剩余高度）+ 处理设置（自然高度，超高自己滚） */}
-            <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
+            <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden max-lg:overflow-visible">
               <ProductPicker
-                className="min-h-[300px] min-w-0 flex-1"
+                className="min-h-[300px] min-w-0 flex-1 max-lg:flex-none"
                 connected={connected}
                 items={visibleItems}
                 total={total}
@@ -542,8 +549,8 @@ export function AutomationPage() {
                   没有第二个「开始处理」按钮 —— 老版只有标题栏那一个。 */}
               <Card
                 padding="normal"
-                className="shrink-0 overflow-y-auto"
-                style={{ maxHeight: "calc(100% - 312px)" }}
+                className="shrink-0 overflow-y-auto max-lg:max-h-none max-lg:overflow-visible"
+                style={narrow ? undefined : { maxHeight: "calc(100% - 312px)" }}
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="flex min-w-0 items-center gap-2">
@@ -573,7 +580,7 @@ export function AutomationPage() {
                 以前这里是 overflow-y-auto，内容一更新（进度百分比跳动）浏览器就会
                 把滚动位置往最近的锚点拽，看起来就是「右边的栏自己在动」。
                 改成 overflow-hidden + overscroll-contain，列表再变化也不动。 */}
-            <div className="min-h-0 overflow-hidden overscroll-contain pb-1">
+            <div className="min-h-0 overflow-hidden overscroll-contain pb-1 max-lg:shrink-0 max-lg:overflow-visible">
               <ProgressPanel
                 run={run}
                 settings={settings}

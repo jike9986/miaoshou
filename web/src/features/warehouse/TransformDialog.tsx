@@ -273,7 +273,7 @@ export function TransformDialog({
         </label>
 
         {transform.isError && (
-          <div className="rounded-md border border-danger-200 bg-danger-50 p-2.5 text-xs text-danger-700">
+          <div className="rounded-md border border-danger-600/20 bg-danger-50 p-2.5 text-xs text-danger-700">
             {apiErrorMessage(transform.error)}
           </div>
         )}

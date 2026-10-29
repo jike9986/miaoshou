@@ -202,8 +202,9 @@ export function ProcessSettings({
           )}
           {/* 第一行：语言 + 文字/图片开关 + 定价模板 + 发布到店铺（用户要求同行） */}
           <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
-            <Field label="商品文字语言" className="w-[140px] shrink-0">
+            <Field label="商品文字语言" htmlFor="process-language" className="w-[140px] shrink-0">
               <Select
+                id="process-language"
                 value={settings.language}
                 onChange={(value) =>
                   onChange({ language: value as AutomationSettings["language"] })
@@ -305,8 +306,9 @@ export function ProcessSettings({
 
           {/* 第二行：主图数量（用户要求：主图跟语言一行） + 重量 + 长宽高 */}
           <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
-            <Field label="主图数量" className="w-[100px] shrink-0">
+            <Field label="主图数量" htmlFor="main-image-count" className="w-[100px] shrink-0">
               <NumberInput
+                id="main-image-count"
                 value={settings.mainImageCount}
                 onChange={(value) => onChange({ mainImageCount: value ?? 1 })}
                 min={1}
@@ -317,8 +319,9 @@ export function ProcessSettings({
                 disabled={disabled || !settings.imagesEnabled}
               />
             </Field>
-            <Field label="SKU 图数量" className="w-[100px] shrink-0">
+            <Field label="SKU 图数量" htmlFor="sku-image-count" className="w-[100px] shrink-0">
               <NumberInput
+                id="sku-image-count"
                 value={settings.skuImageCount}
                 onChange={(value) => onChange({ skuImageCount: value ?? 0 })}
                 min={0}
@@ -329,8 +332,9 @@ export function ProcessSettings({
                 disabled={disabled || !settings.imagesEnabled}
               />
             </Field>
-            <Field label="详情图数量" className="w-[100px] shrink-0">
+            <Field label="详情图数量" htmlFor="detail-image-count" className="w-[100px] shrink-0">
               <NumberInput
+                id="detail-image-count"
                 value={settings.detailImageCount}
                 onChange={(value) => onChange({ detailImageCount: value ?? 0 })}
                 min={0}
@@ -341,8 +345,9 @@ export function ProcessSettings({
                 disabled={disabled || !settings.imagesEnabled}
               />
             </Field>
-            <Field label="重量增加" className="w-[100px] shrink-0">
+            <Field label="重量增加" htmlFor="weight-extra" className="w-[100px] shrink-0">
               <NumberInput
+                id="weight-extra"
                 value={settings.weightExtraKg}
                 onChange={(value) => onChange({ weightExtraKg: value ?? 0 })}
                 min={0}
@@ -353,8 +358,9 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹长" className="w-[90px] shrink-0">
+            <Field label="包裹长" htmlFor="package-length" className="w-[90px] shrink-0">
               <NumberInput
+                id="package-length"
                 value={settings.lengthCm}
                 onChange={(value) => onChange({ lengthCm: value ?? 0.01 })}
                 min={0.01}
@@ -365,8 +371,9 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹宽" className="w-[90px] shrink-0">
+            <Field label="包裹宽" htmlFor="package-width" className="w-[90px] shrink-0">
               <NumberInput
+                id="package-width"
                 value={settings.widthCm}
                 onChange={(value) => onChange({ widthCm: value ?? 0.01 })}
                 min={0.01}
@@ -377,8 +384,9 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹高" className="w-[90px] shrink-0">
+            <Field label="包裹高" htmlFor="package-height" className="w-[90px] shrink-0">
               <NumberInput
+                id="package-height"
                 value={settings.heightCm}
                 onChange={(value) => onChange({ heightCm: value ?? 0.01 })}
                 min={0.01}

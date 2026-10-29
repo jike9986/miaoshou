@@ -174,7 +174,7 @@ export function ProgressPanel({
               {run.failures.map((failure) => (
                 <li
                   key={failure.key}
-                  className="rounded border border-warning-200 bg-warning-50/60 px-2 py-1.5"
+                  className="rounded border border-warning-600/20 bg-warning-50/60 px-2 py-1.5"
                 >
                   <p
                     className="truncate text-2xs font-medium text-fg"

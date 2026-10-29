@@ -2,7 +2,7 @@
 // 最大宽 240px，延迟 300ms（表格内 400ms），进入 120ms。纯 CSS + 定时器实现，无额外依赖。
 // 颜色走 token：bg-inverse（--surface-inverse = #191F25），不硬编码 hex。
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { cn } from "@/lib/utils";
@@ -39,6 +39,7 @@ export function Tooltip({
   const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const timerRef = useRef<number | null>(null);
+  const tooltipId = useId();
   const reduced = useReducedMotion();
 
   const clearTimer = (): void => {
@@ -104,6 +105,7 @@ export function Tooltip({
       <span
         ref={triggerRef}
         className={cn("inline-flex", triggerClassName)}
+        aria-describedby={open && !disabled ? tooltipId : undefined}
         onMouseEnter={show}
         onMouseLeave={hide}
         onFocus={show}
@@ -119,6 +121,7 @@ export function Tooltip({
           <AnimatePresence>
             {open && coords && (
               <motion.div
+                id={tooltipId}
                 role="tooltip"
                 initial={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.97 }}
                 animate={reduced ? { opacity: 1 } : { opacity: 1, scale: 1 }}

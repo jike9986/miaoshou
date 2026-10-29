@@ -159,7 +159,7 @@ export function CarrierPage({ embedded = false }: { embedded?: boolean } = {}) {
         </div>
 
         {usable === 0 && total > 0 && (
-          <div className="flex items-start gap-2 rounded-md border border-warning-300 bg-warning-50 px-3 py-2.5 text-sm text-warning-800">
+          <div className="flex items-start gap-2 rounded-md border border-warning-600/20 bg-warning-50 px-3 py-2.5 text-sm text-warning-700">
             <AlertTriangle className="mt-0.5 size-4 shrink-0" />
             <span>
               池子里的链接都已被标记退役。跨店发布会报「载体不足」，
@@ -242,11 +242,11 @@ export function CarrierPage({ embedded = false }: { embedded?: boolean } = {}) {
                     >
                       {item.url}
                     </a>
-                    <span className="shrink-0 text-2xs text-fg-subtle">
+                    <span className="shrink-0 text-2xs text-fg-muted">
                       成功 {formatCount(item.ok ?? 0)} · 失败 {formatCount(item.failed ?? 0)}
                     </span>
                     {item.addedAt ? (
-                      <span className="shrink-0 text-2xs text-fg-subtle">
+                      <span className="shrink-0 text-2xs text-fg-muted">
                         {formatDate(item.addedAt)}
                       </span>
                     ) : null}

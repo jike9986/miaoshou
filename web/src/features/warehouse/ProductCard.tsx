@@ -78,7 +78,7 @@ export function ProductCard({ product, selected, onToggle, onOpen, index }: Prod
         </div>
 
         {product.imageCount > 1 && (
-          <span className="absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-xs bg-overlay/55 px-1.5 py-0.5 text-2xs text-white">
+          <span className="absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-xs bg-inverse/55 px-1.5 py-0.5 text-2xs text-white">
             <Images className="size-3" strokeWidth={2} />
             <span className="num">{product.imageCount}</span>
           </span>
@@ -88,7 +88,7 @@ export function ProductCard({ product, selected, onToggle, onOpen, index }: Prod
       <button
         type="button"
         onClick={() => onOpen?.(product)}
-        className="flex flex-1 flex-col gap-2 p-3 text-left focus-visible:outline-none"
+        className="flex flex-1 flex-col gap-2 p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32"
       >
         <h3 className="line-clamp-2 min-h-[40px] text-sm font-medium leading-5 text-fg">
           {product.title || "（无标题）"}

@@ -58,7 +58,7 @@ export function Badge({ children, icon, variant, size, outline, className, title
 }
 
 /* ------------------------------------------------------------------ *
- * Tag（可移除标签，§5.6 可移除标签：徽标 + 右侧 X 12px，hover:bg-black/5）
+ * Tag（可移除标签，§5.6 可移除标签：徽标 + 右侧 X 12px，hover:bg-surface-hover）
  * ------------------------------------------------------------------ */
 
 export interface TagProps {
@@ -87,7 +87,7 @@ export function Tag({ children, onRemove, removeLabel = "移除", variant = "neu
           type="button"
           aria-label={removeLabel}
           onClick={onRemove}
-          className="grid size-4 place-items-center rounded-xs opacity-70 transition-[opacity,background-color] duration-fast hover:bg-black/5 hover:opacity-100"
+          className="grid size-4 place-items-center rounded-xs opacity-70 transition-[opacity,background-color] duration-fast hover:bg-surface-hover hover:opacity-100"
         >
           <X className="size-3" strokeWidth={2.4} />
         </button>

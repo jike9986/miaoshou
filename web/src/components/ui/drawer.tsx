@@ -103,7 +103,7 @@ export function Drawer({
     >
       {/* 遮罩 */}
       <div
-        className="absolute inset-0 bg-overlay/45 backdrop-blur-[2px]"
+        className="absolute inset-0 bg-overlay backdrop-blur-[2px]"
         onClick={closeOnOverlay ? handleClose : undefined}
       />
       {/* 面板 */}

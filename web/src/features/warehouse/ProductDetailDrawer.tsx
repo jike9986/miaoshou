@@ -657,7 +657,7 @@ export function ProductDetailDrawer({
                         <span
                           className={cn(
                             "shrink-0 font-medium",
-                            missing ? "text-danger-700" : "text-fg-subtle"
+                            missing ? "text-danger-700" : "text-fg-muted"
                           )}
                         >
                           {label}
@@ -677,7 +677,7 @@ export function ProductDetailDrawer({
                   {coverage.missingFields.slice(0, 12).map((field) => (
                     <li
                       key={field}
-                      className="truncate rounded border border-warning-200 bg-warning-50 px-2 py-1 font-mono text-2xs text-warning-800"
+                      className="truncate rounded border border-warning-600/20 bg-warning-50 px-2 py-1 font-mono text-2xs text-warning-700"
                       title={field}
                     >
                       {field}
@@ -861,7 +861,7 @@ export function ProductDetailDrawer({
                 {analyze.data.items.map((row) => (
                   <li
                     key={row.url}
-                    className="flex items-start gap-2 rounded-sm bg-surface-2 px-2 py-1.5 text-2xs"
+                    className="flex items-start gap-2 rounded-sm bg-canvas-inset px-2 py-1.5 text-2xs"
                   >
                     <Badge
                       size="sm"
@@ -875,7 +875,7 @@ export function ProductDetailDrawer({
                     >
                       {row.action === "translate" ? "译" : row.action === "keep" ? "留" : "看"}
                     </Badge>
-                    <span className="shrink-0 text-fg-subtle">#{row.index}</span>
+                    <span className="shrink-0 text-fg-muted">#{row.index}</span>
                     <span className="min-w-0 flex-1 truncate text-fg-muted">{row.reason}</span>
                     <button
                       type="button"

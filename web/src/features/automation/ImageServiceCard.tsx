@@ -289,12 +289,12 @@ export function ImageServiceCard({ disabled = false, className }: ImageServiceCa
             只是上游没接住。
           </p>
           {data?.endpoint && (
-            <p className="break-all font-mono text-2xs leading-4 text-fg-subtle">
+            <p className="break-all font-mono text-2xs leading-4 text-fg-muted">
               请求端点：{data.endpoint}
             </p>
           )}
           {data?.keyHint && (
-            <p className="text-2xs leading-4 text-fg-subtle">
+            <p className="text-2xs leading-4 text-fg-muted">
               将使用密钥 {data.keyHint}
               {data.source ? `（来源：${data.source}）` : ""}
             </p>
@@ -345,7 +345,7 @@ export function ImageServiceCard({ disabled = false, className }: ImageServiceCa
               {data.path}
             </p>
           )}
-          <p className="text-2xs leading-4 text-fg-subtle">
+          <p className="text-2xs leading-4 text-fg-muted">
             配好后回来点「重新检查」：configured 变绿、模式显示为「直连」或「代理」，
             再点「测试连通性」做一次付费冒烟。
           </p>

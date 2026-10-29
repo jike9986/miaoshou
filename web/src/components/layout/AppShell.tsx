@@ -2,7 +2,7 @@
 // 组合 TitleBar + Sidebar + 内容区（Outlet）；仅内容区滚动，标题栏与侧边栏固定。
 // 路由切换动效（§6.2）：opacity 0→1 + y 8→0，220ms out，无退场动画。
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { motion, useReducedMotion } from "framer-motion";
 import { Menu, Search, X } from "lucide-react";
@@ -13,6 +13,7 @@ import { isMac, useHotkey } from "@/hooks/useHotkey";
 import type { VersionPayload } from "@/lib/queries";
 import { Sidebar, type SidebarAccount, type SidebarNavGroup } from "@/components/layout/Sidebar";
 import { TitleBar, TitleBarBreadcrumb, type TitleBarBrand } from "@/components/layout/TitleBar";
+import { useFocusTrap, useTabTrap } from "@/components/ui/dialog";
 
 /* ------------------------------------------------------------------ *
  * 品牌标记（16px 图标位）：用老版 logo-mark.png（A 字标记），与 0.1.4 一致
@@ -104,6 +105,8 @@ export function AppShell({
   const reduced = useReducedMotion();
   const [collapsed, setCollapsed] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const onDrawerKeyDown = useTabTrap(drawerRef);
 
   // 窄屏（< 1024）自动折叠侧边栏（§7.3 max-lg）
   useEffect(() => {
@@ -115,6 +118,21 @@ export function AppShell({
   }, [location.pathname]);
 
   useHotkey("mod+k", () => onOpenSearch?.(), { enabled: Boolean(onOpenSearch) });
+
+  const modalNavOpen = narrow && drawerOpen;
+  useFocusTrap(modalNavOpen, drawerRef);
+
+  useEffect(() => {
+    if (!modalNavOpen) return;
+    const handler = (event: globalThis.KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDrawerOpen(false);
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [modalNavOpen]);
 
   const breadcrumb = useMemo(() => {
     if (!routeMeta) return null;
@@ -189,12 +207,14 @@ export function AppShell({
 
       {/* 窄屏抽屉式侧边栏（§7.3 max-md：宽 280 + 遮罩） */}
       {narrow && drawerOpen && (
-        <div className="fixed inset-0 z-[50] flex">
+        <div className="fixed inset-0 z-[50] flex" role="dialog" aria-modal="true" aria-label="导航">
           <div
-            className="absolute inset-0 bg-overlay/45 backdrop-blur-[2px]"
+            className="absolute inset-0 bg-overlay backdrop-blur-[2px]"
             onClick={() => setDrawerOpen(false)}
           />
           <motion.div
+            ref={drawerRef}
+            onKeyDown={onDrawerKeyDown}
             initial={reduced ? { opacity: 0 } : { x: -24, opacity: 0 }}
             animate={reduced ? { opacity: 1 } : { x: 0, opacity: 1 }}
             transition={{ duration: 0.24, ease: ease.out }}

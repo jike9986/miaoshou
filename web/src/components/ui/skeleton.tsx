@@ -145,17 +145,26 @@ export function SkeletonTable({
 }
 
 /** 通用列表行骨架（详情页 / 抽屉内） */
-export function SkeletonRows({ rows = 4, className }: { rows?: number; className?: string }) {
+export function SkeletonRows({
+  rows = 4,
+  className,
+  label = "正在加载",
+}: {
+  rows?: number;
+  className?: string;
+  label?: string;
+}) {
   return (
-    <div className={cn("flex flex-col gap-3", className)} aria-hidden>
+    <div className={cn("flex flex-col gap-3", className)} role="status" aria-busy="true" aria-label={label}>
       {Array.from({ length: rows }).map((_, index) => (
-        <div key={index} className="flex items-center gap-3">
+        <div key={index} className="flex items-center gap-3" aria-hidden>
           <Skeleton className="size-10" rounded="rounded-sm" />
           <div className="flex-1">
             <SkeletonText lines={2} />
           </div>
         </div>
       ))}
+      <span className="sr-only">{label}</span>
     </div>
   );
 }

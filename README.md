@@ -137,8 +137,7 @@ CI 里所有涉及数据库的步骤都把 `AOHUANG_DATA_DIR` 指到临时目录
 - **版本号改四处**：`package.json`、`web/package.json`、`app/package.json`、
   `server/core/constants.py` 的兜底字面量。改完跑
   `python scripts/check_version.py` 确认（CI 会拦）。
-- **提交前跑 `pnpm check`**（= `typecheck` + `lint`）。注意 `pnpm lint` 现在只跑
-  ESLint，**不再包含 `tsc`**：类型检查被拆到 `pnpm typecheck`，`pnpm check` 把两者串起来。
+- **提交前跑 `pnpm check`**（= `typecheck` + `lint` + 设计护栏 `design:check`）。
   ESLint 用 flat config（`web/eslint.config.js`、`app/eslint.config.js`），只开
   `typescript-eslint` 的 `recommended`（**非** type-checked），`react-hooks/rules-of-hooks`
   是 error，`exhaustive-deps` 是 warn。
@@ -165,7 +164,10 @@ CI 里所有涉及数据库的步骤都把 `AOHUANG_DATA_DIR` 指到临时目录
 | [docs/architecture.md](docs/architecture.md) | 分层架构、数据模型、接口约定 |
 | [docs/api.md](docs/api.md) | 全部 HTTP 接口 |
 | [docs/migrations.md](docs/migrations.md) | Alembic 用法、与 `_add_missing_columns` 的分工 |
-| [docs/design-system.md](docs/design-system.md) | 设计令牌与组件规范 |
+| [DESIGN.md](DESIGN.md) | AI/前端共用的设计规则入口与机读 Token 摘要 |
+| [docs/design-system.md](docs/design-system.md) | 设计令牌与组件规格 |
+| [docs/design-standards-source-review.md](docs/design-standards-source-review.md) | awesome-design-md 来源与适用性评审 |
+| [docs/design-audit-2026-10-28.md](docs/design-audit-2026-10-28.md) | 当前 UI 设计审计、修复项与验收基线 |
 | [docs/screenshots/](docs/screenshots/README.md) | 截图索引（35 张） |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 分支、提交、PR 检查清单 |
 | [docs/HANDOFF.md](docs/HANDOFF.md) | 交接备忘（踩过的坑） |

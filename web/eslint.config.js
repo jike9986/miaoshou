@@ -91,7 +91,7 @@ export default tseslint.config(
 
   // 构建/配置文件：跑在 Node 里，且需要 console 输出
   {
-    files: ["vite.config.ts", "tailwind.config.js", "postcss.config.js", "eslint.config.js"],
+    files: ["vite.config.ts", "tailwind.config.js", "postcss.config.js", "eslint.config.js", "scripts/**/*.mjs"],
     languageOptions: {
       globals: { ...globals.node },
     },

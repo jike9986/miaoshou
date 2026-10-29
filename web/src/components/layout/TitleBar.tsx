@@ -77,9 +77,9 @@ const WINDOW_BUTTON_BASE =
 
 const WINDOW_BUTTON_STYLE: Record<WindowButtonKind, string> = {
   minimize:
-    "text-fg-secondary hover:bg-black/[0.06] active:bg-black/[0.10] focus-visible:ring-brand-600/40",
+    "text-fg-secondary hover:bg-surface-hover active:bg-surface-active focus-visible:ring-brand-600/40",
   maximize:
-    "text-fg-secondary hover:bg-black/[0.06] active:bg-black/[0.10] focus-visible:ring-brand-600/40",
+    "text-fg-secondary hover:bg-surface-hover active:bg-surface-active focus-visible:ring-brand-600/40",
   close:
     "text-fg-secondary hover:bg-danger-600 hover:text-white active:bg-danger-700 active:text-white focus-visible:ring-danger-600/40",
 };

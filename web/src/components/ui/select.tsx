@@ -171,6 +171,7 @@ export function DropdownSelect<Value extends string = string>({
   const [keyword, setKeyword] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listId = useId();
@@ -196,6 +197,7 @@ export function DropdownSelect<Value extends string = string>({
     if (open) {
       setActiveIndex(Math.max(0, filtered.findIndex((option) => option.value === value)));
       if (searchable) window.setTimeout(() => searchRef.current?.focus(), 0);
+      else panelRef.current?.focus();
     } else {
       setKeyword("");
     }
@@ -206,11 +208,13 @@ export function DropdownSelect<Value extends string = string>({
     if (option.disabled) return;
     onChange(option.value);
     setOpen(false);
+    requestAnimationFrame(() => triggerRef.current?.focus());
   };
 
   return (
     <div ref={rootRef} className={cn("relative", className)}>
       <button
+        ref={triggerRef}
         type="button"
         id={id}
         disabled={disabled}
@@ -221,9 +225,10 @@ export function DropdownSelect<Value extends string = string>({
         aria-invalid={invalid || undefined}
         onClick={() => setOpen((prev) => !prev)}
         onKeyDown={(event) => {
-          if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             setOpen(true);
+            if (event.key === "ArrowUp") setActiveIndex(filtered.length - 1);
           }
         }}
         className={cn(
@@ -256,16 +261,24 @@ export function DropdownSelect<Value extends string = string>({
           id={listId}
           role="listbox"
           tabIndex={-1}
+          aria-activedescendant={filtered[activeIndex] ? `${listId}-option-${activeIndex}` : undefined}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               event.preventDefault();
               setOpen(false);
+              triggerRef.current?.focus();
             } else if (event.key === "ArrowDown") {
               event.preventDefault();
               setActiveIndex((prev) => Math.min(prev + 1, filtered.length - 1));
             } else if (event.key === "ArrowUp") {
               event.preventDefault();
               setActiveIndex((prev) => Math.max(prev - 1, 0));
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              setActiveIndex(0);
+            } else if (event.key === "End") {
+              event.preventDefault();
+              setActiveIndex(filtered.length - 1);
             } else if (event.key === "Enter") {
               event.preventDefault();
               const option = filtered[activeIndex];
@@ -289,6 +302,10 @@ export function DropdownSelect<Value extends string = string>({
                     setActiveIndex(0);
                   }}
                   placeholder={searchPlaceholder}
+                  role="combobox"
+                  aria-controls={listId}
+                  aria-expanded="true"
+                  aria-activedescendant={filtered[activeIndex] ? `${listId}-option-${activeIndex}` : undefined}
                   className="h-8 w-full rounded-sm bg-transparent pl-7 pr-2 text-sm text-fg placeholder:text-fg-muted focus:outline-none"
                 />
               </div>
@@ -303,6 +320,7 @@ export function DropdownSelect<Value extends string = string>({
               return (
                 <div
                   key={option.value}
+                  id={`${listId}-option-${index}`}
                   role="option"
                   aria-selected={isSelected}
                   aria-disabled={option.disabled || undefined}

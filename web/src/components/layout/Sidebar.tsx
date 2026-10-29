@@ -1,6 +1,6 @@
 // design-system §5.9 侧边栏导航 · §7.1 布局（232px / 折叠 64px）· §6.2 折叠动画 240ms out
 // 导航项高 36px，px-2.5 rounded-md gap-2.5 text-[13px] font-medium，图标 18px；
-// 当前项 bg-white text-brand-700 shadow-1 + 左侧 2px 品牌色指示条；分组标题 11/16 500 letter-spacing .04em。
+// 当前项 bg-surface text-brand-700 shadow-1 + 左侧 2px 品牌色指示条；分组标题 11/16 500 letter-spacing .04em。
 
 import { useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
@@ -122,8 +122,8 @@ export function SidebarItem({ item, collapsed = false, onNavigate }: SidebarItem
           item.indent && !collapsed && "ml-4",
           item.disabled && "pointer-events-none opacity-50",
           isActive
-            ? "bg-white text-brand-700 shadow-1"
-            : "text-fg-secondary hover:bg-black/[0.04] hover:text-fg active:bg-black/[0.06]",
+            ? "bg-surface text-brand-700 shadow-1"
+            : "text-fg-secondary hover:bg-surface-hover hover:text-fg active:bg-surface-active",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
         )
       }
@@ -491,7 +491,7 @@ export function Sidebar({
               title={versionHint}
               className={cn(
                 "flex min-w-0 items-center rounded-md text-left",
-                "transition-colors duration-fast hover:bg-black/[0.04]",
+                "transition-colors duration-fast hover:bg-surface-hover",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32",
                 "disabled:opacity-60",
                 collapsed ? "size-6 justify-center" : "flex-1 gap-1.5 px-1.5 py-1"
@@ -538,7 +538,7 @@ export function Sidebar({
             onClick={onAccountClick}
             className={cn(
               "flex h-14 w-full items-center border-t border-border text-left",
-              "transition-colors duration-fast hover:bg-black/[0.04]",
+              "transition-colors duration-fast hover:bg-surface-hover",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32",
               collapsed ? "justify-center px-0" : "gap-2 px-2"
             )}
