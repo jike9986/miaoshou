@@ -140,15 +140,27 @@ def test_member_can_bind_own_key_and_cannot_read_other_account(
     admin_status = client.get(API + "/auth/accounts",
                               headers=_headers(identities["admin_token"]))
     assert admin_status.status_code == 200, admin_status.text
-    assert {row["id"] for row in admin_status.json()["accounts"]} >= {
-        first_account_id, second_account_id}
+    admin_accounts = {row["id"]: row for row in admin_status.json()["accounts"]}
+    assert {first_account_id, second_account_id} <= admin_accounts.keys()
+    first_summary = admin_accounts[first_account_id]
+    assert first_summary["status"] == "active"
+    assert first_summary["ownerOperatorId"] == str(identities["first_id"])
+    assert first_summary["boundByOperatorId"] == str(identities["first_id"])
+    assert first_summary["appIdHint"].endswith("ey-a")
+    assert first_summary["secretHint"].endswith("et-a")
     assert all("appSecret" not in row and "app_secret_enc" not in row
-               for row in admin_status.json()["accounts"])
+               for row in admin_accounts.values())
 
     teacher_status = client.get(API + "/auth/accounts",
                                 headers=_headers(identities["teacher_token"]))
-    assert {row["id"] for row in teacher_status.json()["accounts"]} >= {
-        first_account_id, second_account_id}
+    teacher_accounts = {row["id"]: row for row in teacher_status.json()["accounts"]}
+    assert {first_account_id, second_account_id} <= teacher_accounts.keys()
+    assert teacher_accounts[first_account_id]["status"] == "active"
+    assert teacher_accounts[first_account_id]["ownerOperatorId"] == str(identities["first_id"])
+    assert teacher_accounts[first_account_id]["boundByOperatorId"] == str(identities["first_id"])
+    assert teacher_accounts[first_account_id]["secretHint"].endswith("et-a")
+    assert all("appSecret" not in row and "app_secret_enc" not in row
+               for row in teacher_accounts.values())
 
 
 def test_unbound_member_does_not_inherit_legacy_default_account(client, identities):

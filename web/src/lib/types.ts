@@ -368,7 +368,8 @@ export type QualityReviewReason =
   | "missing_weight"
   | "missing_dimensions"
   | "default_dimensions"
-  | "unverified";
+  | "unverified"
+  | "stale_review";
 
 export interface Product {
   id: string;
@@ -836,6 +837,7 @@ export interface PublishRequest {
   exchangeRate?: string | null;
   language?: string | null;
   allowMismatch?: boolean;
+  confirmUnverifiedSpecifications?: boolean;
   confirm: true;
   claimOnly?: boolean;
   titles?: Record<string, string>;

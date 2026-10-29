@@ -1052,6 +1052,14 @@ export function WarehousePage() {
         open={publishOpen}
         onOpenChange={setPublishOpen}
         warehouseIds={publishIds}
+        qualityReviewById={Object.fromEntries(
+          items
+            .filter((item) => publishIds.includes(item.id))
+            .map((item) => [item.id, {
+              status: item.qualityReviewStatus,
+              reasons: item.qualityReviewReasons ?? [],
+            }])
+        )}
         sourceShopIds={sourceShopIds}
         defaultShopId={currentShopId}
         connected={connected}

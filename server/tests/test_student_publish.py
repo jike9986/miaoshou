@@ -74,12 +74,58 @@ def _automation_run(db, suffix: str, operator, account: Account,
 def _publish_payload(product: Product, account: Account, **overrides):
     return {
         "confirm": True,
+        "confirmUnverifiedSpecifications": True,
         "accountId": str(account.id),
         "shopId": "123",
         "template": "Student pricing",
         "items": [{"warehouseId": str(product.id)}],
         **overrides,
     }
+
+
+def test_member_must_explicitly_acknowledge_unverified_specifications(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+    db.flush()
+    _stub_member_publish(monkeypatch, db, account)
+
+    payload = _publish_payload(product, account)
+    payload.pop("confirmUnverifiedSpecifications")
+    with pytest.raises(errors.AppError) as exc:
+        publish_service.publish(db, payload, operator_id=operator.id)
+
+    assert exc.value.code == "QUALITY_REVIEW_REQUIRED"
+    assert exc.value.status == 409
+    assert exc.value.details["items"] == [{
+        "warehouseId": str(product.id),
+        "reasons": ["missing_dimensions"],
+    }]
+
+
+def test_member_can_publish_verified_product_without_quality_override(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    product.quality_review = {
+        "verifiedRevision": product.revision,
+        "source": "source inspection",
+        "evidence": "confirmed package measurements",
+    }
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+    db.flush()
+    _stub_member_publish(monkeypatch, db, account)
+
+    payload = _publish_payload(product, account)
+    payload.pop("confirmUnverifiedSpecifications")
+    result = publish_service.publish(db, payload, operator_id=operator.id)
+
+    assert result["published"] == ["98765"]
 
 
 def _stub_member_publish(monkeypatch, db, account, *, received_payloads: list | None = None,

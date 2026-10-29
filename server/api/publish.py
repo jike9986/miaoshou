@@ -129,7 +129,9 @@ def publish(payload: PublishRequest, db: DbSession,
                 "published": len(result.get("published") or []),
                 "claimed": len(result.get("claimed") or []),
                 "failures": len(result.get("failures") or []),
-                "targetShopName": result.get("targetShopName")})
+                "targetShopName": result.get("targetShopName"),
+                "confirmedUnverifiedSpecifications": (
+                    body.get("confirmUnverifiedSpecifications") is True)})
     db.commit()
     return result
 

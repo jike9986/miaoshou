@@ -588,6 +588,23 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             raise errors.AppError(errors.FORBIDDEN,
                                   "商品未由当前学员认领，不能发布",
                                   status=403)
+        unverified_specs = []
+        for entry in entries:
+            product = entry.get("product")
+            if not isinstance(product, Product):
+                continue
+            quality_status, reasons = warehouse_service._quality_review_summary(product)
+            if quality_status != "verified":
+                unverified_specs.append({"warehouseId": str(product.id),
+                                         "reasons": reasons})
+        if unverified_specs and payload.get("confirmUnverifiedSpecifications") is not True:
+            raise errors.AppError(
+                "QUALITY_REVIEW_REQUIRED",
+                "所选商品存在待核验规格；请检查后明确确认再继续发布",
+                status=409,
+                details={"items": unverified_specs,
+                         "field": "confirmUnverifiedSpecifications"},
+            )
     batch_id = str(payload.get("batchId") or "").strip() or new_batch_id("pub")
     language = payload.get("language")
     language_warning: str | None = None

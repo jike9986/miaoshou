@@ -1464,6 +1464,7 @@ HTTP 503。当前配额见 `GET /images/limits`（实测 `{"limits":{"minute":60
   "exchangeRate": "0.6521",
   "language": "ms",
   "allowMismatch": false,
+  "confirmUnverifiedSpecifications": false,
   "confirm": true,
   "claimOnly": false,
   "titles": {"778812": "Kasut Sukan Wanita Breathable Mesh Sneakers"}
@@ -1482,6 +1483,7 @@ HTTP 503。当前配额见 `GET /images/limits`（实测 `{"limits":{"minute":60
 | exchangeRate | string\|null | 否 | >0 且 ≤1000 | 覆盖模板里的汇率 |
 | language | string\|null | 否 | `ms`/`en`/`th`/`vi`/`zh` | 用于站点语言校验 |
 | allowMismatch | boolean | 否 | 默认 `false` | 明确接受语言与站点不匹配 |
+| confirmUnverifiedSpecifications | boolean | 否 | 默认 `false` | 学员发布包含待核验重量/尺寸的成品时，必须显式设为 `true`；不会写入或替代人工核验记录 |
 | confirm | boolean | 是 | 必须字面量 `true` | |
 | claimOnly | boolean | 否 | 默认 `false` | 只认领进采集箱，不上架 |
 | titles | object | 否 | `{detailId: title}` | 写发布日志用，避免首屏显示空标题 |
@@ -1534,6 +1536,7 @@ HTTP 503。当前配额见 `GET /images/limits`（实测 `{"limits":{"minute":60
 | 403 | `PUBLISH_DISABLED` | `settings['publish.enabled'] = false` |
 | 404 | `NOT_FOUND` | warehouseId/detailId/店铺不存在（`details.missing`） |
 | 409 | `CONFLICT_BUSY` | 该批商品已有发布在途 |
+| 409 | `QUALITY_REVIEW_REQUIRED` | 学员发布包含待核验规格的商品且未明确确认 |
 | 422 | `SITE_LANGUAGE_MISMATCH` | 语言与目标站点不符且 `allowMismatch != true` |
 | 422 | `TEMPLATE_INVALID` | 模板不存在或校验失败（`details.field` 指出哪一项） |
 | 422 | `CARRIER_UNAVAILABLE` | 载体池不足 |

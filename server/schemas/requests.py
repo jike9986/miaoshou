@@ -131,6 +131,7 @@ class PublishRequest(CamelModel):
     exchangeRate: str | float | None = None
     language: str | None = None
     allowMismatch: bool = False
+    confirmUnverifiedSpecifications: bool = False
     confirm: bool = False
     claimOnly: bool = False
     titles: dict[str, str] = Field(default_factory=dict)

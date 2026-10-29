@@ -17,7 +17,7 @@ import {
   useTemplates,
   useSelectTemplate,
 } from "@/lib/queries";
-import type { PublishResponse, RepricedEntry } from "@/lib/types";
+import type { PublishResponse, QualityReviewReason, QualityReviewStatus, RepricedEntry } from "@/lib/types";
 import {
   Badge,
   Button,
@@ -38,6 +38,10 @@ export interface PublishDialogProps {
   onOpenChange: (open: boolean) => void;
   /** 仓库来源的商品 id（items[].warehouseId） */
   warehouseIds: string[];
+  qualityReviewById?: Record<string, {
+    status?: QualityReviewStatus;
+    reasons: QualityReviewReason[];
+  }>;
   /** 当前店铺（顶部下拉）作为默认目标店铺 */
   defaultShopId: string | null;
   /** 是否允许把仓库商品认领到采集箱；学员只能发布已认领商品 */
@@ -52,6 +56,7 @@ export function PublishDialog({
   open,
   onOpenChange,
   warehouseIds,
+  qualityReviewById = {},
   defaultShopId,
   allowClaimOnly = true,
   sourceShopIds,
@@ -80,6 +85,7 @@ export function PublishDialog({
   const [claimOnly, setClaimOnly] = useState(false);
   const effectiveClaimOnly = allowClaimOnly && claimOnly;
   const [allowMismatch, setAllowMismatch] = useState(false);
+  const [confirmedUnverifiedSpecifications, setConfirmedUnverifiedSpecifications] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** 发布结果：非 null 时弹窗切到「结果区」，repriced / warning 常驻可回看 */
@@ -111,6 +117,7 @@ export function PublishDialog({
     setConfirmed(false);
     setClaimOnly(false);
     setAllowMismatch(false);
+    setConfirmedUnverifiedSpecifications(false);
     // 默认用该账号当前的定价模板（老版 refreshScheduleTemplates 的 result.current）。
     // 不填的话每次发布都得手动选一次，选漏了就是按原价上架。
     setTemplate(templatesQuery.data?.selected?.[String(auth?.accountId ?? "")] ?? "");
@@ -143,6 +150,11 @@ export function PublishDialog({
     value: code,
     label: LANGUAGE_NAMES[code] ?? code,
   }));
+
+  const unverifiedQualityItems = warehouseIds
+    .map((id) => ({ id, review: qualityReviewById[id] }))
+    .filter(({ review }) => review?.status !== "verified");
+  const requiresQualityAcknowledgement = requiresTemplate && unverifiedQualityItems.length > 0;
 
   const templateOptions = templates.map((item) => ({
     value: item.name,
@@ -188,6 +200,10 @@ export function PublishDialog({
       setError("所选语言与目标站点不匹配，请更换语言或勾选「接受语言不匹配」");
       return;
     }
+    if (requiresQualityAcknowledgement && !confirmedUnverifiedSpecifications) {
+      setError("所选商品包含待核验规格，请检查提醒并明确确认");
+      return;
+    }
 
     publish.mutate(
       {
@@ -197,6 +213,8 @@ export function PublishDialog({
         exchangeRate: exchangeRate.trim() || null,
         language: language || null,
         allowMismatch,
+        confirmUnverifiedSpecifications: requiresQualityAcknowledgement
+          && confirmedUnverifiedSpecifications,
         claimOnly: effectiveClaimOnly,
         // 三重保险：confirm 必须是字面量 true（api.md §8.1 CONFIRM_REQUIRED）
         confirm: true,
@@ -262,6 +280,7 @@ export function PublishDialog({
                 // 回到表单时把「我确认发布」重新置空，避免沿用上一次的确认态
                 setResult(null);
                 setConfirmed(false);
+                setConfirmedUnverifiedSpecifications(false);
               }}
             >
               继续发布
@@ -289,7 +308,9 @@ export function PublishDialog({
               icon={<Send />}
               loading={publish.isPending}
               loadingText="正在提交…"
-              disabled={!confirmed || !shopId || rateInvalid || (requiresTemplate && !hasValidTemplate)}
+              disabled={!confirmed || !shopId || rateInvalid
+                || (requiresTemplate && !hasValidTemplate)
+                || (requiresQualityAcknowledgement && !confirmedUnverifiedSpecifications)}
               onClick={submit}
             >
               {effectiveClaimOnly ? "只认领进采集箱" : `发布 ${warehouseIds.length} 件`}
@@ -465,6 +486,26 @@ export function PublishDialog({
             </div>
           )}
 
+          {requiresQualityAcknowledgement && (
+            <div className="flex items-start gap-2 rounded-md border border-warning-600/20 bg-warning-50 px-3 py-2.5 text-[13px] leading-5 text-warning-700">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" strokeWidth={2} />
+              <div className="min-w-0 flex-1">
+                <p>
+                  {unverifiedQualityItems.length} 件商品的重量或尺寸仍待核验
+                  {qualityReviewReasonsLabel(unverifiedQualityItems.flatMap(({ review }) => review?.reasons ?? []))}。
+                  确认继续会按当前数据发布，不会将商品标记为已核验。
+                </p>
+                <div className="mt-1.5">
+                  <Checkbox
+                    checked={confirmedUnverifiedSpecifications}
+                    onChange={setConfirmedUnverifiedSpecifications}
+                    label="我已检查这些规格，仍要继续发布"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
           {allowClaimOnly && (
             <div className="rounded-md border border-border-subtle p-3">
               <Switch
@@ -504,6 +545,19 @@ export function PublishDialog({
 /* ------------------------------------------------------------------ *
  * 结果区：repriced 明细表 + warning 告警块（常驻，直到用户关闭弹窗）
  * ------------------------------------------------------------------ */
+
+const QUALITY_REVIEW_REASON_LABELS: Record<QualityReviewReason, string> = {
+  missing_weight: "缺少有效重量",
+  missing_dimensions: "缺少完整尺寸",
+  default_dimensions: "尺寸仍是默认值",
+  unverified: "尚无人工核验记录",
+  stale_review: "商品变更后需要重新核验",
+};
+
+function qualityReviewReasonsLabel(reasons: QualityReviewReason[]): string {
+  const labels = [...new Set(reasons.map((reason) => QUALITY_REVIEW_REASON_LABELS[reason]).filter(Boolean))];
+  return labels.length > 0 ? `：${labels.join("、")}` : "";
+}
 
 function formatMoney(value: string | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
