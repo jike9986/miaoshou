@@ -18,6 +18,7 @@ import {
   useDeleteProduct,
   useGroups,
   usePatchProduct,
+  useReviewProductQuality,
   useProductDetail,
   useAnalyzeImages,
   useTranslateImages,
@@ -28,6 +29,7 @@ import {
   useAuthStatus,
 } from "@/lib/queries";
 import type { ProductDetailResponse } from "@/lib/types";
+import { buildQualityReviewRequest } from "@/features/warehouse/qualityReviewInput";
 import {
   Badge,
   Button,
@@ -88,6 +90,7 @@ export function ProductDetailDrawer({
   const dimensionsComplete = packageDimensions.every((value) => value !== null);
   const groupsQuery = useGroups();
   const patch = usePatchProduct();
+  const qualityReviewMutation = useReviewProductQuality();
   const remove = useDeleteProduct();
   const titlePreview = useTitlePreview();
   const analyze = useAnalyzeImages();
@@ -99,6 +102,13 @@ export function ProductDetailDrawer({
 
   const [title, setTitle] = useState("");
   const [groupId, setGroupId] = useState<string>("");
+  const [qualityWeight, setQualityWeight] = useState("");
+  const [qualityLength, setQualityLength] = useState("");
+  const [qualityWidth, setQualityWidth] = useState("");
+  const [qualityHeight, setQualityHeight] = useState("");
+  const [qualitySource, setQualitySource] = useState("");
+  const [qualityEvidence, setQualityEvidence] = useState("");
+  const [qualityError, setQualityError] = useState<string | null>(null);
   const [titleError, setTitleError] = useState<string | null>(null);
 
   /**
@@ -280,13 +290,23 @@ export function ProductDetailDrawer({
   const identity = useOperatorIdentity();
   const memberView = isMember || identity?.role === "member";
   const canWrite = !memberView && authStatus.data?.readOnly !== true;
+  const canManageQuality = canWrite &&
+    (!identity || identity.role === "admin" || identity.role === "teacher");
 
   useEffect(() => {
     if (!product) return;
     setTitle(product.title);
     setGroupId(product.groupId ?? "");
     setTitleError(null);
-  }, [product]);
+    setQualityWeight(positiveMeasure(payload?.weight) ?? "");
+    setQualityLength(positiveMeasure(payload?.packageLength) ?? "");
+    setQualityWidth(positiveMeasure(payload?.packageWidth) ?? "");
+    setQualityHeight(positiveMeasure(payload?.packageHeight) ?? "");
+    setQualitySource(product.qualityReview?.source ?? "");
+    setQualityEvidence(product.qualityReview?.evidence ?? "");
+    setQualityError(null);
+  }, [product, payload?.weight, payload?.packageLength,
+    payload?.packageWidth, payload?.packageHeight]);
 
   const mainImages = useMemo(() => {
     const list = (product?.images ?? []) as string[];
@@ -376,6 +396,41 @@ export function ProductDetailDrawer({
     if (Object.keys(patchBody).length === 0) return;
 
     submitPatch(patchBody, revisionRef.current);
+  };
+
+  const saveQualityReview = (): void => {
+    if (!product) return;
+    const prepared = buildQualityReviewRequest({
+      weightKg: qualityWeight,
+      packageLength: qualityLength,
+      packageWidth: qualityWidth,
+      packageHeight: qualityHeight,
+      source: qualitySource,
+      evidence: qualityEvidence,
+    }, revisionRef.current ?? 0);
+    if ("error" in prepared) {
+      setQualityError(prepared.error);
+      return;
+    }
+    setQualityError(null);
+    qualityReviewMutation.mutate({
+      id: product.id,
+      review: prepared.request,
+    }, {
+      onSuccess: (result) => {
+        revisionRef.current = result.revision;
+        toast.success("商品重量与尺寸已核验并保存");
+      },
+      onError: (error) => {
+        const conflictResult = revisionConflictOf(error);
+        if (conflictResult) {
+          toast.warning("商品已被其他人修改，请刷新详情后核对最新数据再提交");
+          void detailQuery.refetch();
+          return;
+        }
+        toast.error("核验信息保存失败", { description: apiErrorMessage(error) });
+      },
+    });
   };
 
   /** 「刷新看最新」：丢掉本地未提交的修改，重新读对方的版本 */
@@ -574,7 +629,11 @@ export function ProductDetailDrawer({
                 {packageWeight ? `${packageWeight} kg` : "缺少有效重量"}
               </p>
               <p className="mt-1 text-2xs text-fg-muted">
-                {payload?._sourceWeight ? `记录的源重量：${String(payload._sourceWeight)} kg` : "重量来源未记录，需对照妙手或原始商品核验"}
+                {product.qualityReview
+                  ? `已核验：${product.qualityReview.source} · ${product.qualityReview.verifiedByOperatorName} · ${formatDate(product.qualityReview.verifiedAt)}`
+                  : payload?._sourceWeight
+                    ? `记录的源重量：${String(payload._sourceWeight)} kg；尚未人工核验`
+                    : "来源未记录，当前数值不能视为已核验"}
               </p>
             </div>
             <div>
@@ -584,12 +643,51 @@ export function ProductDetailDrawer({
                 {dimensionsComplete ? " cm" : ""}
               </p>
               <p className="mt-1 text-2xs text-fg-muted">
-                {dimensionsComplete && packageDimensions.join("×") === "30×20×10"
+                {product.qualityReview
+                  ? `依据：${product.qualityReview.evidence} · 站点：${product.qualityReview.site || "未记录"}`
+                  : dimensionsComplete && packageDimensions.join("×") === "30×20×10"
                   ? "数值为 30 × 20 × 10 cm；记录未标明来源，不能据此确认真实尺寸"
                   : "尺寸来源未记录；缺失或默认值应对照妙手或原始商品核验"}
               </p>
             </div>
           </div>
+
+          {canManageQuality && (
+            <section className="flex flex-col gap-3 rounded-md border border-border-subtle p-3" aria-label="重量与尺寸核验">
+              <div>
+                <SectionTitle>重量与尺寸核验</SectionTitle>
+                <p className="mt-1 text-xs text-fg-muted">仅填写已从可靠来源核实的数据；保存后用于后续定价和发布。</p>
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Field label="重量（kg）" required>
+                  <Input id="quality-weight" type="number" min="0" step="0.001" value={qualityWeight} onChange={(event) => setQualityWeight(event.currentTarget.value)} />
+                </Field>
+                <Field label="长（cm）" required>
+                  <Input id="quality-length" type="number" min="0" step="0.1" value={qualityLength} onChange={(event) => setQualityLength(event.currentTarget.value)} />
+                </Field>
+                <Field label="宽（cm）" required>
+                  <Input id="quality-width" type="number" min="0" step="0.1" value={qualityWidth} onChange={(event) => setQualityWidth(event.currentTarget.value)} />
+                </Field>
+                <Field label="高（cm）" required>
+                  <Input id="quality-height" type="number" min="0" step="0.1" value={qualityHeight} onChange={(event) => setQualityHeight(event.currentTarget.value)} />
+                </Field>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="核验来源" required hint="例如妙手商品资料、原始商品页或实物测量">
+                  <Input id="quality-source" maxLength={120} value={qualitySource} onChange={(event) => setQualitySource(event.currentTarget.value)} />
+                </Field>
+                <Field label="核验依据" required hint="记录可复查的信息，例如页面字段或测量记录">
+                  <Input id="quality-evidence" maxLength={1000} value={qualityEvidence} onChange={(event) => setQualityEvidence(event.currentTarget.value)} />
+                </Field>
+              </div>
+              {qualityError && <InlineError>{qualityError}</InlineError>}
+              <div className="flex justify-end">
+                <Button variant="primary" size="sm" icon={<Save />} loading={qualityReviewMutation.isPending} onClick={saveQualityReview}>
+                  保存核验结果
+                </Button>
+              </div>
+            </section>
+          )}
 
           <div className="flex flex-col gap-3">
             <SectionTitle>标题</SectionTitle>

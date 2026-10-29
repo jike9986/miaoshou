@@ -59,6 +59,7 @@ import type {
   ProcessCollectResult,
   ProductDetailResponse,
   ProductPatchRequest,
+  ProductQualityReviewRequest,
   ProductPatchResponse,
   ProductSort,
   ProductStatus,
@@ -318,6 +319,26 @@ export function usePatchProduct(): UseMutationResult<
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
       void client.invalidateQueries({ queryKey: queryKeys.groups.all });
+    },
+  });
+}
+
+export function useReviewProductQuality(): UseMutationResult<
+  { id: string; revision: number },
+  Error,
+  { id: string; review: ProductQualityReviewRequest }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, review }) =>
+      api.patch<{ id: string; revision: number }, ProductQualityReviewRequest>(
+        `/warehouse/${encodeURIComponent(id)}/quality-review`, review
+      ),
+    onSuccess: (_result, variables) => {
+      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+      void client.invalidateQueries({
+        queryKey: queryKeys.warehouse.detail(variables.id, true),
+      });
     },
   });
 }

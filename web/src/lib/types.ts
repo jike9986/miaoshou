@@ -392,6 +392,7 @@ export interface Product {
   claimedAt: number | null;
   claimedShopId: string | null;
   collected: Record<string, { at: number; detailId: string }>;
+  qualityReview?: ProductQualityReview | null;
   salesLast30: number;
   stock: number;
   status: ProductStatus | string;
@@ -410,6 +411,31 @@ export interface Product {
    * 没有时署名行只显示「谁改的」，不硬编一个时间出来。
    */
   updatedAt?: number;
+}
+
+export interface ProductQualityReview {
+  weightKg: number;
+  packageDimensions: {
+    packageLength: number;
+    packageWidth: number;
+    packageHeight: number;
+  };
+  source: string;
+  evidence: string;
+  site: string;
+  verifiedAt: number;
+  verifiedByOperatorId: number;
+  verifiedByOperatorName: string;
+}
+
+export interface ProductQualityReviewRequest {
+  weightKg: number;
+  packageLength: number;
+  packageWidth: number;
+  packageHeight: number;
+  source: string;
+  evidence: string;
+  expectedRevision: number;
 }
 
 export interface CategoryFacet {

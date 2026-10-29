@@ -22,6 +22,7 @@ from schemas.requests import (
     CustomCategoryRequest,
     ProductImagesPatch,
     ProductPatch,
+    ProductQualityReviewRequest,
 )
 from services import (
     account_service,
@@ -336,6 +337,38 @@ def claim_product(ident: str, db: DbSession, operator: OperatorDep) -> dict[str,
         "status": claim.status,
         "claimedAt": claim.claimed_at,
     }
+
+
+@router.patch("/{ident}/quality-review", summary="核验商品重量与包裹尺寸",
+              dependencies=[require_permission("process")])
+def review_product_quality(ident: str, payload: ProductQualityReviewRequest,
+                           db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    if operator_service.role_of(operator) not in {
+            operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}:
+        raise errors.AppError(
+            "FORBIDDEN", "只有老师或管理员可以核验商品重量与尺寸", status=403,
+            details={"role": operator_service.role_of(operator)})
+    require_writable(db)
+    with audit_service.guard(db, operator=operator,
+                             action="warehouse.quality_review",
+                             target_kind="product", target_id=ident):
+        result = warehouse_service.review_product_quality(
+            db, ident, weight_kg=payload.weightKg,
+            package_length=payload.packageLength,
+            package_width=payload.packageWidth,
+            package_height=payload.packageHeight,
+            source=payload.source, evidence=payload.evidence,
+            operator_id=operator.id, operator_name=operator.name,
+            expected_revision=payload.expectedRevision)
+    audit_service.record(
+        db, operator=operator, action="warehouse.quality_review",
+        target_kind="product", target_id=ident,
+        detail={"fields": ["weight", "packageLength", "packageWidth",
+                            "packageHeight"],
+                "site": result["qualityReview"]["site"],
+                "source": result["qualityReview"]["source"]})
+    db.commit()
+    return result
 
 
 @router.patch("/{ident}", summary="改类目 / 分组 / 标题",

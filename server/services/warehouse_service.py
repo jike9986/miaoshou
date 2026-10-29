@@ -134,6 +134,7 @@ def serialize(product: Product, *, account_name: str = "",
     }
     if include_payload:
         body["payload"] = product.payload if isinstance(product.payload, dict) else {}
+        body["qualityReview"] = product.quality_review
     return body
 
 
@@ -870,6 +871,42 @@ def revision_guard(db: Session, product: Product, expected_revision: int | None,
     # 让内存对象与库里一致：后续 flush 不会再把 revision 写回旧值，
     # 也不会因为「脏了」而多发一条没意义的 UPDATE。
     product.revision = expected + 1
+
+
+def review_product_quality(db: Session, ident: Any, *, weight_kg: float,
+                           package_length: float, package_width: float,
+                           package_height: float, source: str, evidence: str,
+                           operator_id: int, operator_name: str,
+                           expected_revision: int) -> dict[str, Any]:
+    """Persist verified measurements in publish fields and provenance separately."""
+    from core.utils import now_ts
+
+    product = resolve_product(db, ident)
+    revision_guard(db, product, expected_revision, action="核验商品重量和尺寸")
+    payload = dict(product.payload) if isinstance(product.payload, dict) else {}
+    dimensions = {
+        "packageLength": float(package_length),
+        "packageWidth": float(package_width),
+        "packageHeight": float(package_height),
+    }
+    payload["weight"] = float(weight_kg)
+    payload.update(dimensions)
+    product.payload = payload
+    site = str(product.site or payload.get("site") or "")
+    product.quality_review = {
+        "weightKg": float(weight_kg),
+        "packageDimensions": dimensions,
+        "source": source.strip(),
+        "evidence": evidence.strip(),
+        "site": site,
+        "verifiedAt": now_ts(),
+        "verifiedByOperatorId": operator_id,
+        "verifiedByOperatorName": operator_name,
+    }
+    product.operator_id = operator_id
+    db.flush()
+    return {"id": str(product.id), "revision": int(product.revision),
+            "qualityReview": product.quality_review}
 
 
 def update(db: Session, ident: Any, *, category_id: Any = None, cid: Any = None,

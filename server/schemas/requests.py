@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from schemas.common import CamelModel
 
@@ -45,6 +45,21 @@ class ProductPatch(CategoryTarget):
     # 乐观锁：前端把读到商品时拿到的 `revision` 原样带回来。
     # 不传 = 不校验（兼容老调用方），但也就等于放弃了这层保护。
     expectedRevision: int | None = None
+
+
+class ProductQualityReviewRequest(CamelModel):
+    weightKg: float = Field(gt=0, le=1000)
+    packageLength: float = Field(gt=0, le=10000)
+    packageWidth: float = Field(gt=0, le=10000)
+    packageHeight: float = Field(gt=0, le=10000)
+    source: str = Field(min_length=1, max_length=120)
+    evidence: str = Field(min_length=3, max_length=1000)
+    expectedRevision: int = Field(ge=1)
+
+    @field_validator("source", "evidence", mode="before")
+    @classmethod
+    def trim_review_text(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class BatchCategoryRequest(CategoryTarget):

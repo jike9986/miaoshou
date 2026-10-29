@@ -65,6 +65,8 @@ class Product(Base):
     detail_images: Mapped[list[Any]] = mapped_column(JSON, default=list)
     sku_properties: Mapped[list[Any]] = mapped_column(JSON, default=list)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Keep human verification evidence separate so it never enters the publish payload.
+    quality_review: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     # ready / claimed / published / archived
     status: Mapped[str] = mapped_column(String(16), default="ready")
