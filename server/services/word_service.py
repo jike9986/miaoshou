@@ -23,7 +23,7 @@ from models.violation_word import ViolationWord
 
 logger = logging.getLogger(__name__)
 
-ACTIONS = ("remove", "review")
+ACTIONS = ("remove",)
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 # 单次导入的处理上限。与「词库容量」是两件事：这个限制的是**一次请求**的量，
@@ -133,9 +133,8 @@ def _validate_word(word: Any) -> tuple[str, str]:
 
 
 def _counts(db: Session) -> dict[str, Any]:
-    remove = db.query(ViolationWord).filter(ViolationWord.action == "remove").count()
-    review = db.query(ViolationWord).filter(ViolationWord.action == "review").count()
-    return {"remove": remove, "review": review, "limit": WORD_LIMIT,
+    remove = db.query(ViolationWord).count()
+    return {"remove": remove, "review": 0, "limit": WORD_LIMIT,
             "remaining": max(0, WORD_LIMIT - remove)}
 
 
@@ -144,7 +143,7 @@ def serialize(row: ViolationWord) -> dict[str, Any]:
         "id": str(row.id),
         "word": row.word,
         "normalized": row.normalized,
-        "action": row.action,
+        "action": "remove",
         "source": row.source,
         "enabled": bool(row.enabled),
         "createdAt": row.created_at,
@@ -154,14 +153,14 @@ def serialize(row: ViolationWord) -> dict[str, Any]:
 def list_words(db: Session, *, action: str | None = None, q: str | None = None,
                page: int = 1, page_size: int = 200) -> dict[str, Any]:
     if action is not None and action not in ACTIONS:
-        raise errors.validation("action 只能是 remove / review", field="action", value=action)
+        raise errors.validation("action 只能是 remove", field="action", value=action)
     if page < 1:
         raise errors.validation("页码必须不小于 1", field="page", value=page)
     if not 1 <= page_size <= 500:
         raise errors.validation("每页数量必须在 1 到 500 之间", field="pageSize", value=page_size)
     query = db.query(ViolationWord)
-    if action:
-        query = query.filter(ViolationWord.action == action)
+    if action == "remove":
+        query = query.filter(ViolationWord.action.in_(("remove", "review")))
     if q:
         query = query.filter(ViolationWord.word.ilike(f"%{str(q).strip()}%"))
     total = query.count()
@@ -197,7 +196,7 @@ def _check_limit(db: Session, adding: int, action: str) -> None:
 def add(db: Session, word: Any, *, action: str = "remove", source: str = "manual"
         ) -> dict[str, Any]:
     if action not in ACTIONS:
-        raise errors.validation("category 只能是 remove / review", field="category", value=action)
+        raise errors.validation("category 只能是 remove", field="category", value=action)
     text, normalized = _validate_word(word)
     existing = _exists(db, normalized)
     if existing is not None:
@@ -303,7 +302,7 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
     超出 IMPORT_LIMIT 的部分不报错，截断并在 truncated 里说明，剩下的再提交一次。
     """
     if action not in ACTIONS:
-        raise errors.validation("category 只能是 remove / review", field="category", value=action)
+        raise errors.validation("category 只能是 remove", field="category", value=action)
     if mode not in ("append", "replace"):
         raise errors.validation("mode 只能是 append / replace", field="mode", value=mode)
     require_idle()
@@ -341,8 +340,7 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
     if not unique:
         raise errors.validation("没有可导入的有效词", field="words")
     if mode == "replace":
-        db.query(ViolationWord).filter(ViolationWord.action == action).delete(
-            synchronize_session=False)
+        db.query(ViolationWord).delete(synchronize_session=False)
         db.flush()
     existing = {row.normalized for row in db.query(ViolationWord).all()}
     fresh: dict[str, str] = {}
@@ -352,7 +350,7 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
             continue
         fresh[normalized] = text
     if action == "remove":
-        current = db.query(ViolationWord).filter(ViolationWord.action == "remove").count()
+        current = db.query(ViolationWord).count()
         remaining = max(0, WORD_LIMIT - current)
         if len(fresh) > remaining:
             # 词库容量满时同样按部分成功处理（老版行为）：能放多少放多少，
@@ -391,11 +389,8 @@ def clear(db: Session, *, action: str = "remove", confirm: bool = False) -> dict
     if confirm is not True:
         raise errors.AppError(errors.CONFIRM_REQUIRED,
                               "清空词库需要 confirm: true", status=400)
-    if action not in ACTIONS:
-        raise errors.validation("category 只能是 remove / review", field="category", value=action)
     require_idle()
-    removed = db.query(ViolationWord).filter(ViolationWord.action == action).delete(
-        synchronize_session=False)
+    removed = db.query(ViolationWord).delete(synchronize_session=False)
     db.flush()
     return {"removed": int(removed or 0), "counts": _counts(db)}
 
@@ -491,6 +486,9 @@ def apply_action(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
 
 def seed(db: Session) -> int:
     """首次启动写入内置词（source=seed），已存在的跳过。"""
+    db.query(ViolationWord).filter(ViolationWord.action == "review").update(
+        {ViolationWord.action: "remove"}, synchronize_session=False
+    )
     existing = {row.normalized for row in db.query(ViolationWord).all()}
     added = 0
     for word in SEED_WORDS:
@@ -533,18 +531,15 @@ def matcher(db: Session) -> list[tuple[str, str]]:
     """
     rows = (db.query(ViolationWord)
             .filter(ViolationWord.enabled.is_(True)).all())
-    pairs = [(row.normalized, row.action) for row in rows]
-    conflicts = set(validate_library(pairs))
     result: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for normalized, action in pairs:
+    for row in rows:
+        normalized = row.normalized
         key = str(normalized or "").strip().casefold()
         if not key or key in seen:
             continue
-        if key in conflicts and action != "remove":
-            continue
         seen.add(key)
-        result.append((normalized, action))
+        result.append((normalized, "remove"))
     return result
 
 
@@ -559,12 +554,9 @@ def library(db: Session) -> dict[str, Any]:
             .filter(ViolationWord.enabled.is_(True)).all())
     result: dict[str, Any] = {"remove": [], "review": [], "conflicts": []}
     for row in rows:
-        action = "review" if row.action == "review" else "remove"
         word = str(row.word or row.normalized or "").strip()
         if word:
-            result[action].append(word)
-    result["conflicts"] = validate_library(
-        (row.normalized, row.action) for row in rows)
+            result["remove"].append(word)
     return result
 
 
@@ -632,9 +624,7 @@ def clean_title(title: str, words: Iterable[tuple[str, str]]) -> tuple[str, list
     # 长词优先：词库同时有「包邮」和「包邮费」时，先删短的会留下孤立的「费」。
     targets = [(n, a) for n, a in words if n]
     targets.sort(key=lambda pair: (-len(pair[0]), pair[0]))
-    for normalized, action in targets:
-        if action != "remove":
-            continue
+    for normalized, _action in targets:
         pattern = _word_pattern(normalized)
         matches = list(pattern.finditer(match_text))
         if not matches:
@@ -666,7 +656,7 @@ def matched_words(text: str, words: Iterable[tuple[str, str]]) -> list[tuple[str
     """Return title-word hits using the same separator-tolerant rule as cleaning."""
     value = unicodedata.normalize("NFKC", str(text or ""))
     hits: list[tuple[str, str]] = []
-    for normalized, action in words:
+    for normalized, _action in words:
         if normalized and _word_pattern(normalized).search(value):
-            hits.append((normalized, action))
+            hits.append((normalized, "remove"))
     return hits

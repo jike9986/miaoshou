@@ -36,8 +36,8 @@ def record(name, passed, detail):
 
 
 # --- 词库：造一个 review 词和一个 remove 词 ---------------------------------
-from models.violation_word import ViolationWord  # noqa: E402
 from core.utils import now_ts  # noqa: E402
+from models.violation_word import ViolationWord  # noqa: E402
 
 REVIEW_WORD = "限量版"
 REMOVE_WORD = "包邮"
@@ -62,14 +62,16 @@ result = gate_service.title_review_gate(item(), db=db)
 record("标题无 review 词 → blocked=False", result["blocked"] is False, result)
 
 result = gate_service.title_review_gate(item(DIRTY_TITLE), db=db)
-record("标题有 review 词 → blocked=True",
-       result["blocked"] is True and REVIEW_WORD in result["reviewWords"], result)
-record("message 照抄老版措辞",
-       result["message"] == "标题清理后仍需要人工复核，已停止保存", result["message"])
+record("legacy review word is removed without blocking",
+       result["blocked"] is False and REVIEW_WORD not in result["reviewWords"]
+       and REVIEW_WORD not in result["cleanedTitle"], result)
+record("no review-only blocking message remains",
+       result["message"] == "", result["message"])
 
 result = gate_service.title_review_gate(item(DIRTY_TITLE), db=db, allow_review=True)
-record("allow_review=True → blocked=False 但 reviewWords 仍有内容",
-       result["blocked"] is False and REVIEW_WORD in result["reviewWords"], result)
+record("allow_review preserves the same cleaned title",
+       result["blocked"] is False and REVIEW_WORD not in result["reviewWords"]
+       and REVIEW_WORD not in result["cleanedTitle"], result)
 
 # remove 词不该触发复核闸（它是直接删，不是等人看）
 result = gate_service.title_review_gate(item(CLEAN_TITLE + " " + REMOVE_WORD), db=db)
@@ -78,7 +80,8 @@ record("只有 remove 词 → blocked=False 且标题已清理",
 
 # db=None 也要能跑（纯函数场景）
 result = gate_service.title_review_gate(item(DIRTY_TITLE))
-record("db=None 时自开会话仍能判定", result["blocked"] is True, result)
+record("db=None still removes a legacy review word", result["blocked"] is False
+       and REVIEW_WORD not in result["cleanedTitle"], result)
 
 # --- 缺口 2：主图 OCR ------------------------------------------------------
 print("缺口 2：主图 OCR 闸门")
@@ -187,13 +190,12 @@ def merged(title, factory, *, allow_title=False, allow_image=False):
 
 
 result = merged(DIRTY_TITLE, one_review)
-record("两个都 blocked → blocks 有 2 条",
-       result["ok"] is False and len(result["blocks"]) == 2, result)
+record("image review alone contributes one block",
+       result["ok"] is False and len(result["blocks"]) == 1, result)
 
 result = merged(DIRTY_TITLE, all_ok)
-record("只有标题 blocked → blocks 有 1 条",
-       result["ok"] is False and len(result["blocks"]) == 1
-       and result["blocks"][0]["gate"] == "titleReview", result)
+record("title match alone does not block",
+       result["ok"] is True and not result["blocks"], result)
 
 result = merged(CLEAN_TITLE, all_remove)
 record("只有主图 blocked → gate 名为 imageCleanup",
@@ -204,8 +206,9 @@ record("两个都放行 → ok=True 且无 blocks",
        result["ok"] is True and not result["blocks"], result)
 
 result = merged(DIRTY_TITLE, one_review, allow_title=True, allow_image=True)
-record("都 allow → ok=True，但 warnings 里仍有复核词",
-       result["ok"] is True and any(REVIEW_WORD in w for w in result["warnings"]), result)
+record("allow flags do not restore removed title words",
+       result["ok"] is True and REVIEW_WORD not in result["title"]["reviewWords"]
+       and REVIEW_WORD not in result["title"]["cleanedTitle"], result)
 
 result = gate_service.pre_save_gate(db, item(CLEAN_TITLE), skip_images=True)
 record("skip_images=True → 不跑 OCR", result["ok"] is True
@@ -279,8 +282,8 @@ finally:
 chained = pre_save_check.pre_save_issues(
     o, p, c, title_review_words=gate["title"]["reviewWords"],
     image_review_pending=gate["images"])
-record("串联：闸门结果喂进 pre_save_issues 得 2 条",
-       len(chained) == 2, chained)
+record("legacy title word does not add a pre-save issue",
+       len(chained) == 1, chained)
 
 db.close()
 

@@ -11,7 +11,7 @@ ImageSource = Literal["main", "detail", "sku"]
 ImageSize = Literal["1:1", "16:9", "9:16"]
 GroupColor = Literal["slate", "rose", "amber", "emerald", "sky", "violet"]
 WordAction = Literal["add", "remove", "import", "remove-many", "clear", "enable", "disable"]
-WordCategory = Literal["remove", "review"]
+WordCategory = Literal["remove"]
 
 
 class ConnectRequest(CamelModel):

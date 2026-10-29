@@ -52,14 +52,8 @@ def require_product(db: Session, ident: Any):
 
 # --- 词库命中 -------------------------------------------------------------
 def review_hits(title: str, words: Iterable[tuple[str, str]]) -> list[str]:
-    """`review` 类违规词的命中记录（只记录，不改标题）。
-
-    匹配口径与 `word_service.clean_title()` 一致：大小写折叠并容忍词内空格/连字符变体。
-    """
-    from services import word_service
-
-    return [normalized for normalized, action in word_service.matched_words(title, words)
-            if action == "review"]
+    """Compatibility response for the removed review-only category."""
+    return []
 
 
 # 近 N 年内的四位年份才当作「采集年份」处理。

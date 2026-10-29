@@ -42,7 +42,6 @@ def main() -> int:
 
     # ---------- 1. 颜色规范化接线 ----------
     # 老版 normalize_colors 要求恰好 1 个颜色属性；两个颜色属性要抛错停下。
-    from services import color_service
 
     payload_two = {
         "skuPropertyList": [
@@ -101,25 +100,27 @@ def main() -> int:
 
     # ---------- 3. 闸门接线 ----------
     # 关键：pre_save_gate 必须在 clean_title 之后算，且 blocks 优先于 issues 报。
-    from services import gate_service
-
-    # 闸门靠词库判定 review，空词库永远不拦。这里加一个 review 类词。
-    from services import word_service
+    # Simulate a row left by an older database; legacy entries now remove on hit.
+    from services import gate_service, word_service
 
     word_service.seed(db)
-    word_service.add(db, "限量版", action="review")
+    from core.utils import now_ts
+    from models.violation_word import ViolationWord
+
+    db.add(ViolationWord(word="限量版", normalized="限量版", action="review",
+                         source="probe", enabled=True, created_at=now_ts()))
     db.commit()
 
     review_info = {"title": "限量版 运动鞋 男款 透气 跑步 鞋 白色 大码 四十五码"}
     gate = gate_service.title_review_gate(review_info, db=db)
-    check("标题 review 词 → blocked", gate["blocked"] is True,
-          str(gate.get("reviewWords"))[:60])
-    check("标题 review 词 message 有内容", bool(gate["message"]), gate["message"][:50])
+    check("legacy title word is cleaned without blocking",
+          gate["blocked"] is False and "限量版" not in gate["cleanedTitle"]
+          and not gate["reviewWords"], str(gate))
 
     gate_allow = gate_service.title_review_gate(review_info, db=db, allow_review=True)
-    check("allow_review=True → 放行但保留 reviewWords",
-          gate_allow["blocked"] is False and bool(gate_allow["reviewWords"]),
-          str(gate_allow.get("reviewWords"))[:40])
+    check("allow_review does not restore removed title text",
+          gate_allow["blocked"] is False and "限量版" not in gate_allow["cleanedTitle"]
+          and not gate_allow["reviewWords"], str(gate_allow))
 
     clean_info = {"title": "户外运动跑步鞋 透气马拉松训练情侣款 轻便 舒适 百搭"}
     gate_clean = gate_service.title_review_gate(clean_info, db=db)

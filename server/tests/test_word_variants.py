@@ -2,8 +2,11 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from core import errors
+from models.violation_word import ViolationWord
 from services import title_save_service, word_service
 
 
@@ -35,12 +38,67 @@ def test_ascii_word_boundaries_still_protect_unrelated_words() -> None:
     assert removed == []
 
 
-def test_review_hits_use_the_same_variant_matching_rule() -> None:
-    hits = word_service.matched_words(
-        "Adidas---Originals", [("adidas originals", "review")],
+def test_legacy_review_words_are_removed_instead_of_only_recorded() -> None:
+    legacy_word = ("adidas originals", "review")
+
+    assert word_service.matched_words("Adidas---Originals", [legacy_word]) == [
+        ("adidas originals", "remove")
+    ]
+    assert word_service.clean_title("Adidas---Originals shoes", [legacy_word]) == (
+        "shoes",
+        ["adidas originals"],
     )
 
-    assert hits == [("adidas originals", "review")]
+
+def test_seed_migrates_legacy_review_words_to_removal(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'words.db'}")
+    ViolationWord.__table__.create(engine)
+    with Session(engine) as db:
+        db.add(
+            ViolationWord(
+                word="legacy term",
+                normalized="legacy term",
+                action="review",
+                source="manual",
+                enabled=True,
+            )
+        )
+        db.commit()
+
+        word_service.seed(db)
+        db.commit()
+
+        row = db.query(ViolationWord).filter_by(normalized="legacy term").one()
+        assert row.action == "remove"
+        assert word_service._counts(db)["review"] == 0
+        assert ("legacy term", "remove") in word_service.matcher(db)
+    engine.dispose()
+
+
+def test_clear_removes_legacy_review_rows_too(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'words.db'}")
+    ViolationWord.__table__.create(engine)
+    with Session(engine) as db:
+        db.add_all(
+            [
+                ViolationWord(word="old", normalized="old", action="review"),
+                ViolationWord(word="current", normalized="current", action="remove"),
+            ]
+        )
+        db.commit()
+
+        result = word_service.clear(db, confirm=True)
+
+        assert result["removed"] == 2
+        assert db.query(ViolationWord).count() == 0
+    engine.dispose()
+
+
+def test_review_category_is_rejected_for_new_words() -> None:
+    with pytest.raises(errors.AppError):
+        word_service.add(None, "new term", action="review")
+    with pytest.raises(errors.AppError):
+        word_service.import_words(None, ["new term"], action="review")
 
 
 def test_nfkc_full_width_title_matches_half_width_word() -> None:
