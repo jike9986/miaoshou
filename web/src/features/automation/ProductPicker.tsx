@@ -4,7 +4,7 @@
 // 虽然带meta行，但用户明确要求采集箱这里只留图和名字，看得清最重要。
 //
 // 列表形态：多列自适应网格，卡片比之前大（图片 56px），标题单行截断。
-// 工具栏严格一行：搜索 · 筛选 · 每页条数 · 页码 · 翻页 · 全选 · 清空
+// 工具栏严格一行：筛选 · 每页条数 · 页码 · 翻页 · 本页全选；已选商品跨页保留。
 // 每页可选 10 / 20 / 50 / 100（后端已放开到 100，向上游翻页凑数）。
 
 import { RefreshCw, SearchX, Unplug } from "lucide-react";
@@ -200,11 +200,21 @@ export function ProductPicker({
           />
         )}
 
-        {connected && !loading && !errorMessage && items.length === 0 && (
+        {connected && !loading && !errorMessage && items.length === 0 && total === 0 && filter === "all" && (
           <EmptyState
             icon={<SearchX strokeWidth={1.5} />}
             title="采集箱是空的"
             description="先到妙手后台把商品加入采集箱。"
+            minHeight={220}
+          />
+        )}
+
+        {connected && !loading && !errorMessage && items.length === 0 && (total > 0 || filter !== "all") && (
+          <EmptyState
+            icon={<SearchX strokeWidth={1.5} />}
+            title="当前筛选没有结果"
+            description="调整筛选条件，或清除筛选查看采集箱商品。"
+            secondaryAction={{ label: "清除筛选", onClick: () => onFilterChange("all") }}
             minHeight={220}
           />
         )}

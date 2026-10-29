@@ -12,6 +12,7 @@ from schemas.requests import PublishRequest
 from services import (
     account_service,
     audit_service,
+    automation_run_service,
     operator_service,
     publish_service,
     setting_service,
@@ -198,6 +199,8 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
                                     if found.get("itemId") not in (None, "") else None)
             row.finished_at = now_ts() if remote_status != "processing" else None
             updated += 1
+            if remote_status in ("success", "fail", "cancel"):
+                automation_run_service.reconcile_publish_log(db, row)
     db.commit()
     return {"updated": updated, "degraded": degraded, "accountId": str(account.id),
             "platformTotal": platform_total}

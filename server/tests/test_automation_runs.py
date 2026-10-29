@@ -5,9 +5,13 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from api import publish as publish_api
 from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
+from models.automation_run import AutomationRunItem
+from models.product import Product
+from models.publish_log import PublishLog
 from services import operator_service
 
 API = "/api/v1"
@@ -57,18 +61,39 @@ def headers(token: str) -> dict[str, str]:
 
 def create_run(client: TestClient, setup: dict[str, object], *,
                publish_enabled: bool = False) -> dict:
+    detail_id = str(uuid.uuid4().int % 10**12)
+    source_shop_id = str(uuid.uuid4().int % 10**12)
     response = client.post(
         API + "/automation-runs",
         json={
             "accountId": setup["account_id"], "shopId": "22",
             "settings": {"textEnabled": True, "publishEnabled": publish_enabled},
-            "items": [{"key": "101:11", "detailId": "101", "shopId": "11",
+            "items": [{"key": f"{detail_id}:{source_shop_id}",
+                       "detailId": detail_id, "shopId": source_shop_id,
                        "title": "Test item"}],
         },
         headers=headers(str(setup["teacher_token"])),
     )
     assert response.status_code == 201, response.text
     return response.json()["run"]
+
+
+def create_automation_product(setup: dict[str, object], detail_id: str,
+                             shop_id: str = "11") -> Product:
+    db = SessionLocal()
+    try:
+        product = Product(
+            warehouse_key=f"run-product-{uuid.uuid4().hex}",
+            account_id=int(setup["account_id"]), detail_id=detail_id, shop_id=shop_id,
+            title="Automation test", status="ready", automation_result=True,
+            claimed=False, collected={}, payload={},
+        )
+        db.add(product)
+        db.commit()
+        db.refresh(product)
+        return product
+    finally:
+        db.close()
 
 
 def test_recovery_marks_inflight_item_unknown_and_blocks_reprocessing(client, setup):
@@ -147,15 +172,101 @@ def test_failed_process_closes_queued_publish_and_run(client, setup):
     assert result["status"] == "partial"
 
 
+def test_publish_enabled_run_requires_at_least_one_processing_step(client, setup):
+    response = client.post(
+        API + "/automation-runs",
+        json={
+            "accountId": setup["account_id"], "shopId": "22",
+            "settings": {"textEnabled": False, "imagesEnabled": False,
+                         "publishEnabled": True},
+            "items": [{"key": "101:11", "detailId": "101", "shopId": "11"}],
+        },
+        headers=headers(str(setup["teacher_token"])),
+    )
+    assert response.status_code == 400, response.text
+
+
+def test_publish_requires_saved_and_verified_automation_product(client, setup):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+
+    unverified = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": "1",
+              "result": {"saved": True, "draftVerified": False}}, headers=auth,
+    )
+    assert unverified.status_code == 409, unverified.text
+
+    db = SessionLocal()
+    try:
+        product = Product(
+            warehouse_key=f"run-unverified-{uuid.uuid4().hex}",
+            account_id=int(setup["account_id"]), detail_id="102", shop_id="22",
+            title="Unverified test", status="ready", automation_result=True,
+            claimed=False, collected={}, payload={},
+        )
+        db.add(product)
+        db.commit()
+        item_id = item["id"]
+        row = db.query(AutomationRunItem).filter_by(id=int(item_id)).one()
+        row.process_status = "succeeded"
+        row.product_id = product.id
+        row.process_result = {"saved": True, "draftVerified": False}
+        db.commit()
+
+        blocked = client.post(
+            API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+            headers=auth,
+        )
+        assert blocked.status_code == 409, blocked.text
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["detail", "shop"],
+    ids=["different-detail", "different-source-shop"],
+)
+def test_publish_rejects_automation_product_from_another_run_item(
+    client, setup, mismatch,
+):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    started = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth)
+    assert started.status_code == 200, started.text
+    product = create_automation_product(
+        setup,
+        str(int(item["detailId"]) + 1) if mismatch == "detail" else item["detailId"],
+        str(int(item["shopId"]) + 1) if mismatch == "shop" else item["shopId"],
+    )
+
+    result = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True}}, headers=auth,
+    )
+
+    assert result.status_code == 409, result.text
+
+
 def test_skipped_publish_can_be_recorded_as_needs_review(client, setup):
     run = create_run(client, setup, publish_enabled=True)
     item = run["items"][0]
     auth = headers(str(setup["teacher_token"]))
     client.post(
         API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth)
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
     processed = client.post(
         API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
-        json={"status": "succeeded"}, headers=auth,
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True}}, headers=auth,
     )
     assert processed.status_code == 200, processed.text
 
@@ -175,9 +286,11 @@ def test_recovery_closes_unstarted_publish_after_successful_processing(client, s
     auth = headers(str(setup["teacher_token"]))
     client.post(
         API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth)
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
     processed = client.post(
         API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
-        json={"status": "succeeded"}, headers=auth,
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True}}, headers=auth,
     )
     assert processed.status_code == 200, processed.text
 
@@ -186,3 +299,87 @@ def test_recovery_closes_unstarted_publish_after_successful_processing(client, s
     result = recovered.json()["run"]
     assert result["items"][0]["publishStatus"] == "needs_review"
     assert result["status"] == "needs_review"
+
+
+@pytest.mark.parametrize(
+    ("remote_status", "expected_status", "expected_run_status"),
+    [("success", "succeeded", "completed"), ("fail", "failed", "partial")],
+)
+def test_publish_receipt_updates_only_matching_automation_item(
+    client, setup, monkeypatch, remote_status, expected_status, expected_run_status,
+):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    db = SessionLocal()
+    try:
+        detail_id = item["detailId"]
+        assert client.post(
+            API + f"/automation-runs/{run['id']}/items/{item['id']}/start",
+            headers=auth,
+        ).status_code == 200
+
+        product = Product(
+            warehouse_key=f"run-receipt-{uuid.uuid4().hex}",
+            account_id=int(setup["account_id"]), detail_id=detail_id,
+            shop_id=item["shopId"],
+            title="Receipt test", status="ready", automation_result=True, claimed=False,
+            collected={}, payload={},
+        )
+        db.add(product)
+        db.commit()
+        processed = client.post(
+            API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+            json={"status": "succeeded", "productId": str(product.id),
+                  "result": {"saved": True, "draftVerified": True}}, headers=auth,
+        )
+        assert processed.status_code == 200, processed.text
+        assert client.post(
+            API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+            headers=auth,
+        ).status_code == 200
+        submitted = client.post(
+            API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-result",
+            json={"status": "needs_review", "reason": "waiting receipt",
+                  "result": {"batchId": "receipt-batch-1", "published": [detail_id]}},
+            headers=auth,
+        )
+        assert submitted.status_code == 200, submitted.text
+
+        log = PublishLog(
+            account_id=int(setup["account_id"]), product_id=product.id,
+            detail_id=detail_id, shop_id="22", batch_id="receipt-batch-1",
+            status="processing", reason="", title="Receipt test",
+        )
+        db.add(log)
+        db.commit()
+
+        class FakeClient:
+            def publish_records(self, **_kwargs):
+                return {"data": {"detailList": [{
+                    "detailId": detail_id, "status": remote_status,
+                    "itemId": "50001", "reason": "platform rejected",
+                }]}}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            publish_api.publish_service, "account_client_for",
+            lambda *_args: (db.query(Account).filter_by(id=int(setup["account_id"])).one(),
+                            FakeClient()),
+        )
+        refreshed = publish_api._refresh_processing(db, str(setup["account_id"]))
+        assert refreshed["updated"] == 1
+
+        saved = client.get(API + f"/automation-runs/{run['id']}", headers=auth)
+        assert saved.status_code == 200, saved.text
+        saved_run = saved.json()["run"]
+        saved_item = saved_run["items"][0]
+        assert saved_item["publishStatus"] == expected_status
+        assert saved_item["publishReason"] == "platform rejected"
+        assert saved_run["status"] == expected_run_status
+        assert saved_item["publishResult"]["platformStatus"] == remote_status
+        assert saved_item["publishResult"]["publishLogId"] == str(log.id)
+    finally:
+        db.close()

@@ -1280,6 +1280,7 @@ export function useRefreshPublishLogs(): UseMutationResult<RefreshLogsResponse, 
     }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.publishLogs.all });
+      void client.invalidateQueries({ queryKey: queryKeys.automationRuns.all });
     },
   });
 }

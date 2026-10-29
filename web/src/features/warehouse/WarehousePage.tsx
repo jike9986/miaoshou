@@ -105,7 +105,7 @@ export function WarehousePage() {
   );
 
   const query = useWarehouseStore();
-  const clearSelected = query.clearSelected;
+  const { clearSelected, deselectMany, selectMany, toggleSelected } = query;
   const queryClient = useQueryClient();
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const { data: auth } = useAuthStatus();
@@ -155,12 +155,8 @@ export function WarehousePage() {
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishIds, setPublishIds] = useState<string[]>([]);
   const [createBatchOpen, setCreateBatchOpen] = useState(false);
-  // 发布弹窗要靠来源 shopId 判断这单是不是跨店（跨店要建载体，提前告知）
-  const sourceShopIds = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const item of items) map[String(item.id)] = String(item.shopId ?? "");
-    return map;
-  }, [items]);
+  // 选中时保存来源店铺，翻页后也能向发布弹窗提供完整的跨店判断数据。
+  const [sourceShopIds, setSourceShopIds] = useState<Record<string, string>>({});
 
   const [carrierOpen, setCarrierOpen] = useState(false);
   const claimSharedProduct = useMutation({
@@ -204,13 +200,57 @@ export function WarehousePage() {
   const allSelectedOnPage = pageIds.length > 0 && pageIds.every((id) => selectedIds.includes(id));
   const someSelectedOnPage = pageIds.some((id) => selectedIds.includes(id));
 
-  const toggleAllOnPage = useCallback(() => {
+  const clearWarehouseSelection = useCallback(() => {
+    clearSelected();
+    setSourceShopIds({});
+  }, [clearSelected]);
+
+  const toggleWarehouseSelection = useCallback((id: string) => {
+    const item = items.find((candidate) => candidate.id === id);
+    if (selectedIds.includes(id)) {
+      setSourceShopIds((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    } else if (item) {
+      setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
+    }
+    toggleSelected(id);
+  }, [items, selectedIds, toggleSelected]);
+
+  const selectWarehouseItem = useCallback((id: string) => {
+    const item = items.find((candidate) => candidate.id === id);
+    if (item) setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
+    toggleSelected(id);
+  }, [items, toggleSelected]);
+
+  const selectOrDeselectPage = useCallback(() => {
     if (allSelectedOnPage) {
-      query.deselectMany(pageIds);
+      deselectMany(pageIds);
+      setSourceShopIds((current) => {
+        const next = { ...current };
+        for (const id of pageIds) delete next[id];
+        return next;
+      });
       return;
     }
-    query.selectMany(pageIds);
-  }, [allSelectedOnPage, pageIds, query]);
+    selectMany(pageIds);
+    setSourceShopIds((current) => {
+      const next = { ...current };
+      for (const item of items) next[item.id] = String(item.shopId ?? "");
+      return next;
+    });
+  }, [allSelectedOnPage, deselectMany, items, pageIds, selectMany]);
+
+  // Store filter/page-size changes clear its selection internally; keep the local snapshots in sync.
+  useEffect(() => {
+    const selected = new Set(selectedIds);
+    setSourceShopIds((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [selectedIds]);
 
   const claimSelectedForMember = async (): Promise<void> => {
     const { claimed, failures } = await claimSharedProduct.mutateAsync(memberClaimableIds);
@@ -226,8 +266,8 @@ export function WarehousePage() {
   useEffect(() => {
     void queryClient.removeQueries({ queryKey: ["warehouse"] });
     void queryClient.removeQueries({ queryKey: ["system", "templates"] });
-    clearSelected();
-  }, [identity?.id, identity?.role, clearSelected, queryClient]);
+    clearWarehouseSelection();
+  }, [identity?.id, identity?.role, clearWarehouseSelection, queryClient]);
 
   const openPublish = (ids: string[]): void => {
     if (!connected) {
@@ -250,7 +290,7 @@ export function WarehousePage() {
         } else {
           toast.success(`已删除 ${result.deletedCount} 件商品`);
         }
-        query.clearSelected();
+        clearWarehouseSelection();
         setDeleteOpen(false);
       },
       onError: (error) => {
@@ -395,7 +435,7 @@ export function WarehousePage() {
               <ErrorState title="自动化结果加载失败" description={apiErrorMessage(automationQuery.error)} onRetry={() => void automationQuery.refetch()} retrying={automationQuery.isFetching} />
             )}
             {isTeacher && !automationQuery.isLoading && !automationQuery.isError && automationQuery.data?.items.length === 0 && (
-              <Card><EmptyState title="暂无待入仓的自动化结果" description="自动化处理完成的商品会先保存在这里，经老师选择后才会加入成品仓库。" minHeight={220} /></Card>
+              <Card><EmptyState title="暂无待入仓的自动化结果" description="自动化处理成功的商品会保存在这里，由老师选择后加入成品仓库。" minHeight={220} /></Card>
             )}
             {isTeacher && automationQuery.data && automationQuery.data.items.length > 0 && (
               <>
@@ -516,7 +556,7 @@ export function WarehousePage() {
                   size="md"
                   icon={<CheckSquare />}
                   className="shrink-0"
-                  onClick={toggleAllOnPage}
+                  onClick={selectOrDeselectPage}
                   disabled={pageIds.length === 0}
                   title={allSelectedOnPage ? "取消本页全部选中" : "选中本页全部商品"}
                 >
@@ -576,7 +616,7 @@ export function WarehousePage() {
                 <div className="flex items-center gap-2 text-xs text-fg-muted">
                   <button
                     type="button"
-                    onClick={toggleAllOnPage}
+                    onClick={selectOrDeselectPage}
                     className={cn(
                       "inline-flex items-center gap-1.5 rounded-sm px-1 py-0.5 transition-colors duration-fast",
                       "hover:bg-surface-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
@@ -617,7 +657,7 @@ export function WarehousePage() {
                           isMember={isMember}
                           index={index}
                           selected={selectedIds.includes(product.id)}
-                          onToggle={query.toggleSelected}
+                          onToggle={toggleWarehouseSelection}
                           onOpen={(item) => setDetailId(item.id)}
                         />
                       </motion.div>
@@ -637,7 +677,7 @@ export function WarehousePage() {
               showTotal={false}
               pageSizeOptions={PAGE_SIZE_OPTIONS.map((size) => ({ value: size, label: String(size) }))}
               onPageChange={(page) => {
-                if (isMember) query.clearSelected();
+                if (isMember) clearWarehouseSelection();
                 query.setPage(page);
               }}
               onPageSizeChange={query.setPageSize}
@@ -654,7 +694,7 @@ export function WarehousePage() {
         count={tab === "automation" ? automationSelected.length : tab === "products" ? selectedCount : 0}
         total={tab === "automation" ? automationQuery.data?.total : total}
         unit="件"
-        onClear={() => tab === "automation" ? setAutomationSelected([]) : query.clearSelected()}
+        onClear={() => tab === "automation" ? setAutomationSelected([]) : clearWarehouseSelection()}
         actions={tab === "automation" ? [{
             label: importAutomationResults.isPending ? "正在加入…" : "加入成品仓库",
             icon: <PackageCheck className="size-3.5" />,
@@ -714,7 +754,7 @@ export function WarehousePage() {
                     } else {
                       toast.success(`已认领 ${done} 件到采集箱（未发布）`);
                     }
-                    query.clearSelected();
+                    clearWarehouseSelection();
                   },
                   onError: (error) => toast.error(apiErrorMessage(error)),
                 }
@@ -831,7 +871,7 @@ export function WarehousePage() {
         onClose={() => setTransformOpen(false)}
         onApplied={(result) => {
           toast.success(`已改价 ${formatCount(result.changedCount)} 件商品`);
-          query.clearSelected();
+          clearWarehouseSelection();
         }}
       />
 
@@ -865,7 +905,7 @@ export function WarehousePage() {
         connected={connected}
         revisions={hasSelectedRevisions ? selectedRevisions : undefined}
         onRefresh={() => void listQuery.refetch()}
-        onDone={() => query.clearSelected()}
+        onDone={clearWarehouseSelection}
       />}
 
       {!isMember && <CreateBatchDialog
@@ -875,7 +915,7 @@ export function WarehousePage() {
         products={items}
         accountId={auth?.accountId ?? null}
         onCreated={() => {
-          query.clearSelected();
+          clearWarehouseSelection();
           // 建完直接把用户带到批次标签，进度就在眼前，不用自己去找
           setTab("batch");
         }}
@@ -888,8 +928,8 @@ export function WarehousePage() {
           if (!open) setDetailId(null);
         }}
         onRequestDelete={(id) => {
-          query.clearSelected();
-          query.toggleSelected(id);
+          clearWarehouseSelection();
+          selectWarehouseItem(id);
           setDeleteOpen(true);
           setDetailId(null);
         }}
@@ -904,7 +944,7 @@ export function WarehousePage() {
         defaultShopId={currentShopId}
         connected={connected}
         allowClaimOnly={!isMember}
-        onSubmitted={() => query.clearSelected()}
+        onSubmitted={clearWarehouseSelection}
       />
     </>
   );

@@ -170,7 +170,9 @@ export function ProcessSettings({
   // 用户会以为在跑，等半天发现没动。运行前就把话说清楚。
   const comboWarning = ((): string | null => {
     if (!settings.textEnabled && !settings.imagesEnabled) {
-      return "文字处理和图片处理都关着，没有可执行的内容。";
+      return settings.publishEnabled
+        ? "发布前请至少开启文字或图片处理。"
+        : "文字处理和图片处理都关着，没有可执行的内容。";
     }
     if (settings.priceTemplateEnabled && !settings.textEnabled) {
       return "定价模板需要先开启文字处理，否则不会生效。";

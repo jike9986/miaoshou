@@ -12,6 +12,8 @@ from core.utils import now_ts
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.operator import Operator
+from models.product import Product
+from models.publish_log import PublishLog
 from services import operator_service
 
 PROCESS_STATUSES = {"queued", "running", "succeeded", "failed", "needs_review"}
@@ -90,6 +92,11 @@ def create(db: Session, operator: Operator, *, account_id: Any, shop_id: Any,
     shop_text = str(shop_id or "").strip()
     if not shop_text.isdigit():
         raise errors.validation("shopId 必须是数字", field="shopId")
+    wants_publish = settings.get("publishEnabled") is True
+    if wants_publish and not (
+        settings.get("textEnabled") is True or settings.get("imagesEnabled") is True
+    ):
+        raise errors.validation("发布前请至少开启文字或图片处理", field="settings")
 
     clean: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -119,7 +126,6 @@ def create(db: Session, operator: Operator, *, account_id: Any, shop_id: Any,
     )
     db.add(run)
     db.flush()
-    wants_publish = bool(settings.get("publishEnabled"))
     for item in clean:
         db.add(AutomationRunItem(
             run_id=run.id, key=item["key"], detail_id=item["detail_id"],
@@ -212,16 +218,42 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
     if row.process_status not in {"running", "needs_review"}:
         raise errors.AppError("CONFLICT", "该商品不处于可记录处理结果的状态",
                               status=409)
+    if (status == "succeeded" and run.settings.get("publishEnabled") is True
+            and (product_id in (None, "")
+                 or not isinstance(result, Mapping)
+                 or result.get("saved") is not True
+                 or result.get("draftVerified") is not True)):
+        raise errors.AppError(
+            "CONFLICT", "发布前需确认商品已保存并通过草稿读回核验", status=409)
     product_pk = None
     if product_id not in (None, ""):
         text = str(product_id)
         if not text.isdigit():
             raise errors.validation("productId 必须是数字", field="productId")
         product_pk = int(text)
+    server_verification: dict[str, Any] | None = None
+    if status == "succeeded" and run.settings.get("publishEnabled") is True:
+        product = db.query(Product).filter(
+            Product.id == product_pk,
+            Product.account_id == run.account_id,
+            Product.automation_result.is_(True),
+            Product.detail_id == row.detail_id,
+            Product.shop_id == row.source_shop_id,
+        ).one_or_none()
+        if product is None or product.updated_at < row.updated_at:
+            raise errors.AppError(
+                "CONFLICT", "发布目标不是本次处理后保存的自动化商品", status=409)
+        server_verification = {
+            "productId": str(product.id),
+            "productUpdatedAt": product.updated_at,
+            "productRevision": product.revision,
+        }
     row.process_status = status
     row.process_reason = str(reason or "")[:2000]
     row.product_id = product_pk
     row.process_result = dict(result or {})
+    if server_verification is not None:
+        row.process_result["_serverVerification"] = server_verification
     if row.publish_status == "queued" and status in {"failed", "needs_review"}:
         row.publish_status = status
         row.publish_reason = (
@@ -238,6 +270,25 @@ def start_publish(db: Session, run: AutomationRun, item_id: Any) -> dict[str, An
     row = _get_item(db, run, item_id)
     if row.process_status != "succeeded" or row.product_id is None:
         raise errors.AppError("CONFLICT", "商品处理完成后才能发布", status=409)
+    process_result = row.process_result if isinstance(row.process_result, dict) else {}
+    server_verification = process_result.get("_serverVerification")
+    if (run.settings.get("publishEnabled") is not True
+            or process_result.get("saved") is not True
+            or process_result.get("draftVerified") is not True
+            or not isinstance(server_verification, dict)
+            or server_verification.get("productId") != str(row.product_id)):
+        raise errors.AppError(
+            "CONFLICT", "商品草稿未通过保存与读回核验，不能发布", status=409)
+    product = db.query(Product).filter(
+        Product.id == row.product_id,
+        Product.account_id == run.account_id,
+        Product.automation_result.is_(True),
+    ).one_or_none()
+    if (product is None
+            or product.updated_at != server_verification.get("productUpdatedAt")
+            or product.revision != server_verification.get("productRevision")):
+        raise errors.AppError(
+            "CONFLICT", "商品自处理核验后发生变化，请重新处理并核对", status=409)
     changed = (db.query(AutomationRunItem).filter(
         AutomationRunItem.id == row.id,
         AutomationRunItem.publish_status == "queued",
@@ -270,6 +321,39 @@ def finish_publish(db: Session, run: AutomationRun, item_id: Any, *, status: str
     _recompute(run, _items(db, run.id))
     db.commit()
     return get_full(db, run)
+
+
+def reconcile_publish_log(db: Session, log: PublishLog) -> bool:
+    """Copy a final publish receipt to the automation item that submitted it."""
+    if log.status not in {"success", "fail", "cancel"} or not log.batch_id:
+        return False
+    query = (db.query(AutomationRunItem)
+             .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
+             .filter(AutomationRun.account_id == log.account_id,
+                     AutomationRun.shop_id == log.shop_id,
+                     AutomationRunItem.product_id == log.product_id,
+                     AutomationRunItem.publish_status == "needs_review"))
+    matched = []
+    for item in query.all():
+        result = item.publish_result if isinstance(item.publish_result, dict) else {}
+        if result.get("batchId") == log.batch_id:
+            matched.append(item)
+    if len(matched) != 1:
+        return False
+
+    item = matched[0]
+    item.publish_status = "succeeded" if log.status == "success" else "failed"
+    item.publish_reason = str(log.reason or "")[:2000]
+    item.publish_result = {
+        **(item.publish_result if isinstance(item.publish_result, dict) else {}),
+        "publishLogId": str(log.id),
+        "platformStatus": log.status,
+        "platformItemId": log.platform_item_id,
+    }
+    item.updated_at = now_ts()
+    run = db.query(AutomationRun).filter(AutomationRun.id == item.run_id).one()
+    _recompute(run, _items(db, run.id))
+    return True
 
 
 def _get_item(db: Session, run: AutomationRun, item_id: Any) -> AutomationRunItem:

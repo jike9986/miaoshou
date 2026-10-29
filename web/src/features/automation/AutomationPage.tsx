@@ -21,8 +21,7 @@
 //
 // 明确不可用的能力（按钮禁用并给出 title 说明，不假装）：
 //   · 上传尺码图 —— 后端只有「登记图床地址」的 POST /size-charts，没有文件上传接口
-//   · 跨页全选 —— 后端 /collect-box 不支持按筛选条件批量选中，只能选本页可见结果
-//   · 采集箱每页 >20 —— 服务端校验 pageSize 必须 1–20，超出会 400
+//   · 全结果批量选择 —— 后端 /collect-box 不支持一次返回全量选品，需逐页选择
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pencil, Play, Square, Tag } from "lucide-react";
@@ -85,6 +84,8 @@ interface SelectionEntry {
   shopId: string;
   title: string;
 }
+
+const MAX_RUN_ITEMS = 200;
 
 const DATE_FORMAT = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
@@ -193,6 +194,10 @@ export function AutomationPage() {
   const selectedKeys = useMemo(() => new Set(selection.keys()), [selection]);
 
   const toggleItem = useCallback((item: CollectBoxItem) => {
+    if (!selectedKeys.has(item.key) && selection.size >= MAX_RUN_ITEMS) {
+      toast.warning(`一次最多选择 ${MAX_RUN_ITEMS} 件商品`);
+      return;
+    }
     setSelection((prev) => {
       const next = new Map(prev);
       if (next.has(item.key)) {
@@ -207,7 +212,7 @@ export function AutomationPage() {
       }
       return next;
     });
-  }, []);
+  }, [selectedKeys, selection.size]);
 
   /* ---------------- 本地处理态 ---------------- */
   const [stages, setStages] = useState<Record<string, ItemStage>>({});
@@ -225,6 +230,8 @@ export function AutomationPage() {
   const persistentItems = useRef<Map<string, string>>(new Map());
   const hydratedRunId = useRef<string | null>(null);
   const recoveringRunId = useRef<string | null>(null);
+  const startingRunRef = useRef(false);
+  const [preparingRun, setPreparingRun] = useState(false);
   const running = run.phase === "running";
   // 两个开关都关着就没有可执行内容：按钮置灰并说明原因（老版 summary-warning）
   const somethingEnabled = settings.textEnabled || settings.imagesEnabled;
@@ -335,24 +342,36 @@ export function AutomationPage() {
   }, [latestRunQuery.data?.run, recoverRunMutation, hydrateRun, running]);
 
   const selectVisible = useCallback(() => {
+    const allSelected = visibleItems.length > 0 && visibleItems.every((item) => selection.has(item.key));
+    const additions = allSelected ? 0 : visibleItems.filter((item) => !selection.has(item.key)).length;
+    const available = Math.max(0, MAX_RUN_ITEMS - selection.size);
+    if (additions > available) {
+      toast.warning(`一次最多选择 ${MAX_RUN_ITEMS} 件商品`, {
+        description: available > 0
+          ? `已保留现有选择，并从本页补选 ${available} 件。`
+          : "已保留现有选择，请取消部分商品后再继续。",
+      });
+    }
     setSelection((prev) => {
       const next = new Map(prev);
       const allSelected = visibleItems.length > 0 && visibleItems.every((item) => next.has(item.key));
+      let remaining = Math.max(0, MAX_RUN_ITEMS - next.size);
       for (const item of visibleItems) {
         if (allSelected) {
           next.delete(item.key);
-        } else if (!next.has(item.key)) {
+        } else if (!next.has(item.key) && remaining > 0) {
           next.set(item.key, {
             key: item.key,
             detailId: item.detailId,
             shopId: item.shopId,
             title: item.title,
           });
+          remaining -= 1;
         }
       }
       return next;
     });
-  }, [visibleItems]);
+  }, [selection, visibleItems]);
 
   /* ---------------- 真正执行：串行处理入仓 ---------------- */
   const processItem = useProcessCollectItem();
@@ -360,7 +379,7 @@ export function AutomationPage() {
   // 店铺名称用于任务反馈；发布目标跟随顶部当前店铺。
   const shopsQuery = useShops(status?.accountId, { enabled: connected });
 
-  const startRun = async (): Promise<void> => {
+  const executeRun = async (): Promise<void> => {
     if (!connected) {
       toast.warning("请先连接妙手");
       return;
@@ -368,6 +387,19 @@ export function AutomationPage() {
     const targets = [...selection.values()];
     if (targets.length === 0) {
       toast.warning("请先勾选要处理的商品");
+      return;
+    }
+    if (targets.length > MAX_RUN_ITEMS) {
+      toast.warning(`一次最多处理 ${MAX_RUN_ITEMS} 件商品`, {
+        description: "请取消部分选择后再开始任务。",
+      });
+      return;
+    }
+    const savedRun = latestRunQuery.data?.run;
+    if (latestRunQuery.isLoading || recoverRunMutation.isPending
+      || recoveringRunId.current !== null
+      || (savedRun && hydratedRunId.current !== savedRun.id)) {
+      toast.info("正在恢复上次任务，请稍后再开始");
       return;
     }
     // 发布开启但没选目标店铺：先拦住，别等处理完才发现没地方认领
@@ -380,7 +412,6 @@ export function AutomationPage() {
       return;
     }
 
-    const savedRun = latestRunQuery.data?.run;
     let durableRun: AutomationRunRecord | null = null;
     if (persistentRunId.current && savedRun?.id === persistentRunId.current) {
       const queued = new Set(savedRun.items.filter((item) => item.processStatus === "queued").map((item) => item.key));
@@ -501,6 +532,13 @@ export function AutomationPage() {
           },
         });
         processResponseReceived = true;
+        if (settings.publishEnabled && (
+          result.saved !== true
+          || result.product?.draftVerified !== true
+          || !result.product?.id
+        )) {
+          throw new Error("商品草稿未通过保存与读回核验，已阻止发布；请检查妙手商品记录后再继续。");
+        }
         await recordProcessMutation.mutateAsync({
           runId, itemId, status: "succeeded", productId: result.product?.id ? String(result.product.id) : null,
           result: {
@@ -567,7 +605,11 @@ export function AutomationPage() {
                   status: accepted ? "needs_review" : response.failures.length > 0 ? "failed" : "needs_review",
                   reason: response.failures.map((item) => item.reason).filter(Boolean).join("；")
                     || (accepted ? "妙手已受理，等待最终发布回执。" : "妙手未返回可核实的发布结果，请核对发布记录。"),
-                  result: { published: response.published, failures: response.failures },
+                  result: {
+                    batchId: response.batchId,
+                    published: response.published,
+                    failures: response.failures,
+                  },
                 });
                 if (accepted || response.failures.length > 0) {
                   setStages((prev) => ({
@@ -707,6 +749,18 @@ export function AutomationPage() {
     }
   };
 
+  const startRun = async (): Promise<void> => {
+    if (startingRunRef.current) return;
+    startingRunRef.current = true;
+    setPreparingRun(true);
+    try {
+      await executeRun();
+    } finally {
+      startingRunRef.current = false;
+      setPreparingRun(false);
+    }
+  };
+
   const stopRun = (): void => {
     stopRef.current = true;
     setRun((prev) => ({ ...prev, stage: "停止中，等待当前这件完成…" }));
@@ -735,12 +789,16 @@ export function AutomationPage() {
               <Button
                 variant="primary"
                 icon={<Play />}
-                disabled={!connected || selection.size === 0 || !somethingEnabled}
+                disabled={!connected || selection.size === 0 || !somethingEnabled
+                  || preparingRun || latestRunQuery.isLoading || recoverRunMutation.isPending}
+                loading={preparingRun}
                 title={
                   !connected
                     ? "先连接妙手"
                     : selection.size === 0
                       ? "先勾选要处理的商品"
+                    : preparingRun || latestRunQuery.isLoading || recoverRunMutation.isPending
+                      ? "正在准备任务或恢复上次任务"
                       : !somethingEnabled
                         ? "文字和图片处理都关着，没有可执行的内容"
                         : `串行处理 ${selection.size} 件商品`
