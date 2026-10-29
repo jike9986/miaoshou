@@ -8,6 +8,7 @@ from core import errors
 from db.session import SessionLocal, init_db
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
+from models.image_job import ImageJob
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
@@ -291,3 +292,35 @@ def test_member_publish_status_and_history_are_owner_scoped(publish_db):
     assert first_detail["publishHistory"][0]["status"] == "success"
     assert second_detail["publishHistory"] == []
     assert second_detail["product"]["status"] == "claimed"
+
+
+def test_member_product_detail_only_exposes_own_image_jobs(publish_db):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    first, account = _identity(db, suffix)
+    second, _ = _identity(db, f"second-{suffix}")
+    teacher, _ = _identity(db, f"teacher-{suffix}", role=operator_service.ROLE_TEACHER)
+    product = _product(db, suffix, account)
+    own_id = f"own-{suffix}"
+    foreign_id = f"foreign-{suffix}"
+    legacy_id = f"legacy-{suffix}"
+    db.add_all([
+        ImageJob(id=own_id, product_id=product.id, operator_id=first.id,
+                 filename="own.png", reserved_milliyuan=24),
+        ImageJob(id=foreign_id, product_id=product.id, operator_id=second.id,
+                 filename="foreign.png", reserved_milliyuan=240),
+        ImageJob(id=legacy_id, product_id=product.id, operator_id=None,
+                 filename="legacy.png", reserved_milliyuan=120),
+    ])
+    db.flush()
+
+    first_detail = warehouse_service.detail(db, product.id, operator_id=first.id)
+    second_detail = warehouse_service.detail(db, product.id, operator_id=second.id)
+    teacher_detail = warehouse_service.detail(db, product.id, operator_id=teacher.id)
+
+    assert {job["id"] for job in first_detail["imageJobs"]} == {own_id}
+    assert first_detail["imageJobs"][0]["filename"] == "own.png"
+    assert {job["id"] for job in second_detail["imageJobs"]} == {foreign_id}
+    assert {job["id"] for job in teacher_detail["imageJobs"]} == {
+        own_id, foreign_id, legacy_id,
+    }

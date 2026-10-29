@@ -758,8 +758,10 @@ def detail(db: Session, ident: Any, *, include_payload: bool = False,
         history_query = history_query.filter(PublishLog.operator_id == operator_id)
     history = history_query.order_by(
         PublishLog.requested_at.desc()).limit(20).all()
-    jobs = (db.query(ImageJob).filter(ImageJob.product_id == product.id)
-            .order_by(ImageJob.created_at.desc()).limit(20).all())
+    jobs_query = db.query(ImageJob).filter(ImageJob.product_id == product.id)
+    if member_view:
+        jobs_query = jobs_query.filter(ImageJob.operator_id == operator_id)
+    jobs = jobs_query.order_by(ImageJob.created_at.desc()).limit(20).all()
     return {
         "product": body,
         "publishHistory": [{
