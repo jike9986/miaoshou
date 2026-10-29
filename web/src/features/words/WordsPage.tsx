@@ -3,6 +3,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import {
+  Download,
   Plus,
   SearchX,
   Trash2,
@@ -15,6 +16,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { LIMITS } from "@/lib/constants";
 import { useMutateWords, useViolationWords } from "@/lib/queries";
 import { useWordsStore } from "@/features/stores";
+import { useOperatorIdentity } from "@/lib/operator";
 import { Pagination, TextAction, useDebouncedValue } from "@/features/shared";
 import { PageContent, PageHeader } from "@/components/layout";
 import {
@@ -40,7 +42,23 @@ import {
 
 const PAGE_SIZE_OPTIONS = [100, 200, 500];
 
+interface WordBackupItem {
+  word: string;
+  action: "remove" | "review";
+  source: string;
+  enabled: boolean;
+  createdAt: number;
+}
+
+interface WordBackup {
+  format: "aohuang.violation-words";
+  version: 1;
+  items: WordBackupItem[];
+}
+
 export function WordsPage() {
+  const identity = useOperatorIdentity();
+  const canExport = !identity || identity.role === "admin" || identity.role === "teacher";
   const store = useWordsStore();
   const [searchDraft, setSearchDraft] = useState(store.searchDraft);
   const debounced = useDebouncedValue(searchDraft, 300);
@@ -80,6 +98,7 @@ export function WordsPage() {
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const data = listQuery.data;
   const items = data?.items ?? [];
@@ -90,17 +109,46 @@ export function WordsPage() {
   const pageWords = items.map((item) => item.word);
   const allSelected = pageWords.length > 0 && pageWords.every((word) => selected.includes(word));
 
-  const parsedImportWords = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          importText
-            .split(/[\n,，;；\t]+/)
-            .map((word) => word.trim())
-            .filter((word) => word.length > 0 && word.length <= 64)
+  const parsedImportBackup = useMemo(() => {
+    const input = importText.trim();
+    if (!input.startsWith("{")) return null;
+    try {
+      const parsed: unknown = JSON.parse(input);
+      if (
+        typeof parsed === "object" && parsed !== null &&
+        "format" in parsed && parsed.format === "aohuang.violation-words" &&
+        "version" in parsed && parsed.version === 1 &&
+        "items" in parsed && Array.isArray(parsed.items) &&
+        parsed.items.every((item) =>
+          typeof item === "object" && item !== null &&
+          "word" in item && typeof item.word === "string" &&
+          "action" in item && (item.action === "remove" || item.action === "review") &&
+          "source" in item && typeof item.source === "string" &&
+          "enabled" in item && typeof item.enabled === "boolean" &&
+          "createdAt" in item && typeof item.createdAt === "number" &&
+          Number.isFinite(item.createdAt)
         )
-      ),
-    [importText]
+      ) {
+        return parsed as WordBackup;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }, [importText]);
+  const invalidBackupText = importText.trimStart().startsWith("{") && !parsedImportBackup;
+  const parsedImportWords = useMemo(
+    () => parsedImportBackup
+      ? parsedImportBackup.items.map((item) => item.word)
+      : Array.from(
+          new Set(
+            importText
+              .split(/[\n,，;；\t]+/)
+              .map((word) => word.trim())
+              .filter((word) => word.length > 0 && word.length <= 64)
+          )
+        ),
+    [importText, parsedImportBackup]
   );
 
   const submitSingle = (): void => {
@@ -137,7 +185,15 @@ export function WordsPage() {
   };
 
   const submitImport = (): void => {
-    if (parsedImportWords.length === 0) {
+    if (invalidBackupText) {
+      setImportError("无法识别该 JSON 备份格式");
+      return;
+    }
+    if (parsedImportBackup?.items.length === 0 && !importReplace) {
+      setImportError("空词库备份仅支持替换恢复");
+      return;
+    }
+    if (parsedImportWords.length === 0 && !parsedImportBackup) {
       setImportError("没有解析到有效词（每行一个，或用逗号/分号分隔）");
       return;
     }
@@ -149,7 +205,7 @@ export function WordsPage() {
     mutate.mutate(
       {
         action: "import",
-        words: parsedImportWords,
+        words: parsedImportBackup ?? parsedImportWords,
         category: "remove",
         mode: importReplace ? "replace" : "append",
       },
@@ -188,6 +244,27 @@ export function WordsPage() {
     );
   };
 
+  const downloadBackup = async (): Promise<void> => {
+    setExporting(true);
+    try {
+      const backup = await api.get<WordBackup>("/violation-words/export");
+      const blob = new Blob([JSON.stringify(backup, null, 2)], {
+        type: "application/json;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "violation-words-backup.json";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast.success(`已导出 ${backup.items.length} 个词条`);
+    } catch (error) {
+      toast.error("导出失败", { description: apiErrorMessage(error) });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const submitDelete = (): void => {
     mutate.mutate(
       { action: "remove-many", words: selected },
@@ -209,8 +286,7 @@ export function WordsPage() {
   };
 
   const submitClear = (): void => {
-    // 词库不再分「删除/复核」类（界面上命中的词一律删除），清空按删除类执行——
-    // 历史复核类词条若有残留不在本页清空范围内。
+    // 清空会删除词表中的所有记录，包括兼容旧版留下的 review 行。
     mutate.mutate(
       { action: "clear", category: "remove", confirm: true },
       {
@@ -226,6 +302,14 @@ export function WordsPage() {
 
   const headerActions = (
     <>
+      {canExport && (
+        <IconButton
+          label="导出词库 JSON 备份"
+          icon={<Download />}
+          disabled={exporting}
+          onClick={() => void downloadBackup()}
+        />
+      )}
       <Button variant="secondary" icon={<Upload />} onClick={() => setImportOpen(true)}>
         批量导入
       </Button>
@@ -506,7 +590,7 @@ export function WordsPage() {
         }}
         size="md"
         title="批量导入违规词"
-        description="每行一个，或用逗号 / 分号 / 制表符分隔；重复与超长的项会自动跳过。"
+        description="可导入词库 JSON 备份，或按每行一个词、逗号 / 分号 / 制表符分隔的文本导入。"
         closeOnOverlay={false}
         footer={
           <>
@@ -516,10 +600,15 @@ export function WordsPage() {
             <Button
               variant="primary"
               loading={mutate.isPending}
-              disabled={parsedImportWords.length === 0}
+              disabled={
+                (parsedImportWords.length === 0 && !parsedImportBackup) ||
+                (parsedImportBackup?.items.length === 0 && !importReplace)
+              }
               onClick={submitImport}
             >
-              导入 {parsedImportWords.length > 0 ? parsedImportWords.length : ""} 个词
+              {parsedImportBackup?.items.length === 0 && importReplace
+                ? "恢复为空词库"
+                : `导入 ${parsedImportWords.length} 个词`}
             </Button>
           </>
         }
@@ -528,7 +617,7 @@ export function WordsPage() {
           <Field
             label="词列表"
             required
-            error={importError}
+            error={importError ?? (invalidBackupText ? "无法识别该 JSON 备份格式" : undefined)}
             hint={`最多 ${LIMITS.wordsPageSize.max} 个词；已解析 ${parsedImportWords.length} 个`}
           >
             {/* 老版能直接导入 .txt/.csv（title-words-file）。几百个词手敲不现实，
@@ -542,11 +631,11 @@ export function WordsPage() {
               >
                 导入文件
               </Button>
-              <span className="text-2xs text-fg-muted">支持 .txt / .csv，每行一个词或逗号分隔</span>
+              <span className="text-2xs text-fg-muted">支持 JSON 备份、TXT 或 CSV</span>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".txt,.csv,text/plain,text/csv"
+                accept=".txt,.csv,.json,text/plain,text/csv,application/json"
                 className="hidden"
                 onChange={(event) => {
                   const file = event.currentTarget.files?.[0];
@@ -556,8 +645,11 @@ export function WordsPage() {
                   const reader = new FileReader();
                   reader.onload = () => {
                     const text = String(reader.result ?? "");
-                    setImportText((prev) => (prev.trim() ? `${prev}
-${text}` : text));
+                    setImportText((prev) =>
+                      file.name.toLowerCase().endsWith(".json") || !prev.trim()
+                        ? text
+                        : `${prev}\n${text}`
+                    );
                     setImportError(null);
                   };
                   reader.onerror = () => setImportError("读取文件失败，请确认是文本文件");
@@ -569,8 +661,8 @@ ${text}` : text));
               value={importText}
               rows={8}
               autoFocus
-              placeholder={"秒杀\n限时特价\ndrop shipping"}
-              invalid={Boolean(importError)}
+              placeholder={parsedImportBackup ? "已识别完整词库备份" : "秒杀\n限时特价\ndrop shipping"}
+              invalid={Boolean(importError || invalidBackupText)}
               onChange={(event) => {
                 setImportText(event.currentTarget.value);
                 setImportError(null);
@@ -579,7 +671,7 @@ ${text}` : text));
           </Field>
 
           <div className="grid gap-3">
-            <Field label="导入模式" hint="替换会先清空现有全部词条">
+            <Field label="导入模式" hint="替换会清空现有词条，再恢复备份中的内容">
               <Select
                 value={importReplace ? "replace" : "append"}
                 onChange={(value) => setImportReplace(value === "replace")}
@@ -593,7 +685,7 @@ ${text}` : text));
 
           {importReplace && (
             <InlineError className="border-warning-600/20 bg-warning-50 text-warning-700">
-              替换模式会删除全部现有词条，导入前请确认已导出备份。
+              替换会删除当前全部词条。建议先用“导出词库 JSON 备份”保存当前内容。
             </InlineError>
           )}
 
@@ -642,7 +734,7 @@ ${text}` : text));
         onConfirm={submitClear}
       >
         <p className="text-[13px] leading-5 text-fg-secondary">
-          建议先用「批量导入」的记录确认可恢复来源。内置词条删除后需调用 seed 接口才能恢复。
+          清空会删除所有词条且无法撤销；如需保留当前内容，请先导出 JSON 备份。
         </p>
       </ConfirmDialog>
     </>

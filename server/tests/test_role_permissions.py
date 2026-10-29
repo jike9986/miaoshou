@@ -58,6 +58,43 @@ def test_member_can_read_business_pages(client, tokens, path):
     assert response.status_code == 200, response.text
 
 
+def test_word_backup_export_is_available_to_teacher_and_denied_to_member(client, tokens):
+    created = client.post(
+        API + "/violation-words",
+        json={"action": "add", "word": "backup permission check"},
+        headers=auth(tokens, "teacher"),
+    )
+    assert created.status_code == 200, created.text
+
+    exported = client.get(API + "/violation-words/export", headers=auth(tokens, "teacher"))
+    assert exported.status_code == 200, exported.text
+    assert "attachment; filename=\"violation-words-backup.json\"" in exported.headers[
+        "content-disposition"
+    ]
+    item = next(
+        row for row in exported.json()["items"]
+        if row["word"] == "backup permission check"
+    )
+    assert set(item) == {"word", "action", "source", "enabled", "createdAt"}
+    assert item["source"] == "manual"
+    assert item["enabled"] is True
+
+    restored = client.post(
+        API + "/violation-words",
+        json={"action": "import", "category": "remove", "mode": "replace",
+              "words": exported.json()},
+        headers=auth(tokens, "teacher"),
+    )
+    assert restored.status_code == 200, restored.text
+    restored_export = client.get(
+        API + "/violation-words/export", headers=auth(tokens, "teacher")
+    )
+    assert restored_export.json() == exported.json()
+
+    denied = client.get(API + "/violation-words/export", headers=auth(tokens, "member"))
+    assert denied.status_code == 403, denied.text
+
+
 @pytest.mark.parametrize(("method", "path"), [
     ("POST", "/collect-box/123/process"),
     ("POST", "/collect-box/123/claim"),

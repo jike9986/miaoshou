@@ -101,6 +101,58 @@ def test_review_category_is_rejected_for_new_words() -> None:
         word_service.import_words(None, ["new term"], action="review")
 
 
+def test_export_replace_round_trip_preserves_metadata_and_flattens_legacy_review(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'words-backup.db'}")
+    ViolationWord.__table__.create(engine)
+    with Session(engine) as db:
+        db.add_all([
+            ViolationWord(word="manual term", normalized="manual term", action="remove",
+                          source="manual", enabled=False, created_at=123.5),
+            ViolationWord(word="legacy term", normalized="legacy term", action="review",
+                          source="import", enabled=True, created_at=456.25),
+        ])
+        db.commit()
+
+        backup = word_service.export_words(db)
+        db.query(ViolationWord).delete()
+        db.commit()
+        result = word_service.import_words(db, backup, mode="replace")
+        db.commit()
+
+        rows = {row.word: row for row in db.query(ViolationWord).all()}
+        assert result["added"] == 2
+        assert rows["manual term"].action == "remove"
+        assert rows["manual term"].source == "manual"
+        assert rows["manual term"].enabled is False
+        assert rows["manual term"].created_at == 123.5
+        assert rows["legacy term"].action == "remove"
+        assert rows["legacy term"].source == "import"
+        assert rows["legacy term"].enabled is True
+        assert rows["legacy term"].created_at == 456.25
+    engine.dispose()
+
+
+def test_invalid_backup_does_not_clear_existing_words(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'invalid-words-backup.db'}")
+    ViolationWord.__table__.create(engine)
+    with Session(engine) as db:
+        db.add(ViolationWord(word="keep me", normalized="keep me", action="remove"))
+        db.commit()
+
+        with pytest.raises(errors.AppError):
+            word_service.import_words(
+                db,
+                {"format": "aohuang.violation-words", "version": 1,
+                 "items": [{"word": "duplicate", "action": "remove", "source": "manual",
+                            "enabled": True, "createdAt": 1},
+                           {"word": "DUPLICATE", "action": "review", "source": "manual",
+                            "enabled": True, "createdAt": 2}]},
+                mode="replace",
+            )
+        assert db.query(ViolationWord).filter_by(normalized="keep me").one()
+    engine.dispose()
+
+
 def test_nfkc_full_width_title_matches_half_width_word() -> None:
     words = [("nike 2024", "remove")]
     ordinary_title = "Nike-2024 running shoes"

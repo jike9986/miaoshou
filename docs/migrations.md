@@ -106,6 +106,7 @@ locale 是 GBK，ini 里写中文注释会在启动前就抛 `UnicodeDecodeError
 | `20261030_0911` | 增加妙手凭据的学员归属 |
 | `20261030_0912` | 持久化采集箱自动化任务和逐商品结果 |
 | `20261030_0913` | 增加独立商品质量核验依据 |
+| `20261030_0914` | 将妙手草稿读回核验绑定到商品版本 |
 
 ### 基线（`20261028_2020_f6add52fca2e_baseline_existing_13_tables.py`）
 
@@ -214,7 +215,7 @@ cd server && python scripts/db.py stamp head --real
 ```
 [4a] 老库 create_all：exit=0 业务表=18
 [4b] 老库直接 upgrade head：exit=1（预期非 0：表已存在）
-[4c] 老库 stamp head：exit=0，之后 upgrade head：exit=0，版本表=[('20261030_0912',)]
+[4c] 老库 stamp head：exit=0，之后 upgrade head：exit=0，版本表=[('20261030_0914',)]
 ```
 
 ## 加一列的完整流程

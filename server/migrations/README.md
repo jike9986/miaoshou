@@ -29,7 +29,7 @@
   连接串不写死在 `alembic.ini` 里，而是复用应用 database engine 的 URL
   （由 `AOHUANG_DATABASE_URL` 或默认本机 SQLite 配置决定）。
 - `script.py.mako` —— 新迁移的模板。
-- `versions/` —— 迁移脚本。当前迁移头为 `20261030_0913`。
+- `versions/` —— 迁移脚本。当前迁移头为 `20261030_0914`。
 
 ## 和 `_add_missing_columns()` 的分工
 
@@ -81,6 +81,7 @@ python scripts/db.py stamp head --real
 | `20261030_0911` | 增加妙手凭据的学员归属 |
 | `20261030_0912` | 持久化采集箱自动化任务和逐商品结果 |
 | `20261030_0913` | 增加独立商品质量核验依据 |
+| `20261030_0914` | 将妙手草稿读回核验绑定到商品版本 |
 
 基线的生成方式：把 `AOHUANG_DATA_DIR` 指到 `tempfile.mkdtemp()`，对空库跑
 `alembic revision --autogenerate`，因此里面全是 `create_table`。

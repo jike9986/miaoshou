@@ -1431,7 +1431,17 @@ export interface WordsMutationBody {
   word?: string;
   /** 既可传数组，也可传纯文本：按换行/逗号/顿号/分号/制表符切分，`#` 起为注释。
    *  运营一般是直接从表格里粘一整块，要求他们先改成 JSON 数组不现实。 */
-  words?: string[] | string;
+  words?: string[] | string | {
+    format: "aohuang.violation-words";
+    version: 1;
+    items: Array<{
+      word: string;
+      action: "remove" | "review";
+      source: string;
+      enabled: boolean;
+      createdAt: number;
+    }>;
+  };
   category?: WordCategory;
   mode?: "append" | "replace";
   confirm?: true;

@@ -128,6 +128,51 @@ def test_teacher_can_save_review_without_putting_provenance_in_publish_payload(
         db.close()
 
 
+def test_quality_review_expires_when_product_revision_changes(
+        client, credentials, quality_product):
+    product_id, revision, _key = quality_product
+    response = client.patch(
+        f"{API}/warehouse/{product_id}/quality-review",
+        json=_review(revision), headers=_headers(credentials["teacher"]))
+    assert response.status_code == 200, response.text
+    review = response.json()["qualityReview"]
+    assert review["verifiedRevision"] == revision + 1
+
+    db = SessionLocal()
+    try:
+        product = db.query(Product).filter(Product.id == product_id).one()
+        warehouse_service.bump_revision(product)
+        db.commit()
+    finally:
+        db.close()
+
+    detail = client.get(
+        f"{API}/warehouse/{product_id}", params={"includePayload": "true"},
+        headers=_headers(credentials["teacher"]))
+    assert detail.status_code == 200, detail.text
+    body = detail.json()["product"]
+    assert body["qualityReview"] == review
+    assert body["qualityReviewStatus"] == "needs_review"
+    assert body["qualityReviewReasons"] == ["stale_review"]
+
+    verified = client.get(
+        f"{API}/warehouse", params={"q": "Quality review test",
+                                    "qualityStatus": "verified"},
+        headers=_headers(credentials["teacher"]))
+    assert verified.status_code == 200, verified.text
+    assert all(row["id"] != str(product_id) for row in verified.json()["items"])
+
+    needs_review = client.get(
+        f"{API}/warehouse", params={"q": "Quality review test",
+                                    "qualityStatus": "needs_review"},
+        headers=_headers(credentials["teacher"]))
+    assert needs_review.status_code == 200, needs_review.text
+    listed = next(row for row in needs_review.json()["items"]
+                  if row["id"] == str(product_id))
+    assert listed["qualityReviewStatus"] == "needs_review"
+    assert listed["qualityReviewReasons"] == ["stale_review"]
+
+
 def test_list_exposes_summary_and_filters_unverified_specs_without_payload(
         client, credentials, quality_product):
     product_id, _revision, _key = quality_product

@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from api.deps import DbSession, OperatorDep, require_permission, require_writable
@@ -90,6 +91,15 @@ def list_words(
     pageSize: int = Query(default=200, ge=1, le=500),
 ) -> dict[str, Any]:
     return word_service.list_words(db, action=action, q=q, page=page, page_size=pageSize)
+
+
+@router.get("/export", summary="导出完整词库备份",
+            dependencies=[require_permission("words.update")])
+def export_words(db: DbSession) -> JSONResponse:
+    return JSONResponse(
+        content=word_service.export_words(db),
+        headers={"Content-Disposition": 'attachment; filename="violation-words-backup.json"'},
+    )
 
 
 @router.post("", summary="增删改（add / remove / import / remove-many / clear）",

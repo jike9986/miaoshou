@@ -151,8 +151,15 @@ def _positive_measure(value: Any) -> float | None:
 
 
 def _quality_review_summary(product: Product) -> tuple[str, list[str]]:
-    if isinstance(product.quality_review, dict) and product.quality_review:
-        return "verified", []
+    review = product.quality_review
+    if isinstance(review, dict) and review:
+        try:
+            verified_revision = int(review.get("verifiedRevision"))
+        except (TypeError, ValueError):
+            verified_revision = None
+        if verified_revision == int(product.revision or 0):
+            return "verified", []
+        return "needs_review", ["stale_review"]
 
     payload = product.payload if isinstance(product.payload, dict) else {}
     reasons: list[str] = []
@@ -271,10 +278,14 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         raise errors.validation("搜索词不能超过 64 个字符", field="q")
 
     query = active_query(db).filter(Product.automation_result.is_(False))
+    reviewed_revision = Product.quality_review["verifiedRevision"].as_integer()
     if quality_status == "verified":
-        query = query.filter(Product.quality_review.is_not(None))
+        query = query.filter(Product.quality_review.is_not(None),
+                             reviewed_revision == Product.revision)
     elif quality_status == "needs_review":
-        query = query.filter(Product.quality_review.is_(None))
+        query = query.filter(or_(Product.quality_review.is_(None),
+                                 reviewed_revision.is_(None),
+                                 reviewed_revision != Product.revision))
     member_view = _is_member(db, operator_id)
     if category_id not in (None, ""):
         cid_value = str(category_id)
@@ -958,6 +969,7 @@ def review_product_quality(db: Session, ident: Any, *, weight_kg: float,
     product.payload = payload
     site = str(product.site or payload.get("site") or "")
     product.quality_review = {
+        "verifiedRevision": int(product.revision or 0),
         "weightKg": float(weight_kg),
         "packageDimensions": dimensions,
         "source": source.strip(),

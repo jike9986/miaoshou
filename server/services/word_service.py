@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import threading
 import time
@@ -176,6 +177,25 @@ def list_words(db: Session, *, action: str | None = None, q: str | None = None,
     }
 
 
+def export_words(db: Session) -> dict[str, Any]:
+    """Return a portable, lossless snapshot of the current word rows."""
+    rows = db.query(ViolationWord).order_by(ViolationWord.id.asc()).all()
+    return {
+        "format": "aohuang.violation-words",
+        "version": 1,
+        "items": [
+            {
+                "word": row.word,
+                "action": row.action,
+                "source": row.source,
+                "enabled": bool(row.enabled),
+                "createdAt": row.created_at,
+            }
+            for row in rows
+        ],
+    }
+
+
 def _exists(db: Session, normalized: str) -> ViolationWord | None:
     return db.query(ViolationWord).filter(ViolationWord.normalized == normalized).one_or_none()
 
@@ -306,6 +326,75 @@ def import_words(db: Session, words: Any, *, action: str = "remove",
     if mode not in ("append", "replace"):
         raise errors.validation("mode 只能是 append / replace", field="mode", value=mode)
     require_idle()
+
+    if isinstance(words, dict):
+        items = words.get("items")
+        if (words.get("format") != "aohuang.violation-words"
+                or words.get("version") != 1 or not isinstance(items, list)):
+            raise errors.validation("JSON 词库备份格式无效或版本不受支持", field="words")
+        if len(items) > WORD_LIMIT:
+            raise errors.validation("JSON 词库备份超过词库容量上限", field="words")
+
+        restored: list[tuple[str, str, str, bool, float]] = []
+        seen: set[str] = set()
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise errors.validation("JSON 备份词条格式无效", field=f"words.items.{index}")
+            text, normalized = _validate_word(item.get("word"))
+            if normalized in seen:
+                raise errors.validation("JSON 备份包含重复词条", field=f"words.items.{index}.word")
+            seen.add(normalized)
+            item_action = item.get("action")
+            if item_action not in ("remove", "review"):
+                raise errors.validation(
+                    "JSON 备份词条 action 无效",
+                    field=f"words.items.{index}.action",
+                )
+            source = item.get("source")
+            if not isinstance(source, str) or len(source) > 16:
+                raise errors.validation(
+                    "JSON 备份词条 source 无效",
+                    field=f"words.items.{index}.source",
+                )
+            enabled = item.get("enabled")
+            if not isinstance(enabled, bool):
+                raise errors.validation("JSON 备份词条 enabled 必须是布尔值",
+                                        field=f"words.items.{index}.enabled")
+            created_at = item.get("createdAt")
+            if (isinstance(created_at, bool) or not isinstance(created_at, (int, float))
+                    or not math.isfinite(created_at)):
+                raise errors.validation("JSON 备份词条 createdAt 无效",
+                                        field=f"words.items.{index}.createdAt")
+            # Legacy review entries now follow the product's remove-only behavior.
+            restored.append((text, normalized, source, enabled, float(created_at)))
+
+        if mode == "replace":
+            db.query(ViolationWord).delete(synchronize_session=False)
+            db.flush()
+        existing = {row.normalized for row in db.query(ViolationWord).all()}
+        fresh = [item for item in restored if item[1] not in existing]
+        skipped = [item[0] for item in restored if item[1] in existing]
+        if len(existing) + len(fresh) > WORD_LIMIT:
+            raise errors.AppError(
+                errors.WORD_LIMIT_EXCEEDED,
+                f"删除类词条已达上限 {WORD_LIMIT} 条",
+                status=422,
+                details={"limit": WORD_LIMIT, "current": len(existing),
+                         "adding": len(fresh)},
+            )
+        for text, normalized, source, enabled, created_at in fresh:
+            db.add(ViolationWord(
+                word=text, normalized=normalized,
+                action="remove", source=source, enabled=enabled,
+                created_at=created_at,
+            ))
+        db.flush()
+        return {
+            "added": len(fresh), "skipped": skipped,
+            "skippedCount": len(skipped), "truncated": False,
+            "processed": len(restored), "limit": WORD_LIMIT,
+            "textual": False, "counts": _counts(db),
+        }
 
     usable, textual, dropped = normalize_input(words)
     skipped: list[str] = list(dropped)
