@@ -43,6 +43,7 @@ import {
   useStartAutomationRunItem,
   useAutomationRunProcessResult,
   useStartAutomationPublish,
+  useResumeAutomationPublish,
   useAutomationPublishResult,
 } from "@/lib/queries";
 import { useSizeCharts, pickCharts, pickDefaultUrl, buildDefaultSizeChart } from "@/features/automation/useSizeCharts";
@@ -230,6 +231,7 @@ export function AutomationPage() {
   const startRunItemMutation = useStartAutomationRunItem();
   const recordProcessMutation = useAutomationRunProcessResult();
   const startPublishMutation = useStartAutomationPublish();
+  const resumePublishMutation = useResumeAutomationPublish();
   const recordPublishMutation = useAutomationPublishResult();
   const persistentRunId = useRef<string | null>(null);
   const persistentItems = useRef<Map<string, string>>(new Map());
@@ -398,6 +400,93 @@ export function AutomationPage() {
   const publish = usePublish();
   // 新任务跟随顶部店铺，恢复任务继续使用创建时保存的目标店铺。
 
+  const resumePublishTargets = async (
+    targets: SelectionEntry[], saved: AutomationRunRecord,
+  ): Promise<void> => {
+    const failures: RunFailure[] = [];
+    let submitted = 0;
+    setRun({
+      phase: "running", total: targets.length, done: 0, failed: 0,
+      startedAt: Date.now(), endedAt: null, imageDone: 0, imagePlanned: 0,
+      stage: "检查图片并续发…", failures: [], failedKeys: [],
+    });
+    for (const [index, target] of targets.entries()) {
+      const item = saved.items.find((candidate) => candidate.key === target.key);
+      if (!item) continue;
+      setRun((prev) => ({ ...prev, stage: `续发：${target.title || target.detailId}` }));
+      let resumed = false;
+      try {
+        await resumePublishMutation.mutateAsync({ runId: saved.id, itemId: item.id });
+        resumed = true;
+        const response = await publish.mutateAsync({
+          items: [{ warehouseId: String(item.productId) }],
+          accountId: saved.accountId,
+          shopId: saved.shopId,
+          confirm: true,
+          claimOnly: false,
+        });
+        submitted += response.published.length;
+        await recordPublishMutation.mutateAsync({
+          runId: saved.id,
+          itemId: item.id,
+          status: response.published.length > 0 ? "needs_review"
+            : response.failures.length > 0 ? "failed" : "needs_review",
+          reason: response.failures.map((failure) => failure.reason).filter(Boolean).join("；")
+            || (response.published.length > 0
+              ? "妙手已受理续发，等待最终发布回执。"
+              : "妙手未返回可核实的发布结果，请核对发布记录。"),
+          result: {
+            batchId: response.batchId,
+            published: response.published,
+            failures: response.failures,
+          },
+        });
+        if (response.published.length > 0 || response.failures.length > 0) {
+          failures.push({
+            key: target.key,
+            title: target.title || "",
+            detailId: target.detailId,
+            reason: response.published.length > 0
+              ? "妙手已受理续发，最终状态以发布记录回执为准。"
+              : response.failures.map((failure) => failure.reason).filter(Boolean).join("；")
+                || "发布未完成，请核对发布记录。",
+          });
+        }
+      } catch (error) {
+        const reason = apiErrorMessage(error);
+        if (resumed) {
+          try {
+            await recordPublishMutation.mutateAsync({
+              runId: saved.id, itemId: item.id, status: "needs_review", reason,
+            });
+          } catch { /* Recovery keeps ambiguous publish submissions from being retried. */ }
+        }
+        failures.push({ key: target.key, title: target.title || "", detailId: target.detailId, reason });
+      }
+      setRun((prev) => ({
+        ...prev,
+        done: index + 1,
+        needsReview: failures.length,
+        failures: [...failures],
+      }));
+    }
+    setRun((prev) => ({
+      ...prev, phase: "done", endedAt: Date.now(),
+      stage: submitted > 0 ? `已提交续发 ${submitted} 件，等待妙手回执`
+        : failures.length > 0 ? `${failures.length} 项需检查` : "续发完成",
+    }));
+    setSelection(new Map());
+    if (failures.length > 0) {
+      toast.warning(`续发完成，${failures.length} 项需要检查`, {
+        description: failures.map((failure) => failure.reason).join("；"),
+      });
+    } else if (submitted > 0) {
+      toast.info(`已提交续发 ${submitted} 件`, {
+        description: "平台最终状态以发布记录回执为准。",
+      });
+    }
+  };
+
   const executeRun = async (): Promise<void> => {
     if (!connected) {
       toast.warning("请先连接妙手");
@@ -423,6 +512,20 @@ export function AutomationPage() {
       || recoveringRunId.current !== null
       || (savedRun && hydratedRunId.current !== savedRun.id)) {
       toast.info("正在恢复上次任务，请稍后再开始");
+      return;
+    }
+    const resumable = savedRun?.items.filter((item) =>
+      item.processStatus === "succeeded"
+      && item.publishStatus === "needs_review"
+      && item.publishResult.resumeKind === "images_pending") ?? [];
+    const resumableKeys = new Set(resumable.map((item) => item.key));
+    if (targets.some((target) => resumableKeys.has(target.key))) {
+      if (targets.some((target) => !resumableKeys.has(target.key))) {
+        toast.warning("图片续发请只选择待续发商品");
+        return;
+      }
+      if (!savedRun) return;
+      await resumePublishTargets(targets, savedRun);
       return;
     }
     let durableRun: AutomationRunRecord | null = null;
@@ -833,6 +936,11 @@ export function AutomationPage() {
   const [templateDialog, setTemplateDialog] = useState<"none" | "pick" | "edit">("none");
   const templatesOpen = templateDialog === "pick";
   const setTemplatesOpen = (open: boolean): void => setTemplateDialog(open ? "pick" : "none");
+  const isResumeSelection = selection.size > 0 && [...selection.keys()].every((key) =>
+    savedRun?.items.some((item) => item.key === key
+      && item.processStatus === "succeeded"
+      && item.publishStatus === "needs_review"
+      && item.publishResult.resumeKind === "images_pending"));
 
   return (
     <>
@@ -850,7 +958,8 @@ export function AutomationPage() {
               <Button
                 variant="primary"
                 icon={<Play />}
-                disabled={!connected || selection.size === 0 || !somethingEnabled || Boolean(publishConfigIssue)
+                disabled={!connected || selection.size === 0
+                  || (!isResumeSelection && (!somethingEnabled || Boolean(publishConfigIssue)))
                   || preparingRun || latestRunQuery.isLoading || recoverRunMutation.isPending}
                 loading={preparingRun}
                 title={
@@ -860,6 +969,8 @@ export function AutomationPage() {
                       ? "先勾选要处理的商品"
                     : preparingRun || latestRunQuery.isLoading || recoverRunMutation.isPending
                       ? "正在准备任务或恢复上次任务"
+                      : isResumeSelection
+                        ? `校验图片状态后续发 ${selection.size} 件商品`
                       : !somethingEnabled
                         ? "文字和图片处理都关着，没有可执行的内容"
                         : publishConfigIssue
@@ -868,7 +979,7 @@ export function AutomationPage() {
                 }
                 onClick={() => void startRun()}
               >
-                开始处理
+                {isResumeSelection ? "续发选中商品" : "开始处理"}
               </Button>
             )}
           </span>

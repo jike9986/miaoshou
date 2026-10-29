@@ -103,6 +103,16 @@ def start_publish(run_id: str, item_id: str, db: DbSession,
     return {"run": automation_run_service.start_publish(db, run, item_id)}
 
 
+@router.post("/{run_id}/items/{item_id}/resume-publish",
+             dependencies=[require_permission("publish")])
+def resume_publish(run_id: str, item_id: str, db: DbSession,
+                   operator: OperatorDep) -> dict[str, Any]:
+    require_writable(db)
+    run = automation_run_service.get(db, run_id, operator)
+    return {"run": automation_run_service.resume_publish_after_images(
+        db, run, item_id)}
+
+
 @router.post("/{run_id}/items/{item_id}/publish-result",
              dependencies=[require_permission("publish")])
 def publish_result(run_id: str, item_id: str, payload: PublishResultRequest,

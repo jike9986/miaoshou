@@ -818,6 +818,17 @@ export function useStartAutomationPublish(): UseMutationResult<
   });
 }
 
+export function useResumeAutomationPublish(): UseMutationResult<
+  { run: AutomationRunRecord }, Error, { runId: string; itemId: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId, itemId }) => api.post<{ run: AutomationRunRecord }>(
+      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/resume-publish`),
+    onSuccess: () => invalidateAutomationRuns(client),
+  });
+}
+
 export function useAutomationPublishResult(): UseMutationResult<
   { run: AutomationRunRecord }, Error,
   { runId: string; itemId: string; status: AutomationItemOutcome; reason?: string;

@@ -508,6 +508,155 @@ def test_skipped_publish_can_be_recorded_as_needs_review(client, setup):
     result = recorded.json()["run"]
     assert result["items"][0]["publishStatus"] == "needs_review"
     assert result["status"] == "needs_review"
+    cannot_resume = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/resume-publish",
+        headers=auth,
+    )
+    assert cannot_resume.status_code == 409, cannot_resume.text
+
+
+def test_async_image_publish_can_resume_once_when_all_jobs_ready(client, setup):
+    run = create_run(client, setup, publish_enabled=True, images_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
+    processed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"images": {"requested": 1, "submitted": 1, "failed": 0}}},
+        headers=auth,
+    )
+    assert processed.status_code == 200, processed.text
+    db = SessionLocal()
+    try:
+        job = ImageJob(
+            id=uuid.uuid4().hex, product_id=product.id,
+            detail_id=item["detailId"], source="main", status="submitted",
+        )
+        db.add(job)
+        db.commit()
+    finally:
+        db.close()
+
+    waiting = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-result",
+        json={"status": "needs_review", "reason": "images pending"}, headers=auth,
+    )
+    assert waiting.status_code == 200, waiting.text
+    waiting_item = waiting.json()["run"]["items"][0]
+    assert waiting_item["publishResult"]["resumeKind"] == "images_pending"
+    blocked = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/resume-publish",
+        headers=auth,
+    )
+    assert blocked.status_code == 409, blocked.text
+
+    db = SessionLocal()
+    try:
+        db.query(ImageJob).filter_by(id=job.id).update({"status": "ready"})
+        db.commit()
+    finally:
+        db.close()
+    resumed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/resume-publish",
+        headers=auth,
+    )
+    assert resumed.status_code == 200, resumed.text
+    resumed_item = resumed.json()["run"]["items"][0]
+    assert resumed_item["processStatus"] == "succeeded"
+    assert resumed_item["publishStatus"] == "running"
+    assert resumed_item["publishResult"]["resumeKind"] == "images_ready"
+
+    repeated = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/resume-publish",
+        headers=auth,
+    )
+    assert repeated.status_code == 409, repeated.text
+    generic_start = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        headers=auth,
+    )
+    assert generic_start.status_code == 409, generic_start.text
+
+
+def test_recovery_marks_saved_async_images_resumable_after_client_crash(client, setup):
+    run = create_run(client, setup, publish_enabled=True, images_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
+    processed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"images": {"requested": 1, "submitted": 1, "failed": 0}}},
+        headers=auth,
+    )
+    assert processed.status_code == 200, processed.text
+    db = SessionLocal()
+    try:
+        db.add(ImageJob(
+            id=uuid.uuid4().hex, product_id=product.id,
+            detail_id=item["detailId"], source="main", status="ready",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    recovered = client.post(API + f"/automation-runs/{run['id']}/recover", headers=auth)
+    assert recovered.status_code == 200, recovered.text
+    recovered_item = recovered.json()["run"]["items"][0]
+    assert recovered_item["publishStatus"] == "needs_review"
+    assert recovered_item["publishResult"]["resumeKind"] == "images_pending"
+
+    resumed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/resume-publish",
+        headers=auth,
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["run"]["items"][0]["publishStatus"] == "running"
+
+
+def test_async_image_resume_rejects_stale_verified_draft(client, setup):
+    run = create_run(client, setup, publish_enabled=True, images_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(setup, item["detailId"], item["shopId"])
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"images": {"requested": 1, "submitted": 1, "failed": 0}}},
+        headers=auth,
+    ).status_code == 200
+    db = SessionLocal()
+    try:
+        job = ImageJob(
+            id=uuid.uuid4().hex, product_id=product.id,
+            detail_id=item["detailId"], source="main", status="ready",
+        )
+        row = db.query(Product).filter_by(id=product.id).one()
+        row.revision += 1
+        db.add(job)
+        db.commit()
+    finally:
+        db.close()
+    waiting = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-result",
+        json={"status": "needs_review", "reason": "images pending"}, headers=auth,
+    )
+    assert waiting.status_code == 200, waiting.text
+    resumed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/resume-publish",
+        headers=auth,
+    )
+    assert resumed.status_code == 409, resumed.text
 
 
 def test_client_cannot_finish_automation_publish_as_succeeded(client, setup):
@@ -701,5 +850,49 @@ def test_publish_receipt_updates_only_matching_automation_item(
         assert saved_run["status"] == expected_run_status
         assert saved_item["publishResult"]["platformStatus"] == remote_status
         assert saved_item["publishResult"]["publishLogId"] == str(log.id)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(("remote_shop_id", "expected_updated"), [("33", 1), (None, 0)])
+def test_publish_receipt_does_not_cross_match_same_detail_across_shops(
+    client, setup, monkeypatch, remote_shop_id, expected_updated,
+):
+    del client
+    db = SessionLocal()
+    try:
+        account = db.query(Account).filter_by(id=int(setup["account_id"])).one()
+        detail_id = f"cross-shop-{uuid.uuid4().hex[:8]}"
+        logs = [PublishLog(
+            account_id=account.id, detail_id=detail_id, shop_id=shop_id,
+            batch_id=f"cross-shop-{shop_id}-{uuid.uuid4().hex[:6]}",
+            status="processing", title="Cross-shop receipt",
+        ) for shop_id in ("22", "33")]
+        db.add_all(logs)
+        db.commit()
+
+        platform_row = {"detailId": detail_id, "status": "success"}
+        if remote_shop_id is not None:
+            platform_row["shopId"] = remote_shop_id
+
+        class FakeClient:
+            def publish_records(self, **_kwargs):
+                return {"data": {"detailList": [platform_row]}}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            publish_api.publish_service, "account_client_for",
+            lambda *_args: (account, FakeClient()),
+        )
+        refreshed = publish_api._refresh_processing(db, str(account.id))
+        assert refreshed["updated"] == expected_updated
+        db.refresh(logs[0])
+        db.refresh(logs[1])
+        if remote_shop_id == "33":
+            assert (logs[0].status, logs[1].status) == ("processing", "success")
+        else:
+            assert (logs[0].status, logs[1].status) == ("processing", "processing")
     finally:
         db.close()

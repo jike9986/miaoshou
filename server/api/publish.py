@@ -169,7 +169,10 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
     rows = (db.query(PublishLog)
             .filter(PublishLog.account_id == account.id,
                     PublishLog.status == "processing").all())
-    by_detail: dict[str, Any] = {}
+    local_by_detail: dict[str, list[Any]] = {}
+    for row in rows:
+        local_by_detail.setdefault(str(row.detail_id), []).append(row)
+    by_detail: dict[str, list[Any]] = {}
     # 上游同一个接口（search_move_collect_list），老版读 moveCollectDetailList、
     # 新版读 detailList。两边都试：读错字段的后果是永远解析出 0 行、
     # 静默返回 updated=0，回执功能整体失效还不报错。
@@ -182,12 +185,25 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
         if isinstance(row, dict):
             detail_id = row.get("detailId") or row.get("collectBoxDetailId")
             if detail_id not in (None, ""):
-                by_detail[str(detail_id)] = row
+                by_detail.setdefault(str(detail_id), []).append(row)
     from core.utils import now_ts
 
     for row in rows:
-        found = by_detail.get(str(row.detail_id))
-        if not found:
+        candidates = by_detail.get(str(row.detail_id), [])
+        if not candidates:
+            continue
+        matched = [candidate for candidate in candidates
+                   if str(candidate.get("shopId") or candidate.get("targetShopId") or "")
+                   == str(row.shop_id)]
+        if matched:
+            found = matched[0] if len(matched) == 1 else None
+        elif (len(candidates) == 1
+              and len(local_by_detail[str(row.detail_id)]) == 1
+              and not (candidates[0].get("shopId") or candidates[0].get("targetShopId"))):
+            found = candidates[0]
+        else:
+            found = None
+        if found is None:
             continue
         # 局部名不能叫 status：那会盖住入参 status（上游筛选条件），
         # 后面再加一轮回源就会用到错的筛选值。

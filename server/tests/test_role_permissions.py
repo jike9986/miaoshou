@@ -11,6 +11,7 @@ from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
+from models.image_job import ImageJob
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
@@ -410,7 +411,7 @@ def test_automation_results_are_hidden_until_teacher_imports_them(client, tokens
     assert repeated.status_code == 400, repeated.text
 
 
-def test_automation_results_require_successful_platform_receipts(client, tokens):
+def test_automation_results_require_a_verified_successful_process(client, tokens):
     suffix = uuid.uuid4().hex[:8]
     db = SessionLocal()
     try:
@@ -426,17 +427,20 @@ def test_automation_results_require_successful_platform_receipts(client, tokens)
         db.flush()
 
         cases = [
-            ("queued", "queued", {}),
-            ("needs_review", "needs_review", {"batchId": "queued-batch"}),
-            ("failed", "failed", {"batchId": "failed-batch"}),
-            ("not_requested", "not_requested", {}),
-            ("no_receipt", "succeeded", {
+            ("queued", "succeeded", "queued", {}),
+            ("needs_review", "succeeded", "needs_review", {"batchId": "queued-batch"}),
+            ("publish_failed", "succeeded", "failed", {"batchId": "failed-batch"}),
+            ("not_requested", "succeeded", "not_requested", {}),
+            ("no_receipt", "succeeded", "succeeded", {
                 "platformStatus": "success", "publishLogId": "99999999",
             }),
+            ("process_failed", "failed", "not_requested", {}),
         ]
         products = {}
         items = []
-        for index, (key, publish_status, publish_result) in enumerate(cases, start=1):
+        for index, (key, process_status, publish_status, publish_result) in enumerate(
+            cases, start=1,
+        ):
             detail_id = f"{suffix}{index}"
             product = Product(
                 warehouse_key=f"{suffix}:gate:{key}", detail_id=detail_id,
@@ -449,7 +453,7 @@ def test_automation_results_require_successful_platform_receipts(client, tokens)
             products[key] = product
             items.append(AutomationRunItem(
                 run_id=run.id, key=f"{suffix}:gate:{key}", detail_id=detail_id,
-                source_shop_id=str(index), process_status="succeeded",
+                source_shop_id=str(index), process_status=process_status,
                 product_id=product.id, publish_status=publish_status,
                 publish_result=publish_result,
             ))
@@ -499,9 +503,28 @@ def test_automation_results_require_successful_platform_receipts(client, tokens)
             publish_result={"batchId": receipt.batch_id, "platformStatus": "success",
                             "publishLogId": str(receipt.id)},
         ))
+        image_pending = Product(
+            warehouse_key=f"{suffix}:gate:image-pending", detail_id=f"{suffix}8",
+            shop_id="8", title="Image pending", status="ready", payload={},
+            account_id=account.id, automation_result=True,
+            draft_verified_revision=1,
+        )
+        db.add(image_pending)
+        db.flush()
+        db.add(ImageJob(
+            id=f"image-pending-{suffix}", product_id=image_pending.id,
+            detail_id=image_pending.detail_id, source="main", status="submitted",
+        ))
+        items.append(AutomationRunItem(
+            run_id=run.id, key=f"{suffix}:gate:image-pending",
+            detail_id=image_pending.detail_id, source_shop_id=image_pending.shop_id,
+            process_status="succeeded", product_id=image_pending.id,
+            publish_status="needs_review", publish_result={"resumeKind": "images_pending"},
+        ))
         db.add_all(items)
         db.commit()
         ids = {key: str(product.id) for key, product in products.items()}
+        image_pending_id = str(image_pending.id)
         eligible_id = str(eligible.id)
     finally:
         db.close()
@@ -511,14 +534,29 @@ def test_automation_results_require_successful_platform_receipts(client, tokens)
     assert listed.status_code == 200, listed.text
     visible_ids = {item["id"] for item in listed.json()["items"]}
     assert eligible_id in visible_ids
-    assert not (set(ids.values()) & visible_ids)
+    expected_eligible = {ids[key] for key in (
+        "queued", "needs_review", "publish_failed", "not_requested", "no_receipt",
+    )}
+    assert expected_eligible | {eligible_id, ids["stale"]} <= visible_ids
+    assert not ({ids["process_failed"]} & visible_ids)
+    assert image_pending_id not in visible_ids
 
-    for ident in ids.values():
+    for key, ident in ids.items():
+        if key in {
+            "queued", "needs_review", "publish_failed", "not_requested", "no_receipt", "stale",
+        }:
+            continue
         rejected = client.post(
             API + "/warehouse/automation-results/import",
             json={"ids": [ident]}, headers=teacher_headers,
         )
         assert rejected.status_code == 400, rejected.text
+    imported_without_publish = client.post(
+        API + "/warehouse/automation-results/import",
+        json={"ids": [ids["not_requested"]]}, headers=teacher_headers,
+    )
+    assert imported_without_publish.status_code == 200, imported_without_publish.text
+    assert imported_without_publish.json()["added"] == 1
     imported = client.post(
         API + "/warehouse/automation-results/import",
         json={"ids": [eligible_id]}, headers=teacher_headers,

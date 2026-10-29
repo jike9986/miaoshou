@@ -187,6 +187,18 @@ def recover(db: Session, run: AutomationRun) -> dict[str, Any]:
         elif row.process_status == "succeeded" and row.publish_status == "queued":
             row.publish_status = "needs_review"
             row.publish_reason = "商品已处理但发布未完成；请核对图片与商品信息后再发布。"
+            process_result = row.process_result if isinstance(row.process_result, dict) else {}
+            image_result = process_result.get("images")
+            has_image_job = (db.query(ImageJob.id).filter(
+                ImageJob.product_id == row.product_id,
+            ).first() if row.product_id is not None else None)
+            if (run.settings.get("publishEnabled") is True
+                    and run.settings.get("imagesEnabled") is True
+                    and isinstance(image_result, Mapping)
+                    and isinstance(image_result.get("submitted"), int)
+                    and image_result["submitted"] > 0
+                    and has_image_job is not None):
+                row.publish_result = {"resumeKind": "images_pending"}
             row.updated_at = now_ts()
     _recompute(run, _items(db, run.id))
     db.commit()
@@ -342,11 +354,78 @@ def finish_publish(db: Session, run: AutomationRun, item_id: Any, *, status: str
     ):
         raise errors.AppError("CONFLICT", "该商品不处于可记录发布结果的状态",
                               status=409)
+    previous_status = row.publish_status
     row.publish_status = status
     row.publish_reason = str(reason or "")[:2000]
     row.publish_result = dict(result or {})
+    process_result = row.process_result if isinstance(row.process_result, dict) else {}
+    image_result = process_result.get("images")
+    has_image_job = (db.query(ImageJob.id).filter(
+        ImageJob.product_id == row.product_id,
+    ).first() if row.product_id is not None else None)
+    if (previous_status == "queued" and status == "needs_review"
+            and row.process_status == "succeeded"
+            and run.settings.get("publishEnabled") is True
+            and run.settings.get("imagesEnabled") is True
+            and isinstance(image_result, Mapping)
+            and isinstance(image_result.get("submitted"), int)
+            and image_result["submitted"] > 0
+            and has_image_job is not None):
+        row.publish_result["resumeKind"] = "images_pending"
     row.updated_at = now_ts()
     _recompute(run, _items(db, run.id))
+    db.commit()
+    return get_full(db, run)
+
+
+def resume_publish_after_images(db: Session, run: AutomationRun,
+                                item_id: Any) -> dict[str, Any]:
+    row = _get_item(db, run, item_id)
+    result = row.publish_result if isinstance(row.publish_result, dict) else {}
+    if (row.publish_status != "needs_review"
+            or result.get("resumeKind") != "images_pending"
+            or row.process_status != "succeeded"
+            or row.product_id is None
+            or run.settings.get("publishEnabled") is not True
+            or run.settings.get("imagesEnabled") is not True):
+        raise errors.AppError("CONFLICT", "该商品不符合图片完成后的续发条件", status=409)
+
+    process_result = row.process_result if isinstance(row.process_result, dict) else {}
+    server_verification = process_result.get("_serverVerification")
+    product = db.query(Product).filter(
+        Product.id == row.product_id,
+        Product.account_id == run.account_id,
+        Product.automation_result.is_(True),
+    ).one_or_none()
+    if (product is None
+            or not isinstance(server_verification, dict)
+            or server_verification.get("productId") != str(product.id)
+            or product.updated_at != server_verification.get("productUpdatedAt")
+            or product.revision != server_verification.get("productRevision")
+            or product.draft_verified_revision != product.revision):
+        raise errors.AppError("CONFLICT", "商品草稿已变化或核验已失效，请重新核对", status=409)
+
+    unfinished_images = db.query(ImageJob.id).filter(
+        ImageJob.product_id == product.id,
+        ImageJob.status != "ready",
+    ).first()
+    if unfinished_images:
+        raise errors.AppError("CONFLICT", "图片翻译任务尚未全部完成", status=409)
+
+    changed = (db.query(AutomationRunItem).filter(
+        AutomationRunItem.id == row.id,
+        AutomationRunItem.publish_status == "needs_review",
+    ).update({
+        "publish_status": "running",
+        "publish_reason": "",
+        "publish_result": {"resumeKind": "images_ready"},
+        "updated_at": now_ts(),
+    }, synchronize_session="fetch"))
+    if changed != 1:
+        raise errors.AppError("CONFLICT", "该商品发布已开始或已有结果，不会重复续发", status=409)
+    run.status = "running"
+    run.finished_at = None
+    run.updated_at = now_ts()
     db.commit()
     return get_full(db, run)
 

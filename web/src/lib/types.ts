@@ -316,7 +316,7 @@ export interface AutomationRunItemRecord {
   processResult: { textDone?: boolean; images?: ProcessImagesResult | null };
   publishStatus: "not_requested" | "queued" | "running" | "succeeded" | "failed" | "needs_review";
   publishReason: string;
-  publishResult: Record<string, unknown>;
+  publishResult: Record<string, unknown> & { resumeKind?: "images_pending" | "images_ready" };
   updatedAt: number;
 }
 
