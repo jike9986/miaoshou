@@ -104,8 +104,14 @@ def summarize(path: Path) -> dict[str, int]:
         }
         if not {"word", "action", "source", "enabled"}.issubset(word_columns):
             raise sqlite3.DatabaseError("violation_words table is missing required columns")
+        provenance_columns = {"site_scope", "source_url", "rule_version"}
+        has_provenance = provenance_columns.issubset(word_columns)
+        word_selection = ["word", "action", "source"]
+        if has_provenance:
+            word_selection.extend(sorted(provenance_columns))
         words = connection.execute(
-            "SELECT word, action, source FROM violation_words WHERE enabled = 1"
+            "SELECT " + ", ".join(word_selection)
+            + " FROM violation_words WHERE enabled = 1"
         ).fetchall()
     finally:
         connection.close()
@@ -127,6 +133,16 @@ def summarize(path: Path) -> dict[str, int]:
         "active_skus_positive_price_origin_weight": 0,
         "active_skus_price_differs_from_origin": 0,
         "enabled_violation_words": len(words),
+        "violation_word_provenance_schema_available": int(has_provenance),
+        "enabled_words_with_site_scope": sum(
+            bool(row["site_scope"]) for row in words
+        ) if has_provenance else 0,
+        "enabled_words_with_source_url": sum(
+            bool(row["source_url"]) for row in words
+        ) if has_provenance else 0,
+        "enabled_words_with_rule_version": sum(
+            bool(row["rule_version"]) for row in words
+        ) if has_provenance else 0,
         "enabled_seed_remove_words": sum(
             row["source"] == "seed" and row["action"] == "remove" for row in words
         ),
