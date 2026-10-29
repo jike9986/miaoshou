@@ -12,6 +12,7 @@ import {
   Inbox,
   Layers,
   ListChecks,
+  PackageCheck,
   PackageSearch,
   Percent,
   RefreshCw,
@@ -19,6 +20,7 @@ import {
   Send,
   Trash2,
   Link2,
+  Zap,
 } from "lucide-react";
 import { cn, formatCount } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
@@ -30,6 +32,9 @@ import {
   useCreateGroup,
   useDeleteGroup,
   useGroups,
+  useAutomationResults,
+  useImportAutomationResults,
+  useOperators,
   usePublish,
   useWarehouseList,
 } from "@/lib/queries";
@@ -43,6 +48,7 @@ import {
   BulkActionBar,
   Button,
   Card,
+  Checkbox,
   ConfirmDialog,
   Dialog,
   EmptyState,
@@ -60,6 +66,7 @@ import {
 } from "@/components/ui";
 import { CategoryBar } from "@/features/warehouse/CategoryBar";
 import { ProductCard } from "@/features/warehouse/ProductCard";
+import { RemoteImage } from "@/features/shared/RemoteImage";
 import { BatchCategoryDialog } from "@/features/warehouse/BatchCategoryDialog";
 import { CreateBatchDialog } from "@/features/warehouse/CreateBatchDialog";
 import { ProductDetailDrawer } from "@/features/warehouse/ProductDetailDrawer";
@@ -70,7 +77,7 @@ import { BatchPanel } from "@/features/batch/BatchPanel";
 
 const PAGE_SIZE_OPTIONS = [24, 48, 72, 100];
 
-type WarehouseTab = "products" | "batch";
+type WarehouseTab = "products" | "batch" | "automation";
 
 export function WarehousePage() {
   const navigate = useNavigate();
@@ -79,7 +86,8 @@ export function WarehousePage() {
   // tab 记在 URL 上（?tab=batch）：建完批次后 toast 让用户「去批次标签看进度」，
   // 刷新一下回到商品列表会让人以为进度丢了。
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab: WarehouseTab = searchParams.get("tab") === "batch" ? "batch" : "products";
+  const tabValue = searchParams.get("tab");
+  const tab: WarehouseTab = tabValue === "batch" || tabValue === "automation" ? tabValue : "products";
   const setTab = useCallback(
     (value: WarehouseTab) => {
       const next = new URLSearchParams(searchParams);
@@ -94,6 +102,12 @@ export function WarehousePage() {
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const { data: auth } = useAuthStatus();
   const connected = auth?.connected ?? false;
+  const operatorsQuery = useOperators({ enabled: tab === "automation" });
+  const isTeacher = ["teacher", "admin"].includes(operatorsQuery.data?.current?.role ?? "");
+  const automationPage = Number(searchParams.get("automationPage") || "1");
+  const automationQuery = useAutomationResults(automationPage, tab === "automation" && isTeacher);
+  const importAutomationResults = useImportAutomationResults();
+  const [automationSelected, setAutomationSelected] = useState<string[]>([]);
 
   const groupsQuery = useGroups();
   const createGroup = useCreateGroup();
@@ -303,6 +317,7 @@ export function WarehousePage() {
           idBase="warehouse"
           items={[
             { value: "products", label: "商品列表", icon: <PackageSearch className="size-3.5" /> },
+            { value: "automation", label: "自动化结果", icon: <Zap className="size-3.5" /> },
             { value: "batch", label: "批次", icon: <ListChecks className="size-3.5" /> },
           ]}
         />
@@ -317,6 +332,73 @@ export function WarehousePage() {
               accountId={auth?.accountId ?? null}
               onGoToProducts={() => setTab("products")}
             />
+          </div>
+        )}
+
+        {tab === "automation" && (
+          <div role="tabpanel" id={tabPanelId("warehouse", "automation")} aria-labelledby={tabId("warehouse", "automation")} className="mt-4">
+            {!isTeacher && !operatorsQuery.isLoading && (
+              <Card><EmptyState title="仅老师和管理员可查看自动化结果" minHeight={180} /></Card>
+            )}
+            {isTeacher && automationQuery.isLoading && <SkeletonCardGrid count={6} />}
+            {isTeacher && automationQuery.isError && (
+              <ErrorState title="自动化结果加载失败" description={apiErrorMessage(automationQuery.error)} onRetry={() => void automationQuery.refetch()} retrying={automationQuery.isFetching} />
+            )}
+            {isTeacher && !automationQuery.isLoading && !automationQuery.isError && automationQuery.data?.items.length === 0 && (
+              <Card><EmptyState title="暂无待入仓的自动化结果" description="自动化处理完成的商品会先保存在这里，经老师选择后才会加入成品仓库。" minHeight={220} /></Card>
+            )}
+            {isTeacher && automationQuery.data && automationQuery.data.items.length > 0 && (
+              <>
+                <div className="mb-3 flex items-center gap-2 text-xs text-fg-muted">
+                  <Checkbox
+                    checked={automationQuery.data.items.every((item) => automationSelected.includes(item.id))}
+                    onChange={() => {
+                      const ids = automationQuery.data?.items.map((item) => item.id) ?? [];
+                      const allSelected = ids.length > 0 && ids.every((id) => automationSelected.includes(id));
+                      setAutomationSelected((selected) => allSelected
+                        ? selected.filter((id) => !ids.includes(id))
+                        : [...new Set([...selected, ...ids])]);
+                    }}
+                    aria-label="全选当前页自动化结果"
+                  />
+                  <span>本页 {formatCount(automationQuery.data.items.length)} 件</span>
+                </div>
+                <div className="divide-y divide-border-subtle border-y border-border-subtle">
+                  {automationQuery.data.items.map((item) => (
+                    <div key={item.id} className="grid grid-cols-[20px_56px_minmax(0,1fr)] items-center gap-3 py-3 sm:grid-cols-[20px_56px_minmax(0,1fr)_auto]">
+                      <Checkbox
+                        checked={automationSelected.includes(item.id)}
+                        onChange={() => setAutomationSelected((selected) => selected.includes(item.id)
+                          ? selected.filter((id) => id !== item.id)
+                          : [...selected, item.id])}
+                        aria-label={`选择 ${item.title || item.detailId}`}
+                      />
+                      <div className="size-14 overflow-hidden rounded-sm bg-canvas-inset"><RemoteImage src={item.image} className="size-full" /></div>
+                      <div className="min-w-0">
+                        <p className="line-clamp-2 text-sm font-medium text-fg">{item.title || "（无标题）"}</p>
+                        <p className="mt-1 truncate text-xs text-fg-muted">{item.shopName || item.shopId} · {item.detailId}</p>
+                      </div>
+                      <span className="hidden text-xs text-fg-muted sm:block">{item.status === "published" ? "已提交发布" : "处理完成"}</span>
+                    </div>
+                  ))}
+                </div>
+                <Pagination
+                  page={automationPage}
+                  pageSize={24}
+                  total={automationQuery.data.total}
+                  hasMore={automationQuery.data.hasMore}
+                  showTotal
+                  onPageChange={(page) => {
+                    const next = new URLSearchParams(searchParams);
+                    if (page === 1) next.delete("automationPage");
+                    else next.set("automationPage", String(page));
+                    setSearchParams(next, { replace: true });
+                    setAutomationSelected([]);
+                  }}
+                  disabled={automationQuery.isFetching}
+                />
+              </>
+            )}
           </div>
         )}
 
@@ -515,11 +597,22 @@ export function WarehousePage() {
       {/* 浮动批量操作条（design-system §5.8）：只在商品列表 tab 出现，
           看批次时还飘着「已选 12 件」会让人以为选的是批次 */}
       <BulkActionBar
-        count={tab === "products" ? selectedCount : 0}
-        total={total}
+        count={tab === "automation" ? automationSelected.length : tab === "products" ? selectedCount : 0}
+        total={tab === "automation" ? automationQuery.data?.total : total}
         unit="件"
-        onClear={query.clearSelected}
-        actions={[
+        onClear={() => tab === "automation" ? setAutomationSelected([]) : query.clearSelected()}
+        actions={tab === "automation" ? [{
+            label: importAutomationResults.isPending ? "正在加入…" : "加入成品仓库",
+            icon: <PackageCheck className="size-3.5" />,
+            disabled: importAutomationResults.isPending,
+            onClick: () => importAutomationResults.mutate(automationSelected, {
+              onSuccess: (result) => {
+                setAutomationSelected([]);
+                toast.success(`已加入成品仓库 ${formatCount(result.added)} 件`);
+              },
+              onError: (error) => toast.error("加入成品仓库失败", { description: apiErrorMessage(error) }),
+            }),
+          }] : [
           {
             label: "认领到采集箱",
             icon: <Inbox className="size-3.5" />,

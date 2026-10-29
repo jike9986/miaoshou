@@ -119,7 +119,8 @@ def process(
                 allow_title_review=bool(payload.allowTitleReview),
                 allow_image_review=bool(payload.allowImageReview),
                 skip_image_review=bool(payload.skipImageReview),
-                operator_id=getattr(operator, "id", None))
+                operator_id=getattr(operator, "id", None),
+                automation_result=True)
     except MiaoshouError as exc:
         raise map_upstream_error(exc) from None
     finally:

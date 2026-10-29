@@ -48,7 +48,8 @@ class Operator(Base):
     # 管理员能做所有事；老师能处理商品和发布，但不能改系统设置；
     # 成员只能看仓库和自动化，不能发布。
     # 缺省 member：老数据没有 role 字段，按最低权限处理。
-    role: Mapped[str] = mapped_column(String(16), default="member")
+    role: Mapped[str] = mapped_column(
+        String(16), default="member", server_default="member", nullable=False)
     created_at: Mapped[float] = mapped_column(Float, default=now_ts)
     # 每次请求都会 touch，但节流到 60 秒一次（见 operator_service.touch）：
     # 一个批量流程能打上百个请求，不节流就是上百次 UPDATE 抢写锁。

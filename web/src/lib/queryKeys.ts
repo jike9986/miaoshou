@@ -29,6 +29,7 @@ export const queryKeys = {
   warehouse: {
     all: ["warehouse"] as const,
     list: (query: WarehouseQuery) => ["warehouse", query] as const,
+    automationResults: (page: number) => ["warehouse", "automation-results", page] as const,
     detail: (id: string, includePayload = false) => ["warehouse", id, { includePayload }] as const,
   },
   groups: {

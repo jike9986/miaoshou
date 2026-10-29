@@ -13,6 +13,8 @@ import { queryKeys } from "@/lib/queryKeys";
 import type {
   AuditLogQuery,
   AuditLogsResponse,
+  AutomationResultsImportResponse,
+  AutomationResultsResponse,
   AuthConnectRequest,
   AuthConnectResult,
   AuthStatus,
@@ -199,6 +201,32 @@ export function useWarehouseList(params: WarehouseListParams): UseQueryResult<Wa
       }),
     // 保持上一页数据，翻页时列表不闪成骨架
     placeholderData: (previous) => previous,
+  });
+}
+
+export function useAutomationResults(page: number, enabled = true): UseQueryResult<AutomationResultsResponse> {
+  return useQuery({
+    queryKey: queryKeys.warehouse.automationResults(page),
+    queryFn: () => api.get<AutomationResultsResponse>("/warehouse/automation-results", {
+      query: { page, pageSize: 24 },
+    }),
+    enabled,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useImportAutomationResults(): UseMutationResult<
+  AutomationResultsImportResponse,
+  Error,
+  string[]
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (ids) => api.post<AutomationResultsImportResponse, { ids: string[] }>(
+      "/warehouse/automation-results/import", { ids }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+    },
   });
 }
 

@@ -121,6 +121,39 @@ def list_warehouse(
         claimed=claimed_flag, sort=sort)
 
 
+@router.get("/automation-results", summary="自动化处理成功记录",
+            dependencies=[require_permission("process")])
+def list_automation_results(
+    db: DbSession,
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=24, ge=1, le=100),
+) -> dict[str, Any]:
+    return warehouse_service.list_automation_results(db, page=page, page_size=pageSize)
+
+
+class AutomationResultsImportRequest(CamelModel):
+    ids: list[str] = Field(default_factory=list)
+
+
+@router.post("/automation-results/import", summary="将自动化结果加入成品仓库",
+             dependencies=[require_permission("process")])
+def import_automation_results(payload: AutomationResultsImportRequest,
+                              db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    require_writable(db)
+    with audit_service.guard(db, operator=operator,
+                             action="warehouse.automation_results.import",
+                             target_kind="product", target_id=""):
+        result = warehouse_service.admit_automation_results(db, payload.ids)
+        db.commit()
+    for ident in result["ids"]:
+        audit_service.record(
+            db, operator=operator, action="warehouse.automation_results.import",
+            target_kind="product", target_id=ident,
+            detail={"batchSize": result["added"]})
+    db.commit()
+    return result
+
+
 @router.get("/stats", summary="仓库统计与筛选面板")
 def warehouse_stats(db: DbSession, accountId: str | None = None) -> dict[str, Any]:
     """传 accountId 时只数当前账号的商品（多账号共用时分得清哪些是自己的）。"""

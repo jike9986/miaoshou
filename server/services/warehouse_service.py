@@ -171,7 +171,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
     if q is not None and len(str(q)) > 64:
         raise errors.validation("搜索词不能超过 64 个字符", field="q")
 
-    query = active_query(db)
+    query = active_query(db).filter(Product.automation_result.is_(False))
     if category_id not in (None, ""):
         cid_value = str(category_id)
         if cid_value.isdigit():
@@ -372,7 +372,8 @@ def facets(db: Session) -> dict[str, Any]:
     `categoryName` 等于某个自定义标签时计入该标签桶，`cid` 留空——自定义标签
     本来就没有平台 cid，塞个假 cid 会让前端拿去调类目接口。
     """
-    rows = (active_query(db)
+    visible = active_query(db).filter(Product.automation_result.is_(False))
+    rows = (visible
             .with_entities(Product.group_id, Product.group_name, Product.cid,
                            Product.category_id, Product.category_name)
             .all())
@@ -446,7 +447,7 @@ def facets(db: Session) -> dict[str, Any]:
                                "count": group_counts.get(_label_key(name), 0)})
 
     account_counts: dict[int | None, int] = {}
-    for (acc_id,) in active_query(db).with_entities(Product.account_id).all():
+    for (acc_id,) in visible.with_entities(Product.account_id).all():
         account_counts[acc_id] = account_counts.get(acc_id, 0) + 1
     names = account_names(db)
     account_list = [
@@ -461,7 +462,7 @@ def facets(db: Session) -> dict[str, Any]:
 def stats(db: Session, *, account_id: int | None = None) -> dict[str, Any]:
     """仓库统计。传 account_id 时只数当前账号的商品——
     多账号共用一台机器时，「已认领 355 件」是全账号加总，用户分不清哪些是自己的。"""
-    base = active_query(db)
+    base = active_query(db).filter(Product.automation_result.is_(False))
     if account_id is not None:
         base = base.filter(Product.account_id == account_id)
     total = base.count()
@@ -475,6 +476,46 @@ def stats(db: Session, *, account_id: int | None = None) -> dict[str, Any]:
         "remaining": max(0, WAREHOUSE_MAX_ITEMS - total),
         "nearLimit": total >= WAREHOUSE_MAX_ITEMS * NEAR_LIMIT_RATIO,
     }
+
+
+def list_automation_results(db: Session, *, page: int = 1, page_size: int = 24
+                            ) -> dict[str, Any]:
+    if page < 1 or not 1 <= page_size <= 100:
+        raise errors.validation("分页参数无效", field="page")
+    query = active_query(db).filter(Product.automation_result.is_(True))
+    total = query.count()
+    rows = (query.order_by(Product.saved_at.desc(), Product.id.desc())
+            .offset((page - 1) * page_size).limit(page_size).all())
+    names = account_names(db)
+    operators = operator_names(db)
+    return {
+        "items": [serialize(row, account_name=names.get(row.account_id or 0, ""),
+                            operator_name=operators.get(row.operator_id or 0, ""))
+                  for row in rows],
+        "page": page,
+        "pageSize": page_size,
+        "total": total,
+        "hasMore": page * page_size < total,
+    }
+
+
+def admit_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
+    wanted = list(dict.fromkeys(str(value).strip() for value in ids if str(value).strip()))
+    if not wanted or len(wanted) > 100:
+        raise errors.validation("请选择 1 到 100 件自动化处理结果", field="ids")
+    products = [resolve_product(db, ident) for ident in wanted]
+    invalid = [product.id for product in products if not product.automation_result]
+    if invalid:
+        raise errors.validation("部分商品已入仓或不属于自动化处理结果", field="ids",
+                                value=[str(value) for value in invalid])
+    available = stats(db)["remaining"]
+    if len(products) > available:
+        raise errors.AppError("WAREHOUSE_FULL", "成品仓库容量不足",
+                              status=409, details={"remaining": available})
+    for product in products:
+        product.automation_result = False
+    db.flush()
+    return {"added": len(products), "ids": [str(product.id) for product in products]}
 
 
 # --- 详情 -----------------------------------------------------------------
@@ -1333,7 +1374,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                           allow_title_review: bool = False,
                           allow_image_review: bool = False,
                           skip_image_review: bool = False,
-                          operator_id: int | None = None) -> dict[str, Any]:
+                          operator_id: int | None = None,
+                          automation_result: bool = False) -> dict[str, Any]:
     """拉详情 → 按模板定价（可选）→ 入库（主图截断 9 张）。
 
     `allow_title_review` / `allow_image_review` 是人工复核的确认开关：老版默认
@@ -1579,6 +1621,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         if removed_words:
             fields["payload"]["removedWords"] = removed_words
     product = product_service.upsert_product(db, account.id, fields, warehouse_key=key)
+    if automation_result and (existing is None or existing.automation_result):
+        product.automation_result = True
     if existing is not None:
         # 重复入仓不重置认领状态与分组
         product.claimed = existing.claimed

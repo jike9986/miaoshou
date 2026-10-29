@@ -10,6 +10,7 @@ from api import deps
 from core.config import get_settings
 from db.session import SessionLocal, init_db
 from main import app
+from models.product import Product
 from services import operator_service
 
 API = "/api/v1"
@@ -236,6 +237,54 @@ def test_shared_mode_rejects_the_machine_secret(client, tokens, monkeypatch):
     assert guarded.status_code == 401, guarded.text
     identity_probe = client.get(API + "/operators", headers=auth(tokens, "admin"))
     assert identity_probe.status_code == 401, identity_probe.text
+
+
+def test_automation_results_are_hidden_until_teacher_imports_them(client, tokens):
+    suffix = uuid.uuid4().hex[:8]
+    db = SessionLocal()
+    try:
+        pending = Product(
+            warehouse_key=f"{suffix}:1", detail_id=suffix, shop_id="1",
+            title="Processed item", status="published", payload={},
+            automation_result=True,
+        )
+        regular = Product(
+            warehouse_key=f"{suffix}:2", detail_id=suffix, shop_id="2",
+            title="Finished item", status="ready", payload={},
+        )
+        db.add_all([pending, regular])
+        db.commit()
+        pending_id = str(pending.id)
+        regular_id = str(regular.id)
+    finally:
+        db.close()
+
+    member = auth(tokens, "member")
+    denied = client.get(API + "/warehouse/automation-results", headers=member)
+    assert denied.status_code == 403, denied.text
+
+    teacher = auth(tokens, "teacher")
+    results = client.get(API + "/warehouse/automation-results", headers=teacher)
+    assert results.status_code == 200, results.text
+    assert pending_id in {item["id"] for item in results.json()["items"]}
+
+    warehouse = client.get(API + "/warehouse", headers=teacher)
+    assert warehouse.status_code == 200, warehouse.text
+    assert pending_id not in {item["id"] for item in warehouse.json()["items"]}
+    assert regular_id in {item["id"] for item in warehouse.json()["items"]}
+
+    imported = client.post(
+        API + "/warehouse/automation-results/import",
+        json={"ids": [pending_id]}, headers=teacher)
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["added"] == 1
+
+    warehouse = client.get(API + "/warehouse", headers=teacher)
+    assert pending_id in {item["id"] for item in warehouse.json()["items"]}
+    repeated = client.post(
+        API + "/warehouse/automation-results/import",
+        json={"ids": [pending_id]}, headers=teacher)
+    assert repeated.status_code == 400, repeated.text
 
 
 # 这些 POST 只计算/识别，不写业务数据，成员可以调用。

@@ -424,6 +424,13 @@ export interface WarehouseResponse extends Page<Product> {
   stats: WarehouseStats;
 }
 
+export type AutomationResultsResponse = Page<Product>;
+
+export interface AutomationResultsImportResponse {
+  added: number;
+  ids: string[];
+}
+
 export type ProductSort = "savedDesc" | "savedAsc" | "priceAsc" | "priceDesc" | "titleAsc";
 
 export interface WarehouseQuery {

@@ -10,6 +10,7 @@ from sqlalchemy import (
     JSON,
     Float,
     ForeignKey,
+    false,
     Index,
     Integer,
     String,
@@ -67,6 +68,8 @@ class Product(Base):
 
     # ready / claimed / published / archived
     status: Mapped[str] = mapped_column(String(16), default="ready")
+    automation_result: Mapped[bool] = mapped_column(
+        default=False, server_default=false(), nullable=False)
     claimed: Mapped[bool] = mapped_column(default=False)
     claimed_at: Mapped[float | None] = mapped_column(Float)
     claimed_shop_id: Mapped[str | None] = mapped_column(String(32))

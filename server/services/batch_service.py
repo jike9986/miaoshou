@@ -344,6 +344,7 @@ def _default_processor(db: Session, account: Account, client: Any, detail_id: st
         exchange_rate=settings.get("exchangeRate"),
         enforce_pre_save=bool(settings.get("save", True)),
         operator_id=operator_id,
+        automation_result=bool(settings.get("save", True)),
     )
     images: dict[str, Any] | None = None
     if settings.get("processImages") and settings.get("save", True):
