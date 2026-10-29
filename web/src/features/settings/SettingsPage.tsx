@@ -10,7 +10,7 @@
 //   · 审计日志：谁在什么时候动了什么（排查用）
 
 import { useState } from "react";
-import { Globe, Image, Info, ScrollText, Users } from "lucide-react";
+import { Info, SlidersHorizontal, ScrollText, Users } from "lucide-react";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { Tabs, tabId, tabPanelId } from "@/components/ui";
 import { useOperatorIdentity } from "@/lib/operator";
@@ -21,7 +21,7 @@ import { PublishSettingsPanel } from "@/features/settings/PublishSettingsPanel";
 import { ImageServiceCard } from "@/features/automation/ImageServiceCard";
 import { VersionPanel } from "@/features/settings/VersionPanel";
 
-export type SettingsTab = "operators" | "publish" | "image" | "audit" | "about";
+export type SettingsTab = "operators" | "processing" | "audit" | "about";
 
 export interface SettingsPageProps {
   /** 从标题栏身份按钮跳进来时直接定位到某个 Tab */
@@ -41,8 +41,7 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
     { value: "operators", label: canManage ? "账号与权限" : "账号", icon: <Users className="size-3.5" /> },
     ...(canManage
       ? [
-          { value: "publish", label: "发布", icon: <Globe className="size-3.5" /> },
-          { value: "image", label: "图片服务", icon: <Image className="size-3.5" /> },
+          { value: "processing", label: "处理配置", icon: <SlidersHorizontal className="size-3.5" /> },
           { value: "audit", label: "审计日志", icon: <ScrollText className="size-3.5" /> },
         ]
       : []),
@@ -70,8 +69,12 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
           className="contents"
         >
           {activeTab === "operators" && <OperatorsPanel />}
-          {activeTab === "publish" && canManage && <PublishSettingsPanel />}
-          {activeTab === "image" && canManage && <ImageServiceCard />}
+          {activeTab === "processing" && canManage && (
+            <div className="flex flex-col gap-4">
+              <PublishSettingsPanel />
+              <ImageServiceCard />
+            </div>
+          )}
           {activeTab === "audit" && canManage && <AuditLogPanel />}
           {activeTab === "about" && <VersionPanel />}
         </div>
