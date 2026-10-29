@@ -303,7 +303,8 @@ export function AutomationPage() {
     let imageDone = 0;
     let textDone = 0;
     let imageFailures = 0;
-    let claimFailures = 0;
+    let publishIssues = 0;
+    let publishSubmitted = 0;
     const failedKeys: string[] = [];
     const failures: RunFailure[] = [];
 
@@ -367,30 +368,49 @@ export function AutomationPage() {
           },
         }));
 
-        // 发布到店铺：处理成功后自动认领到所选店铺的采集箱（不直接上架）。
-        // 这是用户要的效果——处理完的东西出现在妙手采集箱里，人工确认后再上架。
+        // 异步图片任务尚未回写处理结果时，不发布旧图版本。
         if (settings.publishEnabled && currentShopId) {
           const warehouseId = result.product?.id;
           if (warehouseId) {
-            setRun((prev) => ({ ...prev, stage: `认领到店铺：${target.title || target.detailId}` }));
-            try {
-              await publish.mutateAsync({
-                items: [{ warehouseId: String(warehouseId) }],
-                shopId: currentShopId,
-                confirm: true,
-                claimOnly: true,
-              });
-            } catch (claimError) {
-              // 认领失败不算处理失败：商品已在仓库里，可以稍后从仓库手动认领。
-              // 但要让用户知道这件事没做成，不能假装一切都好。
-              const reason = apiErrorMessage(claimError);
-              claimFailures += 1;
+            const pendingImages = (result.images?.submitted ?? 0) > 0;
+            if (pendingImages) {
+              publishIssues += 1;
               failures.push({
                 key: target.key,
-                title: (target.title || "") + "（认领失败）",
+                title: (target.title || "") + "（等待图片处理）",
                 detailId: target.detailId,
-                reason: `入仓成功，认领失败：${reason}`,
+                reason: "图片翻译任务仍在处理中，已阻止发布旧图片版本。",
               });
+            } else {
+              setRun((prev) => ({ ...prev, stage: `正式发布：${target.title || target.detailId}` }));
+              try {
+                const response = await publish.mutateAsync({
+                  items: [{ warehouseId: String(warehouseId) }],
+                  shopId: currentShopId,
+                  confirm: true,
+                  claimOnly: false,
+                });
+                publishSubmitted += response.published.length;
+                if (response.failures.length > 0 || response.published.length === 0) {
+                  publishIssues += 1;
+                  failures.push({
+                    key: target.key,
+                    title: (target.title || "") + "（发布待核对）",
+                    detailId: target.detailId,
+                    reason: response.failures.map((item) => item.reason).filter(Boolean).join("；")
+                      || "妙手没有返回已提交商品明细，请到发布记录核对。",
+                  });
+                }
+              } catch (publishError) {
+                const reason = apiErrorMessage(publishError);
+                publishIssues += 1;
+                failures.push({
+                  key: target.key,
+                  title: (target.title || "") + "（发布失败）",
+                  detailId: target.detailId,
+                  reason,
+                });
+              }
             }
           }
         }
@@ -429,7 +449,11 @@ export function AutomationPage() {
       imageDone,
       textDone,
       failedKeys,
-      stage: failures.length > 0 ? `完成，${failures.length} 项需检查` : "全部完成",
+      stage: failures.length > 0
+        ? `处理完成，${failures.length} 项需检查`
+        : publishSubmitted > 0
+          ? `已提交发布 ${publishSubmitted} 件，等待妙手回执`
+          : "全部完成",
       endedAt: Date.now(),
     }));
 
@@ -439,18 +463,25 @@ export function AutomationPage() {
       });
     }
 
-    if (failed > 0 || claimFailures > 0) {
-      toast.warning(`已处理 ${succeeded} 件，${failed + claimFailures} 项需要检查`, {
+    if (failed > 0 || publishIssues > 0) {
+      toast.warning(`已处理 ${succeeded} 件，${failed + publishIssues} 项需要检查`, {
         description: [
           failed > 0 ? `${failed} 件处理失败` : null,
-          claimFailures > 0 ? `${claimFailures} 件已入仓但认领失败` : null,
+          publishIssues > 0 ? `${publishIssues} 件发布未完成或需核对` : null,
           "失败明细保留在右侧「处理状态」面板，可筛选「失败」逐条重试",
         ]
           .filter(Boolean)
           .join("；"),
       });
     } else {
-      toast.success(`已处理入仓 ${succeeded} 件`);
+      toast.info(
+        publishSubmitted > 0
+          ? `已处理并提交发布 ${publishSubmitted} 件`
+          : `已处理 ${succeeded} 件`,
+        publishSubmitted > 0
+          ? { description: "平台最终状态以发布记录回执为准。" }
+          : undefined
+      );
     }
   };
 

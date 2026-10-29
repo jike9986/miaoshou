@@ -300,7 +300,7 @@ export interface ProcessImagesResult {
 /** POST /collect-box/{detailId}/process 响应（server/api/collect_box.py: process） */
 export interface ProcessCollectResult {
   saved: boolean;
-  product: Product;
+  product: Product & { draftSaved?: boolean; draftVerified?: boolean };
   images?: ProcessImagesResult | null;
 }
 

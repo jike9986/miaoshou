@@ -1547,6 +1547,17 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             categoryMessage=category_message,
         )
 
+    draft_verified = False
+    if enforce_pre_save:
+        # A local warehouse write is not proof that the processed draft reached Miaoshou.
+        # Publish must only follow a verified upstream save of this exact payload.
+        _save_processed_draft(
+            client, detail_id=str(detail_id), shop_id=str(shop_id),
+            oss_md5=str(block["ossMd5"]), payload=payload, original=info,
+            coverage=coverage, pricing_enabled=template is not None,
+        )
+        draft_verified = True
+
     key = product_key(detail_id, shop_id)
     fields = product_service.build_product(
         info=payload, detail_id=detail_id, shop_id=shop_id, account_id=account.id,
@@ -1629,6 +1640,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         product, payload if isinstance(payload, dict) else {},
         coverage=coverage, issues=issues, gate=gate,
         category_source=category_source, category_message=category_message)
+    body["draftSaved"] = draft_verified
+    body["draftVerified"] = draft_verified
     return body
 
 
@@ -1777,6 +1790,40 @@ def _shop_name(db: Session, account: Account, shop_id: Any) -> str:
            .filter(Shop.account_id == account.id, Shop.shop_id == str(shop_id))
            .one_or_none())
     return row.name if row else ""
+
+
+def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: str,
+                         oss_md5: str, payload: Mapping[str, Any],
+                         original: Mapping[str, Any],
+                         coverage: Mapping[str, Any],
+                         pricing_enabled: bool) -> None:
+    """Write the processed product to Miaoshou and fail closed on readback mismatch."""
+    from services import product_service, readback_check
+
+    try:
+        client.save_shop(detail_id, shop_id, oss_md5, payload)
+        saved = client.shop_detail(detail_id, shop_id)
+    except MiaoshouError as exc:
+        from services.account_service import map_upstream_error
+
+        raise map_upstream_error(exc) from None
+    actual = product_service.detail_block(saved)["info"]
+    if not actual:
+        raise errors.AppError(
+            errors.UPSTREAM_UNKNOWN_RESULT,
+            "妙手已接收保存请求，但无法读回商品详情；已阻止后续发布，请刷新核对",
+            status=502,
+        )
+    mismatches = readback_check.readback_issues(
+        payload, actual, original, coverage, pricing_enabled=pricing_enabled,
+    )
+    if mismatches:
+        raise errors.AppError(
+            errors.UPSTREAM_UNKNOWN_RESULT,
+            "妙手草稿读回与处理结果不一致，已阻止后续发布",
+            status=502,
+            details={"mismatches": mismatches},
+        )
 
 
 def count(db: Session) -> int:
