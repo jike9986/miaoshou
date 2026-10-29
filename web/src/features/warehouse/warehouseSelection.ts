@@ -15,3 +15,12 @@ export function partitionMemberSelection(
   }
   return { claimable, publishable };
 }
+
+export function warehouseIdsForClaimedDetails(
+  selectedWarehouseIds: string[],
+  detailIdsByWarehouseId: Record<string, string>,
+  claimedDetailIds: string[],
+): string[] {
+  const claimed = new Set(claimedDetailIds.map(String));
+  return selectedWarehouseIds.filter((id) => claimed.has(detailIdsByWarehouseId[id]));
+}

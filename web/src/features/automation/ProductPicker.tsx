@@ -233,7 +233,7 @@ export function ProductPicker({
                       一行 3 个的横版在宽屏下把标题挤得只剩几个字，竖版让图成为主角。 */}
                   <div
                     className={cn(
-                      "group relative flex cursor-pointer flex-col overflow-hidden rounded-md border bg-surface",
+                      "group relative flex flex-col overflow-hidden rounded-md border bg-surface",
                       "transition-[border-color,box-shadow] duration-fast",
                       checked
                         ? "border-brand-600 ring-2 ring-brand-600/24"
@@ -244,7 +244,7 @@ export function ProductPicker({
                       disabled && "cursor-not-allowed opacity-60"
                     )}
                   >
-                    <label className="relative block cursor-pointer">
+                    <div className="relative block">
                       <span className="absolute right-2 top-2 z-[1]">
                         <Checkbox
                           checked={checked}
@@ -256,11 +256,8 @@ export function ProductPicker({
                       <span className="block aspect-square w-full overflow-hidden bg-canvas-inset">
                         <RemoteImage src={item.imageUrl} alt={item.title} />
                       </span>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => onToggle(item)}
-                      disabled={disabled}
+                    </div>
+                    <div
                       title={(() => {
                         const done = progress?.[item.key];
                         const base = item.title || "";
@@ -272,16 +269,13 @@ export function ProductPicker({
                         ].filter(Boolean);
                         return parts.length ? `${base}\n${parts.join(" · ")}` : base;
                       })()}
-                      className={cn(
-                        "block w-full px-2 pb-1.5 pt-1 text-left",
-                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32"
-                      )}
+                      className="w-full px-2 pb-1.5 pt-1"
                     >
                       {/* 两行标题，超出省略 —— 比单行多露一倍信息，又不至于撑高卡片 */}
                       <span className="line-clamp-2 min-h-[32px] text-xs font-medium leading-4 text-fg">
                         {item.title || "（无标题）"}
                       </span>
-                    </button>
+                    </div>
                     {stage && stage !== "queued" && (
                       <span
                         className={cn(

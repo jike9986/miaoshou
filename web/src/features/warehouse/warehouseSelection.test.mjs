@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { partitionMemberSelection } from "./warehouseSelection.ts";
+import { partitionMemberSelection, warehouseIdsForClaimedDetails } from "./warehouseSelection.ts";
 
 test("keeps claim and publish actions for selections made on earlier pages", () => {
   const selectedIds = ["page-1-unclaimed", "page-1-claimed", "page-2-unclaimed"];
@@ -33,4 +33,12 @@ test("hides items already published to the selected shop but keeps other shops e
     claimable: [],
     publishable: ["published-elsewhere"],
   });
+});
+
+test("maps successful claim detail IDs back to selected warehouse IDs", () => {
+  assert.deepEqual(warehouseIdsForClaimedDetails(
+    ["warehouse-1", "warehouse-2", "warehouse-3"],
+    { "warehouse-1": "detail-1", "warehouse-2": "detail-2", "warehouse-3": "detail-3" },
+    ["detail-1", "detail-3"],
+  ), ["warehouse-1", "warehouse-3"]);
 });

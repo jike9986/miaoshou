@@ -75,7 +75,7 @@ export function ProductCard({ product, isMember = false, selected, onToggle, onO
             "transition-opacity duration-fast ease-in-out",
             selected
               ? "opacity-100"
-              : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+              : "opacity-60 group-hover:opacity-100 group-focus-within:opacity-100"
           )}
         >
           <Checkbox

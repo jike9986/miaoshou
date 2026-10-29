@@ -60,7 +60,6 @@ import {
   Input,
   Select,
   SkeletonCardGrid,
-  StatusDot,
   Tabs,
   tabId,
   tabPanelId,
@@ -75,7 +74,10 @@ import { ProductDetailDrawer } from "@/features/warehouse/ProductDetailDrawer";
 import { PricePreviewDialog } from "@/features/warehouse/PricePreviewDialog";
 import { TransformDialog } from "@/features/warehouse/TransformDialog";
 import { PublishDialog } from "@/features/publish/PublishDialog";
-import { partitionMemberSelection } from "@/features/warehouse/warehouseSelection";
+import {
+  partitionMemberSelection,
+  warehouseIdsForClaimedDetails,
+} from "@/features/warehouse/warehouseSelection";
 import { BatchPanel } from "@/features/batch/BatchPanel";
 
 const PAGE_SIZE_OPTIONS = [24, 48, 72, 100];
@@ -173,6 +175,7 @@ export function WarehousePage() {
   // 学员的认领/发布动作跨页时也需要知道所选商品当前的认领状态。
   const [selectedClaimed, setSelectedClaimed] = useState<Record<string, boolean>>({});
   const [selectedPublishedShopIds, setSelectedPublishedShopIds] = useState<Record<string, string[]>>({});
+  const [selectedDetailIds, setSelectedDetailIds] = useState<Record<string, string>>({});
 
   const [carrierOpen, setCarrierOpen] = useState(false);
   const claimSharedProduct = useMutation({
@@ -213,13 +216,13 @@ export function WarehousePage() {
   }, [items, selectedIds]);
   const hasSelectedRevisions = Object.keys(selectedRevisions).length > 0;
   const allSelectedOnPage = pageIds.length > 0 && pageIds.every((id) => selectedIds.includes(id));
-  const someSelectedOnPage = pageIds.some((id) => selectedIds.includes(id));
 
   const clearWarehouseSelection = useCallback(() => {
     clearSelected();
     setSourceShopIds({});
     setSelectedClaimed({});
     setSelectedPublishedShopIds({});
+    setSelectedDetailIds({});
   }, [clearSelected]);
 
   const toggleWarehouseSelection = useCallback((id: string) => {
@@ -240,10 +243,16 @@ export function WarehousePage() {
         delete next[id];
         return next;
       });
+      setSelectedDetailIds((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
     } else if (item) {
       setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
       setSelectedClaimed((current) => ({ ...current, [id]: item.claimed }));
       setSelectedPublishedShopIds((current) => ({ ...current, [id]: item.publishedShopIds ?? [] }));
+      setSelectedDetailIds((current) => ({ ...current, [id]: String(item.detailId ?? "") }));
     }
     toggleSelected(id);
   }, [items, selectedIds, toggleSelected]);
@@ -253,6 +262,7 @@ export function WarehousePage() {
     if (item) setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
     if (item) setSelectedClaimed((current) => ({ ...current, [id]: item.claimed }));
     if (item) setSelectedPublishedShopIds((current) => ({ ...current, [id]: item.publishedShopIds ?? [] }));
+    if (item) setSelectedDetailIds((current) => ({ ...current, [id]: String(item.detailId ?? "") }));
     toggleSelected(id);
   }, [items, toggleSelected]);
 
@@ -270,6 +280,11 @@ export function WarehousePage() {
         return next;
       });
       setSelectedPublishedShopIds((current) => {
+        const next = { ...current };
+        for (const id of pageIds) delete next[id];
+        return next;
+      });
+      setSelectedDetailIds((current) => {
         const next = { ...current };
         for (const id of pageIds) delete next[id];
         return next;
@@ -292,6 +307,11 @@ export function WarehousePage() {
       for (const item of items) next[item.id] = item.publishedShopIds ?? [];
       return next;
     });
+    setSelectedDetailIds((current) => {
+      const next = { ...current };
+      for (const item of items) next[item.id] = String(item.detailId ?? "");
+      return next;
+    });
   }, [allSelectedOnPage, deselectMany, items, pageIds, selectMany]);
 
   // Store filter/page-size changes clear its selection internally; keep the local snapshots in sync.
@@ -306,6 +326,10 @@ export function WarehousePage() {
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
     setSelectedPublishedShopIds((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    setSelectedDetailIds((current) => {
       const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
@@ -706,18 +730,6 @@ export function WarehousePage() {
             {!listQuery.isLoading && !listQuery.isError && items.length > 0 && (
               <>
                 <div className="flex items-center gap-2 text-xs text-fg-muted">
-                  <button
-                    type="button"
-                    onClick={selectOrDeselectPage}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-sm px-1 py-0.5 transition-colors duration-fast",
-                      "hover:bg-surface-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
-                    )}
-                  >
-                    <StatusDot tone={allSelectedOnPage ? "success" : someSelectedOnPage ? "warning" : "muted"} />
-                    {allSelectedOnPage ? "取消本页全选" : "全选本页"}
-                  </button>
-                  <span aria-hidden>·</span>
                   <span className="num">本页 {formatCount(items.length)} 件</span>
                   {listQuery.isFetching && (
                     <span className="flex items-center gap-1 text-fg-muted">
@@ -837,16 +849,24 @@ export function WarehousePage() {
                 },
                 {
                   onSuccess: (result) => {
-                    const done = result.claimed?.length ?? 0;
-                    const failed = result.failures?.length ?? 0;
-                    if (failed > 0) {
+                    const claimedWarehouseIds = warehouseIdsForClaimedDetails(
+                      selectedIds,
+                      selectedDetailIds,
+                      result.claimed ?? [],
+                    );
+                    const done = claimedWarehouseIds.length;
+                    const unconfirmed = selectedIds.length - done;
+                    if (done > 0) deselectMany(claimedWarehouseIds);
+                    if (unconfirmed > 0) {
                       toast.warning(
-                        `已认领 ${done} 件，${failed} 件失败`
+                        `已认领 ${done} 件，${unconfirmed} 件未确认`,
+                        result.failures?.[0]?.reason
+                          ? { description: result.failures[0].reason }
+                          : undefined
                       );
                     } else {
                       toast.success(`已认领 ${done} 件到采集箱（未发布）`);
                     }
-                    clearWarehouseSelection();
                   },
                   onError: (error) => toast.error(apiErrorMessage(error)),
                 }
