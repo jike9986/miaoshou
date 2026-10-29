@@ -537,8 +537,8 @@ function SoftwareAccountPanel({ redirectTo, onBack }: { redirectTo: string; onBa
       return;
     }
     change.mutate({ currentPassword, newPassword }, {
-      onSuccess: () => {
-        if (identity) setOperator({ token: identity.token, id: identity.id, name: identity.name, role: identity.role, mustChangePassword: false });
+      onSuccess: (result) => {
+        if (identity) setOperator({ token: result.token, id: identity.id, name: identity.name, role: identity.role, mustChangePassword: result.mustChangePassword });
         void queryClient.invalidateQueries();
         setMustChange(false);
         navigate(redirectTo, { replace: true });

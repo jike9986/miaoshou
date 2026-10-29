@@ -300,7 +300,7 @@ def authenticate_password(db: Session, username: Any, password: str) -> tuple[Op
 
 
 def set_password(db: Session, row: Operator, password: str, *, must_change: bool,
-                 rotate_token: bool = False, username: Any = None) -> None:
+                 rotate_token: bool = False, username: Any = None) -> str | None:
     if username is not None:
         clean_username = normalize_username(username)
         clash = (db.query(Operator)
@@ -312,7 +312,10 @@ def set_password(db: Session, row: Operator, password: str, *, must_change: bool
     row.password_hash = hash_password(password)
     row.must_change_password = must_change
     if rotate_token:
-        row.token = hash_token(secrets.token_urlsafe(32))
+        token = secrets.token_urlsafe(32)
+        row.token = hash_token(token)
+        return token
+    return None
 
 
 def list_all(db: Session) -> list[dict[str, Any]]:

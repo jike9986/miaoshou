@@ -73,7 +73,16 @@ def test_teacher_creates_student_and_student_changes_password(client, tokens):
         headers={"Authorization": f"Bearer {old_token}"},
     )
     assert changed.status_code == 200, changed.text
-    assert changed.json() == {"ok": True}
+    changed_body = changed.json()
+    assert changed_body["ok"] is True
+    assert changed_body["mustChangePassword"] is False
+    assert changed_body["token"] != old_token
+    stale = client.get(API + "/warehouse", headers={
+        "Authorization": f"Bearer {old_token}"})
+    assert stale.status_code == 401, stale.text
+    continued = client.get(API + "/warehouse", headers={
+        "Authorization": f"Bearer {changed_body['token']}"})
+    assert continued.status_code == 200, continued.text
     assert client.post(API + "/auth/login",
                        json={"username": f"student-{suffix}",
                              "password": "new-pass-456"}).json()["mustChangePassword"] is False

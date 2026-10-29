@@ -135,12 +135,15 @@ export function useSoftwareLogin(): UseMutationResult<
 }
 
 export function useChangeSoftwarePassword(): UseMutationResult<
-  { ok: true },
+  { ok: true; token: string; mustChangePassword: false },
   Error,
   { currentPassword: string; newPassword: string }
 > {
   return useMutation({
-    mutationFn: (body) => api.post<{ ok: true }, typeof body>("/auth/change-password", body),
+    mutationFn: (body) => api.post<
+      { ok: true; token: string; mustChangePassword: false },
+      typeof body
+    >("/auth/change-password", body),
   });
 }
 
