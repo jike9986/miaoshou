@@ -26,6 +26,8 @@ export const OPERATOR_TOKEN_KEY = "aohuang.operator.token";
 export const OPERATOR_ID_KEY = "aohuang.operator.id";
 /** 操作员名字（纯展示：标题栏/设置页/署名） */
 export const OPERATOR_NAME_KEY = "aohuang.operator.name";
+export const OPERATOR_ROLE_KEY = "aohuang.operator.role";
+export const OPERATOR_CHANGE_PASSWORD_KEY = "aohuang.operator.must-change-password";
 
 /** 后端在没有 X-Operator 时使用的内置操作员名（与 server 侧常量对齐） */
 export const LOCAL_OPERATOR_NAME = "本机";
@@ -35,6 +37,8 @@ export interface OperatorIdentity {
   token: string;
   id: string | null;
   name: string;
+  role?: "admin" | "teacher" | "member";
+  mustChangePassword?: boolean;
 }
 
 /* ------------------------------------------------------------------ *
@@ -75,6 +79,8 @@ function readSnapshot(): OperatorIdentity | null {
     token,
     id: readItem(OPERATOR_ID_KEY),
     name: readItem(OPERATOR_NAME_KEY) ?? LOCAL_OPERATOR_NAME,
+    role: (readItem(OPERATOR_ROLE_KEY) as OperatorIdentity["role"]) ?? undefined,
+    mustChangePassword: readItem(OPERATOR_CHANGE_PASSWORD_KEY) === "1",
   };
 }
 
@@ -97,6 +103,8 @@ function subscribe(listener: () => void): () => void {
       event.key === OPERATOR_TOKEN_KEY ||
       event.key === OPERATOR_ID_KEY ||
       event.key === OPERATOR_NAME_KEY
+      || event.key === OPERATOR_ROLE_KEY
+      || event.key === OPERATOR_CHANGE_PASSWORD_KEY
     ) {
       emit();
     }
@@ -132,10 +140,14 @@ export function setOperator(identity: {
   token: string;
   id?: string | null;
   name: string;
+  role?: OperatorIdentity["role"];
+  mustChangePassword?: boolean;
 }): void {
   writeItem(OPERATOR_TOKEN_KEY, identity.token);
   writeItem(OPERATOR_ID_KEY, identity.id ?? null);
   writeItem(OPERATOR_NAME_KEY, identity.name);
+  writeItem(OPERATOR_ROLE_KEY, identity.role ?? null);
+  writeItem(OPERATOR_CHANGE_PASSWORD_KEY, identity.mustChangePassword ? "1" : null);
   emit();
 }
 
@@ -144,6 +156,8 @@ export function clearOperator(): void {
   writeItem(OPERATOR_TOKEN_KEY, null);
   writeItem(OPERATOR_ID_KEY, null);
   writeItem(OPERATOR_NAME_KEY, null);
+  writeItem(OPERATOR_ROLE_KEY, null);
+  writeItem(OPERATOR_CHANGE_PASSWORD_KEY, null);
   emit();
 }
 

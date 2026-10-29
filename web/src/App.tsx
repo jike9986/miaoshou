@@ -3,7 +3,8 @@
 // 与老版一致，采集箱和图片翻译没有独立页面。
 // 未连接妙手时自动跳 /unlock（features/auth/guard），用户选择「稍后连接」后不再强跳。
 
-import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { useEffect } from "react";
 import {
   CalendarClock,
   KeyRound,
@@ -62,10 +63,17 @@ const NAV: SidebarNavGroup[] = [
 
 function Shell() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { data: status } = useAuthStatus();
   const guest = useAuthGuardStore((state) => state.guest);
   const operatorIdentity = useOperatorIdentity();
   useAutoUnlock();
+
+  useEffect(() => {
+    if (operatorIdentity?.mustChangePassword && location.pathname !== "/unlock") {
+      navigate("/unlock", { replace: true, state: { from: location.pathname } });
+    }
+  }, [operatorIdentity?.mustChangePassword, location.pathname, navigate]);
 
   const connected = status?.connected ?? false;
   // 操作员名：已设置显示名字，未设置标注「本机（未设置）」——

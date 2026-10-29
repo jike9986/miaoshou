@@ -37,6 +37,10 @@ class Operator(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     # 显示名，如「张三」。唯一：两个人同名，审计日志里就分不清谁是谁了。
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    username: Mapped[str | None] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(256))
+    must_change_password: Mapped[bool] = mapped_column(
+        default=False, server_default="0", nullable=False)
     # 每人一个 token，唯一。明文存储的理由见模块 docstring。
     token: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     # 停用（离职/换人）而不是删除：删了之后 audit_logs.operator_id 会变 NULL，

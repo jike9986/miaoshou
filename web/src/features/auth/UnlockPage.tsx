@@ -4,12 +4,14 @@
 
 import { useEffect, useId, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
-import { useAuthStatus, useConnectAccount, useShops } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword } from "@/lib/queries";
+import { setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
 import {
   Button,
@@ -166,6 +168,8 @@ export function UnlockPage() {
   const [showSecret, setShowSecret] = useState(false);
   const [rememberName, setRememberName] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
+  const existingIdentity = useOperatorIdentity();
+  const [accountMode, setAccountMode] = useState(existingIdentity?.mustChangePassword ?? false);
 
   const connected = status?.connected ?? false;
   const accounts = useMemo(() => status?.accounts ?? [], [status?.accounts]);
@@ -278,6 +282,13 @@ export function UnlockPage() {
     <>
       <PageHeader title="连接妙手" />
       <PageContent width="form">
+        <div className="mb-4 flex gap-2" role="group" aria-label="登录方式">
+          <Button variant={!accountMode ? "primary" : "secondary"} size="sm" onClick={() => setAccountMode(false)}>绑定妙手</Button>
+          <Button variant={accountMode ? "primary" : "secondary"} size="sm" onClick={() => setAccountMode(true)}>软件账号登录</Button>
+        </div>
+        {accountMode ? (
+          <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => setAccountMode(false)} />
+        ) : (
         <motion.div
           variants={reduced ? undefined : fadeUp}
           initial={reduced ? undefined : "hidden"}
@@ -421,8 +432,80 @@ export function UnlockPage() {
             </div>
           </div>
         </motion.div>
+        )}
       </PageContent>
     </>
+  );
+}
+
+function SoftwareAccountPanel({ redirectTo, onBack }: { redirectTo: string; onBack: () => void }) {
+  const usernameId = useId();
+  const passwordId = useId();
+  const currentId = useId();
+  const nextId = useId();
+  const identity = useOperatorIdentity();
+  const queryClient = useQueryClient();
+  const login = useSoftwareLogin();
+  const change = useChangeSoftwarePassword();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [mustChange, setMustChange] = useState(identity?.mustChangePassword ?? false);
+  const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
+
+  const submitLogin = () => {
+    setError(null);
+    login.mutate({ username: username.trim(), password }, {
+      onSuccess: (result) => {
+        setOperator({ token: result.token, id: result.operator.id, name: result.operator.name, role: result.operator.role, mustChangePassword: result.mustChangePassword });
+        setMustChange(result.mustChangePassword);
+        setCurrentPassword(password);
+        setPassword("");
+        if (!result.mustChangePassword) {
+          void queryClient.invalidateQueries();
+          navigate(redirectTo, { replace: true });
+        }
+      },
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
+  const submitPassword = () => {
+    setError(null);
+    if (newPassword.length < 8) {
+      setError("新密码至少需要 8 个字符");
+      return;
+    }
+    change.mutate({ currentPassword, newPassword }, {
+      onSuccess: () => {
+        if (identity) setOperator({ token: identity.token, id: identity.id, name: identity.name, role: identity.role, mustChangePassword: false });
+        void queryClient.invalidateQueries();
+        setMustChange(false);
+        navigate(redirectTo, { replace: true });
+      },
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
+  return (
+    <Card className="w-full" padding="normal">
+      <CardTitle>{mustChange ? "设置新密码" : "软件账号登录"}</CardTitle>
+      <div className="mt-4 flex flex-col gap-4">
+        {mustChange ? <>
+          <p className="text-[13px] leading-5 text-fg-secondary">首次登录需要先修改初始密码。</p>
+          <Field label="当前密码" required htmlFor={currentId}><Input id={currentId} type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.currentTarget.value)} /></Field>
+          <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.currentTarget.value)} /></Field>
+          <Button loading={change.isPending} onClick={submitPassword}>保存新密码</Button>
+        </> : <>
+          <Field label="用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={username} onChange={(e) => setUsername(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
+          <Field label="密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
+          <div className="flex flex-wrap gap-2"><Button loading={login.isPending} onClick={submitLogin}>登录</Button><Button variant="ghost" onClick={onBack}>返回妙手绑定</Button></div>
+        </>}
+        {error && <InlineError>{error}</InlineError>}
+      </div>
+    </Card>
   );
 }
 

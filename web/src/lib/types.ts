@@ -1243,6 +1243,8 @@ export interface HealthResponse {
 export interface Operator {
   id: string;
   name: string;
+  username?: string | null;
+  hasLoginCredentials?: boolean;
   /** 管理员能改名 / 停用 / 重置别人的 token */
   admin: boolean;
   /** 三级角色：admin / teacher / member */
@@ -1254,6 +1256,22 @@ export interface Operator {
   createdAt: number;
   /** 内置「本机」操作员：不可改名、不可停用、不可重置 */
   builtin?: boolean;
+}
+
+export interface SoftwareLoginResponse {
+  operator: Pick<Operator, "id" | "name" | "role">;
+  token: string;
+  mustChangePassword: boolean;
+}
+
+export interface StudentCreateRequest {
+  name: string;
+  username: string;
+  password: string;
+}
+
+export interface StudentCreateResponse {
+  operator: Operator & { username?: string };
 }
 
 export interface OperatorsResponse {

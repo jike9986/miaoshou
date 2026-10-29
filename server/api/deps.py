@@ -215,6 +215,16 @@ def current_operator(
 OperatorDep = Annotated[Operator, Depends(current_operator)]
 
 
+def require_password_change_complete(request: Request,
+                                    operator: OperatorDep) -> Operator:
+    if (operator.must_change_password
+            and request.url.path != "/api/v1/auth/change-password"):
+        raise errors.AppError(
+            "PASSWORD_CHANGE_REQUIRED", "首次登录请先修改密码", status=403,
+            details={"reason": "password_change_required"})
+    return operator
+
+
 def require_permission(permission: str):
     """要求当前操作员有某个权限的依赖工厂。
 

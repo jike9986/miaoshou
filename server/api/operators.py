@@ -25,13 +25,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
+from pydantic import Field
 
 from api.deps import (
     AdminDep,
     DbSession,
     OperatorDep,
     OptionalOperatorDep,
+    require_password_change_complete,
     require_permission,
     require_writable,
 )
@@ -45,6 +47,59 @@ router = APIRouter(prefix="/operators", tags=["操作员"])
 # 但同样必须带 prefix —— tests/test_smoke.py 里有一条断言「每个 APIRouter
 # 都要有 prefix 和 tags」，没有的话 /api/docs 会把它挤进 default 分组。
 audit_router = APIRouter(prefix="/audit-logs", tags=["操作员"])
+
+
+class StudentCreateRequest(CamelModel):
+    name: str = Field(min_length=1, max_length=64)
+    username: str = Field(max_length=64)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetRequest(CamelModel):
+    password: str = Field(min_length=8, max_length=128)
+    username: str | None = Field(default=None, max_length=64)
+
+
+def _require_teacher_or_admin(operator: Any) -> None:
+    if operator_service.role_of(operator) not in {
+            operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}:
+        raise errors.AppError("FORBIDDEN", "无权管理学员账号", status=403)
+
+
+@router.post("/students", status_code=201,
+             dependencies=[Depends(require_password_change_complete)])
+def create_student(payload: StudentCreateRequest, db: DbSession,
+                   operator: OperatorDep) -> dict[str, Any]:
+    _require_teacher_or_admin(operator)
+    require_writable(db)
+    row = operator_service.create_student(
+        db, payload.name, payload.username, payload.password)
+    db.commit()
+    audit_service.record(db, operator=operator, action="operator.student_create",
+                         target_kind="operator", target_id=str(row.id),
+                         detail={"name": row.name, "role": operator_service.ROLE_MEMBER})
+    db.commit()
+    return {"operator": operator_service.serialize(row)}
+
+
+@router.post("/{operator_id}/reset-password",
+             dependencies=[Depends(require_password_change_complete)])
+def reset_student_password(operator_id: str, payload: PasswordResetRequest,
+                           db: DbSession, operator: OperatorDep) -> dict[str, bool]:
+    _require_teacher_or_admin(operator)
+    target = operator_service.get(db, operator_id)
+    if operator_service.role_of(target) != operator_service.ROLE_MEMBER:
+        raise errors.AppError("FORBIDDEN", "只能重置学员账号密码", status=403)
+    require_writable(db)
+    operator_service.set_password(
+        db, target, payload.password, must_change=True, rotate_token=True,
+        username=payload.username)
+    db.commit()
+    audit_service.record(db, operator=operator, action="operator.student_reset_password",
+                         target_kind="operator", target_id=str(target.id),
+                         detail={"role": operator_service.ROLE_MEMBER})
+    db.commit()
+    return {"ok": True}
 
 
 class OperatorCreateRequest(CamelModel):
@@ -83,12 +138,23 @@ def list_operators(db: DbSession,
         current = operator_service.ensure_default(db)
         db.flush()
     rows = operator_service.list_all(db)
+    can_manage_accounts = bool(
+        operator is not None
+        and operator_service.role_of(operator) in {
+            operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER})
+    current_data = operator_service.serialize(current)
+    if not can_manage_accounts:
+        for row in rows:
+            row.pop("username", None)
+            row.pop("hasLoginCredentials", None)
+        current_data.pop("username", None)
+        current_data.pop("hasLoginCredentials", None)
     return {
         # 两个键名都给：前端 types.ts 里是 operators，任务书写的是 items
         "operators": rows,
         "items": rows,
         "total": len(rows),
-        "current": operator_service.serialize(current),
+        "current": current_data,
     }
 
 

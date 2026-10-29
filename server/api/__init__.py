@@ -26,7 +26,12 @@ from api import (
     warehouse,
     words,
 )
-from api.deps import current_operator, require_token, track_client
+from api.deps import (
+    current_operator,
+    require_password_change_complete,
+    require_token,
+    track_client,
+)
 
 API_PREFIX = "/api/v1"
 
@@ -38,7 +43,10 @@ router = APIRouter()
 # 两个都挂在这里而不是让每个路由自己写，是因为「声明了身份却不被解析」会
 # 变成最糟的一种 bug：审计里把张三做的事记到本机名下，人却以为记对了。
 # FastAPI 会按依赖函数缓存结果，所以已经写了 OperatorDep 的路由不会重复解析。
-_guarded = APIRouter(dependencies=[Depends(require_token), Depends(current_operator)])
+_guarded = APIRouter(dependencies=[
+    Depends(require_token), Depends(current_operator),
+    Depends(require_password_change_complete),
+])
 # 在线客户端心跳：挂在**根 router** 上，覆盖包括免鉴权 health 在内的所有请求。
 # 为什么不做成中间件：main.py 归另一处改动所有（bind_host 那批），
 # 而 api/__init__.py 是我们能加东西的地方；router 依赖对经过它的每个请求都执行，
@@ -62,6 +70,7 @@ router.include_router(operators.audit_router)
 
 # system 里的 health 需要免鉴权，因此单独挂载
 router.include_router(system.health_router)
+router.include_router(auth.login_router)
 router.include_router(_guarded)
 router.include_router(system.router, dependencies=[Depends(require_token)])
 

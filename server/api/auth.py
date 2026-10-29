@@ -6,7 +6,8 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from api.deps import AdminDep, DbSession, optional_account, require_writable
+from api.deps import AdminDep, DbSession, OperatorDep, optional_account, require_writable
+from core import errors
 from core.config import get_settings
 from core.constants import (
     APP_VERSION,
@@ -18,10 +19,67 @@ from core.constants import (
     SERVER_NAME,
     SUPPORTED_LANGUAGES,
 )
+from models.operator import Operator
 from schemas.requests import ConnectRequest
-from services import account_service, audit_service, setting_service
+from services import account_service, audit_service, operator_service, setting_service
 
 router = APIRouter(prefix="/auth", tags=["认证"])
+login_router = APIRouter(prefix="/auth", tags=["认证"])
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(max_length=64)
+    password: str = Field(max_length=128)
+
+
+class ChangePasswordRequest(BaseModel):
+    currentPassword: str = Field(max_length=128)
+    newPassword: str = Field(min_length=8, max_length=128)
+
+
+class InitializeCredentialsRequest(BaseModel):
+    username: str = Field(max_length=64)
+    password: str = Field(min_length=8, max_length=128)
+
+
+@login_router.post("/login")
+def login(payload: LoginRequest, db: DbSession) -> dict[str, Any]:
+    result = operator_service.authenticate_password(db, payload.username, payload.password)
+    if result is None:
+        from core.errors import AppError
+        raise AppError("AUTH_FAILED", "用户名或密码错误", status=401)
+    operator, token = result
+    db.commit()
+    return {"operator": {"id": str(operator.id), "name": operator.name,
+                          "role": operator_service.role_of(operator)},
+            "token": token, "mustChangePassword": operator.must_change_password}
+
+
+@router.post("/change-password")
+def change_password(payload: ChangePasswordRequest, db: DbSession,
+                    operator: OperatorDep) -> dict[str, bool]:
+    if not operator_service.verify_password(payload.currentPassword, operator.password_hash):
+        from core.errors import AppError
+        raise AppError("AUTH_FAILED", "当前密码错误", status=401)
+    operator_service.set_password(db, operator, payload.newPassword, must_change=False)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/initialize-credentials")
+def initialize_credentials(payload: InitializeCredentialsRequest, db: DbSession,
+                            operator: OperatorDep) -> dict[str, bool]:
+    if operator.username is not None or operator.password_hash is not None:
+        from core.errors import AppError
+        raise AppError("CONFLICT", "登录凭据已初始化", status=409,
+                       details={"reason": "credentials_initialized"})
+    username = operator_service.normalize_username(payload.username)
+    if db.query(Operator).filter(Operator.username == username).one_or_none():
+        raise errors.validation("用户名已存在", field="username")
+    operator_service.set_password(db, operator, payload.password, must_change=False,
+                                  username=username)
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/connect", summary="连接妙手账号")

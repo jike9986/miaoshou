@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import secrets
 from typing import Any
@@ -44,6 +46,9 @@ TOUCH_INTERVAL_SECONDS = 60.0
 
 # 显示名长度上限，与 models/operator.py 的 String(64) 对齐
 NAME_MAX_LENGTH = 64
+USERNAME_MAX_LENGTH = 64
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 128
 
 
 # 三级角色定义
@@ -62,6 +67,39 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     },
     ROLE_MEMBER: {"warehouse", "words"},
 }
+
+
+def normalize_username(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = text.casefold()
+    if (not normalized or len(normalized) > USERNAME_MAX_LENGTH
+            or any(ch.isspace() for ch in normalized)):
+        raise errors.validation("用户名长度为 1-64 个字符且不能包含空白", field="username")
+    return normalized
+
+
+def hash_password(password: str) -> str:
+    if len(password) < PASSWORD_MIN_LENGTH or len(password) > PASSWORD_MAX_LENGTH:
+        raise errors.validation("密码长度必须为 8-128 个字符", field="password")
+    if not password.strip():
+        raise errors.validation("密码不能全为空白", field="password")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, encoded: str | None) -> bool:
+    if not encoded or len(password) > PASSWORD_MAX_LENGTH:
+        return False
+    try:
+        scheme, salt_hex, digest_hex = encoded.split("$", 2)
+        if scheme != "scrypt":
+            return False
+        digest = hashlib.scrypt(password.encode("utf-8"), salt=bytes.fromhex(salt_hex),
+                                n=2**14, r=8, p=1)
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except (ValueError, UnicodeError):
+        return False
 
 
 def role_of(operator: Operator) -> str:
@@ -207,6 +245,49 @@ def create(db: Session, name: Any, *, is_admin: bool = False,
     return row, token
 
 
+def create_student(db: Session, name: Any, username: Any, password: str) -> Operator:
+    clean_username = normalize_username(username)
+    if db.query(Operator).filter(Operator.username == clean_username).one_or_none():
+        raise errors.validation("用户名已存在", field="username")
+    row = Operator(
+        name=_clean_name(name), username=clean_username,
+        password_hash=hash_password(password), token=secrets.token_urlsafe(32),
+        enabled=True, is_admin=False, role=ROLE_MEMBER,
+        must_change_password=True, created_at=now_ts(),
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def authenticate_password(db: Session, username: Any, password: str) -> tuple[Operator, str] | None:
+    try:
+        clean_username = normalize_username(username)
+    except Exception:
+        return None
+    row = db.query(Operator).filter(Operator.username == clean_username).one_or_none()
+    if row is None or not row.enabled or not verify_password(password, row.password_hash):
+        return None
+    row.token = secrets.token_urlsafe(32)
+    return row, row.token
+
+
+def set_password(db: Session, row: Operator, password: str, *, must_change: bool,
+                 rotate_token: bool = False, username: Any = None) -> None:
+    if username is not None:
+        clean_username = normalize_username(username)
+        clash = (db.query(Operator)
+                 .filter(Operator.username == clean_username, Operator.id != row.id)
+                 .one_or_none())
+        if clash is not None:
+            raise errors.validation("用户名已存在", field="username")
+        row.username = clean_username
+    row.password_hash = hash_password(password)
+    row.must_change_password = must_change
+    if rotate_token:
+        row.token = secrets.token_urlsafe(32)
+
+
 def list_all(db: Session) -> list[dict[str, Any]]:
     """列表。**不含 token**——这里多一个字段，前面所有努力都白费。"""
     rows = db.query(Operator).order_by(Operator.id.asc()).all()
@@ -223,6 +304,8 @@ def serialize(row: Operator) -> dict[str, Any]:
     return {
         "id": str(row.id),
         "name": row.name or "",
+        "username": row.username,
+        "hasLoginCredentials": bool(row.username and row.password_hash),
         "enabled": bool(row.enabled),
         "admin": bool(row.is_admin),
         "isAdmin": bool(row.is_admin),

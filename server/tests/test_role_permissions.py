@@ -301,6 +301,13 @@ READ_ONLY_POSTS = {
 DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/warehouse/transform"),
     ("POST", "/api/v1/sync/price-templates"),
+    # 这些路由在处理函数内校验当前 OperatorDep 的角色/状态。
+    ("POST", "/api/v1/operators/students"),
+    ("POST", "/api/v1/operators/{operator_id}/reset-password"),
+    ("POST", "/api/v1/auth/change-password"),
+    ("POST", "/api/v1/auth/initialize-credentials"),
+    # 登录是唯一公开的写入路由，认证失败统一返回 401。
+    ("POST", "/api/v1/auth/login"),
 }
 
 

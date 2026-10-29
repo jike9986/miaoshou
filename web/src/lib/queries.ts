@@ -50,6 +50,9 @@ import type {
   OperatorPatchRequest,
   OperatorsResponse,
   OperatorTokenResponse,
+  SoftwareLoginResponse,
+  StudentCreateRequest,
+  StudentCreateResponse,
   ProcessCollectRequest,
   ProcessCollectResult,
   ProductDetailResponse,
@@ -114,6 +117,60 @@ export function useAuthStatus(): UseQueryResult<AuthStatus> {
     queryKey: queryKeys.auth.status(),
     queryFn: () => api.get<AuthStatus>("/auth/status"),
     staleTime: 10_000,
+  });
+}
+
+export function useSoftwareLogin(): UseMutationResult<
+  SoftwareLoginResponse,
+  Error,
+  { username: string; password: string }
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<SoftwareLoginResponse, typeof body>("/auth/login", body),
+  });
+}
+
+export function useChangeSoftwarePassword(): UseMutationResult<
+  { ok: true },
+  Error,
+  { currentPassword: string; newPassword: string }
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<{ ok: true }, typeof body>("/auth/change-password", body),
+  });
+}
+
+export function useInitializeSoftwareCredentials(): UseMutationResult<
+  { ok: true },
+  Error,
+  { username: string; password: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body) => api.post<{ ok: true }, typeof body>("/auth/initialize-credentials", body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.operators.all });
+      void client.invalidateQueries({ queryKey: queryKeys.auth.all });
+    },
+  });
+}
+
+export function useCreateStudent(): UseMutationResult<StudentCreateResponse, Error, StudentCreateRequest> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body) => api.post<StudentCreateResponse, StudentCreateRequest>("/operators/students", body),
+    onSuccess: () => void client.invalidateQueries({ queryKey: queryKeys.operators.all }),
+  });
+}
+
+export function useResetStudentPassword(): UseMutationResult<
+  { ok: true },
+  Error,
+  { id: string; password: string; username?: string }
+> {
+  return useMutation({
+    mutationFn: ({ id, ...body }) =>
+      api.post<{ ok: true }, Omit<typeof body, "id">>(`/operators/${encodeURIComponent(id)}/reset-password`, body),
   });
 }
 

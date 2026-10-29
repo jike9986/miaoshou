@@ -28,11 +28,14 @@ import type { OperatorsResponse } from "@/lib/types";
 import { queryKeys } from "@/lib/queryKeys";
 import {
   useCreateOperator,
+  useCreateStudent,
+  useInitializeSoftwareCredentials,
   useOperators,
   useRenameOperator,
   useRotateOperator,
   useSetRole,
   useToggleOperator,
+  useResetStudentPassword,
 } from "@/lib/queries";
 import {
   clearOperator,
@@ -45,6 +48,7 @@ import {
   Badge,
   Button,
   Card,
+  CardTitle,
   ConfirmDialog,
   Dialog,
   EmptyState,
@@ -97,6 +101,10 @@ function IdentityCard({
 }) {
   const identity = useOperatorIdentity();
   const operatorsQuery = useOperators();
+  const initializeCredentials = useInitializeSoftwareCredentials();
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [credentialsInitialized, setCredentialsInitialized] = useState(false);
   const me = useMemo(() => {
     const list = operatorsQuery.data?.operators ?? [];
     if (!identity) return operatorsQuery.data?.current ?? null;
@@ -104,6 +112,31 @@ function IdentityCard({
   }, [identity, operatorsQuery.data]);
 
   const name = identity?.name ?? LOCAL_OPERATOR_NAME;
+  const canInitializeCredentials = Boolean(
+    me?.hasLoginCredentials === false &&
+      (me.role === "teacher" || me.role === "admin")
+  );
+
+  const submitCredentials = () => {
+    const username = loginUsername.trim();
+    if (!username || loginPassword.length < 8) {
+      toast.error("请填写用户名和至少 8 位密码");
+      return;
+    }
+    initializeCredentials.mutate(
+      { username, password: loginPassword },
+      {
+        onSuccess: () => {
+          setLoginPassword("");
+          setCredentialsInitialized(true);
+          toast.success("软件登录已开通", {
+            description: "可使用此账号密码登录，也可在新设备上登录",
+          });
+        },
+        onError: (error) => toast.error("开通软件登录失败", { description: apiErrorMessage(error) }),
+      }
+    );
+  };
 
   return (
     <Card padding="normal">
@@ -161,6 +194,48 @@ function IdentityCard({
           </Button>
         </div>
       </div>
+      {canInitializeCredentials && (
+        <div className="mt-4 border-t border-border-subtle pt-4">
+          <div className="mb-3">
+            <p className="text-[13px] font-semibold leading-5 text-fg">开通软件登录</p>
+            <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
+              为当前旧 token 身份设置用户名和密码，之后可在新设备登录。
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+            <Field label="登录用户名" required>
+              <Input
+                value={loginUsername}
+                autoComplete="username"
+                maxLength={80}
+                onChange={(event) => setLoginUsername(event.currentTarget.value)}
+              />
+            </Field>
+            <Field label="设置密码" required>
+              <Input
+                type="password"
+                value={loginPassword}
+                autoComplete="new-password"
+                maxLength={128}
+                onChange={(event) => setLoginPassword(event.currentTarget.value)}
+              />
+            </Field>
+            <Button
+              loading={initializeCredentials.isPending}
+              disabled={!loginUsername.trim() || loginPassword.length < 8}
+              icon={<KeyRound />}
+              onClick={submitCredentials}
+            >
+              开通登录
+            </Button>
+          </div>
+          {credentialsInitialized && (
+            <p className="mt-2 text-xs leading-[18px] text-success-700" role="status">
+              登录凭据已设置。密码不会保存在此设备，请妥善记录。
+            </p>
+          )}
+        </div>
+      )}
     </Card>
   );
 }
@@ -199,7 +274,7 @@ function SwitchIdentityDialog({
       .get<OperatorsResponse>("/operators", { headers: { Authorization: `Bearer ${value}` } })
       .then((data) => {
         const who = data.current ?? null;
-        setOperator({ token: value, id: who?.id ?? null, name: who?.name ?? "操作员" });
+        setOperator({ token: value, id: who?.id ?? null, name: who?.name ?? "操作员", role: who?.role });
         // 身份一变，后端返回的「我」就不同了：名单与审计都要重取，
         // 否则界面上还挂着上一个人的管理员标记
         void client.invalidateQueries({ queryKey: queryKeys.operators.all });
@@ -437,7 +512,8 @@ function RenameOperatorDialog({
           // 改的是自己：本地显示名跟着换，否则界面还挂着旧名字
           const me = currentOperator();
           if (me && me.id === result.operator.id) {
-            setOperator({ token: me.token, id: me.id, name: result.operator.name });
+            setOperator({ token: me.token, id: me.id, name: result.operator.name,
+              role: me.role, mustChangePassword: me.mustChangePassword });
           }
           onClose();
         },
@@ -545,7 +621,8 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
         // 重置的是自己：本地 token 必须立刻跟着换，否则下一次请求就被 401 拦
         const mine = currentOperator();
         if (mine && mine.id === result.operator.id) {
-          setOperator({ token: result.token, id: result.operator.id, name: result.operator.name });
+          setOperator({ token: result.token, id: result.operator.id, name: result.operator.name,
+            role: me?.role ?? mine.role, mustChangePassword: mine.mustChangePassword });
         }
       },
       onError: (error) => toast.error("重置 token 失败", { description: apiErrorMessage(error) }),
@@ -578,6 +655,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
 
   return (
     <div className={cn("flex flex-col gap-4", className)}>
+      {(me?.role === "teacher" || me?.role === "admin") && <StudentAccountsPanel />}
       <IdentityCard onSwitch={() => setSwitchOpen(true)} onCreated={() => setCreateOpen(true)} />
 
       <Card padding="none">
@@ -856,6 +934,60 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
       {/* 兜底提示：万一有人把一次性框截图丢了，这里再提醒一次不可恢复 */}
       <span className="sr-only">{ONE_TIME_TOKEN_NOTICE}</span>
     </div>
+  );
+}
+
+function StudentAccountsPanel() {
+  const list = useOperators();
+  const create = useCreateStudent();
+  const reset = useResetStudentPassword();
+  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [issued, setIssued] = useState<{ username: string; password: string; label: string } | null>(null);
+  const students = (list.data?.operators ?? []).filter((operator) => operator.role === "member");
+  const createNow = () => {
+    const password = `Stu-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}!`;
+    create.mutate({ name: name.trim(), username: username.trim(), password }, {
+      onSuccess: (result) => {
+        setIssued({ username: username.trim(), password, label: result.operator.name });
+        setName("");
+        setUsername("");
+      },
+      onError: (error) => toast.error("创建学员失败", { description: apiErrorMessage(error) }),
+    });
+  };
+  const resetNow = (student: { id: string; name: string; username?: string | null }) => {
+    const password = `Stu-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}!`;
+    const username = student.username ?? `student-${student.id}`;
+    reset.mutate({ id: student.id, password, username }, {
+      onSuccess: () => setIssued({ username, password, label: student.name }),
+      onError: (error) => toast.error("重置密码失败", { description: apiErrorMessage(error) }),
+    });
+  };
+  return (
+    <Card padding="normal">
+      <CardTitle>学员账号</CardTitle>
+      <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+        <Field label="学员姓名" required><Input value={name} maxLength={80} onChange={(event) => setName(event.currentTarget.value)} /></Field>
+        <Field label="登录用户名" required><Input value={username} maxLength={80} autoComplete="off" onChange={(event) => setUsername(event.currentTarget.value)} /></Field>
+        <Button loading={create.isPending} disabled={!name.trim() || !username.trim()} icon={<UserPlus />} onClick={createNow}>创建学员</Button>
+      </div>
+      {issued && <div className="mt-3 rounded-md border border-success-600/25 bg-success-50 px-3 py-2 text-[13px] leading-5 text-success-700" role="status">
+        <div className="font-medium">{issued.label} 的初始密码（仅显示本次）</div>
+        <div>用户名：{issued.username}</div><div className="font-mono">密码：{issued.password}</div>
+        <button type="button" className="mt-1 text-xs font-medium text-success-700 underline" onClick={() => setIssued(null)}>我已记录</button>
+      </div>}
+      <div className="mt-4 border-t border-border-subtle pt-3">
+        <div className="mb-2 flex items-center gap-2 text-[13px] font-medium text-fg">学员列表 <span className="text-xs font-normal text-fg-muted">{students.length}</span></div>
+        {list.isLoading ? <SkeletonRows rows={2} /> : list.isError ? <InlineError onRetry={() => void list.refetch()}>{apiErrorMessage(list.error)}</InlineError> : students.length === 0 ? <p className="py-3 text-[13px] text-fg-muted">还没有学员账号</p> : <ul className="divide-y divide-border-subtle">
+          {students.map((student) => <li key={student.id} className="flex min-h-11 items-center gap-3 py-2">
+            <span className="min-w-0 flex-1 truncate text-[13px] text-fg">{student.name}</span>
+            <span className="hidden truncate text-xs text-fg-muted sm:block">{(student as typeof student & { username?: string }).username ?? student.id}</span>
+            <Button size="sm" variant="secondary" loading={reset.isPending && reset.variables?.id === student.id} onClick={() => resetNow(student)}>重置密码</Button>
+          </li>)}
+        </ul>}
+      </div>
+    </Card>
   );
 }
 
