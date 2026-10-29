@@ -10,7 +10,6 @@ import { cn } from "@/lib/utils";
 import { ease } from "@/lib/motion";
 import { useIsNarrow } from "@/hooks/useMediaQuery";
 import { isMac, useHotkey } from "@/hooks/useHotkey";
-import type { VersionPayload } from "@/lib/queries";
 import { Sidebar, type SidebarAccount, type SidebarNavGroup } from "@/components/layout/Sidebar";
 import { TitleBar, TitleBarBreadcrumb, type TitleBarBrand } from "@/components/layout/TitleBar";
 import { useFocusTrap, useTabTrap } from "@/components/ui/dialog";
@@ -69,12 +68,6 @@ export interface AppShellProps {
   /** 底部账户区 */
   account?: SidebarAccount | null;
   onAccountClick?: () => void;
-  /** 手动检查更新 */
-  onCheckUpdate?: () => void;
-  /** 是否正在检查更新 */
-  checkingUpdate?: boolean;
-  /** 版本信息（底部显示） */
-  version?: VersionPayload | null;
   /** 标题栏中部（默认：全局搜索入口 > 面包屑） */
   titleBarCenter?: ReactNode;
   /** 标题栏右侧附加入口（最多 1 个） */
@@ -91,9 +84,6 @@ export function AppShell({
   brand,
   account,
   onAccountClick,
-  onCheckUpdate,
-  checkingUpdate,
-  version,
   titleBarCenter,
   titleBarExtra,
   onOpenSearch,
@@ -157,9 +147,6 @@ export function AppShell({
       collapseTogglePosition="top"
       showCollapseToggle={!narrow}
       onNavigate={() => setDrawerOpen(false)}
-      onCheckUpdate={onCheckUpdate}
-      checking={checkingUpdate}
-      version={version}
     />
   );
 

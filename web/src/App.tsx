@@ -15,7 +15,7 @@ import {
 import { AppShell, BrandMark } from "@/components/layout/AppShell";
 import type { SidebarNavGroup } from "@/components/layout/Sidebar";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
-import { AppToaster, toast } from "@/components/ui/toast";
+import { AppToaster } from "@/components/ui/toast";
 import { EmptyState } from "@/components/ui/empty-state";
 import { UnlockPage } from "@/features/auth/UnlockPage";
 import { useAutoUnlock, useAuthGuardStore } from "@/features/auth/guard";
@@ -24,8 +24,7 @@ import { AutomationPage } from "@/features/automation/AutomationPage";
 import { SchedulesPage } from "@/features/schedules/SchedulesPage";
 import { WordsPage } from "@/features/words/WordsPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
-import { useAuthStatus, useCheckUpdate, useVersion } from "@/lib/queries";
-import { apiErrorMessage } from "@/lib/api";
+import { useAuthStatus } from "@/lib/queries";
 import { hasRuntimeToken } from "@/lib/bootstrap";
 import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
 
@@ -64,10 +63,6 @@ const NAV: SidebarNavGroup[] = [
 function Shell() {
   const navigate = useNavigate();
   const { data: status } = useAuthStatus();
-  // 版本：不主动拉清单（refresh=false），点「检查更新」才真去请求，
-  // 免得每次开页都打一次更新服务器。
-  const versionQuery = useVersion(false);
-  const checkUpdate = useCheckUpdate();
   const guest = useAuthGuardStore((state) => state.guest);
   const operatorIdentity = useOperatorIdentity();
   useAutoUnlock();
@@ -97,18 +92,6 @@ function Shell() {
               : { name: "未连接", detail: "点击连接妙手", operator: operatorLabel }
         }
         onAccountClick={() => navigate("/unlock")}
-        version={versionQuery.data ?? null}
-        checkingUpdate={checkUpdate.isPending}
-        onCheckUpdate={() => {
-          checkUpdate.mutate(undefined, {
-            onSuccess: (data) => {
-              if (data.updateAvailable) toast.success(`发现新版本 ${data.latest}`);
-              else if (data.ok) toast.success("已是最新版本");
-              else toast.error(data.error ?? "检查更新失败");
-            },
-            onError: (error) => toast.error(apiErrorMessage(error)),
-          });
-        }}
         // 标题栏不再放账号/店铺切换：账号和店铺已经挪到「开始处理」旁边，
         // 这里再放一份就是两套重复控件，只会占掉标题栏高度。
         // 也不传 routeMeta：标题栏中部不显示「功能 / 板块名」面包屑。

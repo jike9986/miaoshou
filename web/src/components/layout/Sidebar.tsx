@@ -9,7 +9,6 @@ import {
   Download,
   KeyRound,
   MoreHorizontal,
-  RefreshCw,
   PackageSearch,
   PanelLeft,
   Play,
@@ -185,7 +184,7 @@ interface UpdateActionsProps {
   collapsed?: boolean;
 }
 
-function UpdateActions({ version, collapsed = false }: UpdateActionsProps) {
+export function UpdateActions({ version, collapsed = false }: UpdateActionsProps) {
   const updateAvailable = Boolean(version?.updateAvailable);
   // 只在真有新版本时才去查 canInstall / readOnly：这个接口内部会拉一次清单，
   // 没更新的时候每次开页都打一遍纯属浪费。
@@ -364,12 +363,6 @@ export interface SidebarProps {
   showCollapseToggle?: boolean;
   className?: string;
   onNavigate?: () => void;
-  /** 手动检查更新（点了会强制去拉更新清单） */
-  onCheckUpdate?: () => void;
-  /** 是否正在检查 */
-  checking?: boolean;
-  /** 版本信息，用于底部那行提示 */
-  version?: VersionPayload | null;
 }
 
 export function Sidebar({
@@ -384,23 +377,9 @@ export function Sidebar({
   showCollapseToggle = true,
   className,
   onNavigate,
-  onCheckUpdate,
-  checking = false,
-  version,
 }: SidebarProps) {
   const [internalCollapsed, setInternalCollapsed] = useState(defaultCollapsed);
   const collapsed = collapsedProp ?? internalCollapsed;
-
-  // 底部那行提示：优先反映「有新版」，其次反映失败，最后显示当前版本
-  const versionHint = version
-    ? version.updateAvailable
-      ? `发现新版本 ${version.latest}`
-      : version.ok
-        ? `已是最新 v${version.current}`
-        : version.error
-          ? "检查更新失败"
-          : `v${version.current}`
-    : "检查更新";
 
   const toggle = (): void => {
     const next = !collapsed;
@@ -479,58 +458,6 @@ export function Sidebar({
             />
           </div>
         )}
-
-        {/* 版本区：常态只显示「v0.1.5 · 已是最新」一行 11px 小字，
-            有更新时整行变品牌色并浮出操作按钮 —— 平时不打扰，有事才醒目。 */}
-        <div className={cn("border-t border-border", collapsed ? "py-2" : "px-2 py-1.5")}>
-          <div className={cn("flex items-center", collapsed ? "justify-center px-0" : "gap-1")}>
-            <button
-              type="button"
-              onClick={onCheckUpdate}
-              disabled={checking}
-              title={versionHint}
-              className={cn(
-                "flex min-w-0 items-center rounded-md text-left",
-                "transition-colors duration-fast hover:bg-surface-hover",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32",
-                "disabled:opacity-60",
-                collapsed ? "size-6 justify-center" : "flex-1 gap-1.5 px-1.5 py-1"
-              )}
-            >
-              <RefreshCw
-                aria-hidden
-                className={cn("size-3.5 shrink-0 text-fg-muted", checking && "animate-spin")}
-                strokeWidth={1.75}
-              />
-              {!collapsed && (
-                <span
-                  className={cn(
-                    "min-w-0 flex-1 truncate text-[11px] leading-4",
-                    version?.updateAvailable ? "font-medium text-brand-700" : "text-fg-muted"
-                  )}
-                >
-                  {versionHint}
-                </span>
-              )}
-            </button>
-
-            {/* 自动下载不可用时留一条手动通道：地址是清单给的，用户自己去浏览器下也能装 */}
-            {!collapsed && version?.updateAvailable && version.url && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (version.url) window.open(version.url, "_blank", "noopener,noreferrer");
-                }}
-                title="在浏览器里手动下载安装包"
-                className="shrink-0 rounded-md bg-brand-600 px-1.5 py-0.5 text-[11px] font-medium text-white transition-colors duration-fast hover:bg-brand-700"
-              >
-                手动下载
-              </button>
-            )}
-          </div>
-
-          <UpdateActions version={version} collapsed={collapsed} />
-        </div>
 
         {account && (
           <button
