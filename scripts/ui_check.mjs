@@ -58,7 +58,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function main() {
   const pages = await targets();
   if (!pages.length) throw new Error("没有可用的页面目标");
-  const ws = new WebSocket(pages[0].webSocketDebuggerUrl);
+  const page = pages.find((item) => item.url?.includes("/automation")) || pages[0];
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((res, rej) => {
     ws.addEventListener("open", res, { once: true });
     ws.addEventListener("error", rej, { once: true });
@@ -66,6 +67,7 @@ async function main() {
   const cdp = new Cdp(ws);
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
+  const initialLocation = await cdp.evaluate("location.href");
 
   // --- 1. 页面已挂载 ---
   const title = await cdp.evaluate("document.title");
@@ -143,21 +145,58 @@ async function main() {
   const imgs = await cdp.evaluate("document.querySelectorAll('img').length");
   check("仓库页有图片", imgs > 0, `${imgs} 张`);
 
-  // --- 6. 设置页（操作员 + 审计日志），从标题栏身份按钮进 ---
+  // --- 6. 设置页使用当前账号与权限文案 ---
   const settingsOk = await cdp.evaluate(`
     (() => {
-      location.hash = "#/settings";
+      const link = Array.from(document.querySelectorAll('aside a'))
+        .find((item) => (item.getAttribute('href') || '').endsWith('/settings'));
+      if (!link) return false;
+      link.click();
       return true;
     })()
   `);
   await sleep(1800);
   const st = await cdp.evaluate("document.body.innerText");
-  check("设置页可进入", settingsOk && st.length > 200, `${st.length}字符`);
-  check("设置页有「操作员」", /操作员/.test(st), st.slice(0, 100).replace(/\n/g, " "));
-  check("设置页有「审计日志」", /审计日志/.test(st));
-  check("显示当前身份", /当前身份|身份/.test(st));
+  check("设置页可进入", settingsOk && /设置/.test(st) && st.length > 60, `${st.length}字符`);
+  check("设置页有账号入口", /账号与权限|账号/.test(st), st.slice(0, 120).replace(/\n/g, " "));
+  check("设置页有关于与更新入口", /关于与更新/.test(st));
 
-  // --- 7. 后端连通性（界面内发起真实请求） ---
+  // --- 7. 当前页面的视口矩阵：外层横溢出回归探测 ---
+  const viewportCases = [
+    { width: 1440, height: 900, scale: 1 },
+    { width: 1180, height: 720, scale: 1 },
+    { width: 900, height: 700, scale: 1 },
+    { width: 1440, height: 900, scale: 1.25 },
+    { width: 1440, height: 900, scale: 1.5 },
+  ];
+  try {
+    for (const viewport of viewportCases) {
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: viewport.width,
+        height: viewport.height,
+        deviceScaleFactor: viewport.scale,
+        mobile: false,
+      });
+      await sleep(150);
+      const layout = await cdp.evaluate(`({
+        width: innerWidth,
+        height: innerHeight,
+        scrollWidth: document.documentElement.scrollWidth,
+        bodyWidth: document.body.scrollWidth
+      })`);
+      const noHorizontalOverflow = layout.scrollWidth <= layout.width && layout.bodyWidth <= layout.width;
+      check(
+        `视口 ${viewport.width}×${viewport.height} @${viewport.scale} 无页面横溢出`,
+        noHorizontalOverflow,
+        JSON.stringify(layout)
+      );
+    }
+  } finally {
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+    await cdp.evaluate(`location.href = ${JSON.stringify(initialLocation)}`);
+  }
+
+  // --- 8. 后端连通性（界面内发起真实请求） ---
   const apiOk = await cdp.evaluate(`
     (async () => {
       try {
