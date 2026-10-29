@@ -7,7 +7,11 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 from PyInstaller.building.datastruct import Tree
 
 datas, binaries, hidden = [], [], []
-for pkg in ("uvicorn", "fastapi", "pydantic", "sqlalchemy", "httpx", "cryptography", "anyio"):
+for pkg in (
+    "uvicorn", "fastapi", "pydantic", "sqlalchemy", "alembic", "psycopg",
+    "psycopg_binary",
+    "httpx", "cryptography", "anyio",
+):
     try:
         d, b, h = collect_all(pkg)
     except Exception:

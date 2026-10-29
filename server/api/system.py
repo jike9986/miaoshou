@@ -333,7 +333,7 @@ def patch_system_settings(payload: dict[str, Any], db: DbSession,
 
 
 @router.get("/price-defaults", summary="站点默认定价（只读，回源妙手）")
-def price_defaults(db: DbSession,
+def price_defaults(db: DbSession, operator: OperatorDep,
                    site: str | None = None,
                    accountId: str | None = None,
                    credentials: CredentialsHeader = None,
@@ -346,6 +346,9 @@ def price_defaults(db: DbSession,
     `site` 只用于回显与挑出该站点那一段：上游 `get_site_default_setting`
     不吃 site 参数（老版传的是空 body），它一次返回**所有**站点的费率表，
     本地按 site 切出来给界面用，顺带把整表也带上（切换站点不必再请求）。
+
+    `OperatorDep` 同时建立账号归属上下文，学员传入的 accountId 会由
+    `account_service.resolve_account` 校验为本人绑定的账号。
     """
     account = reference.resolve_account_for(db, accountId, credentials)
     site_code = (site or (getattr(account, "site", "") or "") or "MY").upper()

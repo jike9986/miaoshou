@@ -5,6 +5,8 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from api import reference
+from api import system as system_api
 from core.config import get_settings
 from core.errors import AppError
 from db.session import SessionLocal, init_db
@@ -244,6 +246,48 @@ def test_member_reads_are_scoped_to_owned_account(client, identities):
     assert {str(own_id), str(foreign_id)} <= set(
         teacher_templates.json()["selected"])
     assert own_id != foreign_id
+
+
+def test_member_price_defaults_are_scoped_to_owned_account(
+        client, identities, monkeypatch):
+    db = SessionLocal()
+    try:
+        own = Account(
+            name="price defaults own", app_key="price-own-key", app_secret_enc="",
+            owner_operator_id=identities["first_id"], shops="[]", is_default=False,
+        )
+        foreign = Account(
+            name="price defaults foreign", app_key="price-foreign-key",
+            app_secret_enc="", owner_operator_id=identities["second_id"],
+            shops="[]", is_default=False,
+        )
+        db.add_all([own, foreign])
+        db.commit()
+        own_id, foreign_id = str(own.id), str(foreign.id)
+    finally:
+        db.close()
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(system_api, "account_client", lambda _account: FakeClient())
+    monkeypatch.setattr(
+        reference, "cached",
+        lambda _account, _key, _loader, *, refresh: ({"data": {}}, False, False, 0),
+    )
+    headers = _headers(identities["first_token"])
+
+    own_response = client.get(
+        API + "/system/price-defaults", params={"accountId": own_id},
+        headers=headers)
+    foreign_response = client.get(
+        API + "/system/price-defaults", params={"accountId": foreign_id},
+        headers=headers)
+
+    assert own_response.status_code == 200, own_response.text
+    assert own_response.json()["accountId"] == own_id
+    assert foreign_response.status_code == 403, foreign_response.text
 
 
 def test_member_bootstrap_hides_other_members_accounts_and_batches(client, identities):
