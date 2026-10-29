@@ -77,10 +77,10 @@
 
 ## 6. 仍保留的差距
 
-1. `Tabs` 已具备键盘模型，但组件本身不拥有面板，因此还没有统一的 `aria-controls/tabpanel id` 绑定；需要在调用方补面板 id，或后续拆出 `TabPanels`。
-2. `design:check` 是静态护栏，只证明“可机查的违规不存在”；对比度、真实键盘路径和视觉层级仍需 CDP/人工验收。本次只完成核心页面与核心交互验收。
+1. ~~`Tabs` 已具备键盘模型，但组件本身不拥有面板，因此还没有统一的 `aria-controls/tabpanel id` 绑定~~ **已修复**：Tabs 组件新增 `idBase` prop + `tabId()/tabPanelId()` helper，5 个调用方（WarehousePage、WordsPage、SchedulesPage、SettingsPage、BatchCategoryDialog）全部接上 `aria-controls` / `role="tabpanel"` / `aria-labelledby`。
+2. `design:check` 是静态护栏，只证明"可机查的违规不存在"；对比度、真实键盘路径和视觉层级仍需 CDP/人工验收。本次只完成核心页面与核心交互验收。
 3. `@google/design.md` 外部 lint 本次只做来源研究，未作为依赖固定；当前采用零依赖脚本，避免 CI 被临时 npx 下载阻断。
-4. 现有深色 Token 存在，但产品当前以浅色为主；深色视觉仍需专门截图和对比度验收。
+4. ~~现有深色 Token 存在，但产品当前以浅色为主；深色视觉仍需专门截图和对比度验收~~ **已修复**：发现 `tokens.css` 的 `.dark` 块被 Tailwind production 构建 tree-shake（`@layer base` 内未引用的类被删除），已将 `.dark` 移到 `@layer` 外。实测对比度：primary 16.17:1（AAA）、secondary 9.38:1（AAA）、muted 5.71:1（AA）。截图证据：[深色主题](./screenshots/design-audit-2026-10-28-dark.png)。
 
 ## 7. 验收基线
 

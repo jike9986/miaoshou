@@ -80,7 +80,7 @@ export type { DrawerProps, DrawerSize } from "@/components/ui/drawer";
 export { Tooltip } from "@/components/ui/tooltip";
 export type { TooltipProps, TooltipSide } from "@/components/ui/tooltip";
 
-export { ClientOnly, InverseSurface, Popover, Tabs } from "@/components/ui/tabs";
+export { ClientOnly, InverseSurface, Popover, Tabs, tabId, tabPanelId } from "@/components/ui/tabs";
 export type { PopoverProps, TabItem, TabsProps } from "@/components/ui/tabs";
 
 export { AppToaster, TOAST_DURATION, sonnerToast, toast } from "@/components/ui/toast";

@@ -29,6 +29,15 @@ export interface TabItem<Value extends string = string> {
   icon?: ReactNode;
 }
 
+/** tab 与 tabpanel 的 id 约定：调用方给 Tabs 传 idBase，面板用 tabPanelId 对应。 */
+export function tabId(idBase: string, value: string): string {
+  return `${idBase}-tab-${value}`;
+}
+
+export function tabPanelId(idBase: string, value: string): string {
+  return `${idBase}-panel-${value}`;
+}
+
 export interface TabsProps<Value extends string = string> {
   value: Value;
   onChange: (value: Value) => void;
@@ -38,6 +47,8 @@ export interface TabsProps<Value extends string = string> {
   bordered?: boolean;
   /** 右侧附加内容（如「共 1,284 条」） */
   extra?: ReactNode;
+  /** 稳定 id 前缀：传入后 tab 获得 id/aria-controls，面板用 tabPanelId(idBase, value) */
+  idBase?: string;
   "aria-label"?: string;
 }
 
@@ -48,6 +59,7 @@ export function Tabs<Value extends string = string>({
   className,
   bordered = true,
   extra,
+  idBase,
   "aria-label": ariaLabel = "标签页",
 }: TabsProps<Value>) {
   const layoutId = useId();
@@ -86,7 +98,9 @@ export function Tabs<Value extends string = string>({
               key={item.value}
               role="tab"
               type="button"
+              id={idBase ? tabId(idBase, item.value) : undefined}
               aria-selected={active}
+              aria-controls={idBase ? tabPanelId(idBase, item.value) : undefined}
               tabIndex={active ? 0 : -1}
               disabled={item.disabled}
               onClick={() => onChange(item.value)}

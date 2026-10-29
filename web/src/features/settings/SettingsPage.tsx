@@ -12,7 +12,7 @@
 import { useState } from "react";
 import { Globe, Image, ScrollText, Users } from "lucide-react";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
-import { Tabs } from "@/components/ui";
+import { Tabs, tabId, tabPanelId } from "@/components/ui";
 import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
 import { OperatorsPanel } from "@/features/settings/OperatorsPanel";
 import { AuditLogPanel } from "@/features/settings/AuditLogPanel";
@@ -45,6 +45,7 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
         <Tabs
           value={tab}
           onChange={(value) => setTab(value as SettingsTab)}
+          idBase="settings"
           items={[
             { value: "operators", label: "操作员", icon: <Users className="size-3.5" /> },
             { value: "publish", label: "发布", icon: <Globe className="size-3.5" /> },
@@ -55,10 +56,17 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
       </PageHeader>
 
       <PageContent width="table">
-        {tab === "operators" && <OperatorsPanel />}
-        {tab === "publish" && <PublishSettingsPanel />}
-        {tab === "image" && <ImageServiceCard />}
-        {tab === "audit" && <AuditLogPanel />}
+        <div
+          role="tabpanel"
+          id={tabPanelId("settings", tab)}
+          aria-labelledby={tabId("settings", tab)}
+          className="contents"
+        >
+          {tab === "operators" && <OperatorsPanel />}
+          {tab === "publish" && <PublishSettingsPanel />}
+          {tab === "image" && <ImageServiceCard />}
+          {tab === "audit" && <AuditLogPanel />}
+        </div>
       </PageContent>
     </>
   );

@@ -40,6 +40,8 @@ import {
   SkeletonRows,
   Switch,
   Tabs,
+  tabId,
+  tabPanelId,
   Textarea,
   toast,
 } from "@/components/ui";
@@ -324,6 +326,7 @@ export function WordsPage() {
           onChange={(value) =>
             store.setCategory(value === "all" ? null : (value as CategoryValue))
           }
+          idBase="words"
           items={[
             { value: "all", label: "全部", count: counts ? counts.remove + counts.review : null },
             { value: "remove", label: "删除类", count: counts?.remove ?? null },
@@ -337,6 +340,13 @@ export function WordsPage() {
           }
         />
 
+        {/* 三个分类共享一套列表渲染：面板只挂当前 tab 的 id，切 tab 时 id 跟着换 */}
+        <div
+          role="tabpanel"
+          id={tabPanelId("words", store.category ?? "all")}
+          aria-labelledby={tabId("words", store.category ?? "all")}
+          className="contents"
+        >
         {listQuery.isLoading && (
           <SkeletonRows rows={6} />
         )}
@@ -467,6 +477,7 @@ export function WordsPage() {
             </div>
           </>
         )}
+        </div>
 
         <Pagination
           page={store.page}

@@ -37,7 +37,7 @@ import { EMPTY_SCHEDULE_FORM, type ScheduleFormDraft } from "@/features/stores";
 import { ConnectHintBar } from "@/features/shared";
 import { useConnectionState } from "@/features/auth/guard";
 import { PageContent, PageHeader } from "@/components/layout";
-import { Tabs } from "@/components/ui";
+import { Tabs, tabId, tabPanelId } from "@/components/ui";
 import { PublishPage } from "@/features/publish/PublishPage";
 import {
   Badge,
@@ -201,7 +201,14 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
               ]}
             />
           </div>
-          <PublishPage embedded />
+          <div
+            role="tabpanel"
+            id={tabPanelId("schedules", "logs")}
+            aria-labelledby={tabId("schedules", "logs")}
+            className="contents"
+          >
+            <PublishPage embedded />
+          </div>
         </PageContent>
       </>
     );
@@ -228,7 +235,14 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
               ]}
             />
           </div>
-          <ScheduleHistoryPanel />
+          <div
+            role="tabpanel"
+            id={tabPanelId("schedules", "history")}
+            aria-labelledby={tabId("schedules", "history")}
+            className="contents"
+          >
+            <ScheduleHistoryPanel />
+          </div>
         </PageContent>
       </>
     );
@@ -271,6 +285,7 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
             value={tab}
             onChange={(value) => setTab(value as "schedules" | "logs" | "history")}
             bordered={false}
+            idBase="schedules"
             items={[
               { value: "schedules", label: "定时任务" },
               { value: "logs", label: "发布记录" },
@@ -278,7 +293,12 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
             ]}
           />
         </div>
-        <div className="px-6 pb-6 pt-3">
+        <div
+          role="tabpanel"
+          id={tabPanelId("schedules", "schedules")}
+          aria-labelledby={tabId("schedules", "schedules")}
+          className="px-6 pb-6 pt-3"
+        >
         {blocked && (
           <ConnectHintBar
             message="定时发布需要连接妙手账号后才能创建与管理。"

@@ -18,6 +18,8 @@ import {
   Input,
   SkeletonRows,
   Tabs,
+  tabId,
+  tabPanelId,
   toast,
 } from "@/components/ui";
 
@@ -247,6 +249,7 @@ export function BatchCategoryDialog({
             setTab(value);
             setError(null);
           }}
+          idBase="batch-category"
           items={[
             { value: "group", label: "自定义分组", icon: <FolderPlus className="size-3.5" /> },
             { value: "category", label: "平台类目", icon: <Tag className="size-3.5" /> },
@@ -254,7 +257,12 @@ export function BatchCategoryDialog({
         />
 
         {tab === "group" && (
-          <>
+          <div
+            role="tabpanel"
+            id={tabPanelId("batch-category", "group")}
+            aria-labelledby={tabId("batch-category", "group")}
+            className="contents"
+          >
             {groupsQuery.isLoading ? (
               <SkeletonRows rows={3} />
             ) : (
@@ -297,11 +305,16 @@ export function BatchCategoryDialog({
                 </div>
               </div>
             )}
-          </>
+          </div>
         )}
 
         {tab === "category" && (
-          <>
+          <div
+            role="tabpanel"
+            id={tabPanelId("batch-category", "category")}
+            aria-labelledby={tabId("batch-category", "category")}
+            className="contents"
+          >
             {!connected && (
               <InlineError>未连接妙手时无法拉取平台类目树，请先到「连接妙手」页连接。</InlineError>
             )}
@@ -336,7 +349,7 @@ export function BatchCategoryDialog({
                 />
               </Field>
             )}
-          </>
+          </div>
         )}
 
         {error && <InlineError>{error}</InlineError>}

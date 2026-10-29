@@ -56,6 +56,8 @@ import {
   SkeletonCardGrid,
   StatusDot,
   Tabs,
+  tabId,
+  tabPanelId,
   toast,
 } from "@/components/ui";
 import { CategoryBar } from "@/features/warehouse/CategoryBar";
@@ -337,6 +339,7 @@ export function WarehousePage() {
         <Tabs
           value={tab}
           onChange={(value) => setTab(value as WarehouseTab)}
+          idBase="warehouse"
           items={[
             { value: "products", label: "商品列表", icon: <PackageSearch className="size-3.5" /> },
             { value: "batch", label: "批次", icon: <ListChecks className="size-3.5" /> },
@@ -344,14 +347,25 @@ export function WarehousePage() {
         />
 
         {tab === "batch" && (
-          <BatchPanel
-            accountId={auth?.accountId ?? null}
-            onGoToProducts={() => setTab("products")}
-          />
+          <div
+            role="tabpanel"
+            id={tabPanelId("warehouse", "batch")}
+            aria-labelledby={tabId("warehouse", "batch")}
+          >
+            <BatchPanel
+              accountId={auth?.accountId ?? null}
+              onGoToProducts={() => setTab("products")}
+            />
+          </div>
         )}
 
         {tab === "products" && (
-          <>
+          <div
+            role="tabpanel"
+            id={tabPanelId("warehouse", "products")}
+            aria-labelledby={tabId("warehouse", "products")}
+            className="contents"
+          >
             {/* KPI */}
             <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
               <KpiCard
@@ -632,7 +646,7 @@ export function WarehousePage() {
               onPageSizeChange={query.setPageSize}
               disabled={listQuery.isFetching}
             />
-          </>
+          </div>
         )}
       </PageContent>
       {carrierDialog}
