@@ -91,7 +91,6 @@ export function PublishPage({ embedded = false }: { embedded?: boolean } = {}) {
       {!embedded && (
       <PageHeader
         title="发布记录"
-        breadcrumb={["奥皇上品", "功能", "发布记录"]}
         description={
           data
             ? `本机共 ${formatCount(total)} 条${data.platformTotal !== null ? ` · 平台侧 ${formatCount(data.platformTotal)} 条` : ""}`

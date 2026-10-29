@@ -35,7 +35,6 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
     <>
       <PageHeader
         title="设置"
-        breadcrumb={["奥皇上品", "设置"]}
         description={
           identity
             ? `当前身份：${operatorDisplayName()}`

@@ -132,7 +132,6 @@ export function CarrierPage({ embedded = false }: { embedded?: boolean } = {}) {
       {!embedded && (
       <PageHeader
         title="载体链接池"
-        breadcrumb={["奥皇上品", "功能", "载体链接池"]}
         description="跨店发布用它重建载体；池子空了跨店发布会失败"
         actions={headerActions}
       />

@@ -126,7 +126,7 @@ function NotFoundPage() {
   const navigate = useNavigate();
   return (
     <>
-      <PageHeader title="页面不存在" breadcrumb={["奥皇上品", "404"]} />
+      <PageHeader title="页面不存在" />
       <PageContent width="form">
         <EmptyState
           title="没有找到这个页面"

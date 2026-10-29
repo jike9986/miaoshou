@@ -1,13 +1,11 @@
 // design-system §7.1 页面头（56px，px-6，border-b，bg-canvas/85 backdrop-blur-[2px]，sticky top-0 z-10）
-// 标题 18/26 600；可选面包屑 12/18 muted 在标题上方（mb-1）；右侧操作区 gap-2，主按钮 md。
+// 标题 18/26 600；不再渲染面包屑（侧栏已承担导航定位，页头只留页名）；右侧操作区 gap-2，主按钮 md。
 
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 export interface PageHeaderProps {
   title: ReactNode;
-  /** 面包屑（文字数组，最后一项为当前页） */
-  breadcrumb?: string[];
   description?: ReactNode;
   /** 右侧操作区（主按钮在右，同屏只允许一个 primary） */
   actions?: ReactNode;
@@ -20,7 +18,6 @@ export interface PageHeaderProps {
 
 export function PageHeader({
   title,
-  breadcrumb,
   description,
   actions,
   children,
@@ -36,23 +33,11 @@ export function PageHeader({
       )}
     >
       <div className="flex h-14 items-center gap-4 px-6">
-        <div className="min-w-0 flex-1">
-          {breadcrumb && breadcrumb.length > 0 && (
-            <nav aria-label="面包屑" className="mb-1 flex items-center gap-1.5 text-xs leading-[18px] text-fg-muted">
-              {breadcrumb.map((item, index) => (
-                <span key={`${item}-${index}`} className="flex items-center gap-1.5">
-                  {index > 0 && <span aria-hidden className="text-border-strong">/</span>}
-                  <span className={cn(index === breadcrumb.length - 1 && "text-fg-secondary")}>{item}</span>
-                </span>
-              ))}
-            </nav>
+        <div className="flex min-w-0 flex-1 items-baseline gap-3">
+          <h1 className="truncate text-[18px] font-semibold leading-[26px] text-fg">{title}</h1>
+          {description && (
+            <p className="truncate text-[13px] leading-5 text-fg-muted">{description}</p>
           )}
-          <div className="flex min-w-0 items-baseline gap-3">
-            <h1 className="truncate text-[18px] font-semibold leading-[26px] text-fg">{title}</h1>
-            {description && (
-              <p className="truncate text-[13px] leading-5 text-fg-muted">{description}</p>
-            )}
-          </div>
         </div>
         {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
       </div>

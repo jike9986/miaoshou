@@ -3,7 +3,7 @@
 // 批次编排不单独占导航项：作为本页第二个 tab 挂在商品列表旁边（后端 /batch 的
 // 输入就是仓库商品的 detailId，放在一起才不用来回跳）。
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
@@ -35,7 +35,7 @@ import {
 } from "@/lib/queries";
 import type { GroupFacet, Product } from "@/lib/types";
 import { useSessionStore, useWarehouseStore } from "@/features/stores";
-import { Pagination, TextAction, useDebouncedValue } from "@/features/shared";
+import { Pagination, TextAction } from "@/features/shared";
 import { PageContent, PageHeader } from "@/components/layout";
 import { CarrierPage } from "@/features/carrier/CarrierPage";
 import {
@@ -50,8 +50,6 @@ import {
   Field,
   IconButton,
   Input,
-  KpiCard,
-  SearchInput,
   Select,
   SkeletonCardGrid,
   StatusDot,
@@ -71,13 +69,6 @@ import { PublishDialog } from "@/features/publish/PublishDialog";
 import { BatchPanel } from "@/features/batch/BatchPanel";
 
 const PAGE_SIZE_OPTIONS = [24, 48, 72, 100];
-const SORT_OPTIONS = [
-  { value: "savedDesc", label: "最近入库" },
-  { value: "savedAsc", label: "最早入库" },
-  { value: "priceAsc", label: "价格从低到高" },
-  { value: "priceDesc", label: "价格从高到低" },
-  { value: "titleAsc", label: "标题 A→Z" },
-];
 
 type WarehouseTab = "products" | "batch";
 
@@ -109,21 +100,12 @@ export function WarehousePage() {
   const deleteGroup = useDeleteGroup();
   const batchDelete = useBatchDelete();
 
-  const [searchDraft, setSearchDraft] = useState(query.searchDraft);
-  const debouncedSearch = useDebouncedValue(searchDraft, 300);
-  const setQ = useWarehouseStore((state) => state.setQ);
-  const setSearchDraftInStore = useWarehouseStore((state) => state.setSearchDraft);
-
-  useEffect(() => {
-    setSearchDraftInStore(debouncedSearch);
-    setQ(debouncedSearch.trim());
-  }, [debouncedSearch, setSearchDraftInStore, setQ]);
-
   const category = query.category;
+  // 搜索框已按界面精简要求移除；q 不再来自本页，避免旧状态残留影响列表
   const listQuery = useWarehouseList({
     page: query.page,
     pageSize: query.pageSize,
-    q: query.q || null,
+    q: null,
     claimed: query.claimed,
     status: query.status,
     sort: query.sort,
@@ -134,27 +116,8 @@ export function WarehousePage() {
 
   const data = listQuery.data;
   const items = useMemo(() => data?.items ?? [], [data?.items]);
-  const stats = data?.stats;
   const facets = data?.facets;
   const total = data?.total ?? 0;
-
-  /**
-   * 容量提示。上限不会自动清理任何东西（后端 `trim_overflow` 默认拒绝执行），
-   * 所以这里只是「让人知道」，不是「快满了就禁用入仓」——禁用等于把用户
-   * 挡在功能外面，而他并没有要求过这个限制。
-   *
-   * 老后端不返回 maxProducts → 返回 null → 卡片显示原来的 hint，不显示 0/2000。
-   */
-  const capacityHint = useMemo(() => {
-    const max = stats?.maxProducts;
-    if (!max) return null;
-    const used = stats?.totalProducts ?? 0;
-    const remaining = stats?.remaining ?? Math.max(0, max - used);
-    if (stats?.nearLimit) {
-      return `仓库快满了：还剩 ${formatCount(remaining)} 件额度`;
-    }
-    return `本机仓库全部商品 · 上限 ${formatCount(max)} 件`;
-  }, [stats?.maxProducts, stats?.totalProducts, stats?.remaining, stats?.nearLimit]);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [groupName, setGroupName] = useState("");
@@ -328,8 +291,6 @@ export function WarehousePage() {
     <>
       <PageHeader
         title="成品仓库"
-        breadcrumb={["奥皇上品", "功能", "成品仓库"]}
-        description={data ? `共 ${formatCount(total)} 件` : "本地商品库"}
         actions={headerActions}
       />
 
@@ -366,34 +327,6 @@ export function WarehousePage() {
             aria-labelledby={tabId("warehouse", "products")}
             className="contents"
           >
-            {/* KPI */}
-            <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
-              <KpiCard
-                label="总商品数"
-                value={formatCount(stats?.totalProducts ?? total)}
-                hint={capacityHint ?? "本机仓库全部商品"}
-                icon={<PackageSearch />}
-              />
-              <KpiCard
-                label="已认领"
-                value={formatCount(stats?.totalClaimed ?? 0)}
-                hint="已认领到店铺采集箱"
-                icon={<Inbox />}
-              />
-              <KpiCard
-                label="已发布"
-                value={formatCount(stats?.totalPublished ?? 0)}
-                hint="平台已接受上架"
-                icon={<Send />}
-              />
-              <KpiCard
-                label="本页选中"
-                value={formatCount(selectedCount)}
-                hint={query.q ? `搜索「${query.q}」` : "跨页保留选择"}
-                icon={<CheckSquare />}
-              />
-            </div>
-
             {/* 分类栏 */}
             <CategoryBar
               categories={facets?.categories ?? []}
@@ -404,7 +337,7 @@ export function WarehousePage() {
                 count: group.count,
               })) ?? []}
               active={category}
-              total={stats?.totalProducts ?? total}
+              total={total}
               loading={listQuery.isLoading}
               onSelect={(filter) => query.setCategory(filter)}
               onCreateGroup={() => {
@@ -417,26 +350,6 @@ export function WarehousePage() {
 
             {/* 工具栏 */}
             <div className="flex flex-wrap items-center gap-2">
-              <div className="min-w-[220px] flex-1">
-                <SearchInput
-                  value={searchDraft}
-                  onChange={setSearchDraft}
-                  debounceMs={300}
-                  placeholder="搜索标题 / 明细 id / 类目（≤64 字符）"
-                  shortcut="Ctrl K"
-                  width="md"
-                />
-              </div>
-
-              <Select
-                size="md"
-                aria-label="排序"
-                className="w-[152px]"
-                value={query.sort}
-                onChange={(value) => query.setSort(value as typeof query.sort)}
-                options={SORT_OPTIONS}
-              />
-
               <Select
                 size="md"
                 aria-label="认领状态"
@@ -478,54 +391,18 @@ export function WarehousePage() {
                   {allSelectedOnPage ? "取消本页全选" : "全选本页"}
                   {selectedCount > 0 && <span className="num text-fg-muted">（{selectedCount}）</span>}
                 </Button>
-
-                <Button
-                  variant="secondary"
-                  size="md"
-                  icon={<Calculator />}
-                  className="shrink-0"
-                  disabled={selectedCount === 0}
-                  onClick={() => setPriceOpen(true)}
-                >
-                  价格试算{selectedCount > 0 ? `（${selectedCount}）` : ""}
-                </Button>
-
-                <Button
-                  variant="secondary"
-                  size="md"
-                  icon={<Percent />}
-                  className="shrink-0"
-                  disabled={selectedCount === 0}
-                  onClick={() => setTransformOpen(true)}
-                >
-                  批量改价{selectedCount > 0 ? `（${selectedCount}）` : ""}
-                </Button>
-
-                <Button
-                  variant="primary"
-                  size="md"
-                  icon={<Layers />}
-                  className="shrink-0"
-                  disabled={selectedCount === 0}
-                  onClick={() => setBatchOpen(true)}
-                >
-                  设置分类{selectedCount > 0 ? `（${selectedCount}）` : ""}
-                </Button>
               </div>
             </div>
 
-            {(query.q || query.claimed !== null || category.kind !== "all") && (
+            {(query.claimed !== null || category.kind !== "all") && (
               <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
                 <span>当前筛选：</span>
-                {query.q && <Badge variant="neutral">搜索「{query.q}」</Badge>}
                 {query.claimed !== null && (
                   <Badge variant="neutral">{query.claimed ? "已认领" : "未认领"}</Badge>
                 )}
                 {category.kind !== "all" && <Badge variant="brand">{category.name}</Badge>}
                 <TextAction
                   onClick={() => {
-                    setSearchDraft("");
-                    query.setQ("");
                     query.setClaimed(null);
                     query.setCategory({ kind: "all" });
                     query.setStatus(null);
@@ -555,25 +432,9 @@ export function WarehousePage() {
               <Card>
                 <EmptyState
                   icon={<SearchX strokeWidth={1.5} />}
-                  title={query.q ? "没有匹配的商品" : "仓库还是空的"}
-                  description={
-                    query.q
-                      ? "试着换一个关键词，或清除筛选后重新查看。"
-                      : "在采集箱里处理商品后，成品会自动进入这里。"
-                  }
-                  action={
-                    query.q
-                      ? {
-                          label: "清除筛选",
-                          onClick: () => {
-                            setSearchDraft("");
-                            query.setQ("");
-                            query.setClaimed(null);
-                            query.setCategory({ kind: "all" });
-                          },
-                        }
-                      : { label: "去采集箱", onClick: () => navigate("/collect") }
-                  }
+                  title="仓库还是空的"
+                  description="在采集箱里处理商品后，成品会自动进入这里。"
+                  action={{ label: "去采集箱", onClick: () => navigate("/collect") }}
                 />
               </Card>
             )}
@@ -703,6 +564,16 @@ export function WarehousePage() {
             label: "创建批次",
             icon: <ListChecks className="size-3.5" />,
             onClick: () => setCreateBatchOpen(true),
+          },
+          {
+            label: "价格试算",
+            icon: <Calculator className="size-3.5" />,
+            onClick: () => setPriceOpen(true),
+          },
+          {
+            label: "批量改价",
+            icon: <Percent className="size-3.5" />,
+            onClick: () => setTransformOpen(true),
           },
           {
             label: "设置分类",

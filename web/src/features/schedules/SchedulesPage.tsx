@@ -185,7 +185,6 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
       <>
         <PageHeader
           title="定时发布"
-          breadcrumb={["奥皇上品", "功能", "定时发布"]}
           description="定时任务与发布回执"
         />
         <PageContent width="table" padding="p-0" scroll={false}>
@@ -219,7 +218,6 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
       <>
         <PageHeader
           title="定时发布"
-          breadcrumb={["奥皇上品", "功能", "定时发布"]}
           description="每一轮执行的结果，新的在前"
         />
         <PageContent width="table" padding="p-0" scroll={false}>
@@ -252,7 +250,6 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
     <>
       <PageHeader
         title="定时发布"
-        breadcrumb={["奥皇上品", "功能", "定时发布"]}
         description={schedulesQuery.data ? `共 ${formatCount(schedulesQuery.data.total)} 个任务` : undefined}
         actions={
           <>

@@ -1,14 +1,10 @@
 // features/words —— 违规词库（api.md §10）
-// 统计（总词数 / 启用数 / 剩余额度）+ 搜索 + 分类筛选 + 单条添加 + 批量粘贴 + 批量删除 + 清空。
+// 搜索 + 单条添加 + 批量粘贴 + 批量删除 + 清空。不再分「删除/复核」类：命中的词一律删除。
 
 import { useMemo, useRef, useState } from "react";
 import {
-  Ban,
-  CheckCircle2,
-  ListFilter,
   Plus,
   SearchX,
-  ShieldCheck,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -34,21 +30,15 @@ import {
   Field,
   IconButton,
   InlineError,
-  KpiCard,
   SearchInput,
   Select,
   SkeletonRows,
   Switch,
-  Tabs,
-  tabId,
-  tabPanelId,
   Textarea,
   toast,
 } from "@/components/ui";
 
 const PAGE_SIZE_OPTIONS = [100, 200, 500];
-
-type CategoryValue = "remove" | "review";
 
 export function WordsPage() {
   const store = useWordsStore();
@@ -56,10 +46,11 @@ export function WordsPage() {
   const debounced = useDebouncedValue(searchDraft, 300);
   const q = debounced.trim();
 
+  // 词库不再分类：界面不暴露「删除/复核」选择，新增与导入一律按「删除」处理
   const listQuery = useViolationWords({
     page: store.page,
     pageSize: store.pageSize,
-    action: store.category,
+    action: null,
     q,
   });
   const mutate = useMutateWords();
@@ -79,13 +70,11 @@ export function WordsPage() {
 
   const [addOpen, setAddOpen] = useState(false);
   const [singleWord, setSingleWord] = useState("");
-  const [singleCategory, setSingleCategory] = useState<CategoryValue>("remove");
   const [addError, setAddError] = useState<string | null>(null);
 
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [importCategory, setImportCategory] = useState<CategoryValue>("remove");
   const [importReplace, setImportReplace] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
 
@@ -94,10 +83,8 @@ export function WordsPage() {
 
   const data = listQuery.data;
   const items = data?.items ?? [];
-  const counts = data?.counts;
   const total = data?.total ?? 0;
 
-  const enabledCount = useMemo(() => items.filter((item) => item.enabled).length, [items]);
   const selected = store.selectedWords;
 
   const pageWords = items.map((item) => item.word);
@@ -128,7 +115,7 @@ export function WordsPage() {
     }
     setAddError(null);
     mutate.mutate(
-      { action: "add", word, category: singleCategory },
+      { action: "add", word, category: "remove" },
       {
         onSuccess: () => {
           toast.success(`已添加「${word}」`);
@@ -163,7 +150,7 @@ export function WordsPage() {
       {
         action: "import",
         words: parsedImportWords,
-        category: importCategory,
+        category: "remove",
         mode: importReplace ? "replace" : "append",
       },
       {
@@ -222,8 +209,10 @@ export function WordsPage() {
   };
 
   const submitClear = (): void => {
+    // 词库不再分「删除/复核」类（界面上命中的词一律删除），清空按删除类执行——
+    // 历史复核类词条若有残留不在本页清空范围内。
     mutate.mutate(
-      { action: "clear", category: store.category ?? "remove", confirm: true },
+      { action: "clear", category: "remove", confirm: true },
       {
         onSuccess: (result) => {
           toast.success(`已清空 ${result.removed} 个词`);
@@ -250,39 +239,10 @@ export function WordsPage() {
     <>
       <PageHeader
         title="违规词库"
-        breadcrumb={["奥皇上品", "系统", "违规词库"]}
-        description={counts ? `删除类 ${formatCount(counts.remove)} 条 · 可用额度 ${formatCount(counts.remaining)}` : undefined}
         actions={headerActions}
       />
 
       <PageContent width="table">
-        <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
-          <KpiCard
-            label="总词数"
-            value={formatCount(total)}
-            hint={store.category ? "当前筛选下的条数" : "全部违规词"}
-            icon={<Ban />}
-          />
-          <KpiCard
-            label="启用数"
-            value={formatCount(enabledCount)}
-            hint="本页启用中的词条"
-            icon={<ShieldCheck />}
-          />
-          <KpiCard
-            label="删除类"
-            value={formatCount(counts?.remove ?? 0)}
-            hint="清理标题时直接删除"
-            icon={<Trash2 />}
-          />
-          <KpiCard
-            label="剩余额度"
-            value={formatCount(counts?.remaining ?? 0)}
-            hint={`上限 ${formatCount(counts?.limit ?? LIMITS.wordsTotal)} 条`}
-            icon={<CheckCircle2 />}
-          />
-        </div>
-
         <div className="flex flex-wrap items-center gap-2">
           <div className="min-w-[220px] flex-1">
             <SearchInput
@@ -321,32 +281,6 @@ export function WordsPage() {
           />
         </div>
 
-        <Tabs
-          value={store.category ?? "all"}
-          onChange={(value) =>
-            store.setCategory(value === "all" ? null : (value as CategoryValue))
-          }
-          idBase="words"
-          items={[
-            { value: "all", label: "全部", count: counts ? counts.remove + counts.review : null },
-            { value: "remove", label: "删除类", count: counts?.remove ?? null },
-            { value: "review", label: "复核类", count: counts?.review ?? null },
-          ]}
-          extra={
-            <span className="flex items-center gap-1.5">
-              <ListFilter className="size-3.5" strokeWidth={1.75} />
-              {(store.category ?? "all") === "all" ? "全部类别" : store.category === "remove" ? "删除类" : "复核类"}
-            </span>
-          }
-        />
-
-        {/* 三个分类共享一套列表渲染：面板只挂当前 tab 的 id，切 tab 时 id 跟着换 */}
-        <div
-          role="tabpanel"
-          id={tabPanelId("words", store.category ?? "all")}
-          aria-labelledby={tabId("words", store.category ?? "all")}
-          className="contents"
-        >
         {listQuery.isLoading && (
           <SkeletonRows rows={6} />
         )}
@@ -431,12 +365,6 @@ export function WordsPage() {
                       size="sm"
                     />
                     <span className="font-medium">{item.word}</span>
-                    <Badge
-                      variant={item.action === "remove" ? "danger" : "warning"}
-                      size="sm"
-                    >
-                      {item.action === "remove" ? "删" : "审"}
-                    </Badge>
                     <span className="text-2xs text-fg-muted">
                       {item.source === "seed" ? "内置" : item.source === "import" ? "导入" : "手动"}
                     </span>
@@ -477,7 +405,6 @@ export function WordsPage() {
             </div>
           </>
         )}
-        </div>
 
         <Pagination
           page={store.page}
@@ -501,7 +428,7 @@ export function WordsPage() {
                 </TextAction>
               )}
               <TextAction onClick={() => setClearOpen(true)} className="text-danger-600">
-                清空当前分类
+                清空词库
               </TextAction>
             </span>
           }
@@ -562,16 +489,6 @@ export function WordsPage() {
                 setSingleWord(event.currentTarget.value);
                 setAddError(null);
               }}
-            />
-          </Field>
-          <Field label="分类" hint="删除：直接从标题里移除；复核：命中后需人工确认">
-            <Select
-              value={singleCategory}
-              onChange={(value) => setSingleCategory(value as CategoryValue)}
-              options={[
-                { value: "remove", label: "删除类" },
-                { value: "review", label: "复核类" },
-              ]}
             />
           </Field>
         </div>
@@ -661,24 +578,14 @@ ${text}` : text));
             />
           </Field>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="导入到分类">
-              <Select
-                value={importCategory}
-                onChange={(value) => setImportCategory(value as CategoryValue)}
-                options={[
-                  { value: "remove", label: "删除类" },
-                  { value: "review", label: "复核类" },
-                ]}
-              />
-            </Field>
-            <Field label="导入模式" hint="替换会先清空该分类下的全部词条">
+          <div className="grid gap-3">
+            <Field label="导入模式" hint="替换会先清空现有全部词条">
               <Select
                 value={importReplace ? "replace" : "append"}
                 onChange={(value) => setImportReplace(value === "replace")}
                 options={[
                   { value: "append", label: "追加（保留现有词）" },
-                  { value: "replace", label: "替换（先清空该分类）" },
+                  { value: "replace", label: "替换（先清空现有词）" },
                 ]}
               />
             </Field>
@@ -686,7 +593,7 @@ ${text}` : text));
 
           {importReplace && (
             <InlineError className="border-warning-600/20 bg-warning-50 text-warning-700">
-              替换模式会删除该分类下的全部现有词条，导入前请确认已导出备份。
+              替换模式会删除全部现有词条，导入前请确认已导出备份。
             </InlineError>
           )}
 
@@ -727,8 +634,8 @@ ${text}` : text));
       <ConfirmDialog
         open={clearOpen}
         onOpenChange={setClearOpen}
-        title={`清空「${store.category === "review" ? "复核类" : "删除类"}」全部词条？`}
-        description={`会删除该分类下约 ${formatCount(store.category === "review" ? counts?.review ?? 0 : counts?.remove ?? 0)} 个词，不可恢复。`}
+        title="清空全部词条？"
+        description={`会删除约 ${formatCount(total)} 个词，不可恢复。`}
         confirmLabel="确认清空"
         danger
         loading={mutate.isPending}

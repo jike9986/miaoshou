@@ -4,18 +4,16 @@
 
 import { useEffect, useId, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { ArrowRight, Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
-import { cn, formatRelative } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
 import { useAuthStatus, useConnectAccount, useShops } from "@/lib/queries";
 import { useSessionStore } from "@/features/stores";
-import { useAuthGuardStore } from "@/features/auth/guard";
 import {
   Button,
   Card,
-  CardDescription,
   CardTitle,
   DropdownSelect,
   ErrorState,
@@ -162,7 +160,6 @@ export function UnlockPage() {
 
   const { data: status, isLoading, isError, error, refetch, isFetching } = useAuthStatus();
   const connect = useConnectAccount();
-  const markGuest = useAuthGuardStore((state) => state.markGuest);
 
   const [appId, setAppId] = useState("");
   const [appSecret, setAppSecret] = useState("");
@@ -279,11 +276,7 @@ export function UnlockPage() {
 
   return (
     <>
-      <PageHeader
-        title="连接妙手"
-        breadcrumb={["奥皇上品", "功能", "连接妙手"]}
-        description="填写妙手开放平台的 AppID / AppSecret，连接后可拉取店铺、采集箱与类目。"
-      />
+      <PageHeader title="连接妙手" />
       <PageContent width="form">
         <motion.div
           variants={reduced ? undefined : fadeUp}
@@ -295,16 +288,12 @@ export function UnlockPage() {
           <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
             <Card padding="normal">
               <CardTitle>账号凭据</CardTitle>
-              <CardDescription>
-                凭据只保存在本机数据目录，响应中仅回显后 4 位。AppSecret 永不下行。
-              </CardDescription>
 
               <div className="mt-4 flex flex-col gap-4">
                 <Field
                   label="AppID"
                   required
                   htmlFor={appIdField}
-                  hint="妙手开放平台 → 授权信息 → AppKey"
                   error={errors.appId ?? null}
                 >
                   <Input
@@ -326,7 +315,6 @@ export function UnlockPage() {
                   label="AppSecret"
                   required
                   htmlFor={secretField}
-                  hint="仅上行校验，不写日志、不回显"
                   error={errors.appSecret ?? null}
                   action={
                     <button
@@ -369,7 +357,6 @@ export function UnlockPage() {
 
                 <Field
                   label="连接名称"
-                  hint="选填，1–60 字符；缺省为「妙手 + AppID 后 4 位」"
                 >
                   <Input
                     value={rememberName}
@@ -392,21 +379,7 @@ export function UnlockPage() {
                   >
                     连接
                   </Button>
-                  <Button
-                    variant="ghost"
-                    size="md"
-                    onClick={() => {
-                      markGuest();
-                      navigate("/warehouse", { replace: true });
-                    }}
-                    iconRight={<ArrowRight />}
-                  >
-                    稍后连接
-                  </Button>
                 </div>
-                <p className="text-xs leading-[18px] text-fg-muted">
-                  连接会调用一次 <code className="font-mono">shop_list</code> 校验凭据；选中「稍后连接」可先浏览本机仓库。
-                </p>
               </div>
             </Card>
 
@@ -414,7 +387,6 @@ export function UnlockPage() {
               {accounts.length > 0 && (
                 <Card padding="normal">
                   <CardTitle className="text-h3">已保存账号</CardTitle>
-                  <CardDescription>点击用已保存的凭据重连，无需重新输入。</CardDescription>
                   <ul className="mt-3 flex flex-col gap-1.5">
                     {accounts.map((account) => (
                       <li key={account.id}>
@@ -431,13 +403,6 @@ export function UnlockPage() {
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-[13px] font-medium text-fg">
                               {account.name}
-                            </span>
-                            <span className="block truncate font-mono text-2xs text-fg-muted">
-                              {account.appIdHint ?? "—"}
-                              {account.site ? ` · ${account.site}` : ""}
-                              {account.lastVerifiedAt
-                                ? ` · ${formatRelative(account.lastVerifiedAt)}`
-                                : ""}
                             </span>
                           </span>
                           <StatusBadge
