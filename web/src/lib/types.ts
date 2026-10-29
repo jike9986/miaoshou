@@ -363,6 +363,12 @@ export interface ClaimResult {
  * ================================================================== */
 
 export type ProductStatus = "ready" | "claimed" | "published" | "archived";
+export type QualityReviewStatus = "verified" | "needs_review";
+export type QualityReviewReason =
+  | "missing_weight"
+  | "missing_dimensions"
+  | "default_dimensions"
+  | "unverified";
 
 export interface Product {
   id: string;
@@ -393,6 +399,8 @@ export interface Product {
   claimedShopId: string | null;
   collected: Record<string, { at: number; detailId: string }>;
   qualityReview?: ProductQualityReview | null;
+  qualityReviewStatus?: QualityReviewStatus;
+  qualityReviewReasons?: QualityReviewReason[];
   salesLast30: number;
   stock: number;
   status: ProductStatus | string;
@@ -507,6 +515,7 @@ export interface WarehouseQuery {
   q?: string | null;
   accountId?: string | null;
   status?: ProductStatus | null;
+  qualityStatus?: QualityReviewStatus | null;
   claimed?: boolean | null;
   sort?: ProductSort;
 }

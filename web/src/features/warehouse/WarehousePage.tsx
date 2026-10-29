@@ -111,7 +111,9 @@ export function WarehousePage() {
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const { data: auth } = useAuthStatus();
   const connected = auth?.connected ?? false;
-  const operatorsQuery = useOperators({ enabled: tab === "automation" && !isMember });
+  const operatorsQuery = useOperators({
+    enabled: !isMember && (tab === "automation" || tab === "products"),
+  });
   const isTeacher = !isMember && (identity?.role
     ? ["teacher", "admin"].includes(identity.role)
     : ["teacher", "admin"].includes(operatorsQuery.data?.current?.role ?? ""));
@@ -133,6 +135,7 @@ export function WarehousePage() {
     q: null,
     claimed: query.claimed,
     status: query.status,
+    qualityStatus: isTeacher ? query.qualityStatus : null,
     sort: query.sort,
     cid: category.kind === "cid" ? category.cid : null,
     categoryId: category.kind === "categoryId" ? category.categoryId : null,
@@ -588,6 +591,20 @@ export function WarehousePage() {
                   { value: "unclaimed", label: "未认领" },
                 ]}
               />
+              {isTeacher && (
+                <Select
+                  size="md"
+                  aria-label="规格核验状态"
+                  className="w-[148px]"
+                  value={query.qualityStatus ?? "all"}
+                  onChange={(value) => query.setQualityStatus(value === "all" ? null : value as "verified" | "needs_review")}
+                  options={[
+                    { value: "all", label: "全部规格" },
+                    { value: "needs_review", label: "待核验规格" },
+                    { value: "verified", label: "已核验规格" },
+                  ]}
+                />
+              )}
 
               {/* 全选 + 每页条数放同一行右侧：切到每页 100 条时不用滑到列表底部才改得动 */}
               <div className="ml-auto flex items-center gap-2">
@@ -618,16 +635,22 @@ export function WarehousePage() {
               </div>
             </div>
 
-            {(query.claimed !== null || category.kind !== "all") && (
+            {(query.claimed !== null || (isTeacher && query.qualityStatus !== null) || category.kind !== "all") && (
               <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
                 <span>当前筛选：</span>
                 {query.claimed !== null && (
                   <Badge variant="neutral">{query.claimed ? "已认领" : "未认领"}</Badge>
                 )}
+                {isTeacher && query.qualityStatus !== null && (
+                  <Badge variant={query.qualityStatus === "verified" ? "success" : "warning"}>
+                    {query.qualityStatus === "verified" ? "规格已核验" : "规格待核验"}
+                  </Badge>
+                )}
                 {category.kind !== "all" && <Badge variant="brand">{category.name}</Badge>}
                 <TextAction
                   onClick={() => {
                     query.setClaimed(null);
+                    query.setQualityStatus(null);
                     query.setCategory({ kind: "all" });
                     query.setStatus(null);
                   }}

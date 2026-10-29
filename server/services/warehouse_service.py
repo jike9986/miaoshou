@@ -76,6 +76,7 @@ def serialize(product: Product, *, account_name: str = "",
               publish_log: PublishLog | None = None,
               published_shop_ids: list[str] | None = None) -> dict[str, Any]:
     images = product.images if isinstance(product.images, list) else []
+    quality_review_status, quality_review_reasons = _quality_review_summary(product)
     body: dict[str, Any] = {
         "id": str(product.id),
         "key": product.warehouse_key,
@@ -131,11 +132,44 @@ def serialize(product: Product, *, account_name: str = "",
         "publishShopId": publish_log.shop_id if member_view and publish_log else None,
         "publishedShopIds": published_shop_ids or [] if member_view else [],
         "skuProperties": product.sku_properties if isinstance(product.sku_properties, list) else [],
+        "qualityReviewStatus": quality_review_status,
+        "qualityReviewReasons": quality_review_reasons,
     }
     if include_payload:
         body["payload"] = product.payload if isinstance(product.payload, dict) else {}
         body["qualityReview"] = product.quality_review
     return body
+
+
+def _positive_measure(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 and number < float("inf") else None
+
+
+def _quality_review_summary(product: Product) -> tuple[str, list[str]]:
+    if isinstance(product.quality_review, dict) and product.quality_review:
+        return "verified", []
+
+    payload = product.payload if isinstance(product.payload, dict) else {}
+    reasons: list[str] = []
+    if _positive_measure(payload.get("weight")) is None:
+        reasons.append("missing_weight")
+
+    dimensions = [
+        _positive_measure(payload.get(key))
+        for key in ("packageLength", "packageWidth", "packageHeight")
+    ]
+    if any(value is None for value in dimensions):
+        reasons.append("missing_dimensions")
+    elif dimensions == [30, 20, 10]:
+        reasons.append("default_dimensions")
+
+    if not reasons:
+        reasons.append("unverified")
+    return "needs_review", reasons
 
 
 def account_names(db: Session) -> dict[int, str]:
@@ -218,6 +252,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                   category_id: Any = None, cid: Any = None, group_id: Any = None,
                   group: str | None = None, q: str | None = None,
                   account_id: Any = None, status: str | None = None,
+                  quality_status: str | None = None,
                   claimed: bool | None = None, sort: str = "savedDesc",
                   operator_id: int | None = None
                   ) -> dict[str, Any]:
@@ -229,10 +264,16 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         raise errors.validation("排序方式无效", field="sort", value=sort)
     if status is not None and status not in STATUSES:
         raise errors.validation("状态筛选无效", field="status", value=status)
+    if quality_status not in (None, "verified", "needs_review"):
+        raise errors.validation("规格核验状态无效", field="qualityStatus", value=quality_status)
     if q is not None and len(str(q)) > 64:
         raise errors.validation("搜索词不能超过 64 个字符", field="q")
 
     query = active_query(db).filter(Product.automation_result.is_(False))
+    if quality_status == "verified":
+        query = query.filter(Product.quality_review.is_not(None))
+    elif quality_status == "needs_review":
+        query = query.filter(Product.quality_review.is_(None))
     member_view = _is_member(db, operator_id)
     if category_id not in (None, ""):
         cid_value = str(category_id)

@@ -622,6 +622,18 @@ export function ProductDetailDrawer({
             </div>
           </div>
 
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <SectionTitle>重量与尺寸</SectionTitle>
+            <Badge
+              variant={product.qualityReview ? "success" : "warning"}
+              size="sm"
+              title={product.qualityReview
+                ? `核验人：${product.qualityReview.verifiedByOperatorName} · ${formatDate(product.qualityReview.verifiedAt)}`
+                : "当前规格来源未确认，需对照妙手资料、原始商品页或实物核实"}
+            >
+              {product.qualityReview ? "已人工核验" : "待人工核验"}
+            </Badge>
+          </div>
           <div className="grid gap-3 rounded-md border border-border-subtle bg-canvas-inset/50 p-3 sm:grid-cols-2">
             <div>
               <p className="text-2xs text-fg-muted">包裹重量</p>

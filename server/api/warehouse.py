@@ -115,13 +115,15 @@ def list_warehouse(
     accountId: str | None = None,
     status: str | None = None,
     claimed: str | None = None,
+    qualityStatus: str | None = Query(default=None, pattern="^(verified|needs_review)$"),
     sort: str = "savedDesc",
 ) -> dict[str, Any]:
     claimed_flag = None if claimed in (None, "") else parse_bool(claimed, "claimed")
     return warehouse_service.list_products(
         db, page=page, page_size=pageSize, category_id=categoryId, cid=cid,
         group_id=groupId, group=group, q=q, account_id=accountId, status=status,
-        claimed=claimed_flag, sort=sort, operator_id=operator.id)
+        quality_status=qualityStatus, claimed=claimed_flag, sort=sort,
+        operator_id=operator.id)
 
 
 @router.get("/automation-results", summary="自动化处理成功记录",

@@ -63,6 +63,7 @@ import type {
   ProductPatchResponse,
   ProductSort,
   ProductStatus,
+  QualityReviewStatus,
   PublishLogsResponse,
   PublishRequest,
   PublishResponse,
@@ -222,6 +223,7 @@ export interface WarehouseListParams extends PageParams {
   q?: string | null;
   accountId?: string | null;
   status?: ProductStatus | null;
+  qualityStatus?: QualityReviewStatus | null;
   claimed?: boolean | null;
   sort?: ProductSort;
 }
@@ -236,6 +238,7 @@ export function warehouseQueryKey(params: WarehouseListParams): readonly unknown
     q: params.q ?? null,
     accountId: params.accountId ?? null,
     status: params.status ?? null,
+    qualityStatus: params.qualityStatus ?? null,
     claimed: params.claimed ?? null,
     sort: params.sort,
   });
@@ -255,6 +258,7 @@ export function useWarehouseList(params: WarehouseListParams): UseQueryResult<Wa
           q: params.q,
           accountId: params.accountId,
           status: params.status,
+          qualityStatus: params.qualityStatus,
           claimed: params.claimed,
           sort: params.sort,
         }),

@@ -33,6 +33,13 @@ function priceText(product: Product): { symbol: string; amount: string; range: b
   };
 }
 
+const QUALITY_REASON_LABELS: Record<string, string> = {
+  missing_weight: "缺少重量",
+  missing_dimensions: "缺少尺寸",
+  default_dimensions: "尺寸为默认值",
+  unverified: "来源未核验",
+};
+
 export function ProductCard({ product, isMember = false, selected, onToggle, onOpen, index }: ProductCardProps) {
   const price = priceText(product);
   const statusMeta = productStatus(product.status);
@@ -94,6 +101,24 @@ export function ProductCard({ product, isMember = false, selected, onToggle, onO
         <h3 className="line-clamp-2 min-h-[40px] text-sm font-medium leading-5 text-fg">
           {product.title || "（无标题）"}
         </h3>
+
+        {product.qualityReviewStatus && (
+          <div className="flex min-h-4 items-center">
+            <Badge
+              variant={product.qualityReviewStatus === "verified" ? "success" : "warning"}
+              size="sm"
+              title={product.qualityReviewStatus === "verified"
+                ? "重量和包裹尺寸已有人工核验记录"
+                : isMember
+                  ? "重量和包裹尺寸待人工核验"
+                  : (product.qualityReviewReasons ?? [])
+                    .map((reason) => QUALITY_REASON_LABELS[reason] ?? "待人工核验")
+                    .join("、")}
+            >
+              {product.qualityReviewStatus === "verified" ? "规格已核验" : "规格待核验"}
+            </Badge>
+          </div>
+        )}
 
         {/* 价格 + 分类 + SKU 同一行：价格右侧有空间，分类和 SKU 数挪过去，
             不再单独占一行（用户说那里空着） */}

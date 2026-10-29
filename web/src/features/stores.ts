@@ -6,6 +6,7 @@ import { create } from "zustand";
 import type {
   ProductSort,
   ProductStatus,
+  QualityReviewStatus,
   ScheduleFrequency,
   WordCategory,
 } from "@/lib/types";
@@ -45,6 +46,7 @@ export interface WarehouseState {
   q: string;
   claimed: boolean | null;
   status: ProductStatus | null;
+  qualityStatus: QualityReviewStatus | null;
   category: WarehouseCategoryFilter;
   /** 选中商品 id（跨页保留） */
   selected: string[];
@@ -56,6 +58,7 @@ export interface WarehouseState {
   setQ: (value: string) => void;
   setClaimed: (claimed: boolean | null) => void;
   setStatus: (status: ProductStatus | null) => void;
+  setQualityStatus: (status: QualityReviewStatus | null) => void;
   setCategory: (category: WarehouseCategoryFilter) => void;
   toggleSelected: (id: string) => void;
   selectMany: (ids: string[]) => void;
@@ -71,6 +74,7 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
   q: "",
   claimed: null,
   status: null,
+  qualityStatus: null,
   category: { kind: "all" },
   selected: [],
 
@@ -83,6 +87,7 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
   setQ: (q) => set({ q, page: 1, selected: [] }),
   setClaimed: (claimed) => set({ claimed, page: 1, selected: [] }),
   setStatus: (status) => set({ status, page: 1, selected: [] }),
+  setQualityStatus: (qualityStatus) => set({ qualityStatus, page: 1, selected: [] }),
   setCategory: (category) => set({ category, page: 1, selected: [] }),
   toggleSelected: (id) =>
     set((state) => ({
