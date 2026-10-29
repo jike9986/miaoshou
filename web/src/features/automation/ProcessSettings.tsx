@@ -76,8 +76,6 @@ export interface ProcessSettingsProps {
   connected: boolean;
   /** 打开定价模板弹窗（GET /system/templates） */
   onOpenTemplates: () => void;
-  /** 店铺列表（发布到店铺的目标选择器用） */
-  shops?: Array<{ shopId: string; name: string; siteName: string }>;
   /** 运行中：全部控件禁用 */
   disabled?: boolean;
   className?: string;
@@ -88,7 +86,6 @@ export function ProcessSettings({
   onChange,
   connected,
   onOpenTemplates,
-  shops = [],
   disabled = false,
   className,
 }: ProcessSettingsProps) {
@@ -276,30 +273,11 @@ export function ProcessSettings({
                 <span
                   className={cn(
                     "pointer-events-none text-[13px] font-medium leading-[18px] text-brand-700 underline decoration-brand-600/30 underline-offset-4",
-                    (disabled || !connected || shops.length === 0) && "opacity-60"
+                  (disabled || !connected) && "opacity-60"
                   )}
                 >
                   发布到店铺
-                  {settings.publishShopId && (
-                    <span className="ml-1">
-                      · {shops.find((s) => s.shopId === settings.publishShopId)?.name ?? settings.publishShopId}
-                    </span>
-                  )}
                 </span>
-                {connected && shops.length > 0 && (
-                  <Select
-                    size="sm"
-                    aria-label="选择发布店铺"
-                    className="absolute inset-0 h-full cursor-pointer opacity-0"
-                    value={settings.publishShopId}
-                    onChange={(value) => onChange({ publishEnabled: true, publishShopId: value })}
-                    disabled={disabled}
-                    options={[
-                      { value: "", label: "选择店铺…" },
-                      ...shops.map((s) => ({ value: s.shopId, label: `${s.name}（${s.siteName}）` })),
-                    ]}
-                  />
-                )}
               </span>
             </span>
           </div>

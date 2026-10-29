@@ -58,6 +58,7 @@ import { ProcessSettings } from "@/features/automation/ProcessSettings";
 import { ProductPicker } from "@/features/automation/ProductPicker";
 import { ProgressPanel } from "@/features/automation/ProgressPanel";
 import { AccountSwitcher } from "@/features/auth/UnlockPage";
+import { useSessionStore } from "@/features/stores";
 import {
   IDLE_RUN,
   loadSettings,
@@ -88,6 +89,7 @@ const DATE_FORMAT = new Intl.DateTimeFormat("zh-CN", {
 export function AutomationPage() {
   const { data: status } = useAuthStatus();
   const connected = status?.connected ?? false;
+  const currentShopId = useSessionStore((state) => state.currentShopId);
   const narrow = useIsNarrow();
 
   /* ---------------- 列表查询参数 ---------------- */
@@ -255,7 +257,7 @@ export function AutomationPage() {
   /* ---------------- 真正执行：串行处理入仓 ---------------- */
   const processItem = useProcessCollectItem();
   const publish = usePublish();
-  // 店铺列表常驻加载：「发布到店铺」文字在开关关闭时也应能直接打开店铺选择
+  // 店铺名称用于任务反馈；发布目标跟随顶部当前店铺。
   const shopsQuery = useShops(status?.accountId, { enabled: connected });
 
   const startRun = async (): Promise<void> => {
@@ -269,10 +271,12 @@ export function AutomationPage() {
       return;
     }
     // 发布开启但没选目标店铺：先拦住，别等处理完才发现没地方认领
-    if (settings.publishEnabled && !settings.publishShopId) {
-      toast.warning("请先选择要发布到哪家店铺", {
-        description: "在处理设置里勾选「发布到店铺」后，点文字选择目标店铺。",
-      });
+    if (settings.publishEnabled && !currentShopId) {
+      toast.warning("请先在顶部选择当前店铺");
+      return;
+    }
+    if (settings.publishEnabled && !shopsQuery.data?.shops.some((shop) => shop.shopId === currentShopId)) {
+      toast.warning("当前店铺不可用，请重新选择店铺");
       return;
     }
 
@@ -365,14 +369,14 @@ export function AutomationPage() {
 
         // 发布到店铺：处理成功后自动认领到所选店铺的采集箱（不直接上架）。
         // 这是用户要的效果——处理完的东西出现在妙手采集箱里，人工确认后再上架。
-        if (settings.publishEnabled && settings.publishShopId) {
+        if (settings.publishEnabled && currentShopId) {
           const warehouseId = result.product?.id;
           if (warehouseId) {
             setRun((prev) => ({ ...prev, stage: `认领到店铺：${target.title || target.detailId}` }));
             try {
               await publish.mutateAsync({
                 items: [{ warehouseId: String(warehouseId) }],
-                shopId: settings.publishShopId,
+                shopId: currentShopId,
                 confirm: true,
                 claimOnly: true,
               });
@@ -567,7 +571,6 @@ export function AutomationPage() {
                     onChange={patchSettings}
                     connected={connected}
                     onOpenTemplates={() => setTemplatesOpen(true)}
-                    shops={shopsQuery.data?.shops ?? []}
                     disabled={running}
                   />
                 </div>
@@ -586,7 +589,7 @@ export function AutomationPage() {
                 settings={settings}
                 selectedCount={selection.size}
                 visibleCount={visibleItems.length}
-                publishShopName={shopsQuery.data?.shops.find((shop) => shop.shopId === settings.publishShopId)?.name}
+                publishShopName={shopsQuery.data?.shops.find((shop) => shop.shopId === currentShopId)?.name}
               />
             </div>
           </div>
