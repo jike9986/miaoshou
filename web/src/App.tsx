@@ -95,6 +95,9 @@ function Shell() {
   const operatorLabel = operatorIdentity
     ? operatorDisplayName()
     : `${operatorDisplayName()}（未设置）`;
+  const roleLabel = operatorIdentity?.role === "teacher" || operatorIdentity?.role === "admin"
+    ? "老师"
+    : operatorIdentity ? "学员" : "未登录";
 
   return (
     <>
@@ -102,18 +105,11 @@ function Shell() {
       <AppShell
         nav={NAV}
         brand={{ icon: <BrandMark className="size-4" />, name: "奥皇上品" }}
-        account={
-          connected
-            ? {
-                name: status?.connectionName ?? "已连接",
-                detail: status?.appIdHint ?? undefined,
-                operator: operatorLabel,
-              }
-            : guest
-              ? { name: "游客模式", detail: "未连接妙手", operator: operatorLabel }
-              : { name: "未连接", detail: "点击连接妙手", operator: operatorLabel }
-        }
-        onAccountClick={() => navigate("/unlock")}
+        account={{
+          name: operatorLabel,
+          detail: `${roleLabel} · 妙手${connected ? "已连接" : "未连接"}${guest ? " · 游客模式" : ""}`,
+        }}
+        onAccountClick={() => navigate("/settings")}
         // 标题栏不再放账号/店铺切换：账号和店铺已经挪到「开始处理」旁边，
         // 这里再放一份就是两套重复控件，只会占掉标题栏高度。
         // 也不传 routeMeta：标题栏中部不显示「功能 / 板块名」面包屑。

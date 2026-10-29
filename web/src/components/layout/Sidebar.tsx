@@ -8,10 +8,10 @@ import {
   CalendarClock,
   Download,
   KeyRound,
-  MoreHorizontal,
   PackageSearch,
   PanelLeft,
   Play,
+  Settings,
   ShieldBan,
   Zap,
   type LucideIcon,
@@ -463,6 +463,8 @@ export function Sidebar({
           <button
             type="button"
             onClick={onAccountClick}
+            aria-label="打开账号与设置"
+            title="账号与设置"
             className={cn(
               "flex h-14 w-full items-center border-t border-border text-left",
               "transition-colors duration-fast hover:bg-surface-hover",
@@ -494,7 +496,7 @@ export function Sidebar({
                     </span>
                   )}
                 </span>
-                <MoreHorizontal aria-hidden className="size-4 shrink-0 text-fg-muted" strokeWidth={1.75} />
+                <Settings aria-hidden className="size-4 shrink-0 text-fg-muted" strokeWidth={1.75} />
               </>
             )}
           </button>

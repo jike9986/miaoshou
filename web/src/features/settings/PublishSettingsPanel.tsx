@@ -9,10 +9,11 @@ import { useAuthStatus } from "@/lib/queries";
 import { api, apiErrorMessage } from "@/lib/api";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/queryKeys";
-import { Card, CardDescription, CardTitle, Switch, toast } from "@/components/ui";
+import { Card, CardDescription, CardTitle, InlineError, SkeletonRows, Switch, toast } from "@/components/ui";
 
 export function PublishSettingsPanel() {
-  const { data: status } = useAuthStatus();
+  const statusQuery = useAuthStatus();
+  const { data: status } = statusQuery;
   const queryClient = useQueryClient();
 
   const toggle = useMutation({
@@ -25,7 +26,7 @@ export function PublishSettingsPanel() {
     onError: (error) => toast.error("切换失败", { description: apiErrorMessage(error) }),
   });
 
-  const enabled = status?.publishEnabled ?? false;
+  const enabled = status?.publishEnabled === true;
 
   return (
     <Card padding="normal">
@@ -38,6 +39,16 @@ export function PublishSettingsPanel() {
         已有批次和定时任务不受影响。
       </CardDescription>
 
+      {statusQuery.isLoading && <SkeletonRows rows={1} className="mt-4" />}
+      {statusQuery.isError && (
+        <div className="mt-4">
+          <InlineError onRetry={() => void statusQuery.refetch()}>
+            {apiErrorMessage(statusQuery.error)}
+          </InlineError>
+        </div>
+      )}
+
+      {status && !statusQuery.isError && (
       <div className="mt-4 flex items-center justify-between rounded-md border border-border px-4 py-3">
         <div>
           <p className="text-[13px] font-medium text-fg">
@@ -52,12 +63,13 @@ export function PublishSettingsPanel() {
         <Switch
           checked={enabled}
           onChange={(checked) => toggle.mutate(checked)}
-          disabled={toggle.isPending}
+          disabled={toggle.isPending || statusQuery.isFetching}
           aria-label="发布总开关"
         />
       </div>
+      )}
 
-      {enabled && (
+      {status && enabled && (
         <p className="mt-2 text-2xs text-fg-muted">
           开启后，自动化页处理成功的商品可以认领到所选店铺的采集箱（仍需人工确认后上架）。
         </p>
