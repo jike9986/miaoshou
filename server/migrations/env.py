@@ -16,9 +16,8 @@
     默认这两项是关的，autogenerate 只比对「列有没有增减」，看不到
     String(32) → String(64)、默认值从 '' 变成 'active' 这类变化。
 
-连接串不写死在 alembic.ini 里，而是从 core.config.get_settings().db_path 取，
-这样 `AOHUANG_DATA_DIR` 指哪、迁移就改哪（CI 与本地试验都靠这一点把迁移
-关进临时目录，绝不碰用户真实库）。
+连接串不写死在 alembic.ini 里，而是复用 `db.session.engine` 的配置，
+这样 SQLite 与 PostgreSQL 的迁移目标都和应用配置一致。
 """
 from __future__ import annotations
 
@@ -41,13 +40,9 @@ if config.config_file_name is not None:
 # 导入 models 包即把全部模型注册进 Base.metadata（顺序敏感，必须在读 metadata 前）。
 # 这里必须在 fileConfig 之后 import：项目自己的 logger 配置要先就位。
 import models  # noqa: E402,F401  —— 副作用导入，不能删
-from core.config import get_settings  # noqa: E402
 from db.session import Base, engine  # noqa: E402
 
-settings = get_settings()
-# sqlite:/// 后面跟的是路径；Windows 反斜杠在 URL 里要统一成正斜杠
-DB_URL = f"sqlite:///{settings.db_path.as_posix()}"
-config.set_main_option("sqlalchemy.url", DB_URL)
+DB_URL = engine.url
 
 target_metadata = Base.metadata
 
@@ -68,8 +63,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        # 离线出 SQL 时同样需要 batch 语义，否则 SQLite 的 ALTER 语句出不来
-        render_as_batch=True,
+        render_as_batch=engine.dialect.name == "sqlite",
         compare_type=True,
         compare_server_default=True,
         include_object=_include_object,
@@ -90,12 +84,11 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            # SQLite 改列必须 batch；这条是硬要求，见文件头说明
-            render_as_batch=True,
+            render_as_batch=connection.dialect.name == "sqlite",
             compare_type=True,
             compare_server_default=True,
             include_object=_include_object,
-            # 列注释/表注释在 SQLite 上没有意义，关掉避免生成无法执行的迁移
+            # schema discovery 保持关闭；应用模型不使用非默认 schema。
             include_schemas=False,
         )
 

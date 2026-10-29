@@ -63,6 +63,7 @@ def _run_child(mode: str, workdir: Path) -> dict[str, dict]:
     """
     env = dict(os.environ)
     env["AOHUANG_DATA_DIR"] = str(workdir)
+    env["AOHUANG_DATABASE_URL"] = ""
     env["PYTHONPATH"] = str(SERVER_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), "--child", mode],

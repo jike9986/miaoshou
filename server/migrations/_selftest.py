@@ -49,6 +49,7 @@ def _run(args: list[str], data_dir: Path) -> subprocess.CompletedProcess:
     """跑一条子命令（args 直接拼在 `python` 后面，可以是 `-m alembic ...` 或 `-c ...`）。"""
     env = dict(os.environ)
     env["AOHUANG_DATA_DIR"] = str(data_dir)
+    env["AOHUANG_DATABASE_URL"] = ""
     env["PYTHONPATH"] = str(SERVER_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.run(
         [sys.executable, *args], cwd=str(SERVER_DIR), env=env,

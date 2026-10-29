@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import URL, Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from core.config import get_settings
@@ -30,14 +31,6 @@ _settings = get_settings()
 #   · 15 秒够覆盖正常的写冲突（另一件事马上就会提交完），又不至于让人以为死机。
 BUSY_TIMEOUT_SECONDS = 15.0
 
-engine = create_engine(
-    f"sqlite:///{_settings.db_path}",
-    connect_args={"check_same_thread": False, "timeout": BUSY_TIMEOUT_SECONDS},
-    future=True,
-)
-
-
-@event.listens_for(engine, "connect")
 def _sqlite_pragmas(dbapi_connection, _record) -> None:  # noqa: ANN001
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
@@ -46,6 +39,27 @@ def _sqlite_pragmas(dbapi_connection, _record) -> None:  # noqa: ANN001
     # 与上面的 connect_args.timeout 保持一致，理由见 BUSY_TIMEOUT_SECONDS 注释
     cursor.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_SECONDS * 1000)}")
     cursor.close()
+
+
+def _engine_options(url: URL) -> dict[str, object]:
+    options: dict[str, object] = {"future": True}
+    if url.get_backend_name() == "sqlite":
+        options["connect_args"] = {
+            "check_same_thread": False,
+            "timeout": BUSY_TIMEOUT_SECONDS,
+        }
+    return options
+
+
+def _create_engine(url: URL) -> Engine:
+    options = _engine_options(url)
+    database_engine = create_engine(url, **options)
+    if database_engine.dialect.name == "sqlite":
+        event.listen(database_engine, "connect", _sqlite_pragmas)
+    return database_engine
+
+
+engine = _create_engine(_settings.sqlalchemy_url)
 
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
@@ -133,12 +147,19 @@ def _add_missing_columns() -> None:
 def init_db() -> None:
     """建表 + 补列 + 写入默认设置。
 
-    启动路径**不走 alembic**：打包后的 sidecar 里没有迁移目录，
+    SQLite 启动路径**不走 alembic**：打包后的 sidecar 里没有迁移目录，
     而且老用户库的表已经存在，`upgrade head` 会因「table already exists」
     直接失败，让应用起不来。所以这里仍是 `create_all` + `_add_missing_columns`
-    的组合；Alembic 用于开发期建库与结构变更，见 docs/migrations.md。
+    的组合。PostgreSQL 必须先使用 Alembic 管理 schema；应用运行时初始化尚未完成。
     """
     import importlib
+
+    if engine.dialect.name != "sqlite":
+        raise RuntimeError(
+            "PostgreSQL URL is configured, but PostgreSQL application startup is not "
+            "supported yet. Application migrations and shared-mode database support "
+            "must be completed first."
+        )
 
     # 导入 models 包即把所有模型注册到 Base.metadata（避免逐文件 import）
     importlib.import_module("models")

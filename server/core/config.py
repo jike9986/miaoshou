@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL, make_url
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AOHUANG_", env_file=".env", extra="ignore")
 
     data_dir: Path = _default_data_dir()
+    # Optional SQLAlchemy URL. An empty value preserves the per-user SQLite database.
+    database_url: str = ""
     api_port: int = 8812
     api_port_max: int = 8822
     # 妙手上游。注意是 openapi-erp，不是 openapi ——
@@ -94,6 +97,20 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "app.db"
+
+    @property
+    def sqlalchemy_url(self) -> URL:
+        """Return the configured database URL, defaulting to the local SQLite file."""
+        configured = self.database_url.strip()
+        if not configured:
+            return URL.create("sqlite", database=str(self.db_path))
+
+        url = make_url(configured)
+        if url.drivername in {"postgres", "postgresql"}:
+            url = url.set(drivername="postgresql+psycopg")
+        if url.get_backend_name() not in {"sqlite", "postgresql"}:
+            raise ValueError("AOHUANG_DATABASE_URL must use SQLite or PostgreSQL")
+        return url
 
     @property
     def images_dir(self) -> Path:

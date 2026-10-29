@@ -50,9 +50,13 @@ def _real_data_dir() -> Path:
     return Path(local) / "aohuang-desktop"
 
 
-def _run_alembic(args: list[str], data_dir: Path) -> int:
+def _run_alembic(
+    args: list[str], data_dir: Path, *, allow_configured_database: bool = False,
+) -> int:
     env = dict(os.environ)
     env["AOHUANG_DATA_DIR"] = str(data_dir)
+    if not allow_configured_database:
+        env["AOHUANG_DATABASE_URL"] = ""
     env["PYTHONPATH"] = str(SERVER_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     print(f"[db] AOHUANG_DATA_DIR={data_dir}")
     print(f"[db] alembic {' '.join(args)}")
@@ -96,14 +100,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "check":
+        env = dict(os.environ)
+        env["AOHUANG_DATABASE_URL"] = ""
         return subprocess.call([sys.executable, str(MIGRATIONS_DIR / "_selftest.py")],
-                               cwd=str(SERVER_DIR))
+                               cwd=str(SERVER_DIR), env=env)
 
     if args.real:
         data_dir = _real_data_dir()
-        db_path = data_dir / "app.db"
-        print(f"[db] 目标真实库：{db_path}")
-        if not db_path.exists():
+        configured_url = os.environ.get("AOHUANG_DATABASE_URL", "").strip()
+        if configured_url:
+            from sqlalchemy.engine import make_url
+
+            target_url = make_url(configured_url)
+            print(f"[db] 目标真实库：{target_url.render_as_string(hide_password=True)}")
+            missing_sqlite_db = (
+                target_url.get_backend_name() == "sqlite"
+                and target_url.database not in (None, ":memory:")
+                and not Path(target_url.database).exists()
+            )
+        else:
+            db_path = data_dir / "app.db"
+            print(f"[db] 目标真实库：{db_path}")
+            missing_sqlite_db = not db_path.exists()
+        if missing_sqlite_db:
             print("[db] 该库不存在，命令会新建一个空库。", file=sys.stderr)
         answer = input("确认操作真实库？输入 yes 继续：").strip().lower()
         if answer != "yes":
@@ -130,7 +149,9 @@ def main(argv: list[str] | None = None) -> int:
                 return code
 
         before = set(VERSIONS_DIR.glob("*.py"))
-        code = _run_alembic([args.command, *rest], data_dir)
+        code = _run_alembic(
+            [args.command, *rest], data_dir, allow_configured_database=args.real,
+        )
         if args.command == "revision" and "--autogenerate" in rest:
             message = ""
             if "-m" in rest:

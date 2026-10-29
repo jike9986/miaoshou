@@ -52,6 +52,8 @@ _REAL_APP_DB_CANDIDATES = (
 # 所以放在这里，collect 之前就执行。
 _ISOLATED_ROOT = Path(tempfile.mkdtemp(prefix="aohuang-pytest-"))
 os.environ["AOHUANG_DATA_DIR"] = str(_ISOLATED_ROOT)
+# An explicit database URL takes precedence over the isolated data directory.
+os.environ["AOHUANG_DATABASE_URL"] = ""
 # 老变量名也一起设：几个探针会 pop 掉它，但不设的话
 # core.config._default_data_dir 会去读 LOCALAPPDATA，等于没隔离。
 os.environ["TK_AUTOMATION_DATA_DIR"] = str(_ISOLATED_ROOT)
@@ -119,6 +121,7 @@ def run_probe(module_name: str, *, timeout: int = 300) -> None:
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    env["AOHUANG_DATABASE_URL"] = ""
     # 子进程必须有自己能写的临时数据目录：探针里多数会自己再建一个，
     # 少数（probe_gate / test_pre_save）依赖父进程传下来的环境。
     env.setdefault("AOHUANG_DATA_DIR", tempfile.mkdtemp(prefix="aohuang-probe-"))

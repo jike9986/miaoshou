@@ -27,6 +27,7 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 # db/session.py 在模块导入时就把 engine 绑到了当时的 data_dir。
 _TMP = Path(tempfile.mkdtemp(prefix="aohuang-ci-mig-"))
 os.environ["AOHUANG_DATA_DIR"] = str(_TMP)
+os.environ["AOHUANG_DATABASE_URL"] = ""
 sys.path.insert(0, str(SERVER_DIR))
 
 # 这两行必须在上面设置完 AOHUANG_DATA_DIR 之后：db/session.py 在模块导入时
