@@ -24,6 +24,7 @@ import socket
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from core.config import get_settings
 from core.constants import APP_VERSION
+from db.session import engine
 
 # 共享模式落库的键。刻意不写进 models/setting.py 的 DEFAULT_SETTINGS：
 # 那个文件正在被另一处改动，加键会冲突；get 不到时按环境变量兜底。
@@ -188,12 +190,30 @@ def db_path() -> Path:
     return Path(get_settings().db_path)
 
 
-def db_size_bytes() -> int:
-    """主库 + WAL + SHM 的总字节数。
+def _database_label() -> str:
+    if engine.dialect.name == "sqlite":
+        return str(db_path())
+    url = engine.url
+    host = url.host or "local socket"
+    port = f":{url.port}" if url.port else ""
+    database = url.database or ""
+    return f"PostgreSQL {host}{port}/{database}"
 
-    只算 app.db 会低报：WAL 模式下未 checkpoint 的数据在 app.db-wal 里，
-    共享服务器上这个文件经常比主库还大。
+
+def db_size_bytes() -> int:
+    """返回 SQLite 文件族大小或 PostgreSQL 当前数据库大小。
+
+    SQLite 只算 app.db 会低报：未 checkpoint 的数据可能还在 app.db-wal。
     """
+    if engine.dialect.name == "postgresql":
+        try:
+            with engine.connect() as connection:
+                return int(connection.execute(
+                    text("SELECT pg_database_size(current_database())")
+                ).scalar_one())
+        except Exception:  # noqa: BLE001 - health facts must not expose connection details
+            return 0
+
     total = 0
     base = db_path()
     for suffix in ("", "-wal", "-shm"):
@@ -206,7 +226,10 @@ def db_size_bytes() -> int:
 
 
 def wal_enabled() -> bool:
-    """读 journal_mode。用裸连接读，避免在 ORM 事务里开 PRAGMA。"""
+    """SQLite 读取 journal_mode；PostgreSQL 始终使用 WAL。"""
+    if engine.dialect.name == "postgresql":
+        # PostgreSQL always uses write-ahead logging; journal_mode is SQLite-specific.
+        return True
     try:
         con = sqlite3.connect(str(db_path()), timeout=2.0)
     except sqlite3.Error:
@@ -221,37 +244,66 @@ def wal_enabled() -> bool:
 
 
 def probe_writable(force: bool = False) -> dict[str, Any]:
-    """真的抢一次写锁再放开，判断「现在能不能写」。
+    """事务性探测当前数据库写权限，不保留任何数据。
 
-    用 `BEGIN IMMEDIATE` + `ROLLBACK`：拿到写锁就证明可写，且一行数据都不落。
-    不用「往临时表写一行」是因为那会在 WAL 里留垃圾，共享服务器上天天探活
-    会把 WAL 撑起来。
+    SQLite 用 `BEGIN IMMEDIATE` 测试写锁；PostgreSQL 在单事务内做设置行的
+    INSERT/UPDATE/DELETE 后回滚，以验证常用写权限。
 
     区分三种结果，别混成一句「不可写」：
       · writable=True,  busy=False  → 正常
       · writable=True,  busy=True   → 库可写，但此刻别人占着写锁（`database is locked`）
       · writable=False, busy=False  → 真的不可写（只读卷 / 权限 / 文件被占）
     """
-    path = db_path()
+    path = _database_label()
     now = time.time()
     with _write_probe_lock:
         cached = dict(_write_probe_cache)
         fresh = (
             not force
-            and cached.get("path") == str(path)
+            and cached.get("path") == path
             and (now - float(cached.get("at") or 0.0)) < WRITE_PROBE_TTL
         )
     if fresh:
         return {**cached, "cached": True}
 
     result: dict[str, Any] = {"at": time.time(), "writable": True, "busy": False,
-                              "error": "", "path": str(path), "cached": False}
-    if not path.exists():
+                              "error": "", "path": path, "cached": False}
+    if engine.dialect.name == "postgresql":
+        try:
+            with engine.connect() as connection:
+                transaction = connection.begin()
+                try:
+                    probe_key = f"__db_write_probe_{uuid.uuid4().hex}"
+                    connection.execute(text(
+                        "INSERT INTO settings (key, value, updated_at) "
+                        "VALUES (:key, CAST('null' AS JSON), 0)"
+                    ), {"key": probe_key})
+                    connection.execute(text(
+                        "UPDATE settings SET updated_at = updated_at WHERE key = :key"
+                    ), {"key": probe_key})
+                    connection.execute(text(
+                        "DELETE FROM settings WHERE key = :key"
+                    ), {"key": probe_key})
+                finally:
+                    if transaction.is_active:
+                        transaction.rollback()
+        except Exception as exc:  # noqa: BLE001 - keep credentials and server details private
+            original = getattr(exc, "orig", None)
+            sqlstate = (getattr(original, "sqlstate", None)
+                        or getattr(original, "pgcode", None))
+            busy = sqlstate in {"55P03", "57014"}
+            result.update(
+                writable=busy,
+                busy=busy,
+                error=("PostgreSQL write probe timed out" if busy else
+                       f"PostgreSQL write probe failed ({type(exc).__name__})"),
+            )
+    elif not Path(path).exists():
         result.update(writable=False, error="数据库文件不存在")
     else:
         try:
             # 250ms 足够判断「锁在不在」，又不会把探活拖成慢请求
-            con = sqlite3.connect(str(path), timeout=0.25)
+            con = sqlite3.connect(path, timeout=0.25)
             try:
                 con.execute("PRAGMA busy_timeout=250")
                 con.execute("BEGIN IMMEDIATE")
@@ -277,7 +329,8 @@ def probe_writable(force: bool = False) -> dict[str, Any]:
 def db_facts(force_probe: bool = False) -> dict[str, Any]:
     probe = probe_writable(force=force_probe)
     return {
-        "dbPath": str(db_path()),
+        "dbEngine": engine.dialect.name,
+        "dbPath": _database_label(),
         "dbSizeBytes": db_size_bytes(),
         "walEnabled": wal_enabled(),
         "dbWritable": bool(probe.get("writable")),
@@ -289,6 +342,20 @@ def db_facts(force_probe: bool = False) -> dict[str, Any]:
 
 def busy_timeout_ms(db: Session | None = None) -> int:
     """当前连接上的 busy_timeout（毫秒）。共享部署调参要看这个数。"""
+    if engine.dialect.name == "postgresql":
+        owned_connection = db is None
+        connection = engine.connect() if owned_connection else db
+        try:
+            row = connection.execute(text(
+                "SELECT ceil(extract(epoch FROM "
+                "current_setting('lock_timeout')::interval) * 1000)::bigint"
+            )).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except Exception:  # noqa: BLE001 - omit connection details
+            return 0
+        finally:
+            if owned_connection:
+                connection.close()
     try:
         if db is not None:
             row = db.execute(text("PRAGMA busy_timeout")).fetchone()
@@ -389,6 +456,7 @@ def share_view(db: Session | None = None) -> dict[str, Any]:
         "clientCount": len(operators),
         "activeOperators": operators,
         "dbPath": facts["dbPath"],
+        "dbEngine": facts["dbEngine"],
         "dbSizeBytes": facts["dbSizeBytes"],
         "walEnabled": facts["walEnabled"],
         "dbWritable": facts["dbWritable"],
@@ -417,9 +485,11 @@ def share_warnings(shared: bool, host: str, addresses: list[str],
             "确认这是你要的")
     if shared and not addresses:
         warnings.append("本机没有可对外的 IPv4（只有回环/169.254），同事无法连接")
-    if not facts.get("walEnabled"):
+    db_engine = facts.get("dbEngine", "sqlite")
+    if db_engine == "sqlite" and not facts.get("walEnabled"):
         warnings.append("journal_mode 不是 WAL：多人同时读写会互相阻塞")
-    if int(facts.get("dbSizeBytes") or 0) > 512 * 1024 * 1024:
+    if (db_engine == "sqlite"
+            and int(facts.get("dbSizeBytes") or 0) > 512 * 1024 * 1024):
         warnings.append("数据库已超过 512 MB：SQLite 还能用，但备份与 checkpoint 会明显变慢")
     return warnings
 

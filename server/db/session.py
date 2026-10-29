@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import URL, Engine
@@ -150,22 +151,47 @@ def init_db() -> None:
     SQLite 启动路径**不走 alembic**：打包后的 sidecar 里没有迁移目录，
     而且老用户库的表已经存在，`upgrade head` 会因「table already exists」
     直接失败，让应用起不来。所以这里仍是 `create_all` + `_add_missing_columns`
-    的组合。PostgreSQL 必须先使用 Alembic 管理 schema；应用运行时初始化尚未完成。
+    的组合。PostgreSQL 只校验连接与已应用的迁移 heads，不在应用启动时改 schema。
     """
     import importlib
 
-    if engine.dialect.name != "sqlite":
-        raise RuntimeError(
-            "PostgreSQL URL is configured, but PostgreSQL application startup is not "
-            "supported yet. Application migrations and shared-mode database support "
-            "must be completed first."
-        )
+    if engine.dialect.name == "postgresql":
+        _assert_postgresql_schema_current()
+        _seed_settings()
+        return
 
     # 导入 models 包即把所有模型注册到 Base.metadata（避免逐文件 import）
     importlib.import_module("models")
     Base.metadata.create_all(engine)
     _add_missing_columns()
     _seed_settings()
+
+
+def _assert_postgresql_schema_current() -> None:
+    """Require a reachable PostgreSQL database whose Alembic heads match this build."""
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    config = Config()
+    config.set_main_option(
+        "script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
+    expected = set(ScriptDirectory.from_config(config).get_heads())
+    try:
+        with engine.connect() as connection:
+            current = set(MigrationContext.configure(connection).get_current_heads())
+    except Exception as exc:  # noqa: BLE001 - do not expose the configured DSN
+        raise RuntimeError(
+            f"PostgreSQL startup check could not connect/read migration state "
+            f"({type(exc).__name__})") from None
+
+    if current != expected:
+        current_text = ", ".join(sorted(current)) or "none"
+        expected_text = ", ".join(sorted(expected)) or "none"
+        raise RuntimeError(
+            "PostgreSQL schema is not at this application's Alembic head; "
+            f"current={current_text}, expected={expected_text}. "
+            "Run the reviewed database migration command before starting the app.")
 
 
 def _seed_settings() -> None:
