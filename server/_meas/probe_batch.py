@@ -529,10 +529,9 @@ def test_list_and_serialize(db, account) -> None:
 
 
 def test_http() -> None:
-    from core.config import get_settings
+    from _probe_auth import teacher_headers
 
-    token = get_settings().local_secret()
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = teacher_headers()
     base = f"{API_PREFIX}/batch"
 
     # 注入假上游：路由层的 step 走的是同一套 run_once

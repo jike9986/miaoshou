@@ -48,10 +48,9 @@ def main() -> int:
     db.close()
 
     client = TestClient(app_main.app)
-    # 鉴权走本地 secret，探针也要带上，否则全是 401
-    from core.config import get_settings
+    from _probe_auth import teacher_headers
 
-    headers = {"Authorization": f"Bearer {get_settings().local_secret()}"}
+    headers = teacher_headers()
     resp = client.get("/api/v1/system/bootstrap", headers=headers)
     check("HTTP 200", resp.status_code == 200, str(resp.status_code))
     body = resp.json()

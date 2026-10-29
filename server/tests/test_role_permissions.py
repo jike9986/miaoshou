@@ -7,13 +7,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api import deps
-from core.config import get_settings
 from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.product import Product
 from models.product_claim import ProductClaim
+from models.publish_log import PublishLog
 from services import operator_service, warehouse_service
 
 API = "/api/v1"
@@ -38,10 +38,12 @@ def tokens(client):
             _row, token = operator_service.create(
                 db, f"matrix-{role}-{uuid.uuid4().hex[:8]}", role=role)
             rows[role] = token
+        _admin, rows[operator_service.ROLE_ADMIN] = operator_service.create(
+            db, f"matrix-admin-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_ADMIN)
         db.commit()
     finally:
         db.close()
-    rows[operator_service.ROLE_ADMIN] = get_settings().local_secret()
     return rows
 
 
@@ -209,7 +211,7 @@ def test_display_name_is_not_a_login_token_but_remains_a_declaration(client, tok
     name = f"matrix-name-{uuid.uuid4().hex[:8]}"
     db = SessionLocal()
     try:
-        operator_service.create(db, name)
+        _operator, token = operator_service.create(db, name)
         db.commit()
     finally:
         db.close()
@@ -219,7 +221,7 @@ def test_display_name_is_not_a_login_token_but_remains_a_declaration(client, tok
         assert rejected.status_code == 401, rejected.text
 
     declared = client.get(API + "/operators", headers={
-        **auth(tokens, "admin"),
+        "Authorization": f"Bearer {token}",
         "X-Operator": name,
     })
     assert declared.status_code == 200, declared.text
@@ -337,10 +339,20 @@ def test_automation_results_are_hidden_until_teacher_imports_them(client, tokens
         )
         db.add_all([successful_run, failed_run])
         db.flush()
+        receipt = PublishLog(
+            account_id=account.id, product_id=pending.id, detail_id=suffix,
+            shop_id=successful_run.shop_id, batch_id=f"batch-{suffix}",
+            status="success", title="Processed item",
+        )
+        db.add(receipt)
+        db.flush()
         db.add_all([
             AutomationRunItem(
                 run_id=successful_run.id, key=f"{suffix}:1", detail_id=suffix,
                 source_shop_id="1", process_status="succeeded", product_id=pending.id,
+                publish_status="succeeded",
+                publish_result={"batchId": receipt.batch_id, "platformStatus": "success",
+                                "publishLogId": str(receipt.id)},
             ),
             AutomationRunItem(
                 run_id=failed_run.id, key=f"{suffix}2:2", detail_id=f"{suffix}2",
@@ -396,6 +408,123 @@ def test_automation_results_are_hidden_until_teacher_imports_them(client, tokens
         API + "/warehouse/automation-results/import",
         json={"ids": [pending_id]}, headers=teacher)
     assert repeated.status_code == 400, repeated.text
+
+
+def test_automation_results_require_successful_platform_receipts(client, tokens):
+    suffix = uuid.uuid4().hex[:8]
+    db = SessionLocal()
+    try:
+        teacher = operator_service.resolve(db, tokens[operator_service.ROLE_TEACHER])
+        account = Account(name=f"receipt-gate-{suffix}", shops="[]")
+        db.add(account)
+        db.flush()
+        run = AutomationRun(
+            id=f"arun_{uuid.uuid4().hex}", owner_operator_id=teacher.id,
+            account_id=account.id, shop_id="9", status="completed", settings={},
+        )
+        db.add(run)
+        db.flush()
+
+        cases = [
+            ("queued", "queued", {}),
+            ("needs_review", "needs_review", {"batchId": "queued-batch"}),
+            ("failed", "failed", {"batchId": "failed-batch"}),
+            ("not_requested", "not_requested", {}),
+            ("no_receipt", "succeeded", {
+                "platformStatus": "success", "publishLogId": "99999999",
+            }),
+        ]
+        products = {}
+        items = []
+        for index, (key, publish_status, publish_result) in enumerate(cases, start=1):
+            detail_id = f"{suffix}{index}"
+            product = Product(
+                warehouse_key=f"{suffix}:gate:{key}", detail_id=detail_id,
+                shop_id=str(index), title=key, status="ready", payload={},
+                account_id=account.id, automation_result=True,
+                draft_verified_revision=1,
+            )
+            db.add(product)
+            db.flush()
+            products[key] = product
+            items.append(AutomationRunItem(
+                run_id=run.id, key=f"{suffix}:gate:{key}", detail_id=detail_id,
+                source_shop_id=str(index), process_status="succeeded",
+                product_id=product.id, publish_status=publish_status,
+                publish_result=publish_result,
+            ))
+        stale = Product(
+            warehouse_key=f"{suffix}:gate:stale", detail_id=f"{suffix}6",
+            shop_id="7", title="Stale receipt", status="ready", payload={},
+            account_id=account.id, automation_result=True,
+            draft_verified_revision=1,
+        )
+        db.add(stale)
+        db.flush()
+        products["stale"] = stale
+        stale_receipt = PublishLog(
+            account_id=account.id, product_id=stale.id, detail_id=stale.detail_id,
+            shop_id=run.shop_id, batch_id=f"old-receipt-{suffix}", status="success",
+            title=stale.title,
+        )
+        db.add(stale_receipt)
+        db.flush()
+        items.append(AutomationRunItem(
+            run_id=run.id, key=f"{suffix}:gate:stale", detail_id=stale.detail_id,
+            source_shop_id=stale.shop_id, process_status="succeeded",
+            product_id=stale.id, publish_status="succeeded",
+            publish_result={"batchId": f"new-attempt-{suffix}",
+                            "platformStatus": "success",
+                            "publishLogId": str(stale_receipt.id)},
+        ))
+        eligible = Product(
+            warehouse_key=f"{suffix}:gate:eligible", detail_id=f"{suffix}7",
+            shop_id="6", title="Receipt confirmed", status="ready", payload={},
+            account_id=account.id, automation_result=True,
+            draft_verified_revision=1,
+        )
+        db.add(eligible)
+        db.flush()
+        receipt = PublishLog(
+            account_id=account.id, product_id=eligible.id, detail_id=eligible.detail_id,
+            shop_id=run.shop_id, batch_id=f"receipt-{suffix}", status="success",
+            title=eligible.title,
+        )
+        db.add(receipt)
+        db.flush()
+        items.append(AutomationRunItem(
+            run_id=run.id, key=f"{suffix}:gate:eligible", detail_id=eligible.detail_id,
+            source_shop_id=eligible.shop_id, process_status="succeeded",
+            product_id=eligible.id, publish_status="succeeded",
+            publish_result={"batchId": receipt.batch_id, "platformStatus": "success",
+                            "publishLogId": str(receipt.id)},
+        ))
+        db.add_all(items)
+        db.commit()
+        ids = {key: str(product.id) for key, product in products.items()}
+        eligible_id = str(eligible.id)
+    finally:
+        db.close()
+
+    teacher_headers = auth(tokens, "teacher")
+    listed = client.get(API + "/warehouse/automation-results", headers=teacher_headers)
+    assert listed.status_code == 200, listed.text
+    visible_ids = {item["id"] for item in listed.json()["items"]}
+    assert eligible_id in visible_ids
+    assert not (set(ids.values()) & visible_ids)
+
+    for ident in ids.values():
+        rejected = client.post(
+            API + "/warehouse/automation-results/import",
+            json={"ids": [ident]}, headers=teacher_headers,
+        )
+        assert rejected.status_code == 400, rejected.text
+    imported = client.post(
+        API + "/warehouse/automation-results/import",
+        json={"ids": [eligible_id]}, headers=teacher_headers,
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["added"] == 1
 
 
 def test_product_claims_are_per_member_and_preserve_legacy_claims(client, tokens):

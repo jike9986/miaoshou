@@ -3,7 +3,7 @@
 // 与老版一致，采集箱和图片翻译没有独立页面。
 // 未连接妙手时自动跳 /unlock（features/auth/guard），用户选择「稍后连接」后不再强跳。
 
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useRef } from "react";
 import {
   CalendarClock,
@@ -19,7 +19,7 @@ import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { AppToaster, toast } from "@/components/ui/toast";
 import { EmptyState } from "@/components/ui/empty-state";
 import { UnlockPage } from "@/features/auth/UnlockPage";
-import { useAutoUnlock, useAuthGuardStore } from "@/features/auth/guard";
+import { useOperatorSession } from "@/features/auth/guard";
 import { WarehousePage } from "@/features/warehouse/WarehousePage";
 import { AutomationPage } from "@/features/automation/AutomationPage";
 import { SchedulesPage } from "@/features/schedules/SchedulesPage";
@@ -27,7 +27,8 @@ import { WordsPage } from "@/features/words/WordsPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { useAuthStatus, useVersion } from "@/lib/queries";
 import { hasRuntimeToken } from "@/lib/bootstrap";
-import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
+import { clearOperator, operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
+import { Skeleton } from "@/components/ui";
 
 /* ------------------------------------------------------------------ *
  * 左侧导航（与路由一一对应）
@@ -64,12 +65,10 @@ const NAV: SidebarNavGroup[] = [
 function Shell() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { data: status } = useAuthStatus();
-  const guest = useAuthGuardStore((state) => state.guest);
   const operatorIdentity = useOperatorIdentity();
-  const versionQuery = useVersion(true, hasRuntimeToken());
+  const { data: status } = useAuthStatus(Boolean(operatorIdentity));
+  const versionQuery = useVersion(Boolean(operatorIdentity), hasRuntimeToken());
   const notifiedVersion = useRef<string | null>(null);
-  useAutoUnlock();
 
   useEffect(() => {
     const version = versionQuery.data;
@@ -107,7 +106,7 @@ function Shell() {
         brand={{ icon: <BrandMark className="size-4" />, name: "奥皇上品" }}
         account={{
           name: operatorLabel,
-          detail: `${roleLabel} · 妙手${connected ? "已连接" : "未连接"}${guest ? " · 游客模式" : ""}`,
+          detail: `${roleLabel} · 妙手${connected ? "已连接" : "未连接"}`,
         }}
         onAccountClick={() => navigate("/settings")}
         // 标题栏不再放账号/店铺切换：账号和店铺已经挪到「开始处理」旁边，
@@ -117,6 +116,29 @@ function Shell() {
       />
     </>
   );
+}
+
+function RequireSoftwareLogin() {
+  const location = useLocation();
+  const identity = useOperatorIdentity();
+  const session = useOperatorSession(identity?.token ?? null);
+
+  useEffect(() => {
+    if (identity && session.isError) clearOperator();
+  }, [identity, session.isError]);
+
+  if (!identity || identity.mustChangePassword) {
+    return <Navigate to="/unlock" replace state={{ from: location.pathname }} />;
+  }
+  if (session.isLoading) {
+    return <div className="grid min-h-0 flex-1 place-items-center p-8"><Skeleton className="h-24 w-full max-w-[520px]" /></div>;
+  }
+  const current = session.data?.current;
+  if (session.isError || !current || current.id !== identity.id
+    || !["teacher", "admin", "member"].includes(current.role ?? "")) {
+    return <Navigate to="/unlock" replace state={{ from: location.pathname }} />;
+  }
+  return <Outlet />;
 }
 
 /* ------------------------------------------------------------------ *
@@ -156,23 +178,20 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Shell />}>
           <Route index element={<Navigate to="/automation" replace />} />
-          <Route path="automation" element={<AutomationPage />} />
-          <Route path="warehouse" element={<WarehousePage />} />
-          <Route path="schedules" element={<SchedulesPage />} />
-          <Route path="words" element={<WordsPage />} />
-          <Route path="words/*" element={<WordsPage />} />
           <Route path="unlock" element={<UnlockPage />} />
-          {/* 设置页：只从标题栏的身份按钮进（不在左侧导航里占位） */}
-          <Route path="settings" element={<SettingsPage />} />
-
-          {/* 旧地址兼容：老书签/外部链接不再有独立页面，统一回到新板块 */}
-          {/* 采集箱 / 图片翻译 不是页面：前者是自动化页的数据源，
-              后者是处理设置里的开关。旧地址统一回自动化页。 */}
-          <Route path="collect" element={<Navigate to="/automation" replace />} />
-          <Route path="collect-box" element={<Navigate to="/automation" replace />} />
-          <Route path="images" element={<Navigate to="/automation" replace />} />
-          <Route path="carrier" element={<Navigate to="/warehouse" replace />} />
-          <Route path="publish" element={<Navigate to="/schedules" replace />} />
+          <Route element={<RequireSoftwareLogin />}>
+            <Route path="automation" element={<AutomationPage />} />
+            <Route path="warehouse" element={<WarehousePage />} />
+            <Route path="schedules" element={<SchedulesPage />} />
+            <Route path="words" element={<WordsPage />} />
+            <Route path="words/*" element={<WordsPage />} />
+            <Route path="settings" element={<SettingsPage />} />
+            <Route path="collect" element={<Navigate to="/automation" replace />} />
+            <Route path="collect-box" element={<Navigate to="/automation" replace />} />
+            <Route path="images" element={<Navigate to="/automation" replace />} />
+            <Route path="carrier" element={<Navigate to="/warehouse" replace />} />
+            <Route path="publish" element={<Navigate to="/schedules" replace />} />
+          </Route>
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

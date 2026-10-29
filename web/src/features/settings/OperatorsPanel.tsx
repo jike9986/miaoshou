@@ -29,7 +29,6 @@ import { queryKeys } from "@/lib/queryKeys";
 import {
   useCreateOperator,
   useCreateStudent,
-  useInitializeSoftwareCredentials,
   useOperators,
   useRenameOperator,
   useRotateOperator,
@@ -38,7 +37,6 @@ import {
   useResetStudentPassword,
 } from "@/lib/queries";
 import {
-  clearOperator,
   currentOperator,
   LOCAL_OPERATOR_NAME,
   setOperator,
@@ -99,10 +97,6 @@ function IdentityCard({
 }) {
   const identity = useOperatorIdentity();
   const operatorsQuery = useOperators();
-  const initializeCredentials = useInitializeSoftwareCredentials();
-  const [loginUsername, setLoginUsername] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
-  const [credentialsInitialized, setCredentialsInitialized] = useState(false);
   const me = useMemo(() => {
     const list = operatorsQuery.data?.operators ?? [];
     if (!identity) return operatorsQuery.data?.current ?? null;
@@ -110,32 +104,6 @@ function IdentityCard({
   }, [identity, operatorsQuery.data]);
 
   const name = identity?.name ?? LOCAL_OPERATOR_NAME;
-  const canInitializeCredentials = Boolean(
-    me?.hasLoginCredentials === false &&
-      (me.role === "teacher" || me.role === "admin")
-  );
-
-  const submitCredentials = () => {
-    const username = loginUsername.trim();
-    if (!username || loginPassword.length < 8) {
-      toast.error("请填写用户名和至少 8 位密码");
-      return;
-    }
-    initializeCredentials.mutate(
-      { username, password: loginPassword },
-      {
-        onSuccess: () => {
-          setLoginPassword("");
-          setCredentialsInitialized(true);
-          toast.success("软件登录已开通", {
-            description: "可使用此账号密码登录，也可在新设备上登录",
-          });
-        },
-        onError: (error) => toast.error("开通软件登录失败", { description: apiErrorMessage(error) }),
-      }
-    );
-  };
-
   return (
     <Card padding="normal">
       <div className="flex flex-wrap items-center gap-3">
@@ -166,24 +134,10 @@ function IdentityCard({
           <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
             {identity
               ? "你的改动会记在这个名字下，冲突时后端按版本号拦住覆盖。"
-              : `还没设置操作员：所有改动会记在内置的「${LOCAL_OPERATOR_NAME}」名下，多人共用时谁也分不清是谁改的。`}
+              : "请先使用软件账号登录。"}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {identity && (
-            <Button
-              variant="ghost"
-              size="md"
-              onClick={() => {
-                clearOperator();
-                toast.info(`已切换为「${LOCAL_OPERATOR_NAME}」`, {
-                  description: "之后的改动会记在本机名下",
-                });
-              }}
-            >
-              以本机身份继续
-            </Button>
-          )}
           <Button variant="secondary" size="md" icon={<Users />} onClick={onSwitch}>
             切换
           </Button>
@@ -192,48 +146,6 @@ function IdentityCard({
           </Button>
         </div>
       </div>
-      {canInitializeCredentials && (
-        <div className="mt-4 border-t border-border-subtle pt-4">
-          <div className="mb-3">
-            <p className="text-[13px] font-semibold leading-5 text-fg">开通软件登录</p>
-            <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
-              为当前旧 token 身份设置用户名和密码，之后可在新设备登录。
-            </p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
-            <Field label="登录用户名" required>
-              <Input
-                value={loginUsername}
-                autoComplete="username"
-                maxLength={80}
-                onChange={(event) => setLoginUsername(event.currentTarget.value)}
-              />
-            </Field>
-            <Field label="设置密码" required>
-              <Input
-                type="password"
-                value={loginPassword}
-                autoComplete="new-password"
-                maxLength={128}
-                onChange={(event) => setLoginPassword(event.currentTarget.value)}
-              />
-            </Field>
-            <Button
-              loading={initializeCredentials.isPending}
-              disabled={!loginUsername.trim() || loginPassword.length < 8}
-              icon={<KeyRound />}
-              onClick={submitCredentials}
-            >
-              开通登录
-            </Button>
-          </div>
-          {credentialsInitialized && (
-            <p className="mt-2 text-xs leading-[18px] text-success-700" role="status">
-              登录凭据已设置。密码不会保存在此设备，请妥善记录。
-            </p>
-          )}
-        </div>
-      )}
     </Card>
   );
 }
@@ -350,10 +262,7 @@ function SwitchIdentityDialog({
             }}
           />
         </Field>
-        <p className="text-2xs leading-4 text-fg-muted">
-          不想设置身份也可以直接关掉：后端会把你记到内置的「{LOCAL_OPERATOR_NAME}」名下，
-          功能一样能用，只是审计日志里分不清人。
-        </p>
+        <p className="text-2xs leading-4 text-fg-muted">验证通过后才能进入软件功能。</p>
       </div>
     </Dialog>
   );
@@ -856,10 +765,6 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
         )}
       </Card>
 
-      <p className="text-xs leading-[18px] text-fg-muted">
-        提示：没设置操作员时后端把你记到内置的「{LOCAL_OPERATOR_NAME}」名下，功能不受影响；
-        多人共用一台机器时才需要每人一个身份，否则冲突与审计都分不清人。
-      </p>
 
       <CreateOperatorDialog
         open={createOpen}

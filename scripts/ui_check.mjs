@@ -1,10 +1,18 @@
 // 用 CDP 走一遍界面主路径，确认部署后的软件真的能用。
 // Page.captureScreenshot 在这台机器上会卡死，所以只做文本探测 + 断言。
 const CDP_PORT = 9333;
+const BASE = "http://localhost:5173";
 
 async function targets() {
   const r = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`);
   return (await r.json()).filter((t) => t.type === "page");
+}
+
+async function createIsolatedPage() {
+  const pages = await targets();
+  const page = pages.find((item) => item.url?.includes(":5173/")) || pages[0];
+  if (!page?.webSocketDebuggerUrl) throw new Error("没有可用的页面目标");
+  return { page, restoreUrl: page.url };
 }
 
 class Cdp {
@@ -56,9 +64,8 @@ function check(name, ok, detail = "") {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
-  const pages = await targets();
-  if (!pages.length) throw new Error("没有可用的页面目标");
-  const page = pages.find((item) => item.url?.includes("/automation")) || pages[0];
+  const isolated = await createIsolatedPage();
+  const { page } = isolated;
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((res, rej) => {
     ws.addEventListener("open", res, { once: true });
@@ -67,7 +74,8 @@ async function main() {
   const cdp = new Cdp(ws);
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
-  const initialLocation = await cdp.evaluate("location.href");
+  await cdp.send("Page.navigate", { url: `${BASE}/unlock` });
+  await sleep(900);
 
   // --- 1. 页面已挂载 ---
   const title = await cdp.evaluate("document.title");
@@ -77,7 +85,11 @@ async function main() {
   check("React 已挂载", hasRoot);
 
   const text = await cdp.evaluate("document.body.innerText");
-  check("界面有内容", text.length > 200, `${text.length} 字符`);
+  check("界面有内容", text.length > 120, `${text.length} 字符`);
+  const hasOperatorIdentity = await cdp.evaluate(
+    "Boolean(localStorage.getItem('aohuang.operator.token'))"
+  );
+  check("隔离运行态没有软件登录身份", !hasOperatorIdentity);
 
   // --- 2. 侧边栏导航（绝对不许有图片翻译 / 采集箱） ---
   const navs = await cdp.evaluate(`
@@ -100,76 +112,64 @@ async function main() {
   `);
   check("标题栏不含品牌名", !/奥皇上品/.test(titleBar), titleBar.slice(0, 80));
 
-  // --- 4. 逐个路由走一遍，确认不白屏 ---
-  // 只列 App.tsx 里真实存在的路由。旧路径（publish/collect/images/carrier）
-  // 都是 Navigate 重定向，不单独测；settings 走标题栏入口，不在侧边栏。
-  const routes = [
+  // --- 4. 未登录时业务路由必须回到软件账号登录页 ---
+  const guestRoutes = [
     ["/automation", "自动化上品"],
     ["/warehouse", "成品仓库"],
-    ["/schedules", "定时发布"],
-    ["/words", "违规词库"],
+    ["/settings", "设置"],
   ];
-  for (const [href, label] of routes) {
-    const clicked = await cdp.evaluate(`
-      (() => {
-        const a = Array.from(document.querySelectorAll('aside a'))
-          .find(x => (x.getAttribute('href') || '').endsWith(${JSON.stringify(href)}) ||
-                     (x.getAttribute('href') || '') === ${JSON.stringify("#" + href)});
-        if (!a) return false;
-        a.click();
-        return true;
-      })()
-    `);
-    await sleep(1200);
-    const body = await cdp.evaluate("document.body.innerText");
-    const hash = await cdp.evaluate("location.hash");
-    const ok = clicked && body.length > 150 && !/^\s*$/.test(body);
-    check(`路由 ${label} 可进入且不白屏`, ok, `hash=${hash} 文本=${body.length}字符`);
+  async function navigate(path) {
+    await cdp.send("Page.navigate", { url: new URL(path, BASE).href });
+    await sleep(900);
+  }
+  async function readLoginState() {
+    return cdp.evaluate(`(() => {
+      const visible = (element) => Boolean(element && element.getClientRects().length
+        && getComputedStyle(element).visibility !== 'hidden');
+      const username = document.querySelector('input[autocomplete="username"]');
+      const password = document.querySelector('input[autocomplete="current-password"]');
+      const loginButton = Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent.trim() === '登录');
+      const main = document.querySelector('#app-content');
+      return {
+        path: location.pathname,
+        usernameVisible: visible(username),
+        passwordVisible: visible(password),
+        loginVisible: visible(loginButton),
+        mainText: main?.innerText || '',
+        productCards: main?.querySelectorAll('article').length ?? -1,
+        pageHeading: main?.querySelector('h1')?.innerText || '',
+      };
+    })()`);
+  }
+  for (const [path, label] of guestRoutes) {
+    await navigate(path);
+    const state = await readLoginState();
+    const redirected = state.path === "/unlock";
+    const loginVisible = state.usernameVisible && state.passwordVisible && state.loginVisible;
+    const noBusinessContent = state.productCards === 0
+      && !/自动化上品|成品仓库|仓库商品|商品详情/.test(state.mainText);
+    check(
+      `无身份访问 ${label} 重定向到登录页`,
+      redirected,
+      `path=${state.path}`
+    );
+    check(
+      `${label} 路由显示软件登录且无商品内容`,
+      loginVisible && noBusinessContent && state.pageHeading === "软件账号登录",
+      `controls=${loginVisible} cards=${state.productCards} heading=${state.pageHeading}`
+    );
   }
 
-  // --- 5. 仓库页：卡片只显示图 + 标题，且有分页 ---
-  await cdp.evaluate(`
-    (() => {
-      const a = Array.from(document.querySelectorAll('aside a'))
-        .find(x => (x.getAttribute('href') || '').includes('/warehouse'));
-      if (a) a.click();
-    })()
-  `);
-  await sleep(2500);
-  const wh = await cdp.evaluate(`document.body.innerText`);
-  check("仓库页显示商品", /件|商品/.test(wh), wh.slice(0, 120).replace(/\n/g, " "));
-  // 「共 N 件」是统计卡上的总数，是允许的；用户反对的是分页器旁边重复的
-  // 「共 N 条」文案。所以只挡「条」，不挡「件」。
-  const noCount = !/共\s*\d+\s*条/.test(wh);
-  check("分页器没有「共 N 条」", noCount);
-  const imgs = await cdp.evaluate("document.querySelectorAll('img').length");
-  check("仓库页有图片", imgs > 0, `${imgs} 张`);
-
-  // --- 6. 设置页使用当前账号与权限文案 ---
-  const settingsOk = await cdp.evaluate(`
-    (() => {
-      const link = Array.from(document.querySelectorAll('aside a'))
-        .find((item) => (item.getAttribute('href') || '').endsWith('/settings'));
-      if (!link) return false;
-      link.click();
-      return true;
-    })()
-  `);
-  await sleep(1800);
-  const st = await cdp.evaluate("document.body.innerText");
-  check("设置页可进入", settingsOk && /设置/.test(st) && st.length > 60, `${st.length}字符`);
-  check("设置页有账号入口", /账号与权限|账号/.test(st), st.slice(0, 120).replace(/\n/g, " "));
-  check("设置页有关于与更新入口", /关于与更新/.test(st));
-
-  // --- 7. 当前页面的视口矩阵：外层横溢出回归探测 ---
+  // --- 5. 登录页视口矩阵：覆盖窗口尺寸和系统缩放 ---
   const viewportCases = [
-    { width: 1440, height: 900, scale: 1 },
-    { width: 1180, height: 720, scale: 1 },
-    { width: 900, height: 700, scale: 1 },
-    { width: 1440, height: 900, scale: 1.25 },
-    { width: 1440, height: 900, scale: 1.5 },
+    ...[1440, 1180, 900].flatMap((width, index) => {
+      const height = [900, 720, 700][index];
+      return [1, 1.25, 1.5].map((scale) => ({ width, height, scale }));
+    }),
   ];
   try {
+    await navigate("/unlock");
     for (const viewport of viewportCases) {
       await cdp.send("Emulation.setDeviceMetricsOverride", {
         width: viewport.width,
@@ -177,23 +177,33 @@ async function main() {
         deviceScaleFactor: viewport.scale,
         mobile: false,
       });
-      await sleep(150);
-      const layout = await cdp.evaluate(`({
-        width: innerWidth,
-        height: innerHeight,
-        scrollWidth: document.documentElement.scrollWidth,
-        bodyWidth: document.body.scrollWidth
-      })`);
-      const noHorizontalOverflow = layout.scrollWidth <= layout.width && layout.bodyWidth <= layout.width;
+      await sleep(180);
+      const layout = await cdp.evaluate(`(() => {
+        const root = document.querySelector('#root');
+        const main = document.querySelector('#app-content');
+        return {
+          width: innerWidth,
+          height: innerHeight,
+          dpr: devicePixelRatio,
+          documentWidth: document.documentElement.scrollWidth,
+          bodyWidth: document.body.scrollWidth,
+          rootRight: root?.getBoundingClientRect().right ?? Infinity,
+          mainRight: main?.getBoundingClientRect().right ?? Infinity,
+        };
+      })()`);
+      const noHorizontalOverflow = layout.documentWidth <= layout.width
+        && layout.bodyWidth <= layout.width
+        && layout.rootRight <= layout.width
+        && layout.mainRight <= layout.width
+        && Math.abs(layout.dpr - viewport.scale) < 0.01;
       check(
-        `视口 ${viewport.width}×${viewport.height} @${viewport.scale} 无页面横溢出`,
+        `登录页 ${viewport.width}×${viewport.height} @${viewport.scale} 无外层横溢出`,
         noHorizontalOverflow,
         JSON.stringify(layout)
       );
     }
   } finally {
     await cdp.send("Emulation.clearDeviceMetricsOverride");
-    await cdp.evaluate(`location.href = ${JSON.stringify(initialLocation)}`);
   }
 
   // --- 8. 后端连通性（界面内发起真实请求） ---
@@ -208,6 +218,8 @@ async function main() {
   `, true);
   check("界面能连上后端", apiOk && apiOk.status === 200, JSON.stringify(apiOk));
 
+  await cdp.send("Page.navigate", { url: isolated.restoreUrl });
+  await sleep(200);
   ws.close();
 
   const pass = results.filter((r) => r.ok).length;

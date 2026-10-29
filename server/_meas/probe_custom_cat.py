@@ -259,10 +259,9 @@ def test_source_item_ids() -> None:
 
 # --- 路由层 ---------------------------------------------------------------
 def test_http() -> None:
-    from core.config import get_settings
+    from _probe_auth import teacher_headers
 
-    token = get_settings().local_secret()
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = teacher_headers()
     with TestClient(app) as client:
         base = f"{API_PREFIX}/warehouse"
 

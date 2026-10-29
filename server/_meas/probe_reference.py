@@ -38,7 +38,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api import API_PREFIX, reference  # noqa: E402
 from core import errors  # noqa: E402
-from core.config import get_settings  # noqa: E402
 from db.session import Base, SessionLocal, engine  # noqa: E402
 from main import app  # noqa: E402
 from models.account import Account  # noqa: E402
@@ -536,8 +535,9 @@ def main() -> int:
     Base.metadata.create_all(bind=engine)
     test_routes()
 
-    token = get_settings().local_secret()
-    headers = {"Authorization": f"Bearer {token}"}
+    from _probe_auth import teacher_headers
+
+    headers = teacher_headers()
 
     with TestClient(app) as client:
         seed_account()

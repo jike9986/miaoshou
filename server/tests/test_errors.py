@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -72,10 +73,20 @@ def client(app):
 
 @pytest.fixture(scope="module")
 def auth_headers() -> dict[str, str]:
-    """本地 token：首次调用时会在临时数据目录里生成 secret.key。"""
-    from core.config import get_settings
+    """独立老师 token，避免把首次接管凭据当成业务身份。"""
+    from db.session import SessionLocal, init_db
+    from services import operator_service
 
-    return {"Authorization": f"Bearer {get_settings().local_secret()}"}
+    init_db()
+    db = SessionLocal()
+    try:
+        _operator, token = operator_service.create(
+            db, f"errors-teacher-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_TEACHER)
+        db.commit()
+        return {"Authorization": f"Bearer {token}"}
+    finally:
+        db.close()
 
 
 @pytest.fixture

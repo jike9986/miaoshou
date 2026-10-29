@@ -3,17 +3,10 @@
 学员只能访问本人范围内的数据；老师拥有全局管理能力。`admin` 与 `is_admin`
 为旧数据兼容保留，历史管理员与老师执行相同权限策略。
 
-── 向后兼容（改这里之前先读完这段）──────────────────────────────────
-0.1 版全实例只有一把 `data_dir/secret.key`，所有客户端都拿它当 Bearer。
-0.2 加操作员身份时，**绝不能把旧客户端踢回 401**——用户升级后打开界面
-就该继续能用，不该被要求「重新配置身份」，因为界面上根本没有那个地方。
-
-做法是 `ensure_default()`：首次启动建一个叫「本机」的操作员，
-它的客户端凭据仍是现有 `secret.key`，数据库只保存该凭据的 SHA-256 摘要。于是：
-  · 旧客户端继续发 `Bearer <secret.key>` → 解析成「本机」，一切照旧；
-  · 新客户端发 `X-Operator: 张三` 或某个人的 token → 解析成张三；
-  · 什么都不发 → 仍然是 401（与 0.1 一致，不放松）。
-换句话说：**旧 token 不失效，只是从此有了名字**。
+旧版本只使用 `data_dir/secret.key`，不区分操作员。`ensure_default()` 保留
+「本机」记录用于旧数据归属与一次性首次接管，但本机令牌不再是业务身份。
+接管时该记录会被停用，软件会创建独立老师账号并发放个人令牌；历史商品和发布
+记录继续归属「本机」，不会被追溯性地算到老师名下。
 """
 from __future__ import annotations
 
@@ -136,15 +129,12 @@ def require_role(operator: Operator, permission: str) -> Operator:
     return operator
 
 
-# --- 默认操作员 -----------------------------------------------------------
+# --- 首次接管身份 ---------------------------------------------------------
 def ensure_default(db: Session) -> Operator:
-    """保证存在「本机」操作员，且它的 token 摘要匹配现有 secret.key。
+    """保证存在用于一次性接管的内置记录，token 摘要匹配本机 secret.key。
 
-    为什么复用 secret.key 而不是生成新 token：
-      老用户机器上的 secret.key 已经在用（客户端存着它），换掉等于把每台
-      客户端踢回未授权。而界面上没有任何「重新填 token」的入口——用户只能
-      删数据目录重来，那会连 355 件商品一起删。用现有 secret 当默认操作员的
-      token，老客户端一个字节都不用改，只是从此被记成「本机」。
+    该记录只允许 `/auth/initialize-credentials` 使用本机 secret 启动接管；业务
+    API 不接受这个 token。接管后业务请求改用新老师账号的个人令牌。
 
     幂等：已存在则只做一次「token 摘要与 secret.key 对齐」（用户删过 secret.key
     重生成的情况下，本机操作员的 token 要跟着走，否则旧 token 会永久失效）。
@@ -331,9 +321,13 @@ def serialize(row: Operator) -> dict[str, Any]:
     同时保留 `isAdmin` / `lastSeenAt` 两个同义别名：老调用方按 snake→camel
     直觉取的是后者，改名会静默变成 undefined。
     """
+    display_name = row.name or ""
+    if (display_name == DEFAULT_OPERATOR_NAME
+            and row.username and row.password_hash):
+        display_name = row.username
     return {
         "id": str(row.id),
-        "name": row.name or "",
+        "name": display_name,
         "username": row.username,
         "hasLoginCredentials": bool(row.username and row.password_hash),
         "enabled": bool(row.enabled),
@@ -345,7 +339,8 @@ def serialize(row: Operator) -> dict[str, Any]:
         "lastSeenAt": row.last_seen_at,
         # 内置「本机」：它代表「没设置身份时的默认身份」，界面上不该给它
         # 「停用 / 重置」按钮——停掉它等于让所有老客户端 401。
-        "builtin": (row.name or "") == DEFAULT_OPERATOR_NAME,
+        "builtin": ((row.name or "") == DEFAULT_OPERATOR_NAME
+                    and not (row.username and row.password_hash)),
     }
 
 

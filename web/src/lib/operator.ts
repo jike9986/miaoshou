@@ -10,9 +10,7 @@
 //   · 操作员 token 代表「这台机器上现在是谁在操作」，必须持久化，
 //     否则每次重启都要重新贴一遍对方发来的那串字符。
 //
-// 兼容性红线：**没设置操作员时什么都不注入**。
-// 后端在收不到 X-Operator 时会把操作归到内置的「本机」操作员，
-// 老用户升级后不选身份也照常能用，不会被强制弹窗拦住。
+// 未登录时不注入个人身份；运行时本机 token 只由 api.ts 用于首次接管接口。
 
 import { useSyncExternalStore } from "react";
 
@@ -151,7 +149,7 @@ export function setOperator(identity: {
   emit();
 }
 
-/** 清空身份（「以本机身份继续」） */
+/** 清空本机保存的个人登录身份 */
 export function clearOperator(): void {
   writeItem(OPERATOR_TOKEN_KEY, null);
   writeItem(OPERATOR_ID_KEY, null);

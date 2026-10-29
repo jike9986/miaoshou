@@ -75,18 +75,19 @@ def _digits() -> str:
 
 
 # --- 一、身份解析 ---------------------------------------------------------
-def test_only_secret_key_resolves_to_builtin_operator(db):
-    """向后兼容命门：只带 secret.key 的老客户端必须被解析成「本机」，不是 401。"""
+def test_secret_key_is_not_an_operator_business_identity(db):
+    """本机 secret 只用于首次接管，不得映射成业务操作员。"""
     local = operator_service.ensure_default(db)
     db.commit()
 
-    operator = deps.current_operator(
-        db, authorization=f"Bearer {get_settings().local_secret()}")
-
-    assert operator.name == operator_service.DEFAULT_OPERATOR_NAME
-    # token 与 secret.key 对齐，是老客户端一个字节都不用改的前提
-    assert operator.token == operator_service.hash_token(get_settings().local_secret())
-    assert operator.id == local.id
+    assert local.token == operator_service.hash_token(get_settings().local_secret())
+    with pytest.raises(errors.AppError) as denied:
+        deps.require_token(authorization=f"Bearer {get_settings().local_secret()}", db=db)
+    assert denied.value.status == 401
+    with pytest.raises(errors.AppError) as denied:
+        deps.current_operator(db, authorization=f"Bearer {get_settings().local_secret()}")
+    assert denied.value.status == 401
+    assert local.name == operator_service.DEFAULT_OPERATOR_NAME
 
 
 def test_operator_token_resolves_to_that_person(db):
@@ -132,19 +133,19 @@ def test_operator_display_name_cannot_be_used_as_bearer(db):
     assert info.value.status == 401
 
 
-def test_declared_operator_name_with_shared_secret(db):
-    """`X-Operator` 只报名字时必须另有一个有效凭据，且名字可以百分号编码。
+def test_declared_operator_name_requires_its_own_token(db):
+    """`X-Operator` 只报名字时必须用该操作员自己的 token 证明身份。
 
     HTTP 头只能放 ASCII，中文名只能编码后传（见 deps._declared_operator）；
     这里走的就是前端实际用的那条路。
     """
     name = f"李四-{_suffix()}"
-    row, _token = operator_service.create(db, name)
+    row, token = operator_service.create(db, name)
     db.commit()
 
     operator = deps.current_operator(
         db,
-        authorization=f"Bearer {get_settings().local_secret()}",
+        authorization=f"Bearer {token}",
         x_operator=quote(name),
     )
 
@@ -157,10 +158,11 @@ def test_unknown_declared_operator_is_rejected(db):
 
     静默降级会让审计出现「张三做的事记在本机名下」——比拒绝更糟。
     """
+    _row, token = operator_service.create(db, f"known-{_suffix()}")
     with pytest.raises(errors.AppError) as info:
         deps.current_operator(
             db,
-            authorization=f"Bearer {get_settings().local_secret()}",
+            authorization=f"Bearer {token}",
             x_operator=f"查无此人-{_suffix()}",
         )
 
@@ -206,7 +208,8 @@ def test_last_global_manager_cannot_be_disabled(db):
     管理员临时降级，结束后在 finally 里恢复——被验的是 `disable` 的判定，
     不是库里的现状。
     """
-    local = operator_service.ensure_default(db)
+    local, _token = operator_service.create(
+        db, f"last-manager-{_suffix()}", role=operator_service.ROLE_ADMIN)
     db.commit()
 
     others = [(row.id, row.role, row.is_admin) for row in db.query(Operator).all()

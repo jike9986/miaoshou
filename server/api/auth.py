@@ -3,13 +3,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 from pydantic import BaseModel, Field
 
 from api.deps import (
     AdminDep,
     DbSession,
     OperatorDep,
+    _same_secret,
+    _token_from_headers,
     optional_account,
     require_permission,
     require_writable,
@@ -57,7 +59,8 @@ def login(payload: LoginRequest, db: DbSession) -> dict[str, Any]:
         raise AppError("AUTH_FAILED", "用户名或密码错误", status=401)
     operator, token = result
     db.commit()
-    return {"operator": {"id": str(operator.id), "name": operator.name,
+    return {"operator": {"id": str(operator.id),
+                          "name": operator_service.serialize(operator)["name"],
                           "role": operator_service.role_of(operator)},
             "token": token, "mustChangePassword": operator.must_change_password}
 
@@ -74,20 +77,56 @@ def change_password(payload: ChangePasswordRequest, db: DbSession,
     return {"ok": True, "token": token, "mustChangePassword": False}
 
 
-@router.post("/initialize-credentials")
-def initialize_credentials(payload: InitializeCredentialsRequest, db: DbSession,
-                            operator: OperatorDep) -> dict[str, bool]:
-    if operator.username is not None or operator.password_hash is not None:
+@login_router.post("/initialize-credentials")
+def initialize_credentials(
+    payload: InitializeCredentialsRequest,
+    db: DbSession,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_local_token: str | None = Header(default=None, alias="X-Local-Token"),
+) -> dict[str, Any]:
+    """One-time local takeover: retire the machine identity and create a teacher."""
+    supplied = _token_from_headers(authorization, x_local_token)
+    if not _same_secret(supplied, get_settings().local_secret()):
+        raise errors.AppError(errors.AUTH_REQUIRED,
+                              "首次接管必须使用本机令牌", status=401)
+    builtin = operator_service.ensure_default(db)
+    if builtin.username is not None or builtin.password_hash is not None:
         from core.errors import AppError
         raise AppError("CONFLICT", "登录凭据已初始化", status=409,
                        details={"reason": "credentials_initialized"})
     username = operator_service.normalize_username(payload.username)
     if db.query(Operator).filter(Operator.username == username).one_or_none():
         raise errors.validation("用户名已存在", field="username")
-    operator_service.set_password(db, operator, payload.password, must_change=False,
-                                  username=username)
+
+    # Retire the machine identity without changing its row: existing product and
+    # publish records must keep their original actor instead of becoming teacher work.
+    retired = (db.query(Operator)
+               .filter(Operator.id == builtin.id,
+                       Operator.username.is_(None),
+                       Operator.password_hash.is_(None))
+               .update({Operator.enabled: False,
+                        Operator.is_admin: False,
+                        Operator.role: operator_service.ROLE_MEMBER,
+                        Operator.password_hash: "retired"},
+                       synchronize_session=False))
+    if retired != 1:
+        raise errors.AppError("CONFLICT", "登录凭据已初始化", status=409,
+                              details={"reason": "credentials_initialized"})
+
+    operator, token = operator_service.create(
+        db, payload.username, role=operator_service.ROLE_TEACHER)
+    operator_service.set_password(
+        db, operator, payload.password, must_change=False,
+        username=username)
     db.commit()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "operator": {"id": str(operator.id),
+                     "name": operator_service.serialize(operator)["name"],
+                     "role": operator_service.ROLE_TEACHER},
+        "token": token,
+        "mustChangePassword": False,
+    }
 
 
 @router.post("/connect", summary="连接妙手账号",

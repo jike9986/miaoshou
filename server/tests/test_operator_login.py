@@ -32,15 +32,31 @@ def tokens(client):
             _row, token = operator_service.create(
                 db, f"login-{role}-{uuid.uuid4().hex[:8]}", role=role)
             rows[role] = token
+        _admin, rows[operator_service.ROLE_ADMIN] = operator_service.create(
+            db, f"login-admin-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_ADMIN)
         db.commit()
     finally:
         db.close()
-    rows[operator_service.ROLE_ADMIN] = get_settings().local_secret()
     return rows
 
 
 def auth(tokens, role):
     return {"Authorization": f"Bearer {tokens[role]}"}
+
+
+def test_local_secret_is_not_a_business_identity_before_takeover(client):
+    local = {"Authorization": f"Bearer {get_settings().local_secret()}"}
+    for path in ("/warehouse", "/auth/status", "/system/bootstrap", "/operators"):
+        response = client.get(API + path, headers=local)
+        assert response.status_code == 401, f"{path}: {response.status_code} {response.text}"
+
+    connected = client.post(API + "/auth/connect", json={
+        "appId": "local-key", "appSecret": "local-secret", "autoScan": False,
+    }, headers=local)
+    assert connected.status_code == 401, connected.text
+    assert client.get(API + "/system/health").status_code == 200
+    assert client.get("/api/system/health").status_code == 200
 
 
 def test_teacher_creates_student_and_student_changes_password(client, tokens):
@@ -143,18 +159,40 @@ def test_legacy_token_can_initialize_password_login(client, tokens):
     initialized = client.post(
         API + "/auth/initialize-credentials",
         json={"username": "legacy-admin", "password": "legacy-pass-456"},
-        headers=auth(tokens, "admin"),
+        headers={"Authorization": f"Bearer {get_settings().local_secret()}"},
     )
     assert initialized.status_code == 200, initialized.text
+    assert initialized.json()["operator"]["name"] == "legacy-admin"
+    db = SessionLocal()
+    try:
+        builtin = operator_service.ensure_default(db)
+        assert initialized.json()["operator"]["id"] != str(builtin.id)
+        assert builtin.enabled is False
+        assert builtin.role == operator_service.ROLE_MEMBER
+    finally:
+        db.close()
+    teacher_headers = {"Authorization": f"Bearer {initialized.json()['token']}"}
+    assert client.get(API + "/operators", headers=teacher_headers).status_code == 200
+    assert client.get(API + "/warehouse", headers=teacher_headers).status_code == 200
     login = client.post(API + "/auth/login",
                         json={"username": "LEGACY-ADMIN", "password": "legacy-pass-456"})
     assert login.status_code == 200, login.text
-    assert login.json()["operator"]["role"] == "admin"
-    assert client.get(API + "/operators", headers=auth(tokens, "admin")).json()[
+    assert login.json()["operator"]["role"] == "teacher"
+    assert login.json()["operator"]["name"] == "legacy-admin"
+    login_headers = {"Authorization": f"Bearer {login.json()['token']}"}
+    assert client.get(API + "/operators", headers=login_headers).json()[
         "current"]["hasLoginCredentials"] is True
 
+    local = {"Authorization": f"Bearer {get_settings().local_secret()}"}
+    for path in ("/warehouse", "/auth/status", "/system/bootstrap", "/operators"):
+        assert client.get(API + path, headers=local).status_code == 401
+    again = client.post(API + "/auth/initialize-credentials",
+                        json={"username": "second-teacher", "password": "second-pass-456"},
+                        headers=local)
+    assert again.status_code == 409, again.text
 
-def test_legacy_credential_initialization_rejects_duplicate_username(client):
+
+def test_legacy_credential_initialization_is_one_time(client):
     suffix = uuid.uuid4().hex[:8]
     db = SessionLocal()
     try:
@@ -169,10 +207,10 @@ def test_legacy_credential_initialization_rejects_duplicate_username(client):
     response = client.post(
         API + "/auth/initialize-credentials",
         json={"username": f"taken-{suffix}", "password": "legacy-pass-456"},
-        headers={"Authorization": f"Bearer {legacy_token}"},
+        headers={"Authorization": f"Bearer {get_settings().local_secret()}"},
     )
-    assert response.status_code == 400, response.text
-    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["details"]["reason"] == "credentials_initialized"
 
 
 def test_role_change_keeps_existing_operator_token_valid(client, tokens):
@@ -192,7 +230,7 @@ def test_role_change_keeps_existing_operator_token_valid(client, tokens):
     assert publish.status_code != 403, publish.text
 
 
-def test_operator_list_hides_usernames_from_anonymous_and_members(client, tokens):
+def test_operator_list_requires_personal_identity_and_hides_usernames_from_members(client, tokens):
     suffix = uuid.uuid4().hex[:8]
     created = client.post(
         API + "/operators/students",
@@ -202,11 +240,11 @@ def test_operator_list_hides_usernames_from_anonymous_and_members(client, tokens
     )
     assert created.status_code == 201, created.text
 
-    anonymous = client.get(API + "/operators").json()
-    assert all("username" not in row for row in anonymous["operators"])
-    assert "username" not in anonymous["current"]
-    assert [row["id"] for row in anonymous["operators"]] == [
-        anonymous["current"]["id"]]
+    anonymous = client.get(API + "/operators")
+    assert anonymous.status_code == 401
+    local = client.get(API + "/operators", headers={
+        "Authorization": f"Bearer {get_settings().local_secret()}"})
+    assert local.status_code == 401
 
     member = client.get(API + "/operators", headers=auth(tokens, "member")).json()
     assert all("username" not in row for row in member["operators"])

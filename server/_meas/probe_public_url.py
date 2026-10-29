@@ -271,8 +271,9 @@ from main import app  # noqa: E402
 
 db.commit()
 
-token = settings.local_secret()
-headers = {"Authorization": f"Bearer {token}"}
+from _probe_auth import teacher_headers
+
+headers = teacher_headers()
 base = f"{API_PREFIX}/images/jobs"
 
 with TestClient(app) as client:

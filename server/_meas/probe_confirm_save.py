@@ -30,7 +30,7 @@ def main() -> int:
     import main as app_main
     from db.session import SessionLocal, init_db
     from fastapi.testclient import TestClient
-    from core.config import get_settings
+    from _probe_auth import teacher_headers
 
     routes = [(getattr(r, "path", ""), sorted(getattr(r, "methods", []) or []))
               for r in app_main.app.routes]
@@ -46,7 +46,7 @@ def main() -> int:
     db.commit()
     db.close()
 
-    headers = {"Authorization": f"Bearer {get_settings().local_secret()}"}
+    headers = teacher_headers()
     client = TestClient(app_main.app)
     url = "/api/v1/warehouse/confirm-save"
 

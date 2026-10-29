@@ -145,10 +145,9 @@ def test_db() -> None:
 
 
 def test_http() -> None:
-    from core.config import get_settings
+    from _probe_auth import teacher_headers
 
-    token = get_settings().local_secret()
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = teacher_headers()
     with TestClient(app) as client:
         base = f"{API_PREFIX}/size-charts"
 

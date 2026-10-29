@@ -14,7 +14,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Integer, cast, func, or_, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -665,8 +665,18 @@ def _successful_automation_product_ids(db: Session):
     return (db.query(AutomationRunItem.product_id)
             .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
             .join(Product, Product.id == AutomationRunItem.product_id)
+            .join(PublishLog, PublishLog.id == cast(
+                AutomationRunItem.publish_result["publishLogId"].as_string(), Integer))
             .filter(
                 AutomationRunItem.process_status == "succeeded",
+                AutomationRunItem.publish_status == "succeeded",
+                AutomationRunItem.publish_result["platformStatus"].as_string() == "success",
+                PublishLog.status == "success",
+                PublishLog.account_id == AutomationRun.account_id,
+                PublishLog.product_id == AutomationRunItem.product_id,
+                PublishLog.detail_id == AutomationRunItem.detail_id,
+                PublishLog.shop_id == AutomationRun.shop_id,
+                PublishLog.batch_id == AutomationRunItem.publish_result["batchId"].as_string(),
                 Product.draft_verified_revision == Product.revision,
                 AutomationRun.account_id == Product.account_id,
                 AutomationRunItem.detail_id == Product.detail_id,

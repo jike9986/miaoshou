@@ -50,17 +50,10 @@ def require_token(
 ) -> str:
     """校验访问令牌：Authorization: Bearer 或 X-Local-Token，二者取其一。
 
-    认两种凭据，顺序不能颠倒：
-      1. **本机 secret.key** —— 老客户端、单机用户、Electron 主进程都只带它。
-         必须先判它，且判定逻辑与 0.1 逐字一致（`compare_digest`），这样
-         老版本客户端升级后一个字节都不用改。
-      2. **某个操作员的 token** —— 多人共用一台服务器时每人一把。表里查得到
-         且未被停用就放行。
+    仅接受个人操作员 token。本机 secret.key 只可用于首次设置老师登录，
+    不得作为业务身份。
 
-    为什么操作员 token 必须在这里也认：`api/__init__.py` 把所有业务路由挂在
-    `Depends(require_token)` 这一道门上，`current_operator` 只是门后的「翻译成人」。
-    如果这扇门只认 secret.key，那每人一个 token 的设计就是个摆设——发出去的
-    token 连第一个业务请求都进不来（旧实现就是这个 bug，多人一用就 401）。
+    这道门与 `current_operator` 都要求个人 token，防止本机令牌绕过软件登录。
 
     停用的操作员在这里就拒：`resolve` 不看 enabled，`require_enabled` 才拦，
     否则「停用」只是界面上的一个标记，被停的人照样能改数据。
@@ -72,13 +65,11 @@ def require_token(
                               status=401)
     expected = get_settings().local_secret()
     if _same_secret(supplied, expected):
-        if get_settings().shared_mode:
-            raise errors.AppError(
-                errors.AUTH_REQUIRED,
-                "多人共享模式必须使用个人操作员令牌",
-                status=401,
-            )
-        return supplied
+        raise errors.AppError(
+            errors.AUTH_REQUIRED,
+            "本机令牌仅可用于首次设置老师登录；业务请求必须使用个人账号登录",
+            status=401,
+        )
     operator = operator_service.resolve(db, supplied)
     if operator is not None:
         operator_service.require_enabled(operator)
@@ -90,27 +81,17 @@ def require_token(
 def _authenticate(db: Session, supplied: str) -> Operator:
     """把一串凭据解析成操作员；解析不出就按 401/403 拒。
 
-    解析顺序刻意是「先查表、再认 secret.key」：
+    仅从操作员表解析个人 token；本机 secret 只用于一次性首次接管：
       1. 表里有这个 token → 就是那个人（每人一个 token 的正常路径）；
-      2. 表里没有，但它等于 `secret.key` → 说明是「本机」操作员还没建出来
-         （全新库、或用户删过 data_dir 里的库但留着 secret.key）。
-         这里现建一次再解析，老客户端才不会因为「表是空的」被踢回 401。
-         这条是 0.2 升级的向后兼容命门，见 operator_service.ensure_default。
-      3. 都不是 → 401 TOKEN_INVALID（与 0.1 的判定完全一致）。
+      2. token 不存在 → 401 TOKEN_INVALID。
     """
-    if _same_secret(supplied, get_settings().local_secret()) and get_settings().shared_mode:
+    if _same_secret(supplied, get_settings().local_secret()):
         raise errors.AppError(
             errors.AUTH_REQUIRED,
-            "多人共享模式必须使用个人操作员令牌",
+            "本机令牌不能作为操作员身份，请使用个人账号登录",
             status=401,
         )
     operator = operator_service.resolve(db, supplied)
-    if operator is None:
-        if not _same_secret(supplied, get_settings().local_secret()):
-            raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
-        operator_service.ensure_default(db)
-        db.flush()
-        operator = operator_service.resolve(db, supplied)
     if operator is None:
         raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
     return operator
@@ -149,19 +130,13 @@ def _declared_operator(db: Session, declared: str) -> Operator | None:
 def _require_credential(db: Session, supplied: str, operator: Operator) -> None:
     """Require a credential belonging to the declared operator.
 
-    The local secret may assert another identity only in single-user mode, where it
-    remains the trusted machine credential. Shared mode requires per-operator tokens.
+    Only the account owner's own bearer token may assert that identity.
     """
     if not supplied:
         raise errors.AppError(errors.AUTH_REQUIRED,
                               "缺少访问令牌：请带上 Authorization: Bearer <token>",
                               status=401)
     authenticated = _authenticate(db, supplied)
-    if _same_secret(supplied, get_settings().local_secret()):
-        if get_settings().shared_mode:
-            raise errors.AppError(errors.FORBIDDEN,
-                                  "多人共享模式不能使用本机令牌切换身份", status=403)
-        return
     if authenticated.id != operator.id:
         raise errors.AppError(errors.FORBIDDEN,
                               "操作员身份与访问令牌不匹配", status=403)
@@ -180,10 +155,8 @@ def current_operator(
       · `Authorization: Bearer <某人的 token>` —— 每人一个 token 的正路；
       · `X-Operator` 只作为兼容声明，必须由该操作员自己的令牌证明身份。
 
-    三种历史形态都必须照旧能用（0.2 向后兼容的硬要求）：
-      1. 旧客户端只发 `secret.key` → 解析成「本机」，不是 401；
-      2. 发某个人的 token → 就是那个人；
-      3. 什么都不发 → 401 AUTH_REQUIRED，与 0.1 一模一样。
+    业务请求必须由一个有效的个人 token 证明身份；本机 secret 只用于一次性
+    首次接管接口，不会再解析成默认管理员。
     """
     auth_token = _token_from_headers(authorization, x_local_token)
     declared = (x_operator or "").strip()
@@ -269,6 +242,9 @@ def optional_operator(
     declared = (x_operator or "").strip()
     if not declared and not auth_token:
         return None
+    if _same_secret(auth_token, get_settings().local_secret()):
+        raise errors.AppError(errors.AUTH_REQUIRED,
+                              "本机令牌仅可用于首次设置老师登录", status=401)
     if declared:
         operator = _declared_operator(db, declared)
         if operator is None:

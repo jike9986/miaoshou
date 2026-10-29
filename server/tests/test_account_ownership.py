@@ -7,7 +7,6 @@ from fastapi.testclient import TestClient
 
 from api import reference
 from api import system as system_api
-from core.config import get_settings
 from core.errors import AppError
 from db.session import SessionLocal, init_db
 from main import app
@@ -34,7 +33,10 @@ def identities(client):
     del client
     db = SessionLocal()
     try:
-        admin = operator_service.ensure_default(db)
+        builtin = operator_service.ensure_default(db)
+        admin, admin_token = operator_service.create(
+            db, f"owner-admin-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_ADMIN)
         first, first_token = operator_service.create(
             db, f"owner-a-{uuid.uuid4().hex[:8]}", role=operator_service.ROLE_MEMBER)
         second, second_token = operator_service.create(
@@ -60,8 +62,8 @@ def identities(client):
             "unbound_token": unbound_token,
             "teacher_id": teacher.id,
             "teacher_token": teacher_token,
-            "admin_token": get_settings().local_secret(),
-            "admin_id": admin.id,
+            "admin_token": admin_token,
+            "admin_id": builtin.id,
         }
     finally:
         db.close()

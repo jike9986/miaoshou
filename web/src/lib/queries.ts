@@ -116,10 +116,11 @@ function compactQuery(query: Record<string, unknown>): QueryParams {
  * §1 认证 / §2 店铺
  * ================================================================== */
 
-export function useAuthStatus(): UseQueryResult<AuthStatus> {
+export function useAuthStatus(enabled = true): UseQueryResult<AuthStatus> {
   return useQuery({
     queryKey: queryKeys.auth.status(),
     queryFn: () => api.get<AuthStatus>("/auth/status"),
+    enabled,
     staleTime: 10_000,
   });
 }
@@ -148,13 +149,13 @@ export function useChangeSoftwarePassword(): UseMutationResult<
 }
 
 export function useInitializeSoftwareCredentials(): UseMutationResult<
-  { ok: true },
+  SoftwareLoginResponse,
   Error,
   { username: string; password: string }
 > {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (body) => api.post<{ ok: true }, typeof body>("/auth/initialize-credentials", body),
+    mutationFn: (body) => api.post<SoftwareLoginResponse, typeof body>("/auth/initialize-credentials", body),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.operators.all });
       void client.invalidateQueries({ queryKey: queryKeys.auth.all });

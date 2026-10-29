@@ -158,10 +158,9 @@ def test_derived_sync(db, account) -> None:
 
 # --- 路由层 ---------------------------------------------------------------
 def test_http() -> None:
-    from core.config import get_settings
+    from _probe_auth import teacher_headers
 
-    token = get_settings().local_secret()
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = teacher_headers()
     base = f"{API_PREFIX}/warehouse"
 
     # 上游守卫：任何一次妙手调用都算失败（改图片不该碰上游）

@@ -38,14 +38,28 @@ export function resolveApiBase(): string {
 function isDefaultApiTarget(): boolean {
   if (typeof window === "undefined") return true;
   if (getSavedApiBase()) return false;
-  if (new URLSearchParams(window.location.search).get("apiBase")) return false;
   if (window.__AOHUANG_API_BASE__) return false;
   if (import.meta.env.VITE_API_BASE) return false;
-  return true;
+  const bootBase = window.__DSH_BOOT__?.apiBase?.replace(/\/+$/, "");
+  const queryBase = new URLSearchParams(window.location.search).get("apiBase")?.replace(/\/+$/, "");
+  if (!bootBase && !queryBase) return true;
+  if (bootBase && (!queryBase || queryBase === bootBase)) {
+    try {
+      const host = new URL(bootBase).hostname;
+      return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
-function requestToken(): string | null {
-  return operatorToken() ?? (isDefaultApiTarget() ? resolveToken() : null);
+function requestToken(path?: string): string | null {
+  if (operatorToken()) return operatorToken();
+  if (path === "/auth/initialize-credentials" && isDefaultApiTarget()) {
+    return resolveToken();
+  }
+  return null;
 }
 
 /** token 来源：preload 注入的内存值（api.md §0.2，不落 localStorage） */
@@ -263,7 +277,7 @@ async function request<T, B = unknown>(
   const { query, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal, idempotencyKey } = options;
 
   const isSoftwareLogin = method === "POST" && path === "/auth/login";
-  const token = isSoftwareLogin ? null : requestToken();
+  const token = isSoftwareLogin ? null : requestToken(path);
   if (!isSoftwareLogin && !token) {
     throw new ApiError({
       code: "BOOT_MISSING",

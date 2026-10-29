@@ -11,7 +11,7 @@ import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage, resolveApiBase } from "@/lib/api";
 import { getSavedApiBase, saveApiBase } from "@/lib/serverAddress";
-import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword, useInitializeSoftwareCredentials } from "@/lib/queries";
 import { clearOperator, setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
 import {
@@ -44,7 +44,8 @@ export interface AccountSwitcherProps {
 }
 
 export function AccountSwitcher({ compact = false, className }: AccountSwitcherProps = {}) {
-  const { data: status } = useAuthStatus();
+  const identity = useOperatorIdentity();
+  const { data: status } = useAuthStatus(Boolean(identity));
   const connect = useConnectAccount();
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const setCurrentShopId = useSessionStore((state) => state.setCurrentShopId);
@@ -161,7 +162,8 @@ export function UnlockPage() {
   const appIdField = useId();
   const secretField = useId();
 
-  const { data: status, isLoading, isError, error, refetch, isFetching } = useAuthStatus();
+  const existingIdentity = useOperatorIdentity();
+  const { data: status, isLoading, isError, error, refetch, isFetching } = useAuthStatus(Boolean(existingIdentity));
   const connect = useConnectAccount();
 
   const [appId, setAppId] = useState("");
@@ -169,8 +171,9 @@ export function UnlockPage() {
   const [showSecret, setShowSecret] = useState(false);
   const [rememberName, setRememberName] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
-  const existingIdentity = useOperatorIdentity();
-  const [accountMode, setAccountMode] = useState(existingIdentity?.mustChangePassword ?? false);
+  const [accountMode, setAccountMode] = useState(
+    existingIdentity?.mustChangePassword ?? !existingIdentity
+  );
 
   const connected = status?.connected ?? false;
   const accounts = useMemo(() => status?.accounts ?? [], [status?.accounts]);
@@ -188,6 +191,18 @@ export function UnlockPage() {
       navigate(redirectTo, { replace: true });
     }
   }, [connected, navigate, redirectTo, location.state]);
+
+  if (!existingIdentity) {
+    return (
+      <>
+        <PageHeader title="软件账号登录" />
+        <PageContent width="form">
+          <ServerAddressControl />
+          <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} allowInitialize />
+        </PageContent>
+      </>
+    );
+  }
 
   const submit = (): void => {
     const next: FormErrors = {};
@@ -496,7 +511,11 @@ function ServerAddressControl() {
   );
 }
 
-function SoftwareAccountPanel({ redirectTo, onBack }: { redirectTo: string; onBack: () => void }) {
+function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
+  redirectTo: string;
+  onBack: () => void;
+  allowInitialize?: boolean;
+}) {
   const usernameId = useId();
   const passwordId = useId();
   const currentId = useId();
@@ -504,6 +523,7 @@ function SoftwareAccountPanel({ redirectTo, onBack }: { redirectTo: string; onBa
   const identity = useOperatorIdentity();
   const queryClient = useQueryClient();
   const login = useSoftwareLogin();
+  const initialize = useInitializeSoftwareCredentials();
   const change = useChangeSoftwarePassword();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -511,6 +531,9 @@ function SoftwareAccountPanel({ redirectTo, onBack }: { redirectTo: string; onBa
   const [newPassword, setNewPassword] = useState("");
   const [mustChange, setMustChange] = useState(identity?.mustChangePassword ?? false);
   const [error, setError] = useState<string | null>(null);
+  const [initializing, setInitializing] = useState(false);
+  const [bootstrapUsername, setBootstrapUsername] = useState("");
+  const [bootstrapPassword, setBootstrapPassword] = useState("");
   const navigate = useNavigate();
 
   const submitLogin = () => {
@@ -525,6 +548,23 @@ function SoftwareAccountPanel({ redirectTo, onBack }: { redirectTo: string; onBa
           void queryClient.invalidateQueries();
           navigate(redirectTo, { replace: true });
         }
+      },
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
+  const submitInitialize = () => {
+    setError(null);
+    if (!bootstrapUsername.trim() || bootstrapPassword.length < 8) {
+      setError("请填写用户名，并设置至少 8 个字符的密码");
+      return;
+    }
+    initialize.mutate({ username: bootstrapUsername.trim(), password: bootstrapPassword }, {
+      onSuccess: (result) => {
+        setOperator({ token: result.token, id: result.operator.id, name: result.operator.name,
+          role: result.operator.role, mustChangePassword: result.mustChangePassword });
+        void queryClient.invalidateQueries();
+        navigate(redirectTo, { replace: true });
       },
       onError: (reason) => setError(apiErrorMessage(reason)),
     });
@@ -549,9 +589,14 @@ function SoftwareAccountPanel({ redirectTo, onBack }: { redirectTo: string; onBa
 
   return (
     <Card className="w-full" padding="normal">
-      <CardTitle>{mustChange ? "设置新密码" : "软件账号登录"}</CardTitle>
+      <CardTitle>{allowInitialize && initializing ? "首次设置老师账号" : mustChange ? "设置新密码" : "软件账号登录"}</CardTitle>
       <div className="mt-4 flex flex-col gap-4">
-        {mustChange ? <>
+        {allowInitialize && initializing ? <>
+          <p className="text-[13px] leading-5 text-fg-secondary">首次接管仅可设置一次。完成后本机令牌失效，后续请使用老师账号登录。</p>
+          <Field label="老师用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={bootstrapUsername} onChange={(e) => setBootstrapUsername(e.currentTarget.value)} /></Field>
+          <Field label="登录密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="new-password" value={bootstrapPassword} onChange={(e) => setBootstrapPassword(e.currentTarget.value)} /></Field>
+          <div className="flex flex-wrap gap-2"><Button loading={initialize.isPending} onClick={submitInitialize}>完成首次接管</Button><Button variant="ghost" onClick={() => setInitializing(false)}>返回登录</Button></div>
+        </> : mustChange ? <>
           <p className="text-[13px] leading-5 text-fg-secondary">首次登录需要先修改初始密码。</p>
           <Field label="当前密码" required htmlFor={currentId}><Input id={currentId} type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.currentTarget.value)} /></Field>
           <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.currentTarget.value)} /></Field>
@@ -559,7 +604,8 @@ function SoftwareAccountPanel({ redirectTo, onBack }: { redirectTo: string; onBa
         </> : <>
           <Field label="用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={username} onChange={(e) => setUsername(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
           <Field label="密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
-          <div className="flex flex-wrap gap-2"><Button loading={login.isPending} onClick={submitLogin}>登录</Button><Button variant="ghost" onClick={onBack}>返回妙手绑定</Button></div>
+          <div className="flex flex-wrap gap-2"><Button loading={login.isPending} onClick={submitLogin}>登录</Button>{!allowInitialize && <Button variant="ghost" onClick={onBack}>返回妙手绑定</Button>}</div>
+          {allowInitialize && <Button variant="ghost" onClick={() => setInitializing(true)}>首次设置老师账号</Button>}
         </>}
         {error && <InlineError>{error}</InlineError>}
       </div>

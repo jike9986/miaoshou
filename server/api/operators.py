@@ -32,7 +32,6 @@ from api.deps import (
     AdminDep,
     DbSession,
     OperatorDep,
-    OptionalOperatorDep,
     require_password_change_complete,
     require_permission,
     require_writable,
@@ -126,21 +125,18 @@ class OperatorPatchRequest(CamelModel):
 
 @router.get("", summary="操作员列表（不含 token）")
 def list_operators(db: DbSession,
-                   operator: OptionalOperatorDep = None) -> dict[str, Any]:
+                   operator: OperatorDep) -> dict[str, Any]:
     """名单 + 当前身份。
 
-    `current` 是**这次请求**解析出来的身份：不带任何凭据时它是「本机」
-    （`ensure_default` 保证它存在），所以老客户端也能拿到一个合法的 current。
-    注意这里对停用的身份不报错——界面要靠它显示「已被停用」徽标。
+    `current` 是这次请求由个人 token 解析出来的身份。停用的身份仍可读，
+    以便界面显示停用状态；业务写接口会在其它依赖中拒绝它。
     """
     current = operator
     if current is None:
         current = operator_service.ensure_default(db)
         db.flush()
-    can_manage_accounts = bool(
-        operator is not None
-        and operator_service.role_of(operator) in {
-            operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER})
+    can_manage_accounts = operator_service.role_of(operator) in {
+        operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}
     current_data = operator_service.serialize(current)
     if can_manage_accounts:
         rows = operator_service.list_all(db)

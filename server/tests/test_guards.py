@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -21,7 +23,7 @@ from core import errors
 from core.config import get_settings
 from core.constants import NEAR_LIMIT_RATIO, WAREHOUSE_MAX_ITEMS
 from db.session import SessionLocal, init_db
-from services import category_service, warehouse_service
+from services import category_service, operator_service, warehouse_service
 
 
 # --- fixture --------------------------------------------------------------
@@ -55,7 +57,15 @@ def client(_schema):
 
 @pytest.fixture()
 def auth_headers(_schema):
-    return {"Authorization": f"Bearer {get_settings().local_secret()}"}
+    db = SessionLocal()
+    try:
+        _operator, token = operator_service.create(
+            db, f"guard-test-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_TEACHER)
+        db.commit()
+        return {"Authorization": f"Bearer {token}"}
+    finally:
+        db.close()
 
 
 # --- 1. 仓库上限：提示而不是静默删除 --------------------------------------

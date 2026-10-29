@@ -36,10 +36,10 @@ from api.deps import (
 
 API_PREFIX = "/api/v1"
 
-# 全部业务路由统一要求本地 token；health 在 system.py 里单独放行（见 main.py）
+# 全部业务路由统一要求个人操作员 token；health 与登录/首次接管单独放行。
 router = APIRouter()
 # 两道依赖，职责分开：
-#   require_token     —— 门禁：这把凭据能不能进（本机 secret.key 或某个人的 token）
+#   require_token     —— 门禁：这把个人凭据能不能进
 #   current_operator  —— 翻译：这把凭据是谁，顺带拦掉已停用的身份
 # 两个都挂在这里而不是让每个路由自己写，是因为「声明了身份却不被解析」会
 # 变成最糟的一种 bug：审计里把张三做的事记到本机名下，人却以为记对了。
@@ -69,11 +69,14 @@ _guarded.include_router(words.alias_router)
 router.include_router(operators.router)
 router.include_router(operators.audit_router)
 
-# system 里的 health 需要免鉴权，因此单独挂载
+# system 里的 health 需要免鉴权，因此单独挂载；其余 system API 要求个人身份。
 router.include_router(system.health_router)
 router.include_router(auth.login_router)
 router.include_router(_guarded)
-router.include_router(system.router, dependencies=[Depends(require_token)])
+router.include_router(system.router, dependencies=[
+    Depends(require_token), Depends(current_operator),
+    Depends(require_password_change_complete),
+])
 
 
 def health_aliases() -> list[str]:

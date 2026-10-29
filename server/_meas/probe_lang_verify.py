@@ -140,8 +140,9 @@ def test_language() -> None:
 
 # --- 2. 图片密钥验证入口 --------------------------------------------------
 def test_image_verify() -> None:
-    token = get_settings().local_secret()
-    headers = {"Authorization": f"Bearer {token}"}
+    from _probe_auth import teacher_headers
+
+    headers = teacher_headers()
     base = f"{API_PREFIX}/images/verify"
 
     # LOCALAPPDATA 已在文件头指向空目录，临时数据目录里也没有 image-key.txt，
