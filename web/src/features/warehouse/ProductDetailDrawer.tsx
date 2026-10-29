@@ -9,6 +9,7 @@ import { apiErrorMessage } from "@/lib/api";
 import { isConflictBusy, revisionConflictOf, type RevisionConflict } from "@/lib/conflict";
 import type { ImageAnalyzeItem } from "@/lib/queries";
 import { LANGUAGE_NAMES, validateTitle } from "@/lib/constants";
+import { useOperatorIdentity } from "@/lib/operator";
 import { imageStatus, productStatus, publishStatus } from "@/features/shared/status";
 import { RemoteImage } from "@/features/shared/RemoteImage";
 import { ImageJobRow, ImageJobUploadSummary } from "@/features/shared/ImageJobRow";
@@ -49,6 +50,7 @@ import {
 export interface ProductDetailDrawerProps {
   productId: string | null;
   open: boolean;
+  isMember?: boolean;
   onOpenChange: (open: boolean) => void;
   onRequestDelete?: (id: string) => void;
 }
@@ -64,6 +66,7 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 export function ProductDetailDrawer({
   productId,
   open,
+  isMember = false,
   onOpenChange,
   onRequestDelete,
 }: ProductDetailDrawerProps) {
@@ -260,7 +263,9 @@ export function ProductDetailDrawer({
   );
   // 只读模式下后端会拒掉上传（require_writable），按钮直接禁用并说明原因
   const authStatus = useAuthStatus();
-  const canWrite = authStatus.data?.readOnly !== true;
+  const identity = useOperatorIdentity();
+  const memberView = isMember || identity?.role === "member";
+  const canWrite = !memberView && authStatus.data?.readOnly !== true;
 
   useEffect(() => {
     if (!product) return;
@@ -422,7 +427,7 @@ export function ProductDetailDrawer({
       }
       footer={
         <>
-          {onRequestDelete && product && (
+          {canWrite && onRequestDelete && product && (
             <Button
               variant="ghost"
               icon={<Trash2 />}
@@ -438,15 +443,17 @@ export function ProductDetailDrawer({
           >
             关闭
           </Button>
-          <Button
-            variant="primary"
-            icon={<Save />}
-            disabled={!dirty}
-            loading={patch.isPending}
-            onClick={save}
-          >
-            保存修改
-          </Button>
+          {canWrite && (
+            <Button
+              variant="primary"
+              icon={<Save />}
+              disabled={!dirty}
+              loading={patch.isPending}
+              onClick={save}
+            >
+              保存修改
+            </Button>
+          )}
         </>
       }
     >
@@ -540,49 +547,54 @@ export function ProductDetailDrawer({
 
           <div className="flex flex-col gap-3">
             <SectionTitle>标题</SectionTitle>
-            <Field
-              error={titleError}
-              hint="1–255 字符（按字符计，中英文均计 1 个）"
-            >
-              <Textarea
-                value={title}
-                rows={3}
-                maxLength={255}
-                showCount
-                invalid={Boolean(titleError)}
-                onChange={(event) => {
-                  setTitle(event.currentTarget.value);
-                  setTitleError(null);
-                }}
-              />
-            </Field>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                size="sm"
-                icon={<Sparkles />}
-                loading={titlePreview.isPending}
-                onClick={cleanTitle}
-              >
-                按词库清理
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                icon={<CalendarClock />}
-                loading={titlePreview.isPending}
-                onClick={refreshYears}
-                title="把标题里 2024/2025 这类过时年份换成今年；型号与尺码不动"
-              >
-                刷新年份
-              </Button>
-              <span className="text-2xs text-fg-muted">
-                只把清理结果填回上面，确认后点「保存」；只改本地，不回写妙手
-              </span>
-            </div>
+            {canWrite ? (
+              <>
+                <Field error={titleError} hint="1–255 字符（按字符计，中英文均计 1 个）">
+                  <Textarea
+                    value={title}
+                    rows={3}
+                    maxLength={255}
+                    showCount
+                    invalid={Boolean(titleError)}
+                    onChange={(event) => {
+                      setTitle(event.currentTarget.value);
+                      setTitleError(null);
+                    }}
+                  />
+                </Field>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<Sparkles />}
+                    loading={titlePreview.isPending}
+                    onClick={cleanTitle}
+                  >
+                    按词库清理
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<CalendarClock />}
+                    loading={titlePreview.isPending}
+                    onClick={refreshYears}
+                    title="把标题里 2024/2025 这类过时年份换成今年；型号与尺码不动"
+                  >
+                    刷新年份
+                  </Button>
+                  <span className="text-2xs text-fg-muted">
+                    只把清理结果填回上面，确认后点「保存」；只改本地，不回写妙手
+                  </span>
+                </div>
+              </>
+            ) : (
+              <p className="rounded-sm border border-border-subtle bg-canvas-inset/50 px-3 py-2 text-sm leading-5 text-fg">
+                {product.title || "（无标题）"}
+              </p>
+            )}
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className={cn("grid gap-3", canWrite && "sm:grid-cols-2")}>
             <Field label="平台类目" hint="cid 与类目名由拉取商品时写入，改类目请在仓库批量设置">
               <Input
                 value={product.categoryName ?? "未分类"}
@@ -591,19 +603,25 @@ export function ProductDetailDrawer({
                 readOnly
               />
             </Field>
-            <Field label="自定义分组" hint="移出分组传 null；分组不影响平台类目">
-              <Select
-                value={groupId}
-                onChange={setGroupId}
-                options={[
-                  { value: "", label: "未分组" },
-                  ...(groupsQuery.data?.groups ?? []).map((group) => ({
-                    value: group.id,
-                    label: `${group.name}（${group.count}）`,
-                  })),
-                ]}
-              />
-            </Field>
+            {canWrite ? (
+              <Field label="自定义分组" hint="移出分组传 null；分组不影响平台类目">
+                <Select
+                  value={groupId}
+                  onChange={setGroupId}
+                  options={[
+                    { value: "", label: "未分组" },
+                    ...(groupsQuery.data?.groups ?? []).map((group) => ({
+                      value: group.id,
+                      label: `${group.name}（${group.count}）`,
+                    })),
+                  ]}
+                />
+              </Field>
+            ) : product.group ? (
+              <Field label="自定义分组">
+                <Input value={product.group} disabled readOnly />
+              </Field>
+            ) : null}
           </div>
 
           <Separator />
@@ -768,7 +786,7 @@ export function ProductDetailDrawer({
               </InlineError>
             )}
             {/* 图片翻译页已经并入自动化上品，这里是死链；原地给出可用的检查入口 */}
-            <div className="flex flex-wrap items-center gap-2">
+            {canWrite && <div className="flex flex-wrap items-center gap-2">
               {/* 额度：老版顶栏的「图片翻译（本机 Key）· 今日 3/416」。
                   没有它，用户要等提交失败才知道额度用光了。 */}
               {usage.data && (
@@ -855,8 +873,8 @@ export function ProductDetailDrawer({
                     : ""}
                 </span>
               )}
-            </div>
-            {analyze.data && (
+            </div>}
+            {canWrite && analyze.data && (
               <ul className="flex flex-col gap-1">
                 {analyze.data.items.map((row) => (
                   <li
@@ -897,7 +915,7 @@ export function ProductDetailDrawer({
 
           <Separator />
 
-          <div className="flex items-center gap-2">
+          {canWrite && <div className="flex items-center gap-2">
             <IconButton
               label="删除该商品"
               variant="danger"
@@ -909,7 +927,7 @@ export function ProductDetailDrawer({
             <span className="text-2xs text-fg-muted">
               删除为软删除：图片结果文件会清理，发布记录保留。
             </span>
-          </div>
+          </div>}
 
           {statusHint(product.status)}
         </div>

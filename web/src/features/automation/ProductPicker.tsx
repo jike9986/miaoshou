@@ -42,6 +42,7 @@ const CARD_STATE_CLASS: Record<ItemStage, string> = {
   running: "border-info-600/50 bg-info-50/40",
   done: "border-success-600/40 bg-success-50/40",
   failed: "border-danger-600/40 bg-danger-50/40",
+  needs_review: "border-warning-600/40 bg-warning-50/40",
 };
 
 export interface ProductPickerProps {
@@ -277,10 +278,11 @@ export function ProductPicker({
                           "absolute left-1.5 top-1.5 rounded px-1 py-0.5 text-[10px] font-medium leading-3",
                           stage === "running" && "bg-info-600 text-white",
                           stage === "done" && "bg-success-600 text-white",
-                          stage === "failed" && "bg-danger-600 text-white"
+                          stage === "failed" && "bg-danger-600 text-white",
+                          stage === "needs_review" && "bg-warning-600 text-white"
                         )}
                       >
-                        {stage === "running" ? "处理中" : stage === "done" ? "完成" : "失败"}
+                        {stage === "running" ? "处理中" : stage === "done" ? "完成" : stage === "failed" ? "失败" : "待核对"}
                       </span>
                     )}
                   </div>

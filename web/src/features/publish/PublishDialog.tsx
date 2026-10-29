@@ -40,6 +40,8 @@ export interface PublishDialogProps {
   warehouseIds: string[];
   /** 当前店铺（顶部下拉）作为默认目标店铺 */
   defaultShopId: string | null;
+  /** 是否允许把仓库商品认领到采集箱；学员只能发布已认领商品 */
+  allowClaimOnly?: boolean;
   /** 每件商品自己的来源 shopId，用来判断跨店铺发布（要建载体） */
   sourceShopIds?: Record<string, string>;
   connected: boolean;
@@ -51,6 +53,7 @@ export function PublishDialog({
   onOpenChange,
   warehouseIds,
   defaultShopId,
+  allowClaimOnly = true,
   sourceShopIds,
   connected,
   onSubmitted,
@@ -72,6 +75,7 @@ export function PublishDialog({
   const [exchangeRate, setExchangeRate] = useState<string>("");
   const [language, setLanguage] = useState<string>("");
   const [claimOnly, setClaimOnly] = useState(false);
+  const effectiveClaimOnly = allowClaimOnly && claimOnly;
   const [allowMismatch, setAllowMismatch] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -186,7 +190,7 @@ export function PublishDialog({
         exchangeRate: exchangeRate.trim() || null,
         language: language || null,
         allowMismatch,
-        claimOnly,
+        claimOnly: effectiveClaimOnly,
         // 三重保险：confirm 必须是字面量 true（api.md §8.1 CONFIRM_REQUIRED）
         confirm: true,
       },
@@ -204,7 +208,7 @@ export function PublishDialog({
             );
           } else {
             toast.success(
-              claimOnly
+              effectiveClaimOnly
                 ? `已认领 ${publishResult.claimed.length} 件进采集箱`
                 : `已提交 ${publishResult.published.length} 件`,
               {
@@ -281,7 +285,7 @@ export function PublishDialog({
               disabled={!confirmed || !shopId || rateInvalid}
               onClick={submit}
             >
-              {claimOnly ? "只认领进采集箱" : `发布 ${warehouseIds.length} 件`}
+              {effectiveClaimOnly ? "只认领进采集箱" : `发布 ${warehouseIds.length} 件`}
             </Button>
           </>
         )
@@ -430,16 +434,18 @@ export function PublishDialog({
             </div>
           )}
 
-          <div className="rounded-md border border-border-subtle p-3">
-            <Switch
-              checked={claimOnly}
-              onChange={setClaimOnly}
-              label="只认领进采集箱，不上架"
-            />
-            <p className="mt-1.5 text-xs leading-[18px] text-fg-muted">
-              勾选后调用 <code className="font-mono">claimOnly: true</code>，商品会进入目标店铺采集箱，仍需人工确认后发布。
-            </p>
-          </div>
+          {allowClaimOnly && (
+            <div className="rounded-md border border-border-subtle p-3">
+              <Switch
+                checked={claimOnly}
+                onChange={setClaimOnly}
+                label="只认领进采集箱，不上架"
+              />
+              <p className="mt-1.5 text-xs leading-[18px] text-fg-muted">
+                勾选后调用 <code className="font-mono">claimOnly: true</code>，商品会进入目标店铺采集箱，仍需人工确认后发布。
+              </p>
+            </div>
+          )}
 
           <Separator />
 

@@ -71,7 +71,9 @@ logger = logging.getLogger(__name__)
 def serialize(product: Product, *, account_name: str = "",
               include_payload: bool = False, operator_name: str = "",
               claim: ProductClaim | None = None,
-              operator_id: int | None = None) -> dict[str, Any]:
+              operator_id: int | None = None,
+              member_view: bool = False,
+              publish_log: PublishLog | None = None) -> dict[str, Any]:
     images = product.images if isinstance(product.images, list) else []
     body: dict[str, Any] = {
         "id": str(product.id),
@@ -117,7 +119,15 @@ def serialize(product: Product, *, account_name: str = "",
         "collected": product.collected if isinstance(product.collected, dict) else {},
         "salesLast30": int(product.sales_last_30 or 0),
         "stock": int(product.stock or 0),
-        "status": product.status or "ready",
+        "status": (
+            "published" if member_view and publish_log is not None
+            and publish_log.status == "success" else
+            ("archived" if member_view and product.status == "archived" else
+             ("claimed" if member_view and claim is not None else
+              ("ready" if member_view else (product.status or "ready"))))
+        ),
+        "publishStatus": publish_log.status if member_view and publish_log else None,
+        "publishShopId": publish_log.shop_id if member_view and publish_log else None,
         "skuProperties": product.sku_properties if isinstance(product.sku_properties, list) else [],
     }
     if include_payload:
@@ -138,6 +148,31 @@ def operator_names(db: Session) -> dict[int, str]:
     from models.operator import Operator
 
     return {row.id: (row.name or "") for row in db.query(Operator).all()}
+
+
+def _is_member(db: Session, operator_id: int | None) -> bool:
+    if operator_id is None:
+        return False
+    from services import operator_service
+
+    return operator_service.role_of(operator_service.get(db, operator_id)) == (
+        operator_service.ROLE_MEMBER)
+
+
+def _latest_operator_publish_logs(db: Session, operator_id: int | None,
+                                  product_ids: list[int]
+                                  ) -> dict[int, PublishLog]:
+    if operator_id is None or not product_ids:
+        return {}
+    rows = (db.query(PublishLog)
+            .filter(PublishLog.operator_id == operator_id,
+                    PublishLog.product_id.in_(product_ids))
+            .order_by(PublishLog.requested_at.desc(), PublishLog.id.desc()).all())
+    latest: dict[int, PublishLog] = {}
+    for row in rows:
+        if row.product_id is not None:
+            latest.setdefault(row.product_id, row)
+    return latest
 
 
 def active_query(db: Session):
@@ -179,6 +214,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         raise errors.validation("搜索词不能超过 64 个字符", field="q")
 
     query = active_query(db).filter(Product.automation_result.is_(False))
+    member_view = _is_member(db, operator_id)
     if category_id not in (None, ""):
         cid_value = str(category_id)
         if cid_value.isdigit():
@@ -201,7 +237,40 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         if text.isdigit():
             query = query.filter(Product.account_id == int(text))
     if status:
-        query = query.filter(Product.status == status)
+        if member_view and status == "published":
+            own_success = db.query(PublishLog.id).filter(
+                PublishLog.product_id == Product.id,
+                PublishLog.operator_id == operator_id,
+                PublishLog.status == "success",
+            ).exists()
+            query = query.filter(own_success)
+        elif member_view and status == "claimed":
+            own_claim = db.query(ProductClaim.id).filter(
+                ProductClaim.product_id == Product.id,
+                ProductClaim.owner_operator_id == operator_id,
+                ProductClaim.status == "claimed",
+            ).exists()
+            own_success = db.query(PublishLog.id).filter(
+                PublishLog.product_id == Product.id,
+                PublishLog.operator_id == operator_id,
+                PublishLog.status == "success",
+            ).exists()
+            query = query.filter(own_claim, ~own_success)
+        elif member_view and status == "ready":
+            own_success = db.query(PublishLog.id).filter(
+                PublishLog.product_id == Product.id,
+                PublishLog.operator_id == operator_id,
+                PublishLog.status == "success",
+            ).exists()
+            own_claim = db.query(ProductClaim.id).filter(
+                ProductClaim.product_id == Product.id,
+                ProductClaim.owner_operator_id == operator_id,
+                ProductClaim.status == "claimed",
+            ).exists()
+            query = query.filter(~own_success, ~own_claim,
+                                 Product.status != "archived")
+        else:
+            query = query.filter(Product.status == status)
     if claimed is not None:
         if operator_id is None:
             query = query.filter(Product.claimed.is_(bool(claimed)))
@@ -229,9 +298,12 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
             ProductClaim.owner_operator_id == operator_id,
             ProductClaim.product_id.in_([item.id for item in rows]),
         ).all()}
+    publish_logs = (_latest_operator_publish_logs(
+        db, operator_id, [item.id for item in rows]) if member_view else {})
     items = [serialize(row, account_name=names.get(row.account_id or 0, ""),
                        operator_name=operators.get(row.operator_id or 0, ""),
-                       claim=claims.get(row.id), operator_id=operator_id)
+                       claim=claims.get(row.id), operator_id=operator_id,
+                       member_view=member_view, publish_log=publish_logs.get(row.id))
              for row in rows]
     # stats 按当前列表的 account_id 过滤：多账号共用时，
     # 「已认领」显示的是当前账号的数字，不是全账号加总。
@@ -487,6 +559,7 @@ def stats(db: Session, *, account_id: int | None = None,
     base = active_query(db).filter(Product.automation_result.is_(False))
     if account_id is not None:
         base = base.filter(Product.account_id == account_id)
+    member_view = _is_member(db, operator_id)
     total = base.count()
     return {
         "totalProducts": total,
@@ -497,7 +570,14 @@ def stats(db: Session, *, account_id: int | None = None,
                 ProductClaim.owner_operator_id == operator_id,
             ).exists()).count()
         ),
-        "totalPublished": base.filter(Product.status == "published").count(),
+        "totalPublished": (
+            base.filter(db.query(PublishLog.id).filter(
+                PublishLog.product_id == Product.id,
+                PublishLog.operator_id == operator_id,
+                PublishLog.status == "success",
+            ).exists()).count() if member_view else
+            base.filter(Product.status == "published").count()
+        ),
         # 容量信息一起给出，界面才能在快满时提示。
         # 这是 `trim_overflow` 的替代方案，理由见那个函数的 docstring。
         "maxProducts": WAREHOUSE_MAX_ITEMS,
@@ -558,12 +638,19 @@ def detail(db: Session, ident: Any, *, include_payload: bool = False,
             ProductClaim.product_id == product.id,
             ProductClaim.owner_operator_id == operator_id,
         ).one_or_none()
+    member_view = _is_member(db, operator_id)
+    own_publish_log = (_latest_operator_publish_logs(
+        db, operator_id, [product.id]).get(product.id) if member_view else None)
     body = serialize(product, account_name=names.get(product.account_id or 0, ""),
                      include_payload=include_payload,
                      operator_name=operators.get(product.operator_id or 0, ""),
-                     claim=claim, operator_id=operator_id)
-    history = (db.query(PublishLog).filter(PublishLog.product_id == product.id)
-               .order_by(PublishLog.requested_at.desc()).limit(20).all())
+                     claim=claim, operator_id=operator_id,
+                     member_view=member_view, publish_log=own_publish_log)
+    history_query = db.query(PublishLog).filter(PublishLog.product_id == product.id)
+    if member_view:
+        history_query = history_query.filter(PublishLog.operator_id == operator_id)
+    history = history_query.order_by(
+        PublishLog.requested_at.desc()).limit(20).all()
     jobs = (db.query(ImageJob).filter(ImageJob.product_id == product.id)
             .order_by(ImageJob.created_at.desc()).limit(20).all())
     return {

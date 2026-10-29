@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends
 
 from api import (
     auth,
+    automation_runs,
     batch,
     carrier,
     categories,
@@ -53,7 +54,7 @@ _guarded = APIRouter(dependencies=[
 # 效果等价，且不会在 404（未匹配路径）上白记一笔。
 router.dependencies.append(Depends(track_client))
 
-for _module in (auth, shops, collect_box, warehouse, groups, categories,
+for _module in (auth, automation_runs, shops, collect_box, warehouse, groups, categories,
                 images, publish, schedules, words, carrier, size_charts, titles,
                 sync, batch):
     _guarded.include_router(_module.router)

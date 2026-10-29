@@ -164,7 +164,7 @@ export function saveSettings(settings: AutomationSettings): void {
  * 选品列表筛选
  * ------------------------------------------------------------------ */
 
-export type ListFilter = "all" | "selected" | "pending" | "running" | "done" | "failed";
+export type ListFilter = "all" | "selected" | "pending" | "running" | "done" | "failed" | "needs_review";
 
 export const LIST_FILTER_OPTIONS: Array<{ value: ListFilter; label: string }> = [
   { value: "all", label: "全部" },
@@ -173,10 +173,11 @@ export const LIST_FILTER_OPTIONS: Array<{ value: ListFilter; label: string }> = 
   { value: "running", label: "处理中" },
   { value: "done", label: "已完成" },
   { value: "failed", label: "失败" },
+  { value: "needs_review", label: "待核对" },
 ];
 
 /** 本地处理态（后端没有批次任务表，只能记在当前页面会话里） */
-export type ItemStage = "queued" | "running" | "done" | "failed";
+export type ItemStage = "queued" | "running" | "done" | "failed" | "needs_review";
 
 /**
  * 一件商品实际完成了哪几步。
@@ -221,6 +222,8 @@ export interface RunState {
       只有 failedKeys 时只能看到「失败 N 件」，看不到为什么失败；
       这里留住每件的错误原因，批次跑完仍可回看。 */
   failures: RunFailure[];
+  /** 商品执行情况来自持久化运行记录，需要人工核对的项目数 */
+  needsReview?: number;
 }
 
 export interface RunFailure {

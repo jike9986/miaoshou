@@ -10,6 +10,7 @@ import { Badge, Checkbox, StatusBadge, StatusDot } from "@/components/ui";
 
 export interface ProductCardProps {
   product: Product;
+  isMember?: boolean;
   selected: boolean;
   onToggle: (id: string) => void;
   onOpen?: (product: Product) => void;
@@ -32,7 +33,7 @@ function priceText(product: Product): { symbol: string; amount: string; range: b
   };
 }
 
-export function ProductCard({ product, selected, onToggle, onOpen, index }: ProductCardProps) {
+export function ProductCard({ product, isMember = false, selected, onToggle, onOpen, index }: ProductCardProps) {
   const price = priceText(product);
   const statusMeta = productStatus(product.status);
   const groupName = product.group?.trim();
@@ -134,7 +135,7 @@ export function ProductCard({ product, selected, onToggle, onOpen, index }: Prod
         {product.claimed && (
           <div className="flex items-center gap-1 text-xs text-fg-muted">
             <StatusDot tone="warning" />
-            <span>已认领</span>
+            <span>{isMember ? "我已认领" : "已认领"}</span>
           </div>
         )}
 

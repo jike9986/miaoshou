@@ -94,6 +94,11 @@ export const queryKeys = {
       ["batch", "list", params] as const,
     detail: (id: string) => ["batch", "detail", id] as const,
   },
+  automationRuns: {
+    all: ["automation-runs"] as const,
+    latest: (accountId: string | null, shopId: string | null) =>
+      ["automation-runs", "latest", accountId, shopId] as const,
+  },
   sync: {
     all: ["sync"] as const,
     priceTemplates: (params: { site?: string; name?: string; pageNo?: number }) =>

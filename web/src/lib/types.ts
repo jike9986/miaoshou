@@ -304,6 +304,42 @@ export interface ProcessCollectResult {
   images?: ProcessImagesResult | null;
 }
 
+export interface AutomationRunItemRecord {
+  id: string;
+  key: string;
+  detailId: string;
+  shopId: string;
+  title: string;
+  processStatus: "queued" | "running" | "succeeded" | "failed" | "needs_review";
+  processReason: string;
+  productId: string | null;
+  processResult: { textDone?: boolean; images?: ProcessImagesResult | null };
+  publishStatus: "not_requested" | "queued" | "running" | "succeeded" | "failed" | "needs_review";
+  publishReason: string;
+  publishResult: Record<string, unknown>;
+  updatedAt: number;
+}
+
+export interface AutomationRunRecord {
+  id: string;
+  ownerOperatorId: string;
+  accountId: string;
+  shopId: string;
+  status: "queued" | "running" | "needs_review" | "partial" | "completed";
+  settings: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  items: AutomationRunItemRecord[];
+}
+
+export interface AutomationRunCreateRequest {
+  accountId: string;
+  shopId: string;
+  settings: Record<string, unknown>;
+  items: Array<{ key: string; detailId: string; shopId: string; title: string }>;
+}
+
 export interface ClaimRequest {
   targetShopId: string;
   accountId?: string | null;

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from models.account import Account
+from models.automation_run import AutomationRun, AutomationRunItem
 from models.batch import Batch, BatchItem
 from models.category import Category
 from models.group import Group
@@ -29,6 +30,8 @@ from models.operator import Operator
 
 __all__ = [
     "Account",
+    "AutomationRun",
+    "AutomationRunItem",
     "Batch",
     "BatchItem",
     "Category",

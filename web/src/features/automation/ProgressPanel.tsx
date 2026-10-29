@@ -161,8 +161,14 @@ export function ProgressPanel({
       </dl>
 
       <p className="mt-3 text-2xs leading-4 text-fg-muted">
-        批次进度保留在当前页面；重开页面会回到「等待开始」。
+        运行记录已保存；待处理项目可继续，状态不确定的项目需先核对。
       </p>
+
+      {(run.needsReview ?? 0) > 0 && (
+        <p className="mt-2 rounded-md border border-warning-600/20 bg-warning-50 px-2.5 py-1.5 text-2xs leading-4 text-warning-700">
+          {formatCount(run.needsReview ?? 0)} 项状态待核对，不会自动重跑
+        </p>
+      )}
 
       {run.failed > 0 && (
         <div className="mt-3 border-t border-border-subtle pt-3">

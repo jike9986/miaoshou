@@ -24,6 +24,7 @@ from schemas.requests import (
     ProductPatch,
 )
 from services import (
+    account_service,
     audit_service,
     operator_service,
     price_template,
@@ -239,7 +240,15 @@ async def delete_custom_category(request: Request, db: DbSession,
 # --- 货源 offer id 汇总（老版 warehouse.all_source_item_ids）---------------
 # 载体重建要用这批 id 去 1688 抓数据。同样必须排在 /{ident} 之前。
 @router.get("/source-item-ids", summary="仓库商品里出现过的 1688 offer id")
-def source_item_ids(db: DbSession, accountId: str | None = None) -> dict[str, Any]:
+def source_item_ids(db: DbSession, operator: OperatorDep,
+                    accountId: str | None = None) -> dict[str, Any]:
+    if operator_service.role_of(operator) == operator_service.ROLE_MEMBER:
+        if accountId:
+            account_service.require_account(db, accountId)
+        else:
+            account = account_service.current_account(db)
+            # Never expose source identifiers from other members' accounts.
+            accountId = str(account.id) if account is not None else "0"
     ids = warehouse_service.all_source_item_ids(db, account_id=accountId)
     return {"ids": ids, "total": len(ids)}
 

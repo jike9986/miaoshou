@@ -62,10 +62,10 @@ VALID_ROLES = {ROLE_ADMIN, ROLE_TEACHER, ROLE_MEMBER}
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     ROLE_ADMIN: {"*"},
     ROLE_TEACHER: {
-        "process", "publish", "claim", "product_claim", "batch", "schedule",
+        "process", "publish", "publish_claimed", "claim", "product_claim", "batch", "schedule",
         "warehouse", "words", "words.update", "images", "carrier", "account.bind",
     },
-    ROLE_MEMBER: {"warehouse", "words", "product_claim", "account.bind"},
+    ROLE_MEMBER: {"warehouse", "words", "product_claim", "publish_claimed", "account.bind"},
 }
 
 

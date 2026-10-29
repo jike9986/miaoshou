@@ -9,7 +9,13 @@ from fastapi import APIRouter, Query
 from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from api.helpers import parse_bool
 from schemas.requests import PublishRequest
-from services import audit_service, operator_service, publish_service, setting_service
+from services import (
+    account_service,
+    audit_service,
+    operator_service,
+    publish_service,
+    setting_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +39,13 @@ def logs(
     refresh: str | None = None,
     operator: OperatorDep = None,
 ) -> dict[str, Any]:
+    if operator_service.role_of(operator) == operator_service.ROLE_MEMBER:
+        if accountId:
+            account_service.require_account(db, accountId)
+        else:
+            account = account_service.current_account(db)
+            # Never let an unbound member fall back to the global log list.
+            accountId = str(account.id) if account is not None else "0"
     # 默认不在 GET 里打上游（列表要快）；但带 refresh=1 时必须真回源——
     # 否则用户看到的水远是本地快照，平台侧改判永远不会同步过来。
     platform_total: Any = None
@@ -86,7 +99,7 @@ def set_publish_settings(payload: dict[str, Any], db: DbSession,
 
 
 @router.post("", summary="发布（单个/批量，必须 confirm=true）",
-             dependencies=[require_permission("publish")])
+             dependencies=[require_permission("publish_claimed")])
 def publish(payload: PublishRequest, db: DbSession,
             operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)

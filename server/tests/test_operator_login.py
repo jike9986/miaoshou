@@ -179,8 +179,8 @@ def test_role_change_keeps_existing_operator_token_valid(client, tokens):
     assert patched.status_code == 200, patched.text
     read = client.get(API + "/warehouse", headers=bearer)
     assert read.status_code == 200, read.text
-    denied = client.post(API + "/publish", json={}, headers=bearer)
-    assert denied.status_code == 403, denied.text
+    publish = client.post(API + "/publish", json={}, headers=bearer)
+    assert publish.status_code != 403, publish.text
 
 
 def test_operator_list_hides_usernames_from_anonymous_and_members(client, tokens):

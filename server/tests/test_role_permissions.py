@@ -78,7 +78,6 @@ def test_member_can_read_business_pages(client, tokens, path):
     ("POST", "/batch"),
     ("POST", "/schedules"),
     ("POST", "/carrier/links"),
-    ("POST", "/publish"),
     ("POST", "/publish/logs/refresh"),
 ])
 def test_member_cannot_write_business_data(client, tokens, method, path):
@@ -434,6 +433,8 @@ DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/auth/initialize-credentials"),
     # Member claim creation is an intentional owner-scoped write.
     ("POST", "/api/v1/warehouse/{ident}/claim"),
+    # Member publishing is allowed only after publish_service verifies every claim.
+    ("POST", "/api/v1/publish"),
     # 登录是唯一公开的写入路由，认证失败统一返回 401。
     ("POST", "/api/v1/auth/login"),
 }

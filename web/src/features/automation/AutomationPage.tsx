@@ -38,10 +38,17 @@ import {
   useTemplates,
   useWorkflowDefaults,
   useSaveWorkflowDefaults,
+  useCreateAutomationRun,
+  useLatestAutomationRun,
+  useRecoverAutomationRun,
+  useStartAutomationRunItem,
+  useAutomationRunProcessResult,
+  useStartAutomationPublish,
+  useAutomationPublishResult,
 } from "@/lib/queries";
 import { useSizeCharts, pickCharts, pickDefaultUrl, buildDefaultSizeChart } from "@/features/automation/useSizeCharts";
 import { PriceTemplateDialog } from "@/features/warehouse/PriceTemplateDialog";
-import type { CollectBoxItem } from "@/lib/types";
+import type { AutomationRunRecord, CollectBoxItem } from "@/lib/types";
 import { PageContent, PageHeader } from "@/components/layout";
 import {
   Badge,
@@ -207,6 +214,17 @@ export function AutomationPage() {
   // 每件商品完成了哪几步（老版 productStatus 的 textCompleted / imagesCompleted）
   const [progress, setProgress] = useState<Record<string, ItemProgress>>({});
   const [run, setRun] = useState<RunState>(IDLE_RUN);
+  const createRunMutation = useCreateAutomationRun();
+  const latestRunQuery = useLatestAutomationRun(status?.accountId ?? null, currentShopId, connected);
+  const recoverRunMutation = useRecoverAutomationRun();
+  const startRunItemMutation = useStartAutomationRunItem();
+  const recordProcessMutation = useAutomationRunProcessResult();
+  const startPublishMutation = useStartAutomationPublish();
+  const recordPublishMutation = useAutomationPublishResult();
+  const persistentRunId = useRef<string | null>(null);
+  const persistentItems = useRef<Map<string, string>>(new Map());
+  const hydratedRunId = useRef<string | null>(null);
+  const recoveringRunId = useRef<string | null>(null);
   const running = run.phase === "running";
   // 两个开关都关着就没有可执行内容：按钮置灰并说明原因（老版 summary-warning）
   const somethingEnabled = settings.textEnabled || settings.imagesEnabled;
@@ -228,11 +246,93 @@ export function AutomationPage() {
         return items.filter((item) => stages[item.key] === "done");
       case "failed":
         return items.filter((item) => stages[item.key] === "failed");
+      case "needs_review":
+        return items.filter((item) => stages[item.key] === "needs_review");
       case "all":
       default:
         return items;
     }
   }, [filter, items, selectedKeys, stages]);
+
+  const hydrateRun = useCallback((saved: AutomationRunRecord) => {
+    if (hydratedRunId.current === saved.id) return;
+    hydratedRunId.current = saved.id;
+    persistentRunId.current = saved.id;
+    persistentItems.current = new Map(saved.items.map((item) => [item.key, item.id]));
+    const nextSelection = new Map(saved.items.filter((item) => item.processStatus === "queued").map((item) => [item.key, {
+      key: item.key, detailId: item.detailId, shopId: item.shopId, title: item.title,
+    }]));
+    setSelection(nextSelection);
+    const savedSettings = saved.settings;
+    setSettings((current) => ({
+      ...current,
+      ...Object.fromEntries(Object.entries(savedSettings).filter(([key, value]) =>
+        key in current && typeof value === typeof current[key as keyof AutomationSettings])),
+    }));
+    const nextStages: Record<string, ItemStage> = {};
+    const nextProgress: Record<string, ItemProgress> = {};
+    const failures: RunFailure[] = [];
+    let done = 0;
+    let failed = 0;
+    let needsReview = 0;
+    let imageDone = 0;
+    let textDone = 0;
+    for (const item of saved.items) {
+      const stage: ItemStage = item.processStatus === "failed" ? "failed"
+        : item.processStatus === "needs_review" || item.publishStatus === "needs_review" || item.publishStatus === "running" ? "needs_review"
+          : item.processStatus === "running" ? "needs_review"
+            : item.processStatus === "succeeded" ? "done"
+              : "queued";
+      nextStages[item.key] = stage;
+      if (stage === "done" || stage === "failed" || stage === "needs_review") done += 1;
+      if (stage === "failed") failed += 1;
+      if (stage === "needs_review") needsReview += 1;
+      const images = item.processResult.images;
+      if (images) imageDone += images.submitted ?? 0;
+      const textComplete = item.processResult.textDone === true;
+      if (textComplete) textDone += 1;
+      nextProgress[item.key] = {
+        textDone: textComplete,
+        imagesDone: Boolean(images && images.submitted > 0 && images.failed === 0),
+        imageFailures: images?.failed ?? 0,
+      };
+      const reason = item.processReason || item.publishReason;
+      if (stage === "failed" || stage === "needs_review") failures.push({
+        key: item.key, title: item.title, detailId: item.detailId,
+        reason: reason || (stage === "needs_review" ? "处理状态未知，请核对妙手记录后再继续。" : "处理失败"),
+      });
+    }
+    const planned = saved.settings.imagesEnabled === true
+      ? saved.items.length * (Number(saved.settings.mainImageCount ?? 0)
+        + Number(saved.settings.skuImageCount ?? 0) + Number(saved.settings.detailImageCount ?? 0)) : 0;
+    const isInFlight = saved.status === "running";
+    setStages(nextStages);
+    setProgress(nextProgress);
+    setRun({
+      phase: isInFlight || saved.status === "queued" ? "stopped" : "done",
+      total: saved.items.length, done, failed, needsReview,
+      startedAt: saved.createdAt * 1000,
+      endedAt: saved.finishedAt ? saved.finishedAt * 1000 : Date.now(),
+      imageDone, imagePlanned: planned, textDone,
+      stage: needsReview ? `${needsReview} 项待核对` : "已恢复上次运行",
+      failedKeys: failures.map((failure) => failure.key), failures,
+    });
+  }, []);
+
+  useEffect(() => {
+    const saved = latestRunQuery.data?.run;
+    if (running || !saved || hydratedRunId.current === saved.id || recoveringRunId.current === saved.id) return;
+    recoveringRunId.current = saved.id;
+    void (async () => {
+      try {
+        const recovered = (await recoverRunMutation.mutateAsync(saved.id)).run;
+        hydrateRun(recovered);
+      } catch {
+        hydrateRun(saved);
+      }
+      recoveringRunId.current = null;
+    })();
+  }, [latestRunQuery.data?.run, recoverRunMutation, hydrateRun, running]);
 
   const selectVisible = useCallback(() => {
     setSelection((prev) => {
@@ -278,6 +378,54 @@ export function AutomationPage() {
     if (settings.publishEnabled && !shopsQuery.data?.shops.some((shop) => shop.shopId === currentShopId)) {
       toast.warning("当前店铺不可用，请重新选择店铺");
       return;
+    }
+
+    const savedRun = latestRunQuery.data?.run;
+    let durableRun: AutomationRunRecord | null = null;
+    if (persistentRunId.current && savedRun?.id === persistentRunId.current) {
+      const queued = new Set(savedRun.items.filter((item) => item.processStatus === "queued").map((item) => item.key));
+      const previous = new Map(savedRun.items.map((item) => [item.key, item]));
+      if (targets.some((target) => {
+        const item = previous.get(target.key);
+        return item?.processStatus === "needs_review"
+          || item?.publishStatus === "needs_review"
+          || item?.publishStatus === "running";
+      })) {
+        toast.warning("所选商品存在待核对结果，请先核对妙手处理或发布记录");
+        return;
+      }
+      if (targets.some((target) => previous.get(target.key)?.processStatus === "succeeded")) {
+        toast.warning("所选商品已有成功处理记录，请取消已完成商品后再开始新任务");
+        return;
+      }
+      const resumesSavedRun = targets.length > 0 && targets.every((target) => queued.has(target.key));
+      if (resumesSavedRun) {
+        if (settings.publishEnabled && currentShopId !== savedRun.shopId) {
+          toast.warning("此任务目标店铺与顶部当前店铺不同，请切回原店铺后继续");
+          return;
+        }
+        durableRun = savedRun;
+      } else if (targets.some((target) => queued.has(target.key))) {
+        toast.warning("请单独选择上次任务的待处理商品，或取消选择后开始新任务");
+        return;
+      }
+    }
+    if (!durableRun) {
+      const targetShopId = currentShopId ?? targets[0].shopId;
+      try {
+        durableRun = (await createRunMutation.mutateAsync({
+          accountId: status?.accountId ?? "",
+          shopId: targetShopId,
+          settings: { ...settings },
+          items: targets.map(({ key, detailId, shopId, title }) => ({ key, detailId, shopId, title })),
+        })).run;
+      } catch (error) {
+        toast.error(`无法保存任务：${apiErrorMessage(error)}`);
+        return;
+      }
+      persistentRunId.current = durableRun.id;
+      hydratedRunId.current = durableRun.id;
+      persistentItems.current = new Map(durableRun.items.map((item) => [item.key, item.id]));
     }
 
     const imagesPerProduct = settings.mainImageCount + settings.skuImageCount + settings.detailImageCount;
@@ -330,7 +478,12 @@ export function AutomationPage() {
         stage: `处理中：${target.title || target.detailId}`,
       }));
 
+      let processResponseReceived = false;
       try {
+        const runId = persistentRunId.current;
+        const itemId = persistentItems.current.get(target.key);
+        if (!runId || !itemId) throw new Error("任务记录缺少商品明细，已停止以免丢失执行状态");
+        await startRunItemMutation.mutateAsync({ runId, itemId });
         // 串行 await：一件处理完再下一件，避免后端并发写库
         const result = await processItem.mutateAsync({
           detailId: target.detailId,
@@ -345,6 +498,16 @@ export function AutomationPage() {
             mainImageCount: settings.mainImageCount,
             skuImageCount: settings.skuImageCount,
             detailImageCount: settings.detailImageCount,
+          },
+        });
+        processResponseReceived = true;
+        await recordProcessMutation.mutateAsync({
+          runId, itemId, status: "succeeded", productId: result.product?.id ? String(result.product.id) : null,
+          result: {
+            textDone: settings.textEnabled,
+            images: result.images ?? null,
+            saved: result.saved,
+            draftVerified: result.product?.draftVerified,
           },
         });
         // 只有真的提交了翻译任务才算「图片处理完成」。
@@ -374,35 +537,61 @@ export function AutomationPage() {
           if (warehouseId) {
             const pendingImages = (result.images?.submitted ?? 0) > 0;
             if (pendingImages) {
+              const reason = "图片翻译任务仍在处理中，已阻止发布旧图片版本；图片完成后请核对并重新处理发布。";
+              try {
+                await recordPublishMutation.mutateAsync({ runId, itemId, status: "needs_review", reason });
+              } catch {
+                // 恢复接口会把“处理成功、发布仍排队”的项目转为待核对。
+              }
               publishIssues += 1;
               failures.push({
                 key: target.key,
                 title: (target.title || "") + "（等待图片处理）",
                 detailId: target.detailId,
-                reason: "图片翻译任务仍在处理中，已阻止发布旧图片版本。",
+                reason,
               });
             } else {
               setRun((prev) => ({ ...prev, stage: `正式发布：${target.title || target.detailId}` }));
               try {
+                await startPublishMutation.mutateAsync({ runId, itemId });
                 const response = await publish.mutateAsync({
                   items: [{ warehouseId: String(warehouseId) }],
-                  shopId: currentShopId,
+                  shopId: durableRun.shopId,
                   confirm: true,
                   claimOnly: false,
                 });
                 publishSubmitted += response.published.length;
-                if (response.failures.length > 0 || response.published.length === 0) {
+                const accepted = response.published.length > 0;
+                await recordPublishMutation.mutateAsync({
+                  runId, itemId,
+                  status: accepted ? "needs_review" : response.failures.length > 0 ? "failed" : "needs_review",
+                  reason: response.failures.map((item) => item.reason).filter(Boolean).join("；")
+                    || (accepted ? "妙手已受理，等待最终发布回执。" : "妙手未返回可核实的发布结果，请核对发布记录。"),
+                  result: { published: response.published, failures: response.failures },
+                });
+                if (accepted || response.failures.length > 0) {
+                  setStages((prev) => ({
+                    ...prev,
+                    [target.key]: accepted ? "needs_review" : "failed",
+                  }));
+                }
+                if (accepted || response.failures.length > 0) {
                   publishIssues += 1;
                   failures.push({
                     key: target.key,
-                    title: (target.title || "") + "（发布待核对）",
+                    title: (target.title || "") + (accepted ? "（等待发布回执）" : "（发布失败）"),
                     detailId: target.detailId,
-                    reason: response.failures.map((item) => item.reason).filter(Boolean).join("；")
-                      || "妙手没有返回已提交商品明细，请到发布记录核对。",
+                    reason: accepted
+                      ? "妙手已受理发布请求，最终状态以发布记录回执为准。"
+                      : response.failures.map((item) => item.reason).filter(Boolean).join("；")
+                        || "妙手没有返回已提交商品明细，请到发布记录核对。",
                   });
                 }
               } catch (publishError) {
                 const reason = apiErrorMessage(publishError);
+                try {
+                  await recordPublishMutation.mutateAsync({ runId, itemId, status: "needs_review", reason });
+                } catch { /* 保留服务端 running 状态，页面恢复时会转成待核对 */ }
                 publishIssues += 1;
                 failures.push({
                   key: target.key,
@@ -412,12 +601,40 @@ export function AutomationPage() {
                 });
               }
             }
+          } else {
+            const reason = "商品处理结果缺少仓库商品 ID，无法确认发布目标。";
+            try {
+              await recordPublishMutation.mutateAsync({ runId, itemId, status: "needs_review", reason });
+            } catch {
+              // 下次打开时由恢复接口关闭未开始的发布项。
+            }
+            publishIssues += 1;
+            failures.push({
+              key: target.key,
+              title: (target.title || "") + "（发布待核对）",
+              detailId: target.detailId,
+              reason,
+            });
           }
         }
       } catch (error) {
-        failed += 1;
-        failedKeys.push(target.key);
+        const uncertain = processResponseReceived;
+        if (uncertain) {
+          setRun((prev) => ({ ...prev, needsReview: (prev.needsReview ?? 0) + 1 }));
+        } else {
+          failed += 1;
+          failedKeys.push(target.key);
+        }
         const reason = apiErrorMessage(error);
+        const runId = persistentRunId.current;
+        const itemId = persistentItems.current.get(target.key);
+        if (runId && itemId) {
+          try {
+            await recordProcessMutation.mutateAsync({
+              runId, itemId, status: uncertain ? "needs_review" : "failed", reason,
+            });
+          } catch { /* 遗留 running 项在下次打开时会进入待核对 */ }
+        }
         // 留住明细：toast 三秒就没了，失败原因必须能在页面上回看
         failures.push({
           key: target.key,
@@ -425,7 +642,7 @@ export function AutomationPage() {
           detailId: target.detailId,
           reason,
         });
-        setStages((prev) => ({ ...prev, [target.key]: "failed" }));
+        setStages((prev) => ({ ...prev, [target.key]: uncertain ? "needs_review" : "failed" }));
       }
 
       done += 1;
@@ -456,6 +673,11 @@ export function AutomationPage() {
           : "全部完成",
       endedAt: Date.now(),
     }));
+    setSelection((prev) => {
+      const next = new Map(prev);
+      for (const target of targets) next.delete(target.key);
+      return next;
+    });
 
     if (imageFailures > 0) {
       toast.warning(`有 ${imageFailures} 张图没能提交翻译`, {

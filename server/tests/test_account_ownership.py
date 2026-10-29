@@ -9,7 +9,9 @@ from core.config import get_settings
 from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
-from services import account_service, operator_service
+from models.product import Product
+from models.publish_log import PublishLog
+from services import account_service, operator_service, setting_service
 
 API = "/api/v1"
 
@@ -149,6 +151,96 @@ def test_unbound_member_does_not_inherit_legacy_default_account(client, identiti
     assert response.json()["connected"] is False
     assert response.json()["accountId"] is None
     assert response.json()["accounts"] == []
+
+
+def test_member_reads_are_scoped_to_owned_account(client, identities):
+    db = SessionLocal()
+    try:
+        own = (db.query(Account)
+               .filter(Account.owner_operator_id == identities["first_id"])
+               .order_by(Account.last_used.desc().nullslast(), Account.id.desc())
+               .first())
+        if own is None:
+            own = Account(
+                name="read scope own", app_key="read-own-key", app_secret_enc="",
+                owner_operator_id=identities["first_id"], shops="[]", is_default=False,
+            )
+            db.add(own)
+        foreign = Account(
+            name="read scope foreign", app_key="read-foreign-key", app_secret_enc="",
+            owner_operator_id=identities["second_id"], shops="[]", is_default=False,
+        )
+        db.add(foreign)
+        db.flush()
+        own_log = PublishLog(account_id=own.id, detail_id="own-detail",
+                             shop_id="own-shop", title="own publish")
+        foreign_log = PublishLog(account_id=foreign.id, detail_id="foreign-detail",
+                                 shop_id="foreign-shop", title="foreign publish")
+        own_product = Product(
+            warehouse_key=f"scope-own-{uuid.uuid4().hex[:10]}",
+            detail_id="scope-own", shop_id="shop-own", account_id=own.id,
+            payload={"sourceItemId": "190001"},
+        )
+        foreign_product = Product(
+            warehouse_key=f"scope-foreign-{uuid.uuid4().hex[:10]}",
+            detail_id="scope-foreign", shop_id="shop-foreign", account_id=foreign.id,
+            payload={"sourceItemId": "190002"},
+        )
+        db.add_all([own_log, foreign_log, own_product, foreign_product])
+        setting_service.select_template(db, "own-template", account=str(own.id))
+        setting_service.select_template(db, "foreign-template", account=str(foreign.id))
+        db.commit()
+        own_id, foreign_id = own.id, foreign.id
+    finally:
+        db.close()
+
+    member_headers = _headers(identities["first_token"])
+    foreign_logs = client.get(
+        API + "/publish/logs", params={"accountId": str(foreign_id)},
+        headers=member_headers)
+    own_logs = client.get(API + "/publish/logs", headers=member_headers)
+    assert foreign_logs.status_code == 403, foreign_logs.text
+    assert own_logs.status_code == 200, own_logs.text
+    assert "own publish" in {row["title"] for row in own_logs.json()["items"]}
+    assert "foreign publish" not in {
+        row["title"] for row in own_logs.json()["items"]}
+
+    foreign_sources = client.get(
+        API + "/warehouse/source-item-ids", params={"accountId": str(foreign_id)},
+        headers=member_headers)
+    own_sources = client.get(API + "/warehouse/source-item-ids", headers=member_headers)
+    assert foreign_sources.status_code == 403, foreign_sources.text
+    assert own_sources.status_code == 200, own_sources.text
+    assert "190001" in own_sources.json()["ids"]
+    assert "190002" not in own_sources.json()["ids"]
+
+    foreign_templates = client.get(
+        API + "/system/templates", params={"accountId": str(foreign_id)},
+        headers=member_headers)
+    own_templates = client.get(API + "/system/templates", headers=member_headers)
+    foreign_preview = client.post(
+        API + "/system/price-preview",
+        json={"purchaseCny": 10, "weightKg": 1,
+              "accountId": str(foreign_id)},
+        headers=member_headers)
+    assert foreign_templates.status_code == 403, foreign_templates.text
+    assert own_templates.status_code == 200, own_templates.text
+    assert str(foreign_id) not in own_templates.json()["selected"]
+    assert foreign_preview.status_code == 403, foreign_preview.text
+
+    teacher_headers = _headers(identities["teacher_token"])
+    teacher_logs = client.get(API + "/publish/logs", headers=teacher_headers)
+    teacher_sources = client.get(API + "/warehouse/source-item-ids",
+                                 headers=teacher_headers)
+    assert teacher_logs.status_code == 200, teacher_logs.text
+    assert {"own publish", "foreign publish"} <= {
+        row["title"] for row in teacher_logs.json()["items"]}
+    assert {"190001", "190002"} <= set(teacher_sources.json()["ids"])
+    teacher_templates = client.get(API + "/system/templates",
+                                   headers=teacher_headers)
+    assert {str(own_id), str(foreign_id)} <= set(
+        teacher_templates.json()["selected"])
+    assert own_id != foreign_id
 
 
 def test_teacher_must_target_a_student_to_bind_key(client, identities, monkeypatch):

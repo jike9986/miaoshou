@@ -34,6 +34,7 @@ from core.utils import (
 )
 from models.account import Account
 from models.product import Product
+from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
 from services import (
     carrier_service,
@@ -458,9 +459,8 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             operator_id: int | None = None) -> dict[str, Any]:
     """POST /publish。发布不可撤销，所有守卫都在这里。
 
-    `operator_id` 只写进台账的「谁发的」那一列，不参与任何判定。
-    定时任务（schedule_service.run_due）不传，那一栏就是空的——
-    确实没有人点那一下，空着比编一个「系统」用户诚实。
+    学员发布必须由已认领的仓库商品触发，并始终走个人店铺载体流程。
+    定时任务（schedule_service.run_due）不传 operator_id，不属于学员发布。
     """
     if payload.get("confirm") is not True:
         raise errors.AppError(errors.CONFIRM_REQUIRED,
@@ -482,12 +482,39 @@ def publish(db: Session, payload: Mapping[str, Any], *,
 
     account, client = account_client_for(db, payload.get("accountId"))
     target_shop = require_shop(db, account, target_shop_id)
+    from services import operator_service
+
+    operator = operator_service.get(db, operator_id) if operator_id is not None else None
+    member_publish = (operator is not None and operator_service.role_of(operator) ==
+                      operator_service.ROLE_MEMBER)
     # 台账返回里要显示「谁发的」，先取一次名字（一次查询，不逐行查）
     operator_name = ""
     if operator_id is not None:
         operator_name = warehouse_service.operator_names(db).get(int(operator_id), "")
     entries = _resolve_items(db, items)
     claim_only = payload.get("claimOnly") is True
+    if member_publish:
+        if claim_only:
+            raise errors.AppError(errors.FORBIDDEN,
+                                  "学员只能发布已认领的成品商品",
+                                  status=403)
+        if any(not isinstance(item, Mapping) or item.get("warehouseId") in (None, "")
+               for item in items):
+            raise errors.AppError(errors.FORBIDDEN,
+                                  "学员发布必须选择已认领的成品仓库商品",
+                                  status=403)
+        product_ids = [entry["product"].id for entry in entries
+                       if isinstance(entry.get("product"), Product)]
+        claims = (db.query(ProductClaim.product_id)
+                  .filter(ProductClaim.owner_operator_id == operator.id,
+                          ProductClaim.status == "claimed",
+                          ProductClaim.product_id.in_(product_ids)).all()
+                  if product_ids else [])
+        claimed_ids = {row[0] for row in claims}
+        if len(claimed_ids) != len(entries):
+            raise errors.AppError(errors.FORBIDDEN,
+                                  "商品未由当前学员认领，不能发布",
+                                  status=403)
     batch_id = str(payload.get("batchId") or "").strip() or new_batch_id("pub")
     language = payload.get("language")
     language_warning: str | None = None
@@ -502,7 +529,14 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     publish_keys = [product_key(entry["detailId"], target_shop_id)
                     for entry in entries]
 
-    template = _find_template(db, payload.get("template"))
+    template_name = payload.get("template")
+    if member_publish and not str(template_name or "").strip():
+        template_name = setting_service.selected_template_name(db, str(account.id))
+    template = _find_template(db, template_name)
+    if member_publish and template is None:
+        raise errors.AppError(errors.TEMPLATE_INVALID,
+                              "学员发布需要先选择可用的定价模板",
+                              status=422, details={"field": "template"})
     rate = payload.get("exchangeRate")
     if rate not in (None, ""):
         try:
@@ -515,7 +549,8 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         rate = rate_d
     titles = payload.get("titles") if isinstance(payload.get("titles"), dict) else {}
 
-    same_shop = all(str(entry["shopId"]) == str(target_shop_id) for entry in entries)
+    same_shop = (not member_publish and
+                 all(str(entry["shopId"]) == str(target_shop_id) for entry in entries))
     mode = "direct" if same_shop else "carrier"
     warning: str | None = language_warning
     filled_sources: list[int] = []
@@ -648,7 +683,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                               operator_id=operator_id)
             logged.append(row)
         db.flush()
-        if published and not claim_only:
+        if published and not claim_only and not member_publish:
             succeeded = [entries[i] for i in filled_sources] if filled_sources else (
                 _entries_for_ids(entries, published))
             _mark_published(db, succeeded, target_shop_id, account)

@@ -15,6 +15,8 @@ import type {
   AuditLogsResponse,
   AutomationResultsImportResponse,
   AutomationResultsResponse,
+  AutomationRunCreateRequest,
+  AutomationRunRecord,
   AuthConnectRequest,
   AuthConnectResult,
   AuthStatus,
@@ -709,6 +711,94 @@ export function useProcessCollectItem(): UseMutationResult<
       void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
       void client.invalidateQueries({ queryKey: queryKeys.groups.all });
     },
+  });
+}
+
+export function useLatestAutomationRun(accountId: string | null, shopId: string | null,
+                                       enabled = true): UseQueryResult<{ run: AutomationRunRecord | null }> {
+  return useQuery({
+    queryKey: queryKeys.automationRuns.latest(accountId, shopId),
+    queryFn: () => api.get<{ run: AutomationRunRecord | null }>("/automation-runs/latest", {
+      query: { accountId, shopId },
+    }),
+    enabled: Boolean(accountId) && enabled,
+    staleTime: 0,
+  });
+}
+
+function invalidateAutomationRuns(client: ReturnType<typeof useQueryClient>): void {
+  void client.invalidateQueries({ queryKey: queryKeys.automationRuns.all });
+}
+
+export function useCreateAutomationRun(): UseMutationResult<
+  { run: AutomationRunRecord }, Error, AutomationRunCreateRequest
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body) => api.post<{ run: AutomationRunRecord }, AutomationRunCreateRequest>(
+      "/automation-runs", body),
+    onSuccess: () => invalidateAutomationRuns(client),
+  });
+}
+
+export function useRecoverAutomationRun(): UseMutationResult<
+  { run: AutomationRunRecord }, Error, string
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => api.post<{ run: AutomationRunRecord }>(
+      `/automation-runs/${encodeURIComponent(id)}/recover`),
+    onSuccess: () => invalidateAutomationRuns(client),
+  });
+}
+
+export function useStartAutomationRunItem(): UseMutationResult<
+  { run: AutomationRunRecord }, Error, { runId: string; itemId: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId, itemId }) => api.post<{ run: AutomationRunRecord }>(
+      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/start`),
+    onSuccess: () => invalidateAutomationRuns(client),
+  });
+}
+
+export type AutomationItemOutcome = "succeeded" | "failed" | "needs_review";
+
+export function useAutomationRunProcessResult(): UseMutationResult<
+  { run: AutomationRunRecord }, Error,
+  { runId: string; itemId: string; status: AutomationItemOutcome; reason?: string;
+    productId?: string | null; result?: Record<string, unknown> }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId, itemId, ...body }) => api.post<{ run: AutomationRunRecord }>(
+      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/process-result`, body),
+    onSuccess: () => invalidateAutomationRuns(client),
+  });
+}
+
+export function useStartAutomationPublish(): UseMutationResult<
+  { run: AutomationRunRecord }, Error, { runId: string; itemId: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId, itemId }) => api.post<{ run: AutomationRunRecord }>(
+      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/publish-start`),
+    onSuccess: () => invalidateAutomationRuns(client),
+  });
+}
+
+export function useAutomationPublishResult(): UseMutationResult<
+  { run: AutomationRunRecord }, Error,
+  { runId: string; itemId: string; status: AutomationItemOutcome; reason?: string;
+    result?: Record<string, unknown> }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId, itemId, ...body }) => api.post<{ run: AutomationRunRecord }>(
+      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/publish-result`, body),
+    onSuccess: () => invalidateAutomationRuns(client),
   });
 }
 

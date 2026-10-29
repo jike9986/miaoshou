@@ -3,9 +3,10 @@
 // 批次编排不单独占导航项：作为本页第二个 tab 挂在商品列表旁边（后端 /batch 的
 // 输入就是仓库商品的 detailId，放在一起才不用来回跳）。
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Calculator,
   CheckSquare,
@@ -23,9 +24,10 @@ import {
   Zap,
 } from "lucide-react";
 import { cn, formatCount } from "@/lib/utils";
-import { ApiError, apiErrorMessage } from "@/lib/api";
+import { api, ApiError, apiErrorMessage } from "@/lib/api";
 import { LIMITS, toPublishItems } from "@/lib/constants";
 import { listItem } from "@/lib/motion";
+import { useOperatorIdentity } from "@/lib/operator";
 import {
   useAuthStatus,
   useBatchDelete,
@@ -82,12 +84,16 @@ type WarehouseTab = "products" | "batch" | "automation";
 export function WarehousePage() {
   const navigate = useNavigate();
   const reduced = useReducedMotion();
+  const identity = useOperatorIdentity();
+  const isMember = identity?.role === "member";
 
   // tab 记在 URL 上（?tab=batch）：建完批次后 toast 让用户「去批次标签看进度」，
   // 刷新一下回到商品列表会让人以为进度丢了。
   const [searchParams, setSearchParams] = useSearchParams();
   const tabValue = searchParams.get("tab");
-  const tab: WarehouseTab = tabValue === "batch" || tabValue === "automation" ? tabValue : "products";
+  const tab: WarehouseTab = !isMember && (tabValue === "batch" || tabValue === "automation")
+    ? tabValue
+    : "products";
   const setTab = useCallback(
     (value: WarehouseTab) => {
       const next = new URLSearchParams(searchParams);
@@ -99,11 +105,15 @@ export function WarehousePage() {
   );
 
   const query = useWarehouseStore();
+  const clearSelected = query.clearSelected;
+  const queryClient = useQueryClient();
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const { data: auth } = useAuthStatus();
   const connected = auth?.connected ?? false;
-  const operatorsQuery = useOperators({ enabled: tab === "automation" });
-  const isTeacher = ["teacher", "admin"].includes(operatorsQuery.data?.current?.role ?? "");
+  const operatorsQuery = useOperators({ enabled: tab === "automation" && !isMember });
+  const isTeacher = !isMember && (identity?.role
+    ? ["teacher", "admin"].includes(identity.role)
+    : ["teacher", "admin"].includes(operatorsQuery.data?.current?.role ?? ""));
   const automationPage = Number(searchParams.get("automationPage") || "1");
   const automationQuery = useAutomationResults(automationPage, tab === "automation" && isTeacher);
   const importAutomationResults = useImportAutomationResults();
@@ -153,11 +163,32 @@ export function WarehousePage() {
   }, [items]);
 
   const [carrierOpen, setCarrierOpen] = useState(false);
+  const claimSharedProduct = useMutation({
+    mutationFn: async (ids: string[]) => {
+      let claimed = 0;
+      const failures: string[] = [];
+      for (const id of ids) {
+        try {
+          await api.post(`/warehouse/${encodeURIComponent(id)}/claim`);
+          claimed += 1;
+        } catch (error) {
+          failures.push(apiErrorMessage(error));
+        }
+      }
+      return { claimed, failures };
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["warehouse"] });
+    },
+  });
   // 认领到采集箱走 POST /publish + claimOnly=true（老版同样行为：只认领不发布）
   const claimOnly = usePublish();
   const selectedIds = query.selected;
   const selectedCount = selectedIds.length;
   const pageIds = items.map((item) => item.id);
+  const selectedItems = items.filter((item) => selectedIds.includes(item.id));
+  const memberClaimableIds = selectedItems.filter((item) => !item.claimed).map((item) => item.id);
+  const memberPublishableIds = selectedItems.filter((item) => item.claimed).map((item) => item.id);
   // 选中商品各自的当前版本号：批量改分类时带上，任何一件被别人改过就整体回滚
   // 老后端列表不回 revision → 这个 map 是空的 → 请求里不带 expectedRevisions
   const selectedRevisions = useMemo(() => {
@@ -181,9 +212,26 @@ export function WarehousePage() {
     query.selectMany(pageIds);
   }, [allSelectedOnPage, pageIds, query]);
 
+  const claimSelectedForMember = async (): Promise<void> => {
+    const { claimed, failures } = await claimSharedProduct.mutateAsync(memberClaimableIds);
+    if (failures.length > 0) {
+      toast.warning(`已认领 ${claimed} 件，${failures.length} 件失败`, {
+        description: failures[0],
+      });
+    } else {
+      toast.success(`已认领 ${claimed} 件成品`);
+    }
+  };
+
+  useEffect(() => {
+    void queryClient.removeQueries({ queryKey: ["warehouse"] });
+    void queryClient.removeQueries({ queryKey: ["system", "templates"] });
+    clearSelected();
+  }, [identity?.id, identity?.role, clearSelected, queryClient]);
+
   const openPublish = (ids: string[]): void => {
     if (!connected) {
-      toast.warning("发布需要先连接妙手账号");
+      toast.warning(isMember ? "发布前请先绑定你自己的妙手 key" : "发布需要先连接妙手账号");
       navigate("/unlock", { state: { from: "/warehouse" } });
       return;
     }
@@ -277,7 +325,7 @@ export function WarehousePage() {
       />
       {/* 跨店发布辅助：同一个商品发到不同店铺时，需要一张「载体链接」来重建。
           这个名字太技术了，改成用户能懂的说法。 */}
-      <Button
+      {!isMember && <Button
         variant="secondary"
         size="md"
         icon={<Link2 />}
@@ -285,7 +333,7 @@ export function WarehousePage() {
         onClick={() => setCarrierOpen(true)}
       >
         跨店发布链接
-      </Button>
+      </Button>}
     </>
   );
 
@@ -317,8 +365,10 @@ export function WarehousePage() {
           idBase="warehouse"
           items={[
             { value: "products", label: "商品列表", icon: <PackageSearch className="size-3.5" /> },
-            { value: "automation", label: "自动化结果", icon: <Zap className="size-3.5" /> },
-            { value: "batch", label: "批次", icon: <ListChecks className="size-3.5" /> },
+            ...(!isMember ? [
+              { value: "automation", label: "自动化结果", icon: <Zap className="size-3.5" /> },
+              { value: "batch", label: "批次", icon: <ListChecks className="size-3.5" /> },
+            ] as const : []),
           ]}
         />
 
@@ -410,7 +460,7 @@ export function WarehousePage() {
             className="contents"
           >
             {/* 分类栏 */}
-            <CategoryBar
+            {!isMember && <CategoryBar
               categories={facets?.categories ?? []}
               groups={facets?.groups ?? groupsQuery.data?.groups.map((group) => ({
                 id: group.id,
@@ -428,7 +478,7 @@ export function WarehousePage() {
                 setCreateOpen(true);
               }}
               onDeleteGroup={(group) => setDeleteGroupTarget(group)}
-            />
+            />}
 
             {/* 工具栏 */}
             <div className="flex flex-wrap items-center gap-2">
@@ -564,6 +614,7 @@ export function WarehousePage() {
                       >
                         <ProductCard
                           product={product}
+                          isMember={isMember}
                           index={index}
                           selected={selectedIds.includes(product.id)}
                           onToggle={query.toggleSelected}
@@ -585,7 +636,10 @@ export function WarehousePage() {
               // 就是同一数字出现两次，用户明确要求去掉。
               showTotal={false}
               pageSizeOptions={PAGE_SIZE_OPTIONS.map((size) => ({ value: size, label: String(size) }))}
-              onPageChange={query.setPage}
+              onPageChange={(page) => {
+                if (isMember) query.clearSelected();
+                query.setPage(page);
+              }}
               onPageSizeChange={query.setPageSize}
               disabled={listQuery.isFetching}
             />
@@ -612,7 +666,21 @@ export function WarehousePage() {
               },
               onError: (error) => toast.error("加入成品仓库失败", { description: apiErrorMessage(error) }),
             }),
-          }] : [
+          }] : isMember ? [
+          ...(memberClaimableIds.length > 0 ? [{
+            label: claimSharedProduct.isPending
+              ? "正在认领…"
+              : `认领成品 ${memberClaimableIds.length} 件`,
+            icon: <PackageCheck className="size-3.5" />,
+            disabled: claimSharedProduct.isPending,
+            onClick: () => void claimSelectedForMember(),
+          }] : []),
+          ...(memberPublishableIds.length > 0 ? [{
+            label: "发布已认领商品",
+            icon: <Send className="size-3.5" />,
+            onClick: () => openPublish(memberPublishableIds),
+          }] : []),
+        ] : [
           {
             label: "认领到采集箱",
             icon: <Inbox className="size-3.5" />,
@@ -789,7 +857,7 @@ export function WarehousePage() {
         ids={selectedIds}
       />
 
-      <BatchCategoryDialog
+      {!isMember && <BatchCategoryDialog
         open={batchOpen}
         onOpenChange={setBatchOpen}
         ids={selectedIds}
@@ -798,9 +866,9 @@ export function WarehousePage() {
         revisions={hasSelectedRevisions ? selectedRevisions : undefined}
         onRefresh={() => void listQuery.refetch()}
         onDone={() => query.clearSelected()}
-      />
+      />}
 
-      <CreateBatchDialog
+      {!isMember && <CreateBatchDialog
         open={createBatchOpen}
         onOpenChange={setCreateBatchOpen}
         ids={selectedIds}
@@ -811,7 +879,7 @@ export function WarehousePage() {
           // 建完直接把用户带到批次标签，进度就在眼前，不用自己去找
           setTab("batch");
         }}
-      />
+      />}
 
       <ProductDetailDrawer
         productId={detailId}
@@ -825,6 +893,7 @@ export function WarehousePage() {
           setDeleteOpen(true);
           setDetailId(null);
         }}
+        isMember={isMember}
       />
 
       <PublishDialog
@@ -834,6 +903,7 @@ export function WarehousePage() {
         sourceShopIds={sourceShopIds}
         defaultShopId={currentShopId}
         connected={connected}
+        allowClaimOnly={!isMember}
         onSubmitted={() => query.clearSelected()}
       />
     </>

@@ -4,10 +4,17 @@ from __future__ import annotations
 import collections
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
 from api import reference
-from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
+from api.deps import (
+    CredentialsHeader,
+    DbSession,
+    OperatorDep,
+    current_operator,
+    require_permission,
+    require_writable,
+)
 from api.helpers import parse_bool
 from core import errors
 from core.config import get_settings
@@ -17,6 +24,7 @@ from core.constants import (
     SUPPORTED_LANGUAGES,
     UPDATE_HOST_WHITELIST,
 )
+from models.operator import Operator
 from schemas.requests import PricePreviewRequest
 from services import (
     account_service,
@@ -36,6 +44,20 @@ from services.miaoshou import MiaoshouError
 router = APIRouter(prefix="/system", tags=["系统"])
 # 免鉴权路由：Electron 探活必须在拿到 token 之前就能调
 health_router = APIRouter(prefix="/system", tags=["系统"])
+
+
+def _member_account_scope(db: DbSession, operator: Operator | None,
+                          account_id: str | None) -> str:
+    """Resolve a member's requested account before reading per-account settings."""
+    if not isinstance(operator, Operator):
+        return str(account_id or "").strip()
+    if operator_service.role_of(operator) != operator_service.ROLE_MEMBER:
+        return str(account_id or "").strip()
+    if account_id:
+        account_service.require_account(db, account_id)
+        return str(account_id).strip()
+    account = account_service.current_account(db)
+    return str(account.id) if account is not None else "0"
 
 
 @health_router.get("/health", summary="健康检查（无鉴权，供 Electron 探活）")
@@ -346,7 +368,8 @@ def price_defaults(db: DbSession,
 
 
 @router.get("/templates", summary="定价模板列表")
-def templates(db: DbSession, accountId: str | None = None) -> dict[str, Any]:
+def templates(db: DbSession, operator: Operator | None = Depends(current_operator),
+              accountId: str | None = None) -> dict[str, Any]:
     """本地模板库 + 合并视图。
 
     `templates` / `total` / `selected` 是原有字段，一个都不动（前端已在用）。
@@ -365,9 +388,15 @@ def templates(db: DbSession, accountId: str | None = None) -> dict[str, Any]:
             items.append({"name": name, "invalid": True, "error": str(exc)})
             continue
         items.append({"name": name, "template": normalized})
-    account = str(accountId or "").strip()
+    account = _member_account_scope(db, operator, accountId)
+    selected = setting_service.selected_templates(db)
+    if (isinstance(operator, Operator)
+            and operator_service.role_of(operator) == operator_service.ROLE_MEMBER):
+        owned_ids = {row["id"] for row in account_service.account_summaries(db)}
+        selected = {key: value for key, value in selected.items()
+                    if key == "" or key in owned_ids}
     return {"templates": items, "total": len(items),
-            "selected": setting_service.selected_templates(db),
+            "selected": selected,
             "available": setting_service.template_available(db, None,
                                                             account_id=account),
             "selectedName": setting_service.selected_template_name(db, account)}
@@ -375,6 +404,7 @@ def templates(db: DbSession, accountId: str | None = None) -> dict[str, Any]:
 
 @router.get("/templates/available", summary="定价模板合并视图（本地 + 上游）")
 def templates_available(db: DbSession,
+                        operator: Operator | None = Depends(current_operator),
                         site: str | None = None,
                         accountId: str | None = None,
                         refresh: str | None = None,
@@ -390,7 +420,7 @@ def templates_available(db: DbSession,
     """
     from services import sync_service
 
-    account = str(accountId or "").strip()
+    account = _member_account_scope(db, operator, accountId)
     refresh_flag = parse_bool(refresh, "refresh", False)
     upstream, upstream_error = sync_service.upstream_template_rows(
         db, site=site, account_id=account or None, credentials=credentials,
@@ -410,7 +440,8 @@ def templates_available(db: DbSession,
 
 
 @router.post("/price-preview", summary="未入仓商品的定价试算（手填采购价 + 重量）")
-def price_preview(payload: PricePreviewRequest, db: DbSession) -> dict[str, Any]:
+def price_preview(payload: PricePreviewRequest, db: DbSession,
+                  operator: Operator | None = Depends(current_operator)) -> dict[str, Any]:
     """没入仓、没有 skuMap 的商品也能直接算展示价。
 
     `apply_template` 要求完整 item（含 skuMap），未入仓商品套不上；
@@ -454,7 +485,7 @@ def price_preview(payload: PricePreviewRequest, db: DbSession) -> dict[str, Any]
             raise errors.validation("汇率必须大于 0", field="rate", value=str(rate_d))
         rate = rate_d
 
-    account = str(payload.accountId or "").strip()
+    account = _member_account_scope(db, operator, payload.accountId)
     name = str(payload.templateName or "").strip()
     stored = setting_service.price_templates(db)
     pt_defaults = price_template.DEFAULT_TEMPLATE
