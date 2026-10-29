@@ -209,6 +209,35 @@ def test_explicit_role_overrides_legacy_admin_flag(client, tokens):
     assert forbidden.status_code == 403, forbidden.text
 
 
+def test_operator_header_cannot_impersonate_another_operator(client, tokens):
+    response = client.get(
+        API + "/operators",
+        headers={
+            **auth(tokens, "teacher"),
+            "X-Operator": tokens[operator_service.ROLE_MEMBER],
+        },
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_shared_mode_rejects_the_machine_secret(client, tokens, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        deps,
+        "get_settings",
+        lambda: SimpleNamespace(
+            shared_mode=True,
+            local_secret=lambda: tokens[operator_service.ROLE_ADMIN],
+        ),
+    )
+
+    guarded = client.get(API + "/warehouse", headers=auth(tokens, "admin"))
+    assert guarded.status_code == 401, guarded.text
+    identity_probe = client.get(API + "/operators", headers=auth(tokens, "admin"))
+    assert identity_probe.status_code == 401, identity_probe.text
+
+
 # 这些 POST 只计算/识别，不写业务数据，成员可以调用。
 READ_ONLY_POSTS = {
     "/api/v1/warehouse/price-preview",

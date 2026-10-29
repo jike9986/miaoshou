@@ -246,7 +246,7 @@ async function request<T, B = unknown>(
 ): Promise<T> {
   const { query, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal, idempotencyKey } = options;
 
-  const token = resolveToken();
+  const token = operatorToken() ?? resolveToken();
   if (!token) {
     throw new ApiError({
       code: "BOOT_MISSING",
@@ -267,16 +267,11 @@ async function request<T, B = unknown>(
   signal?.addEventListener("abort", onExternalAbort);
 
   const requestId = createRequestId();
-  // 操作员身份：和 Authorization 同一个位置注入，业务代码一行都不用改。
-  // 没设置身份时**不加这个头**——后端会把它记到内置的「本机」操作员名下，
-  // 老用户升级后照常能用（不会被强制选身份）。
-  const operator = operatorToken();
   const finalHeaders: Record<string, string> = {
     Accept: "application/json",
     Authorization: `Bearer ${token}`,
     "X-Client-Version": resolveClientVersion(),
     "X-Request-Id": requestId,
-    ...(operator ? { "X-Operator": operator } : {}),
     ...headers,
   };
   if (body !== undefined) finalHeaders["Content-Type"] = "application/json; charset=utf-8";
@@ -427,7 +422,7 @@ export const api = {
     options: RequestOptions & { fileName?: string } = {}
   ): Promise<T> => {
     const { fileName, headers = {}, timeoutMs = 120_000, signal } = options;
-    const token = resolveToken();
+    const token = operatorToken() ?? resolveToken();
     if (!token) {
       throw new ApiError({
         code: "BOOT_MISSING",
@@ -437,14 +432,12 @@ export const api = {
       });
     }
     const requestId = createRequestId();
-    const operator = operatorToken();
     const finalHeaders: Record<string, string> = {
       Accept: "application/json",
       Authorization: `Bearer ${token}`,
       "X-Client-Version": resolveClientVersion(),
       "X-Request-Id": requestId,
       "Content-Type": file.type || "application/octet-stream",
-      ...(operator ? { "X-Operator": operator } : {}),
       ...(fileName ? { "X-File-Name": encodeURIComponent(fileName) } : {}),
       ...headers,
     };

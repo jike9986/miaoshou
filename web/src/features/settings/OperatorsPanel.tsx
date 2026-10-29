@@ -196,7 +196,7 @@ function SwitchIdentityDialog({
     setBusy(true);
     // 显式带上这串 token 探一次：能拿到 current 就说明它有效
     api
-      .get<OperatorsResponse>("/operators", { headers: { "X-Operator": value } })
+      .get<OperatorsResponse>("/operators", { headers: { Authorization: `Bearer ${value}` } })
       .then((data) => {
         const who = data.current ?? null;
         setOperator({ token: value, id: who?.id ?? null, name: who?.name ?? "操作员" });

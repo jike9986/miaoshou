@@ -72,6 +72,12 @@ def require_token(
                               status=401)
     expected = get_settings().local_secret()
     if _same_secret(supplied, expected):
+        if get_settings().shared_mode:
+            raise errors.AppError(
+                errors.AUTH_REQUIRED,
+                "多人共享模式必须使用个人操作员令牌",
+                status=401,
+            )
         return supplied
     operator = operator_service.resolve(db, supplied)
     if operator is not None:
@@ -92,6 +98,12 @@ def _authenticate(db: Session, supplied: str) -> Operator:
          这条是 0.2 升级的向后兼容命门，见 operator_service.ensure_default。
       3. 都不是 → 401 TOKEN_INVALID（与 0.1 的判定完全一致）。
     """
+    if _same_secret(supplied, get_settings().local_secret()) and get_settings().shared_mode:
+        raise errors.AppError(
+            errors.AUTH_REQUIRED,
+            "多人共享模式必须使用个人操作员令牌",
+            status=401,
+        )
     operator = operator_service.resolve(db, supplied)
     if operator is None:
         if not _same_secret(supplied, get_settings().local_secret()):
@@ -134,19 +146,25 @@ def _declared_operator(db: Session, declared: str) -> Operator | None:
     return None
 
 
-def _require_credential(db: Session, supplied: str) -> None:
-    """只要「声明了是谁」就必须同时带一个有效凭据。
+def _require_credential(db: Session, supplied: str, operator: Operator) -> None:
+    """Require a credential belonging to the declared operator.
 
-    否则 `X-Operator: 张三` 就成了一张万能通行证——谁都能自称任何人，
-    「谁做的能查到」直接退化成「谁做的都能赖」。注意这里校验的是凭据的
-    有效性，**不是**凭据和声明的一致性：本机那把共享 secret.key 依然可以
-    代表任何人（运营共用一个装机实例的常态），只是不能什么都不带。
+    The local secret may assert another identity only in single-user mode, where it
+    remains the trusted machine credential. Shared mode requires per-operator tokens.
     """
     if not supplied:
         raise errors.AppError(errors.AUTH_REQUIRED,
                               "缺少访问令牌：请带上 Authorization: Bearer <token>",
                               status=401)
-    _authenticate(db, supplied)
+    authenticated = _authenticate(db, supplied)
+    if _same_secret(supplied, get_settings().local_secret()):
+        if get_settings().shared_mode:
+            raise errors.AppError(errors.FORBIDDEN,
+                                  "多人共享模式不能使用本机令牌切换身份", status=403)
+        return
+    if authenticated.id != operator.id:
+        raise errors.AppError(errors.FORBIDDEN,
+                              "操作员身份与访问令牌不匹配", status=403)
 
 
 def current_operator(
@@ -157,12 +175,10 @@ def current_operator(
 ) -> Operator:
     """当前操作员：把「谁在操作」解析出来，供审计留痕用。
 
-    **不是权限校验**，`require_token` 仍然是唯一的门禁（且行为一字未改）。
-    这个依赖只是把同一把 token 翻译成「人」，外加两种新写法：
+    这个依赖把已验证的凭据翻译成「人」，并确保声明身份与令牌属于同一人：
 
       · `Authorization: Bearer <某人的 token>` —— 每人一个 token 的正路；
-      · `X-Operator: 张三` 或 `X-Operator: <某人的 token>` —— 前端已经有
-        共享 secret.key、只想声明「现在是我在操作」时用。
+      · `X-Operator` 只作为兼容声明，必须由该操作员自己的令牌证明身份。
 
     三种历史形态都必须照旧能用（0.2 向后兼容的硬要求）：
       1. 旧客户端只发 `secret.key` → 解析成「本机」，不是 401；
@@ -186,9 +202,7 @@ def current_operator(
                 errors.TOKEN_INVALID,
                 f"未知的操作员「{declared[:32]}」：请先在操作员页添加，或改用操作员 token",
                 status=401)
-        if operator.token != declared:
-            # 只报了名字，那么必须另有一个有效凭据（见 _require_credential）
-            _require_credential(db, auth_token)
+        _require_credential(db, auth_token, operator)
     else:
         operator = _authenticate(db, auth_token)
 
@@ -250,8 +264,7 @@ def optional_operator(
                 errors.TOKEN_INVALID,
                 f"未知的操作员「{declared[:32]}」：请先在操作员页添加，或改用操作员 token",
                 status=401)
-        if operator.token != declared:
-            _require_credential(db, auth_token)
+        _require_credential(db, auth_token, operator)
     else:
         operator = _authenticate(db, auth_token)
     # 停用的身份也要能读出来（前端要显示「已被停用」徽标并提示去启用），
