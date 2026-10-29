@@ -692,7 +692,7 @@ HTTP 400。所以 `pageSize=100` 虽然能通过路由层的 `le=100`，仍会�
 | 422 | `TEMPLATE_INVALID` | `template` 指定的模板不存在（`warehouse_service.py:551-555`） |
 | 502 | `UPSTREAM_ERROR` | 上游不可达/拒绝（实测假凭据 → `ConnectError`） |
 
-> 已实现的链路：`shop_detail` 拉详情 → 翻译 → `process_price` 定价 → 违规词清理（remove 类删词、review 类只记录）→ 颜色规范化 → `build_product` 落库 → 主图截断 9 张 → 可选挂分组。
+> 已实现的链路：`shop_detail` 拉详情 → 翻译 → `process_price` 定价 → 扁平违规词库清理（所有启用且命中的词均从标题删除）→ 颜色规范化 → `build_product` 落库 → 主图截断 9 张 → 可选挂分组。
 > **未实现**：老版 `product_workflow.py` 在入仓后还会 `save_shop()` 把草稿写回妙手，新版没有这一步（`grep -n "save_shop" server/services/warehouse_service.py server/api/collect_box.py` 零命中），只写本地库。
 > **前端入口**：已接入。`web/src/lib/queries.ts:450-468` 的 `useProcessCollectItem()`（120s 超时，成功后失效采集箱/仓库/分组三个 query），页面在 `web/src/features/collect-box/CollectBoxPage.tsx:917` 起的单条/批量「处理入仓」表单，字段与本节一致（来源店铺只读、语言、汇率、分组、模板、`save`）。
 
@@ -1858,7 +1858,7 @@ HTTP 503。当前配额见 `GET /images/limits`（实测 `{"limits":{"minute":60
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| action | string | 否 | null | `remove` / `review` |
+| action | string | 否 | null | 仅支持 `remove`；省略时不过滤 |
 | q | string | 否 | null | 词面模糊匹配 |
 | page | integer | 否 | 1 | |
 | pageSize | integer | 否 | 200 | 1–500 |
@@ -1880,9 +1880,11 @@ HTTP 503。当前配额见 `GET /images/limits`（实测 `{"limits":{"minute":60
 }
 ```
 
+词库是全局扁平列表：`action` 固定为 `remove`，`review` 仅为兼容计数字段且始终为 0；传 `action=review` 会返回参数错误。`source` 只说明录入渠道：`seed`（内置）、`import`（批量导入）、`manual`（手动添加），不记录或证明官方规则出处，也不表示适用的站点/市场。当前数据没有规则链接、版本或市场范围，不能据此认定词条已由平台政策核验。
+
 ### 10.2 POST /violation-words
 
-支持单条增删与批量动作，沿用旧 `action` 语义。
+支持单条增删、批量导入/删除和清空。词条只有删除这一种匹配动作；新建与导入时不选择 `review` 分类。
 
 **请求（单条新增）**
 
@@ -1914,20 +1916,17 @@ HTTP 503。当前配额见 `GET /images/limits`（实测 `{"limits":{"minute":60
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
-| action | string | 是 | `add` / `remove` / `import` / `remove-many` / `clear`（**没有 `enable` / `disable`**） |
+| action | string | 是 | `add` / `remove` / `import` / `remove-many` / `clear` |
 | word | string | 条件 | `add`/`remove` 必填；1–64 可见字符（无控制字符） |
 | words | string[] | 条件 | `import`/`remove-many` 必填；1–500，去重 |
-| category | string | 否 | `remove`（默认）/`review` |
+| category | string | 否 | 仅支持 `remove`（默认）；其他值返回参数错误 |
 | mode | string | 否 | `append`（默认）/`replace` |
 | confirm | boolean | 条件 | `clear` 必须 `true` |
 
-**关于 `enabled`：启停有独立接口，且不在 `POST /violation-words` 的 action 里**
+**启停**
 
-- `enabled` 字段存在、列表会返回（`word_service.py:57`），`matcher()` 只取 `enabled=True` 的词参与匹配（`word_service.py:302`）。
-- 启停走独立的 **`PATCH /violation-words/enabled`（§10.3）**，不是这个 POST 的 action。
-- `enable` / `disable` 两个 action 已可用（`WordAction` 已放开为 7 值，`schemas/requests.py:14`；服务层分支 `word_service.py:267-279`）。两者都只翻 `enabled` 位、不删词，返回 `{updated, enabled, missing[], counts}`。实测 `{"action":"disable","word":"<已有词>"}` → 200 `{"updated":1,"enabled":false}`；非法 action → 400。
-- 与 `PATCH /violation-words/enabled` 的区别：PATCH 专用于启停、字段更直白；`POST` 的 enable/disable 是 action 语法的等价入口。两者写的是同一字段。
-- **不要用 `remove-many` 代替停用**：那是删词（`source` 会从 `seed` 变 `manual`、`createdAt` 重置）。停用只翻 `enabled` 位。
+- 通过 **`PATCH /violation-words/enabled`（§10.3）**切换 `enabled`；停用不会删除词条，也不会改变 `source` 或 `createdAt`。
+- `POST /violation-words` 不支持 `enable` / `disable` action；启停不改变词条来源或规则出处，因为库中没有保存规则证据。
 
 **响应 200（`POST /violation-words`）**
 
@@ -1950,13 +1949,12 @@ HTTP 503。当前配额见 `GET /images/limits`（实测 `{"limits":{"minute":60
 | 400 | `VALIDATION_ERROR` | action 非法、word 为空/超长/含控制字符 |
 | 403 | `READ_ONLY_MODE` | |
 | 409 | `DUPLICATE_WORD` | `add` 时词已存在（`details.existing = "remove"`） |
-| 409 | `WORD_CONFLICT` | 同词同时出现在 `remove` 与 `review` |
 | 409 | `CONFLICT_BUSY` | 商品批次运行中，词库不可改 |
-| 422 | `WORD_LIMIT_EXCEEDED` | `remove` 超过 500 条（`details.limit`、`details.current`） |
+| 422 | `WORD_LIMIT_EXCEEDED` | 词库超过 500 条（`details.limit`、`details.current`） |
 
-### 10.3 PATCH /violation-words/enabled（真启停）
+### 10.3 PATCH /violation-words/enabled
 
-只翻 `enabled` 位，**不删词、不改 `source` / `createdAt`**——这才是老版「临时停用、以后还能启用」的语义。路由 `api/words.py:71-81`，服务层 `word_service.set_enabled()`（`:202-233`）。
+只翻 `enabled` 位，不删词、不改 `source` / `createdAt`。停用后该词不参与标题匹配；重新启用后仍按删除词处理。
 
 **请求**
 
@@ -2368,8 +2366,7 @@ const result = await api("/publish", {
 
 ### 16.1 `POST /titles/preview` — 标题清理预览（不写库、不调上游）
 
-直接复用词库的 `word_service.matcher()` + `clean_title()`：`remove` 类词从标题里删掉，
-`review` 类词只记进 `reviewWords` 不改标题。
+直接复用词库的 `word_service.matcher()` + `clean_title()`：所有启用且命中的词都会从标题里删除。响应保留兼容字段 `reviewWords`，当前始终为空数组，不代表存在复核类词条。
 
 **请求**
 

@@ -55,7 +55,7 @@
 | # | 老版能力 | 新版状态 |
 |---|---|---|
 | D1 | 标题翻译（中→马来语） | ✅ 已接入 process（失败降级保留原文） |
-| D2 | 违规词检测 | ✅ remove 类自动删、review 类记录到 payload.violations |
+| D2 | 违规词检测 | ✅ 使用扁平移除词库；所有启用且命中的词都从标题删除，不提供复核分类 |
 | D3 | 类目 AI 匹配 | `POST /categories/sync` + `GET /categories` |
 | D4 | 颜色规范化 | ✅ clean_color 已接入（Y18[beige] → Beige） |
 | D5 | 重量/包装计算 | process 内置 |
@@ -109,6 +109,8 @@
 | H3 | 删除 | `DELETE` |
 | H4 | 启用开关 | enable/disable |
 | H5 | 导入种子词 | `POST /violation-words/seed` |
+
+词库的 `source` 只标记内置、批量导入或手动录入渠道；当前没有官方规则出处和市场适用性证据字段。内置词不等同于经平台政策核验的禁限词清单。
 
 ## I. 系统
 

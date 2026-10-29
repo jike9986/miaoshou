@@ -380,12 +380,12 @@ schedules  1───n publish_logs
 | id | INTEGER | PK | |
 | word | VARCHAR(64) | NOT NULL | 原文 |
 | normalized | VARCHAR(64) | UNIQUE, NOT NULL | `casefold()` 去重键 |
-| action | VARCHAR(8) | NOT NULL DEFAULT 'remove' | `remove` / `review` |
-| source | VARCHAR(16) | NOT NULL DEFAULT 'manual' | `manual` / `import` / `seed` |
+| action | VARCHAR(8) | NOT NULL DEFAULT 'remove' | 当前写入与匹配行为固定为 `remove`；历史 `review` 行在启动时迁移为 `remove` |
+| source | VARCHAR(16) | NOT NULL DEFAULT 'manual' | 录入渠道：`manual` / `import` / `seed`；不是规则出处或适用市场 |
 | enabled | BOOLEAN | NOT NULL DEFAULT 1 | |
 | created_at | REAL | NOT NULL | |
 
-上限 500 条（`action='remove'`）；`remove` 与 `review` 不允许同词（应用层校验 + 唯一索引兜底）。
+上限 500 条。所有启用词条命中后均从标题删除；当前表没有官方政策引用、规则版本或站点/市场范围字段，因此无法证明词条来源经过政策核验或只适用于特定市场。
 
 ### 3.11 settings（键值配置）
 
