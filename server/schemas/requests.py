@@ -212,8 +212,10 @@ class ProcessRequest(CamelModel):
     # 图片处理开关（老版 process_images / imagesEnabled）。
     # 前端勾了「图片」才会提交翻译任务；不传＝不处理，保持原有行为。
     processImages: bool = False
-    # 每件商品提交几张主图去翻译（老版 main-image-count，上限 MAIN_IMAGE_LIMIT）
-    mainImageCount: int = 5
+    # 各类图片分别限制前 N 张；新字段默认 0，旧客户端仍只处理主图。
+    mainImageCount: int = Field(default=5, ge=0, le=9)
+    skuImageCount: int = Field(default=0, ge=0, le=9)
+    detailImageCount: int = Field(default=0, ge=0, le=9)
     # 两道人工复核闸门的确认开关（老版 prepare_shoe 抛错停下等人看）。
     # 默认 False = 遇到需复核的标题/主图就拦下，确认过才放行。
     allowTitleReview: bool = False

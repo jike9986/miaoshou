@@ -7,7 +7,7 @@
 // 工具栏严格一行：搜索 · 筛选 · 每页条数 · 页码 · 翻页 · 全选 · 清空
 // 每页可选 10 / 20 / 50 / 100（后端已放开到 100，向上游翻页凑数）。
 
-import { ScanLine, SearchX, Unplug } from "lucide-react";
+import { RefreshCw, SearchX, Unplug } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CollectBoxItem } from "@/lib/types";
 import { RemoteImage } from "@/features/shared/RemoteImage";
@@ -18,10 +18,8 @@ import {
   Checkbox,
   EmptyState,
   ErrorState,
-  SearchInput,
   Select,
   SkeletonRows,
-  Switch,
 } from "@/components/ui";
 import {
   LIST_FILTER_OPTIONS,
@@ -58,16 +56,12 @@ export interface ProductPickerProps {
   error: unknown;
   visibleCount: number;
   filter: ListFilter;
-  keyword: string;
-  autoScan: boolean;
   selectedKeys: ReadonlySet<string>;
   stages: Record<string, ItemStage>;
   /** 每件完成了哪几步；缺省表示还没开始 */
   progress?: Record<string, ItemProgress>;
   onFilterChange: (filter: ListFilter) => void;
-  onKeywordChange: (keyword: string) => void;
-  onAutoScanChange: (autoScan: boolean) => void;
-  onScan: () => void;
+  onRefresh: () => void;
   onRetry: () => void;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
@@ -89,15 +83,11 @@ export function ProductPicker({
   fetching,
   error,
   filter,
-  keyword,
-  autoScan,
   selectedKeys,
   stages,
   progress,
   onFilterChange,
-  onKeywordChange,
-  onAutoScanChange,
-  onScan,
+  onRefresh,
   onRetry,
   onPageChange,
   onPageSizeChange,
@@ -109,6 +99,7 @@ export function ProductPicker({
 }: ProductPickerProps) {
   const errorMessage =
     error instanceof Error ? error.message : typeof error === "string" ? error : null;
+  const allVisibleSelected = items.length > 0 && items.every((item) => selectedKeys.has(item.key));
 
   return (
     <section
@@ -116,52 +107,33 @@ export function ProductPicker({
         "flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-1",
         className
       )}
-      aria-label="选择要处理的商品"
+      aria-label="采集箱"
     >
       {/* 标题行：只保留「已选 N」提示，其余交给工具栏 */}
       <div className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-border-subtle px-3">
         <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[13px] font-medium leading-5 text-fg">选择要处理的商品</span>
+          <span className="truncate text-[13px] font-medium leading-5 text-fg">采集箱</span>
           {selectedKeys.size > 0 && (
             <Badge variant="brand" size="sm">
               已选 {selectedKeys.size}
             </Badge>
           )}
         </span>
-        <span className="flex shrink-0 items-center gap-2">
-          <Switch
-            checked={autoScan}
-            onChange={onAutoScanChange}
-            label="自动扫描"
-            disabled={!connected}
-          />
-          <Button
-            size="sm"
-            variant="secondary"
-            icon={<ScanLine className="size-3.5" />}
-            loading={fetching && !loading}
-            loadingText="扫描中"
-            disabled={!connected || disabled}
-            onClick={onScan}
-          >
-            扫描
-          </Button>
-        </span>
+        <Button
+          size="sm"
+          variant="secondary"
+          icon={<RefreshCw className="size-3.5" />}
+          loading={fetching && !loading}
+          loadingText="刷新中"
+          disabled={!connected || disabled}
+          onClick={onRefresh}
+        >
+          刷新
+        </Button>
       </div>
 
-      {/* 单行工具栏 */}
+      {/* 单行工具栏：筛选 + 紧凑分页 + 本页全选 */}
       <div className="flex shrink-0 flex-nowrap items-center gap-1.5 border-b border-border-subtle px-3 py-2">
-        <SearchInput
-          value={keyword}
-          onChange={onKeywordChange}
-          placeholder="搜索标题/ID"
-          aria-label="搜索商品"
-          width="w-[108px]"
-          size="sm"
-          shortcut={null}
-          className="pr-3"
-          containerClassName="min-w-[96px] shrink"
-        />
         <Select
           size="sm"
           aria-label="筛选"
@@ -194,10 +166,10 @@ export function ProductPicker({
             variant="secondary"
             className="shrink-0"
             disabled={!connected || items.length === 0 || disabled}
-            title="选中本页全部商品"
+            title={allVisibleSelected ? "取消本页全部选中" : "选中本页全部商品"}
             onClick={onSelectVisible}
           >
-            全选
+            {allVisibleSelected ? "取消全选" : "全选"}
           </Button>
           <Button
             size="sm"
@@ -241,8 +213,8 @@ export function ProductPicker({
         {connected && !loading && !errorMessage && items.length === 0 && (
           <EmptyState
             icon={<SearchX strokeWidth={1.5} />}
-            title={keyword ? "没有匹配的商品" : "采集箱是空的"}
-            description={keyword ? "换个关键词试试。" : "先到妙手后台把商品加入采集箱。"}
+            title="采集箱是空的"
+            description="先到妙手后台把商品加入采集箱。"
             minHeight={220}
           />
         )}
@@ -257,7 +229,7 @@ export function ProductPicker({
               const checked = selectedKeys.has(item.key);
               return (
                 <li key={item.key}>
-                  {/* 竖版卡片：方图在上、两行标题在下，勾选框浮在图左上角。
+                  {/* 竖版卡片：方图在上、两行标题在下，勾选框与仓库统一浮在图右上角。
                       一行 3 个的横版在宽屏下把标题挤得只剩几个字，竖版让图成为主角。 */}
                   <div
                     className={cn(
@@ -273,7 +245,7 @@ export function ProductPicker({
                     )}
                   >
                     <label className="relative block cursor-pointer">
-                      <span className="absolute left-1.5 top-1.5 z-[1] rounded bg-surface/90 p-0.5 shadow-1">
+                      <span className="absolute right-2 top-2 z-[1]">
                         <Checkbox
                           checked={checked}
                           onChange={() => onToggle(item)}
@@ -313,7 +285,7 @@ export function ProductPicker({
                     {stage && stage !== "queued" && (
                       <span
                         className={cn(
-                          "absolute right-1.5 top-1.5 rounded px-1 py-0.5 text-[10px] font-medium leading-3",
+                          "absolute left-1.5 top-1.5 rounded px-1 py-0.5 text-[10px] font-medium leading-3",
                           stage === "running" && "bg-info-600 text-white",
                           stage === "done" && "bg-success-600 text-white",
                           stage === "failed" && "bg-danger-600 text-white"

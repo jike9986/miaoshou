@@ -63,7 +63,7 @@ export function ProductCard({ product, selected, onToggle, onOpen, index }: Prod
 
         <div
           className={cn(
-            "absolute right-2 top-2 rounded-xs bg-white/92 p-1 backdrop-blur-[2px]",
+            "absolute right-2 top-2",
             "transition-opacity duration-fast ease-in-out",
             selected
               ? "opacity-100"

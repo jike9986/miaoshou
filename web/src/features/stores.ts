@@ -59,6 +59,7 @@ export interface WarehouseState {
   setCategory: (category: WarehouseCategoryFilter) => void;
   toggleSelected: (id: string) => void;
   selectMany: (ids: string[]) => void;
+  deselectMany: (ids: string[]) => void;
   clearSelected: () => void;
 }
 
@@ -93,6 +94,11 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
     set((state) => {
       const merged = new Set([...state.selected, ...ids]);
       return { selected: Array.from(merged) };
+    }),
+  deselectMany: (ids) =>
+    set((state) => {
+      const removed = new Set(ids);
+      return { selected: state.selected.filter((id) => !removed.has(id)) };
     }),
   clearSelected: () => set({ selected: [] }),
 }));

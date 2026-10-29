@@ -126,14 +126,41 @@ def process(
         client.close()
     image_result: dict[str, Any] | None = None
     if payload.processImages and payload.save:
-        # 图片翻译（老版 process_images 阶段）。只把主图前 N 张送去翻，
-        # 失败的图不影响商品已入库——翻译是附加步骤，不该回滚整件商品。
-        image_result = warehouse_service.attach_image_translation(
-            db, product,
-            limit=int(payload.mainImageCount or 0),
-            source_images=[str(url) for url in (product.get("images") or [])],
-            operator_id=getattr(operator, "id", None),
-        )
+        # 主图、SKU 图、详情图共用同一图片任务管线，分别按用户设置提交前 N 张。
+        # 从刚入库的 payload 取详情/SKU 原图，避免只凭列表封面漏掉另外两类。
+        from models import Product
+        from services import product_service
+
+        row = db.query(Product).filter(Product.id == int(product["id"])).one()
+        saved_payload = row.payload if isinstance(row.payload, dict) else {}
+        sources = {
+            "main": [str(url) for url in (product.get("images") or [])],
+            "sku": [str(item["url"]) for item in warehouse_service.sku_image_sources(saved_payload)],
+            "detail": product_service.detail_images(saved_payload),
+        }
+        limits = {
+            "main": payload.mainImageCount,
+            "sku": payload.skuImageCount,
+            "detail": payload.detailImageCount,
+        }
+        image_result = {"requested": 0, "submitted": 0, "failed": 0, "jobs": []}
+        for source in ("main", "sku", "detail"):
+            if not limits[source]:
+                continue
+            result = warehouse_service.attach_image_translation(
+                db, product,
+                limit=int(limits[source]),
+                source_images=sources[source],
+                source=source,
+                operator_id=getattr(operator, "id", None),
+            )
+            for field in ("requested", "submitted", "failed"):
+                image_result[field] += int(result.get(field) or 0)
+            image_result["jobs"].extend(result.get("jobs") or [])
+            if result.get("batchId") and not image_result.get("batchId"):
+                image_result["batchId"] = result["batchId"]
+            if result.get("reason") and not image_result.get("reason"):
+                image_result["reason"] = result["reason"]
     if not payload.save:
         db.rollback()
         return {"saved": False, "product": product}

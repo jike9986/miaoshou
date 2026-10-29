@@ -281,6 +281,10 @@ export interface ProcessCollectRequest {
   processImages?: boolean;
   /** 每件提交几张主图去翻译 */
   mainImageCount?: number;
+  /** 每件提交几张 SKU 图去翻译，0 = 跳过 */
+  skuImageCount?: number;
+  /** 每件提交几张详情图去翻译，0 = 跳过 */
+  detailImageCount?: number;
 }
 
 /** 图片翻译提交结果：submitted 才是真的提交了几张，不是商品有几张图 */

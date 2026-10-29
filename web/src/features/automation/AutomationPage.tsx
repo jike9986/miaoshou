@@ -77,9 +77,6 @@ interface SelectionEntry {
   title: string;
 }
 
-/** 自动扫描间隔（扫描即查询，没有独立的 scan 接口） */
-const AUTO_SCAN_MS = 30_000;
-
 const DATE_FORMAT = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
   day: "2-digit",
@@ -94,12 +91,10 @@ export function AutomationPage() {
   /* ---------------- 列表查询参数 ---------------- */
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [keyword, setKeyword] = useState("");
   const [filter, setFilter] = useState<ListFilter>("all");
-  const [autoScan, setAutoScan] = useState(false);
 
   const listQuery = useCollectBoxList(
-    { page, pageSize, status: "all", keyword: keyword.trim() || undefined },
+    { page, pageSize, status: "all" },
     connected
   );
 
@@ -107,13 +102,7 @@ export function AutomationPage() {
   const total = listQuery.data?.total ?? 0;
   const hasMore = listQuery.data?.hasMore ?? false;
 
-  // 自动扫描：定时重取（「扫描即查询」）
   const refetchList = listQuery.refetch;
-  useEffect(() => {
-    if (!autoScan || !connected) return;
-    const timer = window.setInterval(() => void refetchList(), AUTO_SCAN_MS);
-    return () => window.clearInterval(timer);
-  }, [autoScan, connected, refetchList]);
 
   /* ---------------- 处理设置 ---------------- */
   // 惰性初始化：先读存档，读不到才用默认值（老版 persistTaskPreferences 的等价物）
@@ -246,8 +235,11 @@ export function AutomationPage() {
   const selectVisible = useCallback(() => {
     setSelection((prev) => {
       const next = new Map(prev);
+      const allSelected = visibleItems.length > 0 && visibleItems.every((item) => next.has(item.key));
       for (const item of visibleItems) {
-        if (!next.has(item.key)) {
+        if (allSelected) {
+          next.delete(item.key);
+        } else if (!next.has(item.key)) {
           next.set(item.key, {
             key: item.key,
             detailId: item.detailId,
@@ -283,7 +275,8 @@ export function AutomationPage() {
       return;
     }
 
-    const plannedImages = settings.imagesEnabled ? targets.length * settings.mainImageCount : 0;
+    const imagesPerProduct = settings.mainImageCount + settings.skuImageCount + settings.detailImageCount;
+    const plannedImages = settings.imagesEnabled ? targets.length * imagesPerProduct : 0;
     stopRef.current = false;
     setStages(Object.fromEntries(targets.map((target) => [target.key, "queued" as ItemStage])));
     setRun({
@@ -343,6 +336,8 @@ export function AutomationPage() {
             // 勾了「图片」才提交翻译；不勾就是纯文字处理
             processImages: settings.imagesEnabled,
             mainImageCount: settings.mainImageCount,
+            skuImageCount: settings.skuImageCount,
+            detailImageCount: settings.detailImageCount,
           },
         });
         // 只有真的提交了翻译任务才算「图片处理完成」。
@@ -513,7 +508,7 @@ export function AutomationPage() {
             {/* 左：选品（弹性撑满剩余高度）+ 处理设置（自然高度，超高自己滚） */}
             <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
               <ProductPicker
-                className="min-h-[200px] min-w-0 flex-1"
+                className="min-h-[300px] min-w-0 flex-1"
                 connected={connected}
                 items={visibleItems}
                 total={total}
@@ -525,8 +520,6 @@ export function AutomationPage() {
                 error={listQuery.error}
                 visibleCount={visibleItems.length}
                 filter={filter}
-                keyword={keyword}
-                autoScan={autoScan}
                 selectedKeys={selectedKeys}
                 stages={stages}
                 progress={progress}
@@ -535,12 +528,7 @@ export function AutomationPage() {
                   setFilter(next);
                   setPage(1);
                 }}
-                onKeywordChange={(next) => {
-                  setKeyword(next);
-                  setPage(1);
-                }}
-                onAutoScanChange={setAutoScan}
-                onScan={() => void refetchList()}
+                onRefresh={() => void refetchList()}
                 onRetry={() => void refetchList()}
                 onPageChange={setPage}
                 onPageSizeChange={(next) => {
@@ -557,7 +545,7 @@ export function AutomationPage() {
               <Card
                 padding="normal"
                 className="shrink-0 overflow-y-auto"
-                style={{ maxHeight: "calc(100% - 212px)" }}
+                style={{ maxHeight: "calc(100% - 312px)" }}
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="flex min-w-0 items-center gap-2">

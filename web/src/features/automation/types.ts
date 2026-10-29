@@ -36,7 +36,9 @@ export interface AutomationSettings {
   imagesEnabled: boolean;
   /** 主图数量 1–9 */
   mainImageCount: number;
-  /** 详情图数量 1–9 */
+  /** SKU 图数量 0–9，0 = 不处理 SKU 图 */
+  skuImageCount: number;
+  /** 详情图数量 0–9，0 = 不处理详情图 */
   detailImageCount: number;
   /** 图片并发数 1–9 */
   imageConcurrency: number;
@@ -63,6 +65,7 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
   textEnabled: true,
   imagesEnabled: true,
   mainImageCount: 5,
+  skuImageCount: 5,
   detailImageCount: 5,
   imageConcurrency: 3,
   // 与老版 0.1.4 index.html 的默认 value 完全一致：
@@ -90,6 +93,7 @@ const PERSISTED_KEYS: Array<keyof AutomationSettings> = [
   "textEnabled",
   "imagesEnabled",
   "mainImageCount",
+  "skuImageCount",
   "detailImageCount",
   "imageConcurrency",
   "weightExtraKg",

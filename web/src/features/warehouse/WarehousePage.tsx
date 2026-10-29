@@ -196,7 +196,7 @@ export function WarehousePage() {
 
   const toggleAllOnPage = useCallback(() => {
     if (allSelectedOnPage) {
-      query.clearSelected();
+      query.deselectMany(pageIds);
       return;
     }
     query.selectMany(pageIds);
@@ -443,12 +443,12 @@ export function WarehousePage() {
                 <Select
                   size="md"
                   aria-label="每页条数"
-                  className="w-[128px] shrink-0"
+                  className="w-[72px] shrink-0"
                   value={String(query.pageSize)}
                   onChange={(value) => query.setPageSize(Number(value))}
                   options={PAGE_SIZE_OPTIONS.map((size) => ({
                     value: String(size),
-                    label: `每页 ${size}`,
+                    label: String(size),
                   }))}
                 />
 

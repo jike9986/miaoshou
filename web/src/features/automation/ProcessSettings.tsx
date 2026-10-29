@@ -316,7 +316,31 @@ export function ProcessSettings({
                 step={1}
                 decimals={0}
                 suffix="张"
-                disabled={disabled}
+                disabled={disabled || !settings.imagesEnabled}
+              />
+            </Field>
+            <Field label="SKU 图数量" className="w-[100px] shrink-0">
+              <NumberInput
+                value={settings.skuImageCount}
+                onChange={(value) => onChange({ skuImageCount: value ?? 0 })}
+                min={0}
+                max={9}
+                step={1}
+                decimals={0}
+                suffix="张"
+                disabled={disabled || !settings.imagesEnabled}
+              />
+            </Field>
+            <Field label="详情图数量" className="w-[100px] shrink-0">
+              <NumberInput
+                value={settings.detailImageCount}
+                onChange={(value) => onChange({ detailImageCount: value ?? 0 })}
+                min={0}
+                max={9}
+                step={1}
+                decimals={0}
+                suffix="张"
+                disabled={disabled || !settings.imagesEnabled}
               />
             </Field>
             <Field label="重量增加" className="w-[100px] shrink-0">
@@ -505,12 +529,11 @@ export function ProcessSettings({
             <div className="flex min-h-[84px] flex-1 flex-wrap content-start gap-2">
               {charts.map((chart) => {
                 const active = chart.id === settings.sizeChartId;
-                const isDefault = isDefaultSizeChart(chart, defaultUrl);
                 return (
                   <div
                     key={chart.id}
                     className={cn(
-                      "group relative flex w-[120px] shrink-0 flex-col overflow-hidden rounded-md border bg-canvas-inset",
+                      "group relative flex size-[132px] shrink-0 flex-col overflow-hidden rounded-md border bg-canvas-inset",
                       "transition-[border-color,box-shadow] duration-fast ease-in-out",
                       active
                         ? "border-brand-600 ring-2 ring-brand-600/24"
@@ -537,7 +560,7 @@ export function ProcessSettings({
                         loading="lazy"
                         draggable={false}
                         referrerPolicy="no-referrer"
-                        className="aspect-[4/5] w-full object-contain"
+                        className="aspect-square w-full object-contain"
                       />
                       <span className="absolute inset-x-0 bottom-0 truncate bg-inverse/85 px-1 py-0.5 text-[10px] leading-4 text-fg-inverse">
                         {chart.name}
@@ -554,31 +577,6 @@ export function ProcessSettings({
                       )}
                     </button>
 
-                    {/* 项目默认图：标出来 + 删除按钮禁用，原因写在 title 里。
-                        默认图的图片名本身就含「默认」，底部不再重复放 Badge —— 两个「默认」叠着很奇怪。 */}
-                    <div className="flex items-center justify-end gap-1 border-t border-border-subtle px-1 py-1">
-                      <IconButton
-                        label={
-                          isDefault ? "项目默认尺码图不能删除" : `删除尺码图「${chart.name}」`
-                        }
-                        title={
-                          isDefault ? "项目默认尺码图不能删除" : `删除尺码图「${chart.name}」`
-                        }
-                        variant={isDefault ? "ghost" : "danger"}
-                        size="sm"
-                        icon={<Trash2 />}
-                        disabled={locked || isDefault || deletePending}
-                        onClick={() => {
-                          // 默认图那条删除按钮是 disabled 的，正常点不到；
-                          // 这里再拦一次是因为 disabled 状态下仍可能被键盘/脚本触发
-                          if (isDefault) {
-                            toast.warning("项目默认尺码图不能删除");
-                            return;
-                          }
-                          setPendingDelete(chart);
-                        }}
-                      />
-                    </div>
                   </div>
                 );
               })}

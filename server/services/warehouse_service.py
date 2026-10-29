@@ -820,9 +820,9 @@ def delete(db: Session, ident: Any) -> dict[str, Any]:
 
 def attach_image_translation(db: Session, product: Mapping[str, Any], *,
                              limit: int, source_images: list[str] | None = None,
-                             operator_id: int | None = None
+                             source: str = "main", operator_id: int | None = None
                              ) -> dict[str, Any]:
-    """把商品主图的翻译任务提交给图片服务（老版 process_images 阶段）。
+    """把商品主图、SKU 图或详情图的翻译任务提交给图片服务。
 
     只做提交，不等结果：图片翻译是异步的（`GET /images/jobs/{id}` 查进度），
     入仓流程不能被它阻塞。真正失败也不回滚商品——文字已经处理好了，
@@ -836,17 +836,21 @@ def attach_image_translation(db: Session, product: Mapping[str, Any], *,
     """
     from services import image_service
 
-    images = [str(url) for url in (source_images or [])
-              if isinstance(url, str) and url.startswith("http")]
+    if source not in ("main", "detail", "sku"):
+        raise errors.validation("source 只能是 main / detail / sku", field="source", value=source)
+    images = list(dict.fromkeys(
+        str(url) for url in (source_images or [])
+        if isinstance(url, str) and url.startswith("http")))
     count = max(0, min(int(limit or 0), MAIN_IMAGE_LIMIT))
     selected = images[:count]
+    source_name = {"main": "主图", "detail": "详情图", "sku": "SKU 图"}[source]
     if not selected:
         return {"requested": 0, "submitted": 0, "failed": 0, "jobs": [],
-                "reason": "没有可翻译的主图"}
+                "reason": f"没有可翻译的{source_name}"}
 
     items = [{"productId": str(product.get("id") or ""),
               "detailId": str(product.get("detailId") or ""),
-              "source": "main", "url": url} for url in selected]
+              "source": source, "url": url} for url in selected]
     try:
         result = image_service.translate(db, {"items": items, "size": "1:1"},
                                         operator_id=operator_id)
