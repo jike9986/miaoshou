@@ -198,8 +198,6 @@ export function AutomationPage() {
     });
   }, []);
 
-  const clearSelection = useCallback(() => setSelection(new Map()), []);
-
   /* ---------------- 本地处理态 ---------------- */
   const [stages, setStages] = useState<Record<string, ItemStage>>({});
   // 每件商品完成了哪几步（老版 productStatus 的 textCompleted / imagesCompleted）
@@ -255,7 +253,8 @@ export function AutomationPage() {
   /* ---------------- 真正执行：串行处理入仓 ---------------- */
   const processItem = useProcessCollectItem();
   const publish = usePublish();
-  const shopsQuery = useShops(status?.accountId, { enabled: connected && settings.publishEnabled });
+  // 店铺列表常驻加载：「发布到店铺」文字在开关关闭时也应能直接打开店铺选择
+  const shopsQuery = useShops(status?.accountId, { enabled: connected });
 
   const startRun = async (): Promise<void> => {
     if (!connected) {
@@ -537,7 +536,6 @@ export function AutomationPage() {
                 }}
                 onToggle={toggleItem}
                 onSelectVisible={selectVisible}
-                onClearSelection={clearSelection}
               />
 
               {/* 处理设置：自然高度，窗口矮时在卡片内滚动。
@@ -581,6 +579,7 @@ export function AutomationPage() {
                 settings={settings}
                 selectedCount={selection.size}
                 visibleCount={visibleItems.length}
+                publishShopName={shopsQuery.data?.shops.find((shop) => shop.shopId === settings.publishShopId)?.name}
               />
             </div>
           </div>

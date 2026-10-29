@@ -422,9 +422,11 @@ export function Sidebar({
           收起按钮放这一行右侧 —— 桌面软件惯例（VSCode/Notion/飞书都在顶部），
           用户找「收起」时视线最先落在左上角。 */}
       <div className={cn("flex h-12 shrink-0 items-center gap-2 pt-2", collapsed ? "justify-center" : "px-3")}>
-        <span className="grid size-6 shrink-0 place-items-center text-brand-600 [&_svg]:size-6 [&_img]:size-6">
-          {brand?.icon}
-        </span>
+        {!collapsed && (
+          <span className="grid size-6 shrink-0 place-items-center text-brand-600 [&_svg]:size-6 [&_img]:size-6">
+            {brand?.icon}
+          </span>
+        )}
         {!collapsed && (
           <span className="truncate text-[15px] font-semibold leading-[22px] text-fg">
             {brand?.name ?? "奥皇上品"}

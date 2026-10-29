@@ -77,7 +77,7 @@ export function Pagination({
           <Select
             size="sm"
             aria-label="每页条数"
-            className="w-[64px] shrink-0"
+            className="w-[76px] shrink-0"
             value={String(pageSize)}
             onChange={(value) => onPageSizeChange(Number(value))}
             options={pageSizeOptions.map((option) => ({

@@ -68,7 +68,6 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
   const accountOptions = (status?.accounts ?? []).map((account) => ({
     value: account.id,
     label: account.name,
-    description: account.appIdHint || account.site || undefined,
   }));
 
   const shopOptions = shops.map((shop) => ({
@@ -83,7 +82,7 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
       {accountOptions.length > 1 ? (
         <DropdownSelect
           size="sm"
-          className={compact ? "w-[124px]" : "w-[148px]"}
+          className={compact ? "w-[104px]" : "w-[148px]"}
           value={status?.accountId ?? null}
           onChange={(accountId) => {
             if (!accountId || accountId === status?.accountId) return;
@@ -110,9 +109,11 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
         />
       ) : (
         <span className="flex items-center gap-1.5 text-xs leading-[18px] text-fg-secondary">
-          <span className="grid size-5 place-items-center rounded-full bg-brand-100 text-[10px] font-medium text-brand-800">
-            {Array.from(status?.connectionName ?? "妙")[0]}
-          </span>
+          {!compact && (
+            <span className="grid size-5 place-items-center rounded-full bg-brand-100 text-[10px] font-medium text-brand-800">
+              {Array.from(status?.connectionName ?? "妙")[0]}
+            </span>
+          )}
           <span className="max-w-[120px] truncate font-medium">
             {status?.connectionName ?? "已连接"}
           </span>

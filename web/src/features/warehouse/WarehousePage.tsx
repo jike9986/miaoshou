@@ -443,7 +443,7 @@ export function WarehousePage() {
                 <Select
                   size="md"
                   aria-label="每页条数"
-                  className="w-[72px] shrink-0"
+                  className="w-[76px] shrink-0"
                   value={String(query.pageSize)}
                   onChange={(value) => query.setPageSize(Number(value))}
                   options={PAGE_SIZE_OPTIONS.map((size) => ({

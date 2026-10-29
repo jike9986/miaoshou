@@ -67,7 +67,6 @@ export interface ProductPickerProps {
   onPageSizeChange: (pageSize: number) => void;
   onToggle: (item: CollectBoxItem) => void;
   onSelectVisible: () => void;
-  onClearSelection: () => void;
   disabled?: boolean;
   className?: string;
 }
@@ -93,7 +92,6 @@ export function ProductPicker({
   onPageSizeChange,
   onToggle,
   onSelectVisible,
-  onClearSelection,
   disabled = false,
   className,
 }: ProductPickerProps) {
@@ -170,15 +168,6 @@ export function ProductPicker({
             onClick={onSelectVisible}
           >
             {allVisibleSelected ? "取消全选" : "全选"}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="shrink-0"
-            disabled={selectedKeys.size === 0 || disabled}
-            onClick={onClearSelection}
-          >
-            清空
           </Button>
         </div>
       </div>

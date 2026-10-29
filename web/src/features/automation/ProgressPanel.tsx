@@ -1,17 +1,13 @@
-// features/automation —— 右侧固定宽度进度栏（老版「监视」区）
+// features/automation —— 右侧处理状态与任务摘要
 //
-// 只做展示：数据全部由 AutomationPage 通过 props 传入（RunState + 设置快照），
-// 不在这里发起任何请求，也不编造数据 —— 没有真实运行时就显示
-// 「等待开始」「0 / 0」，不会出现假进度。
-//
-// 结构：
-//   1. 处理状态卡：当前阶段 / 运行时间 / 预计剩余 / 批次进度 + 两条进度条
-//   2. 任务摘要卡：已选商品、文字处理、图片处理、定价模板、发布到店铺、目标语言
+// 只展示真实传入的数据，不发起请求、不编造进度。合并为一张紧凑卡片：
+// 状态与进度在上，任务摘要在下；所有摘要行固定高度，切换文字/图片开关时
+// 只改文字，不改变卡片尺寸。
 
 import { useEffect, useState } from "react";
-import { Activity, Gauge, ListChecks } from "lucide-react";
+import { Activity, ListChecks } from "lucide-react";
 import { cn, formatCount, formatDuration } from "@/lib/utils";
-import { Badge, Card, CardTitle, Progress, Separator, StatusBadge } from "@/components/ui";
+import { Card, CardTitle, Progress, Separator, StatusBadge } from "@/components/ui";
 import {
   languageLabel,
   type AutomationSettings,
@@ -25,6 +21,8 @@ export interface ProgressPanelProps {
   selectedCount: number;
   /** 列表里本页可见件数 */
   visibleCount: number;
+  /** 发布目标店铺名；只拿到 id 时回退显示 id */
+  publishShopName?: string;
   className?: string;
 }
 
@@ -48,31 +46,25 @@ export function ProgressPanel({
   settings,
   selectedCount,
   visibleCount,
+  publishShopName,
   className,
 }: ProgressPanelProps) {
   const running = run.phase === "running";
   const elapsed = useTickingElapsed(run.startedAt, running);
-
-  // 已结束的批次按 endedAt 冻结耗时
   const finalElapsed =
     run.startedAt !== null && run.endedAt !== null
       ? Math.max(0, Math.round((run.endedAt - run.startedAt) / 1000))
       : null;
   const shownElapsed = running ? elapsed : finalElapsed;
-
-  // 预计剩余：只在运行中且有已完成样本时估算，避免编造
   const remaining =
     running && shownElapsed !== null && run.done > 0 && run.total > run.done
       ? Math.round((shownElapsed / run.done) * (run.total - run.done))
       : null;
 
   const batchPercent = run.total > 0 ? (run.done / run.total) * 100 : 0;
-  // 图片进度：按「已处理件数 × 每件主图数」推进；没有计划量时显示 0
-  const imageDone = run.imageDone;
-  const imagePercent = run.imagePlanned > 0 ? (imageDone / run.imagePlanned) * 100 : 0;
-
-  const textDone = run.done;
-  const textPercent = settings.textEnabled && run.total > 0 ? (textDone / run.total) * 100 : 0;
+  const imagePercent = run.imagePlanned > 0 ? (run.imageDone / run.imagePlanned) * 100 : 0;
+  const textPercent = settings.textEnabled && run.total > 0 ? (run.done / run.total) * 100 : 0;
+  const imageTotal = settings.mainImageCount + settings.skuImageCount + settings.detailImageCount;
 
   const phaseMeta =
     run.phase === "running"
@@ -84,210 +76,158 @@ export function ProgressPanel({
           : { label: "等待开始", tone: "neutral" as const, dot: "neutral" as const };
 
   return (
-    <div className={cn("flex flex-col gap-3", className)}>
-      {/* 处理状态 ------------------------------------------------------- */}
-      <Card padding="normal">
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5">
-            <Activity className="size-4 text-fg-muted" strokeWidth={1.75} />
-            <CardTitle>处理状态</CardTitle>
+    <Card padding="normal" className={cn("shrink-0 overflow-hidden", className)}>
+      {/* 状态 */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5">
+          <Activity className="size-4 text-fg-muted" strokeWidth={1.75} />
+          <CardTitle>处理状态</CardTitle>
+        </span>
+        <StatusBadge meta={phaseMeta} />
+      </div>
+
+      <div className="mt-3 rounded-md border border-border-subtle bg-canvas-inset/45 p-2.5">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-2xs text-fg-muted">当前阶段</span>
+          <span className="min-w-0 truncate text-[13px] font-medium text-fg" title={run.stage}>
+            {run.stage}
           </span>
-          <StatusBadge meta={phaseMeta} />
         </div>
-
-        <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2.5">
-          <Stat label="当前阶段" value={run.stage} wide />
-          <Stat
-            label="运行时间"
-            value={shownElapsed === null ? "等待开始" : formatDuration(shownElapsed)}
-          />
-          <Stat label="预计剩余" value={remaining === null ? "—" : formatDuration(remaining)} />
-          <Stat
-            label="批次进度"
-            value={
-              run.total > 0
-                ? `${formatCount(run.done)} / ${formatCount(run.total)}（${Math.round(batchPercent)}%）`
-                : "0 / 0"
-            }
-            wide
-          />
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          <Stat label="批次" value={`${formatCount(run.done)} / ${formatCount(run.total)}`} />
+          <Stat label="耗时" value={shownElapsed === null ? "—" : formatDuration(shownElapsed)} />
+          <Stat label="剩余" value={remaining === null ? "—" : formatDuration(remaining)} />
         </div>
+        <Progress className="mt-2" value={batchPercent} label="批次进度" showValue />
+      </div>
 
-        <Separator className="my-3" />
-
-        <div className="flex flex-col gap-3">
+      {/* 两条真实进度：文字按件，图片按实际提交张数 */}
+      <div className="mt-3 grid gap-2.5">
+        <div>
           <Progress
             value={textPercent}
             tone={settings.textEnabled ? "brand" : "warning"}
             label="商品设置与文字"
             showValue
           />
-          <p className="num -mt-1.5 text-2xs text-fg-muted">
+          <p className="num mt-1 h-4 truncate text-2xs leading-4 text-fg-muted">
             {settings.textEnabled
-              ? `${formatCount(textDone)} / ${formatCount(run.total)} 件 · 目标 ${languageLabel(settings.language)}`
-              : "已关闭：不翻译标题与属性"}
-            {/* 文字和图片是两个独立开关，各自成功了几件要分开说。
-                合成一个「已完成 N 件」会把「文字好了图片全挂」盖掉。 */}
-            {run.phase === "done" && settings.imagesEnabled && (
-              <span className="ml-1 text-fg-subtle">
-                （文字 {formatCount(run.textDone ?? 0)} 件、图片 {formatCount(run.imageDone)} 张）
-              </span>
-            )}
+              ? `${formatCount(run.done)} / ${formatCount(run.total)} 件 · ${languageLabel(settings.language)}`
+              : "已关闭 · 不翻译标题与属性"}
           </p>
-
+        </div>
+        <div>
           <Progress
             value={imagePercent}
             tone={settings.imagesEnabled ? "brand" : "warning"}
             label="图片处理"
             showValue
           />
-          <p className="num -mt-1.5 text-2xs text-fg-muted">
+          <p className="num mt-1 h-4 truncate text-2xs leading-4 text-fg-muted">
             {settings.imagesEnabled
-              ? `${formatCount(imageDone)} / ${formatCount(run.imagePlanned)} 张`
-              : "已关闭：不处理主图与详情图"}
+              ? `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张 · 每件 ${imageTotal} 张`
+              : "已关闭 · 不处理图片"}
           </p>
         </div>
+      </div>
 
-        {run.failed > 0 && (
-          <div className="mt-3 flex flex-col gap-2">
-            <p className="rounded-md border border-warning-600/20 bg-warning-50 px-2.5 py-1.5 text-2xs leading-4 text-warning-700">
-              本批失败 {formatCount(run.failed)} 件
-              {run.failures.length > 0 ? `，原因见下方` : "，可在列表中筛「失败」逐条重试"}
-            </p>
-            {/* 失败明细（老版 failures-section）：toast 会消失，这里留住原因 */}
-            {run.failures.length > 0 && (
-              <ul className="flex flex-col gap-1">
-                {run.failures.map((failure) => (
-                  <li
-                    key={failure.key}
-                    className="rounded border border-warning-200 bg-warning-50/60 px-2 py-1.5"
+      <Separator className="my-3" />
+
+      {/* 摘要：固定 2×4 网格，开关变化不会让框长高 */}
+      <div className="flex items-center gap-1.5">
+        <ListChecks className="size-4 text-fg-muted" strokeWidth={1.75} />
+        <h3 className="text-[13px] font-semibold leading-5 text-fg">任务摘要</h3>
+      </div>
+      <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2">
+        <SummaryStat label="已选" value={`${formatCount(selectedCount)} 件`} strong />
+        <SummaryStat label="本页" value={`${formatCount(visibleCount)} 件`} />
+        <SummaryStat label="文字" value={settings.textEnabled ? "开" : "关"} active={settings.textEnabled} />
+        <SummaryStat label="图片" value={settings.imagesEnabled ? "开" : "关"} active={settings.imagesEnabled} />
+        <SummaryStat
+          label="定价"
+          value={settings.priceTemplateEnabled ? settings.template || "未选模板" : "关"}
+          active={settings.priceTemplateEnabled}
+        />
+        <SummaryStat
+          label="发布"
+          value={settings.publishEnabled ? publishShopName || settings.publishShopId || "未选店铺" : "关"}
+          active={settings.publishEnabled}
+        />
+        <SummaryStat
+          label="语言"
+          value={settings.textEnabled ? languageLabel(settings.language) : "不翻译"}
+        />
+        <SummaryStat label="尺码图" value={settings.sizeChartId ? "已选" : "未选"} />
+      </dl>
+
+      <p className="mt-3 text-2xs leading-4 text-fg-muted">
+        批次进度保留在当前页面；重开页面会回到「等待开始」。
+      </p>
+
+      {run.failed > 0 && (
+        <div className="mt-3 border-t border-border-subtle pt-3">
+          <p className="rounded-md border border-warning-600/20 bg-warning-50 px-2.5 py-1.5 text-2xs leading-4 text-warning-700">
+            本批失败 {formatCount(run.failed)} 件
+          </p>
+          {run.failures.length > 0 && (
+            <ul className="mt-2 flex max-h-36 flex-col gap-1 overflow-y-auto">
+              {run.failures.map((failure) => (
+                <li
+                  key={failure.key}
+                  className="rounded border border-warning-200 bg-warning-50/60 px-2 py-1.5"
+                >
+                  <p
+                    className="truncate text-2xs font-medium text-fg"
+                    title={failure.title || failure.detailId}
                   >
-                    <p
-                      className="truncate text-2xs font-medium text-fg"
-                      title={failure.title || failure.detailId}
-                    >
-                      {failure.title || failure.detailId}
-                    </p>
-                    <p className="mt-0.5 break-words text-2xs leading-4 text-warning-700">
-                      {failure.reason}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </Card>
-
-      {/* 任务摘要 ------------------------------------------------------- */}
-      <Card padding="normal">
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5">
-            <ListChecks className="size-4 text-fg-muted" strokeWidth={1.75} />
-            <CardTitle>任务摘要</CardTitle>
-          </span>
-          <Gauge className="size-4 text-fg-muted" strokeWidth={1.75} />
+                    {failure.title || failure.detailId}
+                  </p>
+                  <p className="mt-0.5 break-words text-2xs leading-4 text-warning-700">
+                    {failure.reason}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
-
-        <dl className="mt-3 flex flex-col gap-2">
-          <SummaryRow label="已选商品" value={`${formatCount(selectedCount)} 件`} />
-          <SummaryRow label="本页可见" value={`${formatCount(visibleCount)} 件`} muted />
-          <Separator className="my-0.5" />
-          <SummaryRow
-            label="文字处理"
-            value={settings.textEnabled ? "开" : "关"}
-            tone={settings.textEnabled ? "on" : "off"}
-          />
-          <SummaryRow
-            label="图片处理"
-            value={settings.imagesEnabled ? "开" : "关"}
-            tone={settings.imagesEnabled ? "on" : "off"}
-          />
-          <SummaryRow
-            label="定价模板"
-            value={
-              settings.priceTemplateEnabled
-                ? settings.template || "开（未选模板）"
-                : "关"
-            }
-            tone={settings.priceTemplateEnabled ? "on" : "off"}
-          />
-          <SummaryRow
-            label="发布到店铺"
-            value={
-              settings.publishEnabled
-                ? settings.publishShopId
-                  ? `认领到 ${settings.publishShopId}`
-                  : "开（未选店铺）"
-                : "关"
-            }
-            tone={settings.publishEnabled ? "on" : "off"}
-          />
-          <Separator className="my-0.5" />
-          <SummaryRow
-            label="目标语言"
-            value={settings.textEnabled ? languageLabel(settings.language) : "不翻译"}
-            muted={!settings.textEnabled}
-          />
-          <SummaryRow
-            label="尺码图"
-            value={settings.sizeChartId ? `已选 #${settings.sizeChartId}` : "未选"}
-            muted={!settings.sizeChartId}
-          />
-        </dl>
-
-        <p className="mt-3 border-t border-border-subtle pt-2 text-2xs leading-4 text-fg-muted">
-          批次进度来自当前页面会话；后端没有批次任务表，重开页面会回到「等待开始」。
-        </p>
-      </Card>
-
-    </div>
+      )}
+    </Card>
   );
 }
 
-function Stat({
-  label,
-  value,
-  wide = false,
-}: {
-  label: string;
-  value: string;
-  wide?: boolean;
-}) {
+function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className={cn(wide && "col-span-2")}>
+    <div className="min-w-0">
       <dt className="text-2xs leading-4 text-fg-muted">{label}</dt>
-      <dd className="num mt-0.5 truncate text-[13px] font-medium leading-5 text-fg" title={value}>
+      <dd className="num mt-0.5 h-5 truncate text-[13px] font-medium leading-5 text-fg" title={value}>
         {value}
       </dd>
     </div>
   );
 }
 
-function SummaryRow({
+function SummaryStat({
   label,
   value,
-  tone = "plain",
-  muted = false,
+  active = false,
+  strong = false,
 }: {
   label: string;
   value: string;
-  tone?: "plain" | "on" | "off";
-  muted?: boolean;
+  active?: boolean;
+  strong?: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between gap-2">
-      <dt className="shrink-0 text-xs leading-[18px] text-fg-muted">{label}</dt>
+    <div className="min-w-0">
+      <dt className="text-2xs leading-4 text-fg-muted">{label}</dt>
       <dd
         className={cn(
-          "min-w-0 truncate text-xs leading-[18px]",
-          tone === "on" && "font-medium text-brand-700",
-          tone === "off" && "text-fg-muted",
-          tone === "plain" && (muted ? "text-fg-muted" : "text-fg")
+          "num mt-0.5 h-5 truncate text-[13px] leading-5",
+          active ? "font-medium text-brand-700" : strong ? "font-semibold text-fg" : "text-fg"
         )}
         title={value}
       >
-        {tone === "on" ? <Badge variant="brand">{value}</Badge> : value}
+        {value}
       </dd>
     </div>
   );

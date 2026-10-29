@@ -35,7 +35,6 @@ import { apiErrorMessage } from "@/lib/api";
 import {
   Badge,
   Button,
-  Checkbox,
   ConfirmDialog,
   Dialog,
   ErrorState,
@@ -222,6 +221,7 @@ export function ProcessSettings({
                 checked={settings.textEnabled}
                 onChange={(checked) => onChange({ textEnabled: checked })}
                 label="文字"
+                aria-label="开启文字处理"
                 disabled={disabled}
               />
             </span>
@@ -230,71 +230,69 @@ export function ProcessSettings({
                 checked={settings.imagesEnabled}
                 onChange={(checked) => onChange({ imagesEnabled: checked })}
                 label="图片"
+                aria-label="开启图片处理"
                 disabled={disabled}
               />
             </span>
 
-            {/* 定价模板：勾选框保留，「选择」融合进文字（点文字也能打开） */}
+            {/* 四个功能开关统一样式；模板名和店铺名是可点击入口，用品牌色区别普通文字 */}
             <span className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap">
-              <Checkbox
+              <Switch
                 checked={settings.priceTemplateEnabled}
                 onChange={(checked) => onChange({ priceTemplateEnabled: checked })}
-                size="sm"
+                aria-label="开启定价模板"
                 disabled={disabled}
               />
               <button
                 type="button"
-                onClick={onOpenTemplates}
+                onClick={() => {
+                  if (!settings.priceTemplateEnabled) onChange({ priceTemplateEnabled: true });
+                  onOpenTemplates();
+                }}
                 className={cn(
-                  "text-[13px] font-medium leading-[18px] transition-colors duration-fast",
-                  settings.priceTemplateEnabled
-                    ? "text-fg hover:text-brand-700"
-                    : "text-fg-muted hover:text-fg",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
+                  "text-[13px] font-medium leading-[18px] text-brand-700 underline decoration-brand-600/30 underline-offset-4",
+                  "transition-colors duration-fast hover:text-brand-800 hover:decoration-brand-700",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32",
+                  disabled && "cursor-not-allowed opacity-60"
                 )}
+                disabled={disabled}
               >
                 定价模板
                 {settings.priceTemplateEnabled && settings.template && (
-                  <span className="ml-1 text-brand-700">· {settings.template}</span>
+                  <span className="ml-1 no-underline">· {settings.template}</span>
                 )}
               </button>
             </span>
 
-            {/* 发布到店铺：勾选框保留，文字点开店铺选择器 */}
             <span className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap">
-              <Checkbox
+              <Switch
                 checked={settings.publishEnabled}
                 onChange={(checked) => onChange({ publishEnabled: checked })}
-                size="sm"
+                aria-label="开启发布到店铺"
                 disabled={disabled}
               />
-              <span className="relative">
-                <button
-                  type="button"
-                  disabled={disabled || !settings.publishEnabled}
+              <span className="relative inline-flex h-8 items-center">
+                <span
                   className={cn(
-                    "text-[13px] font-medium leading-[18px] transition-colors duration-fast",
-                    settings.publishEnabled
-                      ? "text-fg hover:text-brand-700"
-                      : "text-fg-muted",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32",
-                    (!settings.publishEnabled || disabled) && "cursor-default"
+                    "pointer-events-none text-[13px] font-medium leading-[18px] text-brand-700 underline decoration-brand-600/30 underline-offset-4",
+                    (disabled || !connected || shops.length === 0) && "opacity-60"
                   )}
                 >
                   发布到店铺
-                  {settings.publishEnabled && settings.publishShopId && (
-                    <span className="ml-1 text-brand-700">
+                  {settings.publishShopId && (
+                    <span className="ml-1">
                       · {shops.find((s) => s.shopId === settings.publishShopId)?.name ?? settings.publishShopId}
                     </span>
                   )}
-                </button>
-                {settings.publishEnabled && shops.length > 0 && (
+                </span>
+                {connected && shops.length > 0 && (
                   <Select
                     size="sm"
-                    aria-label="选择目标店铺"
-                    className="absolute inset-0 opacity-0 cursor-pointer"
+                    aria-label="选择发布店铺"
+                    className="absolute inset-0 h-full cursor-pointer opacity-0"
                     value={settings.publishShopId}
-                    onChange={(value) => onChange({ publishShopId: value })}
+                    onChange={(value) => onChange({ publishEnabled: true, publishShopId: value })}
+                    disabled={disabled}
                     options={[
                       { value: "", label: "选择店铺…" },
                       ...shops.map((s) => ({ value: s.shopId, label: `${s.name}（${s.siteName}）` })),
