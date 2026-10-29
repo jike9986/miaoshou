@@ -491,8 +491,6 @@ def scan_violation_words(db: Session, text: str) -> list[dict[str, str]]:
     if not text:
         return []
     hits: list[dict[str, str]] = []
-    lowered = text.casefold()
-    for word, action in word_service.matcher(db):
-        if word and word.casefold() in lowered:
-            hits.append({"word": word, "action": action})
+    for word, action in word_service.matched_words(text, word_service.matcher(db)):
+        hits.append({"word": word, "action": action})
     return hits

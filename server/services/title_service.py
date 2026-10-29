@@ -54,16 +54,12 @@ def require_product(db: Session, ident: Any):
 def review_hits(title: str, words: Iterable[tuple[str, str]]) -> list[str]:
     """`review` 类违规词的命中记录（只记录，不改标题）。
 
-    匹配口径与 `word_service.clean_title()` 一致：casefold 后做子串包含。
+    匹配口径与 `word_service.clean_title()` 一致：大小写折叠并容忍词内空格/连字符变体。
     """
-    lowered = str(title or "").casefold()
-    hits: list[str] = []
-    for normalized, action in words:
-        if action != "review" or not normalized:
-            continue
-        if normalized in lowered:
-            hits.append(normalized)
-    return hits
+    from services import word_service
+
+    return [normalized for normalized, action in word_service.matched_words(title, words)
+            if action == "review"]
 
 
 # 近 N 年内的四位年份才当作「采集年份」处理。

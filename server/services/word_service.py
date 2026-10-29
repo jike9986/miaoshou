@@ -574,10 +574,12 @@ def _word_pattern(word: str) -> re.Pattern[str]:
     - 英文/数字开头结尾的词加词边界，避免删 `free` 把 `freedom` 砍掉
     - 中文词不加边界（中文没有空格分词，加了反而匹配不到）
     """
-    # 词内空格与连字符视为同一分隔：词库里写「free shipping」也要命中「free-shipping」，
-    # 反过来写「free-shipping」也要命中「free shipping」。所以两种都先拆开再拼。
-    parts = [part for part in re.split(r"[\s-]+", word) if part]
-    pattern = r"[\s-]+".join(re.escape(part) for part in parts) or re.escape(word)
+    # Ignore separators already present in the entry and allow them between every
+    # character, so both "free shipping" and obfuscated "f-r-e-e s-h-i-p-p-i-n-g" match.
+    characters = [char for char in str(word or "").casefold()
+                  if char not in " \t\r\n-‐‑‒–—"]
+    separator = r"[\s\-‐‑‒–—]*"
+    pattern = separator.join(re.escape(char) for char in characters) or re.escape(word)
     if word[0].isascii() and word[0].isalnum():
         pattern = r"(?<![A-Za-z0-9_])" + pattern
     if word[-1].isascii() and word[-1].isalnum():
@@ -593,12 +595,13 @@ def clean_title(title: str, words: Iterable[tuple[str, str]]) -> tuple[str, list
     targets = [(n, a) for n, a in words if n]
     targets.sort(key=lambda pair: (-len(pair[0]), pair[0]))
     for normalized, action in targets:
-        if normalized not in text.casefold():
-            continue
         if action != "remove":
             continue
+        pattern = _word_pattern(normalized)
+        if not pattern.search(text):
+            continue
         # 替换成空格而不是空串：中文词删掉后两侧会粘在一起（「跑步鞋包邮包」→「跑步鞋包」）
-        text = _word_pattern(normalized).sub(" ", text)
+        text = pattern.sub(" ", text)
         removed.append(normalized)
     # 删词后常留下空括号/空分隔符（【包邮】→【】），一并清掉
     text = re.sub(r"[【\[（(]\s*[】\]）)]", " ", text)
@@ -608,3 +611,13 @@ def clean_title(title: str, words: Iterable[tuple[str, str]]) -> tuple[str, list
     text = re.sub(r"^[\s\-–—·|/\,，、]+|[\s\-–—·|/\,，、]+$", "", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip(), removed
+
+
+def matched_words(text: str, words: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Return title-word hits using the same separator-tolerant rule as cleaning."""
+    value = str(text or "")
+    hits: list[tuple[str, str]] = []
+    for normalized, action in words:
+        if normalized and _word_pattern(normalized).search(value):
+            hits.append((normalized, action))
+    return hits
