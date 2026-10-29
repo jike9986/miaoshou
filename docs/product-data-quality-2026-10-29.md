@@ -34,3 +34,19 @@
 ## 复核方式
 
 复核时先确认软件实际数据目录，再以只读方式统计 `products`、JSON payload、活动 SKU 和 `violation_words`。商品数量、缺失规格、站点来源和标题长度应分别按结构化列与 payload 交叉核对；SKU 价格需逐行比较 `price` 与 `originPrice`。更换数据库快照或数据目录后，应重新生成统计，不能沿用本报告的数量。
+
+### 只读复核脚本与本次结果（2026-10-30）
+
+仓库内的 `scripts/verify_product_data_quality.py` 使用标准库 SQLite，以 `mode=ro` 打开显式传入的数据库文件，并开启 `PRAGMA query_only=ON`。它只打印汇总计数、数据库文件及 WAL 文件的 SHA-256，不输出商品标题、商品标识、SKU 明细或凭据；缺少 `--db` 参数时不会自行寻找或打开数据库。脚本不连接服务器，也不修改数据库。
+
+PowerShell 示例：
+
+```powershell
+python scripts/verify_product_data_quality.py --db "$env:LOCALAPPDATA\aohuang-desktop\app.db"
+```
+
+结果码 `0` 表示数据库可读且脚本计算的报告基线全部匹配；`1` 表示可读但至少一项统计与报告不同；`2` 表示路径、SQLite 完整性检查或必要表结构不可用。若 `app.db-wal` 存在，脚本也输出其哈希；即使 WAL 文件为空，也会打印空文件的 SHA-256。
+
+本次在报告指定路径做只读复核：文件存在，大小 6,336,512 字节，修改时间为 `2026-10-28 19:02:20 +08:00`，SQLite `quick_check` 返回 `ok`。脚本输出的数据库 SHA-256 为 `9bde93b45fbc580283148a2199880abda1b890a8b26c99c5a4ab96465f24ffa1`，WAL SHA-256 为 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`（空文件）；报告列出的商品、SKU、词库、规格、站点和标题汇总均匹配，`reported_summary_matches=yes`，退出码为 `0`。
+
+哈希只标识本次本机快照，不是线上数据库或其他 `AOHUANG_DATA_DIR` 的校验值。汇总定义以脚本为准；不同数据库快照需要重新运行并人工解释差异，不能把本次匹配结果沿用到其他数据目录。
