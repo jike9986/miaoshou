@@ -427,6 +427,36 @@ def test_app_key_cannot_be_bound_to_multiple_students_but_owner_can_reconnect(
         db.close()
 
 
+def test_teacher_cannot_reassign_another_students_bound_key(client, identities, monkeypatch):
+    monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
+    app_key = f"owned-key-{uuid.uuid4().hex[:8]}"
+    app_secret = "private-app-secret"
+    connected = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
+        headers=_headers(identities["first_token"]),
+    )
+    assert connected.status_code == 200, connected.text
+
+    response = client.post(
+        API + "/auth/connect",
+        json={"accountId": connected.json()["accountId"],
+              "appId": app_key, "appSecret": app_secret,
+              "studentOperatorId": str(identities["second_id"]),
+              "autoScan": False},
+        headers=_headers(identities["teacher_token"]),
+    )
+    assert response.status_code == 403, response.text
+    assert app_secret not in response.text
+
+    db = SessionLocal()
+    try:
+        account = db.query(Account).filter(Account.app_key == app_key).one()
+        assert account.owner_operator_id == identities["first_id"]
+    finally:
+        db.close()
+
+
 def test_image_jobs_and_result_files_are_isolated_by_operator(client, identities):
     db = SessionLocal()
     try:
