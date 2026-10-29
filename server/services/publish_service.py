@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from core import errors
@@ -90,6 +91,41 @@ def _in_flight_blocker(db: Session, *, account: Account,
             warehouseKey=key, detailId=row.detail_id, shopId=row.shop_id,
             status=row.status, requestedAt=row.requested_at,
             retryAfterSeconds=int(PUBLISH_PROCESSING_SECONDS) + 1)
+
+
+def _already_published_blocker(db: Session, *, account: Account,
+                               entries: list[dict[str, Any]],
+                               target_shop_id: str) -> None:
+    """拒绝将同一成品重复发布到同一店铺；失败/取消和其他店铺仍可重试。"""
+    product_ids = {
+        entry["product"].id for entry in entries
+        if isinstance(entry.get("product"), Product)
+    }
+    raw_keys = {
+        product_key(entry["detailId"], target_shop_id)
+        for entry in entries if not isinstance(entry.get("product"), Product)
+    }
+    query = (db.query(PublishLog)
+             .filter(PublishLog.account_id == account.id,
+                     PublishLog.shop_id == str(target_shop_id),
+                     PublishLog.status == "success"))
+    clauses = []
+    if product_ids:
+        clauses.append(PublishLog.product_id.in_(product_ids))
+    if raw_keys:
+        clauses.append(PublishLog.warehouse_key.in_(raw_keys))
+    if not clauses:
+        return
+    rows = query.filter(or_(*clauses)).all()
+    if rows:
+        row = rows[0]
+        raise errors.AppError(
+            "ALREADY_PUBLISHED",
+            "该成品已成功发布到此店铺，已阻止重复发布",
+            status=409,
+            details={"detailId": row.detail_id, "shopId": row.shop_id,
+                     "warehouseId": str(row.product_id) if row.product_id else None},
+        )
 
 
 # --- 记录 -----------------------------------------------------------------
@@ -573,6 +609,10 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         busy_message="这件正在发布中，请等上一轮结束")
     try:
         _in_flight_blocker(db, account=account, keys=publish_keys)
+        if not claim_only:
+            _already_published_blocker(
+                db, account=account, entries=entries,
+                target_shop_id=str(target_shop_id))
         if claim_only:
             detail_ids = [int(entry["detailId"]) for entry in entries
                           if str(entry["detailId"]).isdigit()]

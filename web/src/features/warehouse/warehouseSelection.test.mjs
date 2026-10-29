@@ -22,3 +22,15 @@ test("does not include selections whose status snapshot was cleared", () => {
     publishable: [],
   });
 });
+
+test("hides items already published to the selected shop but keeps other shops eligible", () => {
+  assert.deepEqual(partitionMemberSelection(
+    ["published-here", "published-elsewhere"],
+    { "published-here": true, "published-elsewhere": true },
+    { "published-here": ["shop-a"], "published-elsewhere": ["shop-b"] },
+    "shop-a",
+  ), {
+    claimable: [],
+    publishable: ["published-elsewhere"],
+  });
+});

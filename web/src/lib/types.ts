@@ -395,6 +395,8 @@ export interface Product {
   salesLast30: number;
   stock: number;
   status: ProductStatus | string;
+  /** 学员成功发布过该商品的妙手店铺 ID。 */
+  publishedShopIds?: string[];
   /**
    * 乐观并发版本号（每次写成功 +1）。
    * 老后端不返回这个字段 → 运行时是 undefined，前端按「不支持并发检查」处理，

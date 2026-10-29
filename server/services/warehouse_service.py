@@ -73,7 +73,8 @@ def serialize(product: Product, *, account_name: str = "",
               claim: ProductClaim | None = None,
               operator_id: int | None = None,
               member_view: bool = False,
-              publish_log: PublishLog | None = None) -> dict[str, Any]:
+              publish_log: PublishLog | None = None,
+              published_shop_ids: list[str] | None = None) -> dict[str, Any]:
     images = product.images if isinstance(product.images, list) else []
     body: dict[str, Any] = {
         "id": str(product.id),
@@ -128,6 +129,7 @@ def serialize(product: Product, *, account_name: str = "",
         ),
         "publishStatus": publish_log.status if member_view and publish_log else None,
         "publishShopId": publish_log.shop_id if member_view and publish_log else None,
+        "publishedShopIds": published_shop_ids or [] if member_view else [],
         "skuProperties": product.sku_properties if isinstance(product.sku_properties, list) else [],
     }
     if include_payload:
@@ -173,6 +175,22 @@ def _latest_operator_publish_logs(db: Session, operator_id: int | None,
         if row.product_id is not None:
             latest.setdefault(row.product_id, row)
     return latest
+
+
+def _successful_operator_publish_shops(
+    db: Session, operator_id: int | None, product_ids: list[int]
+) -> dict[int, list[str]]:
+    if operator_id is None or not product_ids:
+        return {}
+    rows = (db.query(PublishLog.product_id, PublishLog.shop_id)
+            .filter(PublishLog.operator_id == operator_id,
+                    PublishLog.product_id.in_(product_ids),
+                    PublishLog.status == "success").all())
+    shops: dict[int, set[str]] = {}
+    for product_id, shop_id in rows:
+        if product_id is not None and shop_id:
+            shops.setdefault(product_id, set()).add(str(shop_id))
+    return {product_id: sorted(shop_ids) for product_id, shop_ids in shops.items()}
 
 
 def active_query(db: Session):
@@ -300,10 +318,13 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         ).all()}
     publish_logs = (_latest_operator_publish_logs(
         db, operator_id, [item.id for item in rows]) if member_view else {})
+    successful_publish_shops = (_successful_operator_publish_shops(
+        db, operator_id, [item.id for item in rows]) if member_view else {})
     items = [serialize(row, account_name=names.get(row.account_id or 0, ""),
                        operator_name=operators.get(row.operator_id or 0, ""),
                        claim=claims.get(row.id), operator_id=operator_id,
-                       member_view=member_view, publish_log=publish_logs.get(row.id))
+                       member_view=member_view, publish_log=publish_logs.get(row.id),
+                       published_shop_ids=successful_publish_shops.get(row.id, []))
              for row in rows]
     # stats 按当前列表的 account_id 过滤：多账号共用时，
     # 「已认领」显示的是当前账号的数字，不是全账号加总。

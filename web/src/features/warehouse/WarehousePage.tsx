@@ -160,6 +160,7 @@ export function WarehousePage() {
   const [sourceShopIds, setSourceShopIds] = useState<Record<string, string>>({});
   // 学员的认领/发布动作跨页时也需要知道所选商品当前的认领状态。
   const [selectedClaimed, setSelectedClaimed] = useState<Record<string, boolean>>({});
+  const [selectedPublishedShopIds, setSelectedPublishedShopIds] = useState<Record<string, string[]>>({});
 
   const [carrierOpen, setCarrierOpen] = useState(false);
   const claimSharedProduct = useMutation({
@@ -186,7 +187,7 @@ export function WarehousePage() {
   const selectedCount = selectedIds.length;
   const pageIds = items.map((item) => item.id);
   const { claimable: memberClaimableIds, publishable: memberPublishableIds } =
-    partitionMemberSelection(selectedIds, selectedClaimed);
+    partitionMemberSelection(selectedIds, selectedClaimed, selectedPublishedShopIds, currentShopId);
   // 选中商品各自的当前版本号：批量改分类时带上，任何一件被别人改过就整体回滚
   // 老后端列表不回 revision → 这个 map 是空的 → 请求里不带 expectedRevisions
   const selectedRevisions = useMemo(() => {
@@ -206,6 +207,7 @@ export function WarehousePage() {
     clearSelected();
     setSourceShopIds({});
     setSelectedClaimed({});
+    setSelectedPublishedShopIds({});
   }, [clearSelected]);
 
   const toggleWarehouseSelection = useCallback((id: string) => {
@@ -221,9 +223,15 @@ export function WarehousePage() {
         delete next[id];
         return next;
       });
+      setSelectedPublishedShopIds((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
     } else if (item) {
       setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
       setSelectedClaimed((current) => ({ ...current, [id]: item.claimed }));
+      setSelectedPublishedShopIds((current) => ({ ...current, [id]: item.publishedShopIds ?? [] }));
     }
     toggleSelected(id);
   }, [items, selectedIds, toggleSelected]);
@@ -232,6 +240,7 @@ export function WarehousePage() {
     const item = items.find((candidate) => candidate.id === id);
     if (item) setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
     if (item) setSelectedClaimed((current) => ({ ...current, [id]: item.claimed }));
+    if (item) setSelectedPublishedShopIds((current) => ({ ...current, [id]: item.publishedShopIds ?? [] }));
     toggleSelected(id);
   }, [items, toggleSelected]);
 
@@ -244,6 +253,11 @@ export function WarehousePage() {
         return next;
       });
       setSelectedClaimed((current) => {
+        const next = { ...current };
+        for (const id of pageIds) delete next[id];
+        return next;
+      });
+      setSelectedPublishedShopIds((current) => {
         const next = { ...current };
         for (const id of pageIds) delete next[id];
         return next;
@@ -261,6 +275,11 @@ export function WarehousePage() {
       for (const item of items) next[item.id] = item.claimed;
       return next;
     });
+    setSelectedPublishedShopIds((current) => {
+      const next = { ...current };
+      for (const item of items) next[item.id] = item.publishedShopIds ?? [];
+      return next;
+    });
   }, [allSelectedOnPage, deselectMany, items, pageIds, selectMany]);
 
   // Store filter/page-size changes clear its selection internally; keep the local snapshots in sync.
@@ -271,6 +290,10 @@ export function WarehousePage() {
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
     setSelectedClaimed((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    setSelectedPublishedShopIds((current) => {
       const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });

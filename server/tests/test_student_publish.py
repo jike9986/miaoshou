@@ -60,7 +60,8 @@ def _publish_payload(product: Product, account: Account, **overrides):
     }
 
 
-def _stub_member_publish(monkeypatch, db, account, *, received_payloads: list | None = None):
+def _stub_member_publish(monkeypatch, db, account, *, received_payloads: list | None = None,
+                         target_shop_id: str = "123"):
     class FakeClient:
         def publish_items(self, detail_ids, shop_ids):
             self.published = (detail_ids, shop_ids)
@@ -68,7 +69,7 @@ def _stub_member_publish(monkeypatch, db, account, *, received_payloads: list | 
     client = FakeClient()
     monkeypatch.setattr(publish_service, "account_client_for", lambda *_args: (account, client))
     monkeypatch.setattr(publish_service, "require_shop", lambda *_args: {
-        "shopId": "123", "name": "Target shop", "site": "MY",
+        "shopId": target_shop_id, "name": "Target shop", "site": "MY",
     })
     monkeypatch.setattr(publish_service.setting_service, "publish_enabled", lambda *_args: True)
     monkeypatch.setattr(publish_service, "_in_flight_blocker", lambda *_args, **_kwargs: None)
@@ -81,7 +82,7 @@ def _stub_member_publish(monkeypatch, db, account, *, received_payloads: list | 
     def fill_carriers(_client, _carriers, payloads, *, shop_id):
         if received_payloads is not None:
             received_payloads.extend(payloads)
-        assert shop_id == 123
+        assert shop_id == int(target_shop_id)
         return {"saved": [98765], "savedSources": [0], "failures": []}
 
     monkeypatch.setattr(publish_service.carrier_service, "fill_carriers", fill_carriers)
@@ -117,6 +118,66 @@ def test_member_can_publish_claimed_product_with_template_without_mutating_share
     assert product.claimed_shop_id is None
     log = db.query(PublishLog).filter(PublishLog.product_id == product.id).one()
     assert log.operator_id == operator.id
+
+
+def test_member_cannot_republish_successful_product_to_same_shop(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+    db.flush()
+    _stub_member_publish(monkeypatch, db, account)
+
+    publish_service.publish(db, _publish_payload(product, account), operator_id=operator.id)
+    log = db.query(PublishLog).filter(PublishLog.product_id == product.id).one()
+    log.status = "success"
+    db.flush()
+
+    with pytest.raises(errors.AppError) as exc:
+        publish_service.publish(db, _publish_payload(product, account), operator_id=operator.id)
+    assert exc.value.code == "ALREADY_PUBLISHED"
+    assert exc.value.status == 409
+
+
+def test_member_can_publish_same_product_to_a_different_shop(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+    db.add(PublishLog(account_id=account.id, product_id=product.id,
+                      detail_id="98765", shop_id="123", title=product.title,
+                      status="success", operator_id=operator.id))
+    db.flush()
+    _stub_member_publish(monkeypatch, db, account, target_shop_id="456")
+    payload = _publish_payload(product, account, shopId="456")
+
+    result = publish_service.publish(db, payload, operator_id=operator.id)
+
+    assert result["targetShopId"] == "456"
+    assert db.query(PublishLog).filter(
+        PublishLog.product_id == product.id, PublishLog.shop_id == "456"
+    ).one().status == "processing"
+
+
+@pytest.mark.parametrize("status", ["fail", "cancel"])
+def test_member_can_retry_failed_or_cancelled_product(publish_db, monkeypatch, status):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+    db.add(PublishLog(account_id=account.id, product_id=product.id,
+                      detail_id="98765", shop_id="123", title=product.title,
+                      status=status, operator_id=operator.id))
+    db.flush()
+    _stub_member_publish(monkeypatch, db, account)
+
+    result = publish_service.publish(
+        db, _publish_payload(product, account), operator_id=operator.id)
+
+    assert result["published"] == ["98765"]
 
 
 @pytest.mark.parametrize("case", ["unclaimed", "owned-by-other", "detail-id-bypass"])
@@ -163,8 +224,10 @@ def test_member_publish_status_and_history_are_owner_scoped(publish_db):
     second_item = next(item for item in second_list if item["id"] == str(product.id))
     assert first_item["status"] == "published"
     assert first_item["publishStatus"] == "success"
+    assert first_item["publishedShopIds"] == ["456"]
     assert second_item["status"] == "claimed"
     assert second_item["publishStatus"] is None
+    assert second_item["publishedShopIds"] == []
     assert warehouse_service.stats(db, operator_id=first.id)["totalPublished"] == 1
     assert warehouse_service.stats(db, operator_id=second.id)["totalPublished"] == 0
 
