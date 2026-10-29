@@ -1,8 +1,7 @@
-"""操作员身份与三级角色服务：解析 token → 是谁，以及能做什么。
+"""操作员身份与角色服务：解析 token → 是谁，以及能做什么。
 
-成员只读，老师处理商品/图片/发布，管理员额外管理操作员、账号和全局配置。
-`is_admin` 为旧数据兼容保留，`role_of()` 始终优先识别它，避免老管理员被
-新增的 member 默认列降级。
+学员只能访问本人范围内的数据；老师拥有全局管理能力。`admin` 与 `is_admin`
+为旧数据兼容保留，历史管理员与老师执行相同权限策略。
 
 ── 向后兼容（改这里之前先读完这段）──────────────────────────────────
 0.1 版全实例只有一把 `data_dir/secret.key`，所有客户端都拿它当 Bearer。
@@ -24,6 +23,7 @@ import logging
 import secrets
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -57,14 +57,11 @@ ROLE_TEACHER = "teacher"
 ROLE_MEMBER = "member"
 VALID_ROLES = {ROLE_ADMIN, ROLE_TEACHER, ROLE_MEMBER}
 
-# 权限语义：成员只读；老师处理商品、图片和发布；管理员额外管理账号、
-# 操作员与全局设置。写词库用 words.update，避免成员拿只读 words 权限写库。
+# 老师与旧版管理员承担相同的全局管理职责。保留 admin 只为兼容历史数据，
+# 新账号与界面统一使用 teacher / member 两种角色。
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     ROLE_ADMIN: {"*"},
-    ROLE_TEACHER: {
-        "process", "publish", "publish_claimed", "claim", "product_claim", "batch", "schedule",
-        "warehouse", "words", "words.update", "images", "carrier", "account.bind",
-    },
+    ROLE_TEACHER: {"*"},
     ROLE_MEMBER: {"warehouse", "words", "product_claim", "publish_claimed", "account.bind"},
 }
 
@@ -128,7 +125,7 @@ def require_role(operator: Operator, permission: str) -> Operator:
         role = role_of(operator)
         raise errors.AppError(
             "FORBIDDEN",
-            f"当前角色（{role}）没有「{permission}」权限，请联系管理员",
+            f"当前角色（{role}）没有「{permission}」权限，请联系老师",
             status=403,
             details={"role": role, "permission": permission})
     return operator
@@ -347,22 +344,23 @@ def rename(db: Session, operator_id: Any, name: Any) -> dict[str, Any]:
 
 
 def _require_admin(is_admin_operator: bool, action: str) -> None:
-    """只有管理员能执行的操作的统一校验。"""
+    """旧参数名保留兼容；全局管理能力由老师与历史管理员共享。"""
     if not is_admin_operator:
         raise errors.AppError(
-            "FORBIDDEN", f"只有管理员可以{action}", status=403,
+            "FORBIDDEN", f"只有老师可以{action}", status=403,
             details={"reason": "not_admin"})
 
 
 def _check_last_admin(db: Session, row: Operator, *, action: str) -> None:
-    """不能把最后一个启用中的管理员停用/降级。"""
+    """不能停用/降级最后一个启用中的全局管理账号。"""
     remaining = (db.query(Operator)
-                 .filter(Operator.is_admin.is_(True),
+                 .filter(or_(Operator.is_admin.is_(True),
+                             Operator.role.in_((ROLE_ADMIN, ROLE_TEACHER))),
                          Operator.enabled.is_(True),
                          Operator.id != row.id).count())
     if remaining == 0:
         raise errors.AppError(
-            "FORBIDDEN", f"这是最后一个启用中的管理员，{action}后将无人能管理操作员",
+            "FORBIDDEN", f"这是最后一个启用中的老师账号，{action}后将无人能管理操作员",
             status=409, details={"reason": "last_admin"})
 
 
@@ -370,13 +368,13 @@ def disable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[s
     """停用。不是删除：删了之后历史日志的 operator_id 会变 NULL。
 
     两道保护，都是挡手滑：
-      · 只有管理员能停用别人（普通操作员互相停用会直接打架）；
-      · 不能停用自己，也不能停用最后一个启用中的管理员——
+      · 只有老师能停用别人（普通学员互相停用会直接打架）；
+      · 不能停用自己，也不能停用最后一个启用中的全局管理账号——
         否则没人能再停用/启用任何人，也没人能改共享设置。
     """
     _require_admin(is_admin_operator, "停用操作员")
     row = get(db, operator_id)
-    if row.enabled and bool(row.is_admin):
+    if row.enabled and role_of(row) in {ROLE_ADMIN, ROLE_TEACHER}:
         _check_last_admin(db, row, action="停用")
     row.enabled = False
     db.flush()
@@ -394,14 +392,14 @@ def enable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[st
 
 def set_role(db: Session, operator_id: Any, role: str, *,
              is_admin_operator: bool) -> dict[str, Any]:
-    """改角色。只有管理员能改，且不能把最后一个管理员降成非管理员。"""
+    """改角色。老师与历史管理员均可管理，且不能移除最后一个全局管理账号。"""
     _require_admin(is_admin_operator, "改角色")
     if role not in VALID_ROLES:
         raise errors.validation(f"角色无效：{role}，可选 admin/teacher/member",
                                 field="role", value=role)
     row = get(db, operator_id)
-    # 不能把最后一个启用中的管理员降成非管理员
-    if role != ROLE_ADMIN and bool(row.is_admin) and row.enabled:
+    # 老师与历史管理员权限等价；只在把最后一个全局管理账号改成学员时阻止。
+    if role == ROLE_MEMBER and role_of(row) in {ROLE_ADMIN, ROLE_TEACHER} and row.enabled:
         _check_last_admin(db, row, action="降级")
     row.role = role
     row.is_admin = (role == ROLE_ADMIN)

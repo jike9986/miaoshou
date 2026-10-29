@@ -68,6 +68,9 @@ export function PublishDialog({
 
   const shops = useMemo(() => shopsQuery.data?.shops ?? [], [shopsQuery.data?.shops]);
   const templates = templatesQuery.data?.templates ?? [];
+  const usableTemplates = templates.filter((item) => !item.invalid);
+  const requiresTemplate = !allowClaimOnly;
+  const hasValidTemplate = usableTemplates.some((item) => item.name === template);
 
   const [shopId, setShopId] = useState<string | null>(defaultShopId);
   const [template, setTemplate] = useState<string>("");
@@ -171,6 +174,10 @@ export function PublishDialog({
     }
     if (!shopId) {
       setError("请选择目标店铺");
+      return;
+    }
+    if (requiresTemplate && !hasValidTemplate) {
+      setError("学员发布必须选择一个可用的定价模板");
       return;
     }
     if (!confirmed) {
@@ -282,7 +289,7 @@ export function PublishDialog({
               icon={<Send />}
               loading={publish.isPending}
               loadingText="正在提交…"
-              disabled={!confirmed || !shopId || rateInvalid}
+              disabled={!confirmed || !shopId || rateInvalid || (requiresTemplate && !hasValidTemplate)}
               onClick={submit}
             >
               {effectiveClaimOnly ? "只认领进采集箱" : `发布 ${warehouseIds.length} 件`}
@@ -343,15 +350,32 @@ export function PublishDialog({
             </Field>
           )}
 
-          {crossCount > 0 && (
+          {(crossCount > 0 || requiresTemplate) && (
             <p className="rounded-md border border-info-500/20 bg-info-50 px-2.5 py-1.5 text-2xs leading-4 text-info-700">
-              其中 {crossCount} 件来自其他店铺，发布会自动采集并创建 {crossCount} 个载体；
-              链接池不足时发布会失败。
+              {requiresTemplate
+                ? "学员发布会为商品创建发布载体，并按所选定价模板重算售价；链接池不足时发布会失败。"
+                : `其中 ${crossCount} 件来自其他店铺，发布会自动采集并创建 ${crossCount} 个载体；链接池不足时发布会失败。`}
             </p>
           )}
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="定价模板" hint={templates.length === 0 ? "还没有保存定价模板（可留空）" : "跨店铺发布时按模板重算售价"}>
+            <Field
+              label="定价模板"
+              required={requiresTemplate}
+              hint={
+                templatesQuery.isLoading
+                  ? "正在读取定价模板…"
+                  : templatesQuery.isError
+                    ? undefined
+                    : requiresTemplate && usableTemplates.length === 0
+                      ? "暂无可用模板，请先在仓库的定价模板中创建并保存模板。"
+                      : requiresTemplate
+                        ? "发布时将按所选模板重算售价"
+                        : templates.length === 0
+                          ? "还没有保存定价模板（可留空）"
+                          : "跨店铺发布时按模板重算售价"
+              }
+            >
               <Select
                 value={template}
                 onChange={(name) => {
@@ -378,8 +402,15 @@ export function PublishDialog({
                   }
                 }}
                 options={templateOptions}
-                placeholder="不使用模板"
+                placeholder={requiresTemplate ? "选择定价模板" : "不使用模板"}
+                disabled={templatesQuery.isLoading || (requiresTemplate && usableTemplates.length === 0)}
+                required={requiresTemplate}
               />
+              {templatesQuery.isError && (
+                <InlineError onRetry={() => void templatesQuery.refetch()}>
+                  定价模板读取失败：{apiErrorMessage(templatesQuery.error)}
+                </InlineError>
+              )}
             </Field>
 
             <Field

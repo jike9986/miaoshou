@@ -77,14 +77,14 @@ def save_title(db: Session, *, account_id: Any, detail_id: Any, shop_id: Any,
             status=400, details={"field": "title", "length": len(wanted)})
 
     # 待清理词必须先清掉：把脏标题写回去等于白做一次清理。
-    # 用词库判定，口径与 clean_title 一致（casefold 后子串包含）。
+    # 用词库判定，口径与 clean_title 一致（NFKC + 空格/连字符变体）。
     from services import word_service
 
     pairs = (list(word_service.matcher(db)) if rules is None
              else [(str(word).casefold(), action)
                    for word, action in rules.items()])
-    hits_remove = [word for word, action in pairs
-                   if action == "remove" and word and word in wanted.casefold()]
+    hits_remove = [word for word, action in word_service.matched_words(wanted, pairs)
+                   if action == "remove"]
     review_words = title_service.review_hits(wanted, pairs)
     if hits_remove:
         raise errors.AppError(

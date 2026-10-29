@@ -1,12 +1,12 @@
 """操作员与审计查询路由。
 
-操作员名单用于记名，角色用于分级授权：成员只读，老师处理业务，
-管理员额外管理操作员、账号和全局配置。操作员写接口仅管理员可调用。
+操作员名单用于记名。老师（包括旧版管理员身份）拥有全局管理能力，
+学员只能访问本人范围内的业务数据。
 
   · `GET  /operators`          —— 谁能被记名（**永不返回 token**）
   · `POST /operators`          —— 加一个人，token 只在这里出现一次
   · `PATCH /operators/{id}`    —— 改名 / 重新启用（`{enabled: true}`）
-  · `POST /operators/{id}/disable` —— 停用（管理员；不能停自己 / 最后一个管理员）
+  · `POST /operators/{id}/disable` —— 停用（老师；不能停自己 / 最后一位老师）
   · `POST /operators/{id}/enable`  —— 重新启用的显式路径（与 PATCH 等价）
   · `POST /operators/{id}/rotate`  —— 重发 token（旧 token 立即失效）
   · `GET  /audit-logs`         —— 谁、什么时候、对什么、做了什么、结果如何
@@ -19,7 +19,7 @@
 401 说明无效（见 OperatorsPanel 的 SwitchIdentityDialog）。如果它挂在
 `require_token` 后面，那么带着**别人的** token 来探测会被共享 secret.key
 那道门先放行，永远返回 200，「这串 token 有没有效」就判不出来了。
-写操作由 AdminDep 统一鉴权，并逐个接口留下审计。
+写操作由全局管理权限统一鉴权，并逐个接口留下审计。
 """
 from __future__ import annotations
 
@@ -104,12 +104,12 @@ def reset_student_password(operator_id: str, payload: PasswordResetRequest,
 
 class OperatorCreateRequest(CamelModel):
     name: str = ""
-    # 只有管理员能建管理员。默认 false：加人进来是为了记名，不是为了给权。
+    # 旧客户端兼容字段；新界面通过 role 创建老师或学员。
     isAdmin: bool = False
     # 前端字段叫 admin（见 web/src/lib/types.ts 的 OperatorCreateRequest）。
     # 两个都收：老调用方按 isAdmin，界面按 admin。
     admin: bool | None = None
-    # 三级角色：admin / teacher / member。优先级高于 isAdmin。
+    # admin 是历史兼容值，与 teacher 权限相同；新界面只创建 teacher / member。
     role: str | None = None
 
 
@@ -167,7 +167,7 @@ def create_operator(payload: OperatorCreateRequest, db: DbSession,
     # 传了角色就按角色来，没传就按 isAdmin 推
     if role is None:
         role = operator_service.ROLE_ADMIN if is_admin else operator_service.ROLE_MEMBER
-    # role 优先于旧 isAdmin 字段，两个布尔列必须同步，避免 role_of 把老师误判为管理员。
+    # role 优先于旧 isAdmin 字段；admin 只保留为旧客户端兼容的角色值。
     is_admin = role == operator_service.ROLE_ADMIN
     row, token = operator_service.create(db, payload.name, is_admin=is_admin,
                                           role=role)
@@ -190,10 +190,10 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
                                 field="name")
     result: dict[str, Any] = {}
     if payload.role is not None:
-        # 改角色：只有管理员能改，且不能把最后一个管理员降成非管理员
+        # 改角色：老师可管理，且不能移除最后一位全局管理者
         result = operator_service.set_role(
             db, operator_id, payload.role,
-            is_admin_operator=operator_service.role_of(operator) == operator_service.ROLE_ADMIN)
+            is_admin_operator=operator_service.can(operator, "admin"))
         db.commit()
         audit_service.record(db, operator=operator, action="operator.set_role",
                              target_kind="operator", target_id=str(operator_id),
@@ -213,7 +213,7 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
         if payload.enabled:
             result = operator_service.enable(
                 db, operator_id,
-                is_admin_operator=operator_service.role_of(operator) == operator_service.ROLE_ADMIN)
+                is_admin_operator=operator_service.can(operator, "admin"))
             db.commit()
             audit_service.record(db, operator=operator, action="operator.enable",
                                  target_kind="operator", target_id=str(operator_id),
@@ -221,7 +221,7 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
             db.commit()
         else:
             # PATCH {enabled:false} 与 /disable 走同一条校验（含「不能停自己」
-            # 与「不能停最后一个管理员」），不另开一套宽松路径。
+            # 与「不能停最后一个老师」），不另开一套宽松路径。
             result = _disable(db, operator_id, operator)
     return {"operator": result}
 
@@ -233,7 +233,7 @@ def _disable(db: DbSession, operator_id: str, operator: Any) -> dict[str, Any]:
         raise errors.forbidden("不能停用自己的账号", reason="self")
     result = operator_service.disable(
         db, operator_id,
-        is_admin_operator=operator_service.role_of(operator) == operator_service.ROLE_ADMIN)
+        is_admin_operator=operator_service.can(operator, "admin"))
     db.commit()
     audit_service.record(db, operator=operator, action="operator.disable",
                          target_kind="operator", target_id=str(operator_id),
@@ -242,19 +242,19 @@ def _disable(db: DbSession, operator_id: str, operator: Any) -> dict[str, Any]:
     return result
 
 
-@router.post("/{operator_id}/disable", summary="停用（管理员；不能停自己/最后一个管理员）")
+@router.post("/{operator_id}/disable", summary="停用（老师；不能停自己/最后一位老师）")
 def disable_operator(operator_id: str, db: DbSession,
                      operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     return {"operator": _disable(db, operator_id, operator)}
 
 
-@router.post("/{operator_id}/enable", summary="重新启用（管理员）")
+@router.post("/{operator_id}/enable", summary="重新启用（老师）")
 def enable_operator(operator_id: str, db: DbSession,
                     operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     result = operator_service.enable(
-        db, operator_id, is_admin_operator=bool(operator.is_admin))
+        db, operator_id, is_admin_operator=operator_service.can(operator, "admin"))
     db.commit()
     audit_service.record(db, operator=operator, action="operator.enable",
                          target_kind="operator", target_id=str(operator_id),

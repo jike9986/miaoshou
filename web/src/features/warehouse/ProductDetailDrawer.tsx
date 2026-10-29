@@ -63,6 +63,11 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   );
 }
 
+function positiveMeasure(value: unknown): string | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? String(parsed) : null;
+}
+
 export function ProductDetailDrawer({
   productId,
   open,
@@ -72,6 +77,15 @@ export function ProductDetailDrawer({
 }: ProductDetailDrawerProps) {
   // includePayload=true：翻译检查报告存在 payload.translation.coverage 里
   const detailQuery = useProductDetail(open ? productId : null, true);
+  const payload = detailQuery.data?.product.payload;
+  const payloadSite = typeof payload?.site === "string" ? payload.site : "";
+  const packageWeight = positiveMeasure(payload?.weight);
+  const packageDimensions = [
+    positiveMeasure(payload?.packageLength),
+    positiveMeasure(payload?.packageWidth),
+    positiveMeasure(payload?.packageHeight),
+  ];
+  const dimensionsComplete = packageDimensions.every((value) => value !== null);
   const groupsQuery = useGroups();
   const patch = usePatchProduct();
   const remove = useDeleteProduct();
@@ -478,7 +492,15 @@ export function ProductDetailDrawer({
               <div className="flex flex-wrap items-center gap-2">
                 <StatusBadge meta={productStatus(product.status)} />
                 {product.language && <Badge variant="info">{product.language}</Badge>}
-                {product.site && <Badge variant="neutral">{product.site}</Badge>}
+                {product.site ? (
+                  <Badge variant="neutral">{product.site}</Badge>
+                ) : payloadSite ? (
+                  <Badge variant="warning" title="商品站点字段为空，原始商品信息中记录了该站点">
+                    {payloadSite} · 源数据
+                  </Badge>
+                ) : (
+                  <Badge variant="warning">站点待核对</Badge>
+                )}
               </div>
               <p className="mt-2 line-clamp-3 text-sm leading-5 text-fg">{product.title}</p>
               <p className="mt-1 font-mono text-2xs text-fg-muted">
@@ -545,11 +567,35 @@ export function ProductDetailDrawer({
             </div>
           </div>
 
+          <div className="grid gap-3 rounded-md border border-border-subtle bg-canvas-inset/50 p-3 sm:grid-cols-2">
+            <div>
+              <p className="text-2xs text-fg-muted">包裹重量</p>
+              <p className="num mt-0.5 text-sm font-semibold text-fg">
+                {packageWeight ? `${packageWeight} kg` : "缺少有效重量"}
+              </p>
+              <p className="mt-1 text-2xs text-fg-muted">
+                {payload?._sourceWeight ? `记录的源重量：${String(payload._sourceWeight)} kg` : "重量来源未记录，需对照妙手或原始商品核验"}
+              </p>
+            </div>
+            <div>
+              <p className="text-2xs text-fg-muted">包裹尺寸（长 × 宽 × 高）</p>
+              <p className="num mt-0.5 text-sm font-semibold text-fg">
+                {packageDimensions.map((value) => value ?? "缺失").join(" × ")}
+                {dimensionsComplete ? " cm" : ""}
+              </p>
+              <p className="mt-1 text-2xs text-fg-muted">
+                {dimensionsComplete && packageDimensions.join("×") === "30×20×10"
+                  ? "数值为 30 × 20 × 10 cm；记录未标明来源，不能据此确认真实尺寸"
+                  : "尺寸来源未记录；缺失或默认值应对照妙手或原始商品核验"}
+              </p>
+            </div>
+          </div>
+
           <div className="flex flex-col gap-3">
             <SectionTitle>标题</SectionTitle>
             {canWrite ? (
               <>
-                <Field error={titleError} hint="1–255 字符（按字符计，中英文均计 1 个）">
+                <Field error={titleError} hint="25–255 字符（按字符计，中英文均计 1 个）">
                   <Textarea
                     value={title}
                     rows={3}

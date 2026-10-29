@@ -1,4 +1,10 @@
-from services import word_service
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from core import errors
+from services import title_save_service, word_service
 
 
 def test_removal_matches_spaces_and_inserted_hyphens() -> None:
@@ -47,3 +53,27 @@ def test_nfkc_full_width_word_matches_half_width_title() -> None:
 
     assert word_service.matched_words(title, words) == [("ＮＩＫＥ－２０２４", "remove")]
     assert word_service.clean_title(title, words) == ("running shoes", ["ＮＩＫＥ－２０２４"])
+
+
+@pytest.mark.parametrize("variant", ["free shipping", "free-shipping", "free---shipping"])
+def test_direct_title_save_rejects_separator_variants(variant: str, monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "services.account_service", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "services.title_service",
+        SimpleNamespace(review_hits=lambda title, pairs: []),
+    )
+
+    with pytest.raises(errors.AppError) as excinfo:
+        title_save_service.save_title(
+            None,
+            account_id=1,
+            detail_id=1,
+            shop_id=1,
+            title=f"New handmade {variant} shoe product for daily wear",
+            confirm=True,
+            rules={"free shipping": "remove"},
+        )
+
+    assert "待清理词" in excinfo.value.message
+    assert excinfo.value.details["removedWords"] == ["free shipping"]

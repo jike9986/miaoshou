@@ -1,4 +1,4 @@
-"""三级角色的真实 HTTP 权限矩阵与全路由防漏挂检查。"""
+"""老师/学员权限矩阵与全路由防漏挂检查。"""
 from __future__ import annotations
 
 import uuid
@@ -102,8 +102,8 @@ def test_member_cannot_write_business_data(client, tokens, method, path):
     ("POST", "/images/verify"),
     ("POST", "/publish/settings"),
 ])
-def test_teacher_cannot_manage_system_or_identities(client, tokens, method, path):
-    response = client.request(method, API + path, json={}, headers=auth(tokens, "teacher"))
+def test_member_cannot_manage_system_or_identities(client, tokens, method, path):
+    response = client.request(method, API + path, json={}, headers=auth(tokens, "member"))
     assert response.status_code == 403, response.text
 
 
@@ -195,7 +195,28 @@ def test_admin_can_read_audit_and_change_shared_settings(client, tokens):
     assert settings.status_code == 200, settings.text
 
 
-def test_explicit_role_overrides_legacy_admin_flag(client, tokens):
+def test_teacher_has_same_global_management_permissions_as_legacy_admin(client, tokens):
+    headers = auth(tokens, "teacher")
+    audit = client.get(API + "/audit-logs", headers=headers)
+    assert audit.status_code == 200, audit.text
+    settings = client.post(API + "/system/settings", json={}, headers=headers)
+    assert settings.status_code == 200, settings.text
+
+    name = f"teacher-created-{uuid.uuid4().hex[:8]}"
+    created = client.post(API + "/operators", json={"name": name, "role": "member"},
+                          headers=headers)
+    assert created.status_code == 201, created.text
+    operator_id = created.json()["operator"]["id"]
+    changed = client.patch(API + f"/operators/{operator_id}",
+                           json={"role": "teacher"}, headers=headers)
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["operator"]["role"] == "teacher"
+    disabled = client.post(API + f"/operators/{operator_id}/disable", headers=headers)
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["operator"]["enabled"] is False
+
+
+def test_explicit_teacher_role_overrides_legacy_admin_flag(client, tokens):
     name = f"matrix-role-{uuid.uuid4().hex[:8]}"
     created = client.post(API + "/operators",
                           json={"name": name, "isAdmin": True, "role": "teacher"},
@@ -205,8 +226,8 @@ def test_explicit_role_overrides_legacy_admin_flag(client, tokens):
     assert body["operator"]["role"] == "teacher"
     assert body["operator"]["isAdmin"] is False
     teacher_headers = {"Authorization": f"Bearer {body['token']}"}
-    forbidden = client.post(API + "/system/settings", json={}, headers=teacher_headers)
-    assert forbidden.status_code == 403, forbidden.text
+    allowed = client.post(API + "/system/settings", json={}, headers=teacher_headers)
+    assert allowed.status_code == 200, allowed.text
 
 
 def test_operator_header_cannot_impersonate_another_operator(client, tokens):

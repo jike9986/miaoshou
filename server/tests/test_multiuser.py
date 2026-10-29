@@ -185,8 +185,8 @@ def test_disabled_operator_is_rejected(db):
     assert str(info.value.details.get("operatorId")) == str(row.id)
 
 
-def test_last_admin_cannot_be_disabled(db):
-    """最后一个启用中的管理员不能停用：停了就没人能再管操作员。
+def test_last_global_manager_cannot_be_disabled(db):
+    """最后一个启用中的老师/旧管理员不能停用：停了就没人能管理操作员。
 
     为了让「只剩下一个管理员」这个前提不受用例执行顺序影响，这里先把其它
     管理员临时降级，结束后在 finally 里恢复——被验的是 `disable` 的判定，
@@ -195,18 +195,20 @@ def test_last_admin_cannot_be_disabled(db):
     local = operator_service.ensure_default(db)
     db.commit()
 
-    others = [row.id for row in
-              db.query(Operator).filter(Operator.is_admin.is_(True)).all()
-              if row.id != local.id]
+    others = [(row.id, row.role, row.is_admin) for row in db.query(Operator).all()
+              if row.id != local.id and operator_service.role_of(row) in {
+                  operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}]
     try:
-        for ident in others:
-            db.query(Operator).filter(Operator.id == ident).one().is_admin = False
+        for ident, _role, _is_admin in others:
+            row = db.query(Operator).filter(Operator.id == ident).one()
+            row.role = operator_service.ROLE_MEMBER
+            row.is_admin = False
         db.commit()
 
-        only_admin = (db.query(Operator)
-                      .filter(Operator.is_admin.is_(True), Operator.enabled.is_(True))
-                      .count())
-        assert only_admin == 1
+        managers = [row for row in db.query(Operator).filter(Operator.enabled.is_(True)).all()
+                    if operator_service.role_of(row) in {
+                        operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}]
+        assert len(managers) == 1
 
         with pytest.raises(errors.AppError) as info:
             operator_service.disable(db, local.id, is_admin_operator=True)
@@ -217,11 +219,18 @@ def test_last_admin_cannot_be_disabled(db):
         assert info.value.details.get("reason") == "last_admin"
         # 判定必须在写之前：抛异常之后这一行不能被改成停用
         assert db.query(Operator).filter(Operator.id == local.id).one().enabled is True
+
+        with pytest.raises(errors.AppError) as downgrade_info:
+            operator_service.set_role(
+                db, local.id, operator_service.ROLE_MEMBER, is_admin_operator=True)
+        assert downgrade_info.value.status == 409
+        assert downgrade_info.value.details.get("reason") == "last_admin"
     finally:
-        for ident in others:
+        for ident, role, is_admin in others:
             row = db.query(Operator).filter(Operator.id == ident).one_or_none()
             if row is not None:
-                row.is_admin = True
+                row.role = role
+                row.is_admin = is_admin
         db.commit()
 
 

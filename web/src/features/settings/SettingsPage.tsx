@@ -13,7 +13,8 @@ import { useState } from "react";
 import { Globe, Image, Info, ScrollText, Users } from "lucide-react";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { Tabs, tabId, tabPanelId } from "@/components/ui";
-import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
+import { useOperatorIdentity } from "@/lib/operator";
+import { useOperators } from "@/lib/queries";
 import { OperatorsPanel } from "@/features/settings/OperatorsPanel";
 import { AuditLogPanel } from "@/features/settings/AuditLogPanel";
 import { PublishSettingsPanel } from "@/features/settings/PublishSettingsPanel";
@@ -29,45 +30,50 @@ export interface SettingsPageProps {
 
 export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
-  // 订阅身份：换了人 / 改了名，标题副文案要跟着变
   const identity = useOperatorIdentity();
+  const operatorsQuery = useOperators();
+  const role = operatorsQuery.data?.current?.role ?? identity?.role;
+  const canManage =
+    role === "teacher" || role === "admin" || operatorsQuery.data?.current?.admin === true;
+  const activeTab =
+    canManage || tab === "operators" || tab === "about" ? tab : "operators";
+  const settingsTabs = [
+    { value: "operators", label: canManage ? "账号与权限" : "账号", icon: <Users className="size-3.5" /> },
+    ...(canManage
+      ? [
+          { value: "publish", label: "发布", icon: <Globe className="size-3.5" /> },
+          { value: "image", label: "图片服务", icon: <Image className="size-3.5" /> },
+          { value: "audit", label: "审计日志", icon: <ScrollText className="size-3.5" /> },
+        ]
+      : []),
+    { value: "about", label: "关于与更新", icon: <Info className="size-3.5" /> },
+  ] as const;
 
   return (
     <>
       <PageHeader
         title="设置"
-        description={
-          identity
-            ? `当前身份：${operatorDisplayName()}`
-            : `当前身份：${operatorDisplayName()}（未设置，按本机记账）`
-        }
       >
         <Tabs
-          value={tab}
+          value={activeTab}
           onChange={(value) => setTab(value as SettingsTab)}
           idBase="settings"
-          items={[
-            { value: "operators", label: "操作员", icon: <Users className="size-3.5" /> },
-            { value: "publish", label: "发布", icon: <Globe className="size-3.5" /> },
-            { value: "image", label: "图片服务", icon: <Image className="size-3.5" /> },
-            { value: "audit", label: "审计日志", icon: <ScrollText className="size-3.5" /> },
-            { value: "about", label: "关于与更新", icon: <Info className="size-3.5" /> },
-          ]}
+          items={[...settingsTabs]}
         />
       </PageHeader>
 
       <PageContent width="table">
         <div
           role="tabpanel"
-          id={tabPanelId("settings", tab)}
-          aria-labelledby={tabId("settings", tab)}
+          id={tabPanelId("settings", activeTab)}
+          aria-labelledby={tabId("settings", activeTab)}
           className="contents"
         >
-          {tab === "operators" && <OperatorsPanel />}
-          {tab === "publish" && <PublishSettingsPanel />}
-          {tab === "image" && <ImageServiceCard />}
-          {tab === "audit" && <AuditLogPanel />}
-          {tab === "about" && <VersionPanel />}
+          {activeTab === "operators" && <OperatorsPanel />}
+          {activeTab === "publish" && canManage && <PublishSettingsPanel />}
+          {activeTab === "image" && canManage && <ImageServiceCard />}
+          {activeTab === "audit" && canManage && <AuditLogPanel />}
+          {activeTab === "about" && <VersionPanel />}
         </div>
       </PageContent>
     </>

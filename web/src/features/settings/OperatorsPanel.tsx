@@ -2,13 +2,13 @@
 //
 // 这个面板回答三个问题：
 //   1. 我现在是谁？（顶部大字，换人要点得着）
-//   2. 这台机器上还有谁？（表格：名字 / 是否管理员 / 最后活跃 / 是否启用）
+//   2. 这台机器上还有谁？（表格：名字 / 角色 / 最后活跃 / 是否启用）
 //   3. 怎么把人加进来？（新建 → 一次性 token → 复制给对方）
 //
 // 两条硬规则：
 //   · token 明文只在「新建」和「重置」的响应里出现一次，必须当场用一次性框摊开；
 //     重置前要确认「旧 token 会立刻失效」，否则对方会莫名其妙被踢下线。
-//   · 非管理员看不到停用 / 重置按钮（不是禁用，是不渲染）——
+//   · 学员看不到停用 / 重置按钮（不是禁用，是不渲染）——
 //     权限不够的按钮摆在那里只会招来一串 403。
 
 import { useMemo, useState } from "react";
@@ -69,22 +69,20 @@ import { OneTimeTokenDialog, ONE_TIME_TOKEN_NOTICE } from "@/features/settings/O
  * ------------------------------------------------------------------ */
 
 const ROLE_OPTIONS = [
-  { value: "member" as const, label: "成员（只读）" },
-  { value: "teacher" as const, label: "老师（处理+发布）" },
-  { value: "admin" as const, label: "管理员（全部权限）" },
+  { value: "member" as const, label: "学员（仅本人商品）" },
+  { value: "teacher" as const, label: "老师（全局管理）" },
 ];
 
 const ROLE_SHORT_OPTIONS = [
-  { value: "member" as const, label: "成员" },
+  { value: "member" as const, label: "学员" },
   { value: "teacher" as const, label: "老师" },
-  { value: "admin" as const, label: "管理员" },
 ];
 
 function roleLabel(role?: string): string {
   switch (role) {
-    case "admin": return "管理员";
+    case "admin":
     case "teacher": return "老师";
-    default: return "成员";
+    default: return "学员";
   }
 }
 
@@ -149,9 +147,9 @@ function IdentityCard({
             <span className="text-[15px] font-semibold leading-[22px] text-fg">
               当前身份：{name}
             </span>
-            {me?.admin && (
+            {(me?.role === "teacher" || me?.role === "admin" || me?.admin) && (
               <Badge variant="brand" size="sm">
-                管理员
+                老师
               </Badge>
             )}
             {!identity && (
@@ -276,12 +274,12 @@ function SwitchIdentityDialog({
         const who = data.current ?? null;
         setOperator({ token: value, id: who?.id ?? null, name: who?.name ?? "操作员", role: who?.role });
         // 身份一变，后端返回的「我」就不同了：名单与审计都要重取，
-        // 否则界面上还挂着上一个人的管理员标记
+        // 否则界面上还挂着上一个人的角色标记
         void client.invalidateQueries({ queryKey: queryKeys.operators.all });
         void client.invalidateQueries({ queryKey: queryKeys.auditLogs.all });
         if (who && who.enabled === false) {
           toast.warning(`「${who.name}」已被停用`, {
-            description: "token 能读到身份，但写操作会被后端拒绝，请联系管理员重新启用",
+            description: "token 能读到身份，但写操作会被后端拒绝，请联系老师重新启用",
           });
         } else {
           toast.success(`已切换为「${who?.name ?? "操作员"}」`);
@@ -335,7 +333,7 @@ function SwitchIdentityDialog({
           label="token"
           required
           error={error}
-          hint="这串字符由管理员或对方本人一次性发放，服务端只存哈希，丢了只能重置。"
+          hint="这串字符由老师或对方本人一次性发放，服务端只存哈希，丢了只能重置。"
         >
           <Input
             value={token}
@@ -375,7 +373,7 @@ function CreateOperatorDialog({
   onToken: (token: string, name: string) => void;
 }) {
   const [name, setName] = useState("");
-  const [role, setRole] = useState<"admin" | "teacher" | "member">("member");
+  const [role, setRole] = useState<"teacher" | "member">("member");
   const [error, setError] = useState<string | null>(null);
   const create = useCreateOperator();
 
@@ -461,10 +459,10 @@ function CreateOperatorDialog({
             }}
           />
         </Field>
-        <Field label="角色" hint="管理员：能做所有事；老师：能处理商品和发布；成员：只能看仓库和词库。">
+        <Field label="角色" hint="老师可以管理账号、共享设置和业务数据；学员只能访问本人认领的商品。">
           <Select
             value={role}
-            onChange={(value) => setRole(value as "admin" | "teacher" | "member")}
+            onChange={(value) => setRole(value as "teacher" | "member")}
             options={ROLE_OPTIONS}
           />
         </Field>
@@ -604,12 +602,28 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
     return operators.find((item) => item.id === identity.id) ?? current;
   }, [identity, operators, operatorsQuery.data]);
 
-  /**
-   * 是否管理员。
-   * 后端没回 current（老版本）时按 true 处理：宁可多显示两个按钮，
-   * 也不要把唯一的管理入口藏起来让人无路可走。
-   */
-  const isAdmin = me ? me.admin : true;
+  const canManage = me?.role === "teacher" || me?.role === "admin" || me?.admin === true;
+
+  if (operatorsQuery.isLoading) return <SkeletonRows rows={4} />;
+  if (operatorsQuery.isError) {
+    return <InlineError onRetry={() => void operatorsQuery.refetch()}>
+      {apiErrorMessage(operatorsQuery.error)}
+    </InlineError>;
+  }
+  if (!canManage) {
+    return (
+      <Card padding="normal">
+        <CardTitle>当前账号</CardTitle>
+        <div className="mt-3 flex items-center gap-2">
+          <span className="text-[13px] font-medium text-fg">{me?.name ?? identity?.name ?? "学员"}</span>
+          <Badge variant="neutral" size="sm">学员</Badge>
+        </div>
+        <p className="mt-2 text-xs leading-[18px] text-fg-muted">
+          学员账号和密码由老师管理；如需调整，请联系老师。
+        </p>
+      </Card>
+    );
+  }
 
   const rotateNow = (): void => {
     const target = rotateTarget;
@@ -655,7 +669,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
 
   return (
     <div className={cn("flex flex-col gap-4", className)}>
-      {(me?.role === "teacher" || me?.role === "admin") && <StudentAccountsPanel />}
+      <StudentAccountsPanel />
       <IdentityCard onSwitch={() => setSwitchOpen(true)} onCreated={() => setCreateOpen(true)} />
 
       <Card padding="none">
@@ -684,17 +698,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
         </div>
         <Separator />
 
-        {operatorsQuery.isLoading && <SkeletonRows rows={4} className="px-4 py-3" />}
-
-        {operatorsQuery.isError && (
-          <div className="px-4 py-3">
-            <InlineError onRetry={() => void operatorsQuery.refetch()}>
-              {apiErrorMessage(operatorsQuery.error)}
-            </InlineError>
-          </div>
-        )}
-
-        {!operatorsQuery.isLoading && !operatorsQuery.isError && operators.length === 0 && (
+        {operators.length === 0 && (
           <EmptyState
             icon={<Users strokeWidth={1.5} />}
             title="还没有操作员"
@@ -730,8 +734,8 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                 {operators.map((item) => {
                   const isSelf = identity?.id === item.id;
                   const isBuiltin = item.builtin === true || item.id === "local";
-                  // 非管理员不渲染停用 / 重置（不是灰掉）：权限不够的按钮只会招 403
-                  const canManageOthers = isAdmin && !isBuiltin;
+                  // 学员不渲染停用 / 重置（不是灰掉）：权限不够的按钮只会招 403
+                  const canManageOthers = canManage && !isBuiltin;
                   return (
                     <tr
                       key={item.id}
@@ -754,12 +758,8 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                         <p className="mt-0.5 truncate font-mono text-2xs text-fg-muted">{item.id}</p>
                       </td>
                       <td className="px-3 py-2.5">
-                        {item.role === "admin" ? (
-                          <Badge variant="brand" icon={<ShieldCheck className="size-3" />}>
-                            {roleLabel(item.role)}
-                          </Badge>
-                        ) : item.role === "teacher" ? (
-                          <Badge variant="info" size="sm">
+                        {item.role === "admin" || item.role === "teacher" ? (
+                          <Badge variant="brand" size="sm" icon={<ShieldCheck className="size-3" />}>
                             {roleLabel(item.role)}
                           </Badge>
                         ) : (
@@ -786,7 +786,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                       </td>
                       <td className="px-3 py-2.5 pr-4">
                         <span className="flex items-center justify-end gap-1">
-                          {/* 改名：自己随时能改，别人只有管理员能改 */}
+                          {/* 改名：自己随时能改，别人只有老师能改 */}
                           {(isSelf || canManageOthers) && !isBuiltin && (
                             <Tooltip content="改名字">
                               <IconButton
@@ -804,10 +804,10 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                                 <Select
                                   size="sm"
                                   className="w-[100px]"
-                                  value={item.role ?? "member"}
+                                  value={item.role === "admin" ? "teacher" : item.role ?? "member"}
                                   onChange={(value) => {
                                     setRole.mutate(
-                                      { id: item.id, role: value as "admin" | "teacher" | "member" },
+                                      { id: item.id, role: value as "teacher" | "member" },
                                       {
                                         onSuccess: () =>
                                           toast.success(`已把「${item.name}」改为${roleLabel(value)}`),

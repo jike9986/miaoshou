@@ -4,7 +4,7 @@
 // 未连接妙手时自动跳 /unlock（features/auth/guard），用户选择「稍后连接」后不再强跳。
 
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   CalendarClock,
   KeyRound,
@@ -16,7 +16,7 @@ import {
 import { AppShell, BrandMark } from "@/components/layout/AppShell";
 import type { SidebarNavGroup } from "@/components/layout/Sidebar";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
-import { AppToaster } from "@/components/ui/toast";
+import { AppToaster, toast } from "@/components/ui/toast";
 import { EmptyState } from "@/components/ui/empty-state";
 import { UnlockPage } from "@/features/auth/UnlockPage";
 import { useAutoUnlock, useAuthGuardStore } from "@/features/auth/guard";
@@ -25,7 +25,7 @@ import { AutomationPage } from "@/features/automation/AutomationPage";
 import { SchedulesPage } from "@/features/schedules/SchedulesPage";
 import { WordsPage } from "@/features/words/WordsPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
-import { useAuthStatus } from "@/lib/queries";
+import { useAuthStatus, useVersion } from "@/lib/queries";
 import { hasRuntimeToken } from "@/lib/bootstrap";
 import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
 
@@ -67,7 +67,21 @@ function Shell() {
   const { data: status } = useAuthStatus();
   const guest = useAuthGuardStore((state) => state.guest);
   const operatorIdentity = useOperatorIdentity();
+  const versionQuery = useVersion(true, hasRuntimeToken());
+  const notifiedVersion = useRef<string | null>(null);
   useAutoUnlock();
+
+  useEffect(() => {
+    const version = versionQuery.data;
+    if (!version?.ok || !version.updateAvailable || !version.latest
+      || notifiedVersion.current === version.latest) return;
+    notifiedVersion.current = version.latest;
+    toast.info(`发现新版本 ${version.latest}`, {
+      description: "更新详情和安装操作可在设置中查看。",
+      action: { label: "打开设置", onClick: () => navigate("/settings") },
+      duration: 8000,
+    });
+  }, [versionQuery.data, navigate]);
 
   useEffect(() => {
     if (operatorIdentity?.mustChangePassword && location.pathname !== "/unlock") {
