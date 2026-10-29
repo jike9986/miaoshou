@@ -168,9 +168,31 @@ cd server && python migrations/_verify_baseline.py
 `categories` `groups` `image_jobs` `operators` `product_claims` `products` `publish_logs`
 `schedule_logs` `schedules` `settings` `shops` `violation_words`。
 
-PostgreSQL 可配置连接并在启动时检查 schema revision，但尚未完成 SQLite 业务数据导入、
-DPAPI/Fernet 凭据重加密、数据备份与恢复校验，也没有真实 PostgreSQL 服务上的 CRUD 和迁移验收。
-不要仅通过设置连接串就迁移生产数据或启动共享服务。
+PostgreSQL 可配置连接并在启动时检查 schema revision。受控 SQLite 导入工具已实现，但尚无真实
+PostgreSQL 服务上的 CRUD、迁移或导入验收；PostgreSQL 备份/恢复演练也尚未实现。不要仅通过设置
+连接串就迁移生产数据或启动共享服务。
+
+### SQLite 到 PostgreSQL 的受控导入
+
+`server/scripts/migrate_sqlite_to_postgres.py` 默认只做预检。它要求源库表/列与当前模型一致，
+检查 SQLite integrity 与外键，并验证每个非空妙手密文可解密；目标必须是当前 Alembic head、
+仅含本应用表且没有业务数据的 PostgreSQL 库。存在其它表、目标有数据或源结构不匹配都会中止。
+
+先通过受保护的环境配置提供 `AOHUANG_DATABASE_URL` 和独立的 `AOHUANG_CREDENTIAL_KEY`，
+再从 `server/` 目录运行：
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py --source "D:/aohuang-data/app.db"
+python scripts/migrate_sqlite_to_postgres.py --source "D:/aohuang-data/app.db" --apply
+```
+
+不带 `--apply` 不写备份、不改目标。正式导入会先用 `VACUUM INTO` 生成本地 SQLite 快照并校验，
+再从该快照复制数据，在一个 PostgreSQL 事务中保留主键、重加密妙手凭据、对齐自增序列并核对各表行数。
+默认备份位置是源库旁的 `backups/`，不会自动清理旧备份。`--source-data-dir` 可指定含源 `secret.key`
+的目录；DPAPI 密文必须在原 Windows 用户身份下解密。迁移窗口内应停止源库写入并保留原始库。
+
+该工具目前只有 SQLite 算法测试，尚未连接真实 PostgreSQL 做端到端导入、恢复演练或应用 smoke test；
+它不会备份 PostgreSQL 目标，也不应对现有含其它业务数据的共享服务器运行。
 
 ## 老库如何纳入版本管理
 

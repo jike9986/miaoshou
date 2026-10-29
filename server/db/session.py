@@ -156,6 +156,9 @@ def init_db() -> None:
     import importlib
 
     if engine.dialect.name == "postgresql":
+        from services.crypto import validate_server_key
+
+        validate_server_key()
         _assert_postgresql_schema_current()
         _seed_settings()
         return

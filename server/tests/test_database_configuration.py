@@ -146,6 +146,9 @@ def test_postgres_init_only_checks_schema_and_seeds_settings(monkeypatch) -> Non
     fake_engine = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
     calls: list[str] = []
     monkeypatch.setattr(session_module, "engine", fake_engine)
+    from services import crypto
+
+    monkeypatch.setattr(crypto, "validate_server_key", lambda: calls.append("key"))
     monkeypatch.setattr(session_module, "_assert_postgresql_schema_current",
                         lambda: calls.append("schema"))
     monkeypatch.setattr(session_module, "_seed_settings", lambda: calls.append("seed"))
@@ -156,7 +159,35 @@ def test_postgres_init_only_checks_schema_and_seeds_settings(monkeypatch) -> Non
 
     session_module.init_db()
 
-    assert calls == ["schema", "seed"]
+    assert calls == ["key", "schema", "seed"]
+
+
+def test_postgres_init_stops_when_credential_key_is_missing(monkeypatch) -> None:
+    fake_engine = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    monkeypatch.setattr(session_module, "engine", fake_engine)
+    from services import crypto
+
+    def fail_key_validation() -> None:
+        raise crypto.CredentialError("key missing")
+
+    monkeypatch.setattr(
+        crypto,
+        "validate_server_key",
+        fail_key_validation,
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_assert_postgresql_schema_current",
+        lambda: pytest.fail("schema must not be checked without credential key"),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_seed_settings",
+        lambda: pytest.fail("settings must not be seeded without credential key"),
+    )
+
+    with pytest.raises(crypto.CredentialError, match="key missing"):
+        session_module.init_db()
 
 
 def test_sqlite_init_keeps_create_patch_and_seed_path(monkeypatch) -> None:

@@ -102,8 +102,8 @@ CI 迁移检查另行统计出 33 个显式索引和 18 个 SQLite 自动唯一/
 `categories` `groups` `image_jobs` `operators` `product_claims` `products` `publish_logs`
 `schedule_logs` `schedules` `settings` `shops` `violation_words`。
 
-PostgreSQL 当前仅有连接配置、迁移执行路径和启动 revision 校验；尚无真实 PostgreSQL
-CRUD/在线迁移验收，也无 SQLite 业务数据导入、凭据重加密及备份恢复校验工具。
+PostgreSQL 有连接配置、迁移执行路径和启动 revision 校验。受控 SQLite 导入工具已实现并有 SQLite
+算法测试，但尚无真实 PostgreSQL CRUD/在线迁移/导入验收，也没有 PostgreSQL 备份恢复演练。
 
 期望值不要硬编码 —— `scripts/ci_migration_check.py` 与
 `migrations/_selftest.py` 都从 `Base.metadata` 派生表集合，模型加了表会自动跟上。

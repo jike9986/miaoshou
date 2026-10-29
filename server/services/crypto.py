@@ -35,6 +35,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from core.config import get_settings
 
 DPAPI_PREFIX = "dpapi:"
+SERVER_PREFIX = "server:"
+SERVER_KEY_ENV = "AOHUANG_CREDENTIAL_KEY"
 _FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
 
 
@@ -126,6 +128,21 @@ def _fernet() -> Fernet:
     return Fernet(key)
 
 
+def _server_fernet() -> Fernet:
+    key = os.environ.get(SERVER_KEY_ENV)
+    if not key:
+        raise CredentialError(f"服务端凭据密钥未配置（{SERVER_KEY_ENV}）")
+    try:
+        return Fernet(key.encode("ascii"))
+    except (TypeError, ValueError):
+        raise CredentialError(f"服务端凭据密钥格式无效（{SERVER_KEY_ENV}）") from None
+
+
+def validate_server_key() -> None:
+    """Raise CredentialError unless the independent server key is configured and valid."""
+    _server_fernet()
+
+
 def _write_file(path: Path, payload: bytes) -> None:
     """原子写 + 0600：先落临时文件，再 replace。
 
@@ -154,10 +171,20 @@ def _write_file(path: Path, payload: bytes) -> None:
 def encrypt(plain: str) -> str:
     if not plain:
         return ""
+    if SERVER_KEY_ENV in os.environ:
+        return encrypt_for_server(plain)
     protected = _dpapi_encrypt(plain)
     if protected is not None:
         return protected
     return _fernet().encrypt(plain.encode("utf-8")).decode("ascii")
+
+
+def encrypt_for_server(plain: str) -> str:
+    """Encrypt credentials with the independent server key and mark their envelope."""
+    if not plain:
+        return ""
+    token = _server_fernet().encrypt(plain.encode("utf-8")).decode("ascii")
+    return SERVER_PREFIX + token
 
 
 def decrypt(token: str) -> str:
@@ -168,6 +195,12 @@ def decrypt(token: str) -> str:
     """
     if not token:
         return ""
+    if token.startswith(SERVER_PREFIX):
+        fernet = _server_fernet()
+        try:
+            return fernet.decrypt(token[len(SERVER_PREFIX):].encode("ascii")).decode("utf-8")
+        except (InvalidToken, UnicodeError, ValueError):
+            raise CredentialError("服务端凭据无法解密：密钥不匹配或凭据内容已损坏") from None
     if token.startswith(DPAPI_PREFIX):
         restored = _dpapi_decrypt(token)
         if restored is not None:
@@ -176,6 +209,22 @@ def decrypt(token: str) -> str:
     try:
         return _fernet().decrypt(token.encode("ascii")).decode("utf-8")
     except (InvalidToken, ValueError):
+        raise CredentialError(
+            "凭据无法解密：local secret 已变更或凭据文件损坏，请重新填写 AppSecret"
+        ) from None
+
+
+def decrypt_with_local_secret(token: str, local_secret: str) -> str:
+    """Decrypt a local Fernet token using an explicitly supplied local secret."""
+    if not token:
+        return ""
+    if token.startswith((DPAPI_PREFIX, SERVER_PREFIX)):
+        return decrypt(token)
+
+    key = base64.urlsafe_b64encode(hashlib.sha256(local_secret.encode("utf-8")).digest())
+    try:
+        return Fernet(key).decrypt(token.encode("ascii")).decode("utf-8")
+    except (InvalidToken, UnicodeError, ValueError):
         raise CredentialError(
             "凭据无法解密：local secret 已变更或凭据文件损坏，请重新填写 AppSecret"
         ) from None

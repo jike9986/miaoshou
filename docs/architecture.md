@@ -471,7 +471,7 @@ Alembic 单链式 revision，文件名 `<YYYYMMDD>_<HHMM>_<rev>_<slug>.py`：
 - **本地优先**：单机单用户，全部数据在 `%LOCALAPPDATA%\AOHUANG-Listing\data\app.db`，离线可用，备份就是一个文件（`VACUUM INTO` 生成一致性快照）。
 - **量级匹配**：仓库上限 2000 条商品、发布记录万级、图片任务万级，SQLite 在 WAL 下完全够用；旧实现是「每次读写整个 JSON 文件」，2000 条时 gallery 已经要全量反序列化。
 - **事务能力**：认领状态、图片预扣费、发布台账都需要「读-改-写」原子性，JSON 文件靠 `.tmp + replace` 只能保证不写坏，保证不了并发互斥。
-- **PostgreSQL 支持状态**：可通过 `AOHUANG_DATABASE_URL` 配置 PostgreSQL，启动时会校验连接和迁移版本；生产启动不会自动改 schema。SQLite 到 PostgreSQL 的业务数据导入、凭据重加密、备份/恢复验证尚未实现，当前也没有真实 PostgreSQL 在线 CRUD 与迁移验收。不能把改连接串视为完成数据库切换。
+- **PostgreSQL 支持状态**：可通过 `AOHUANG_DATABASE_URL` 配置 PostgreSQL，启动时校验独立凭据密钥、连接和迁移版本；生产启动不会自动改 schema。受控 SQLite 导入工具已实现并有 SQLite 算法测试，但当前没有真实 PostgreSQL 在线 CRUD、迁移、导入或备份恢复验收。不能把改连接串视为完成数据库切换。
 - **已知限制**：单写者。因此后端强制单 worker，写操作串行在短事务里；长任务（图片、发布）只写状态字段，不做长事务。
 
 ### 4.3 鉴权方案
