@@ -33,7 +33,7 @@
                                     ┌────────────▼──┐   ┌──────▼──────────────┐
                                     │ SQLite (WAL)  │   │ 本地文件存储          │
                                     │ app.db        │   │ image-results/       │
-                                    │ 15 张业务表    │   │ logs/  backups/      │
+                                    │ 18 张业务表    │   │ logs/  backups/      │
                                     └───────────────┘   └─────────────────────┘
                                                  │
                         ┌────────────────────────┼──────────────────────────┐
@@ -432,28 +432,25 @@ schedules  1───n publish_logs
 > | 场景 | 谁负责 |
 > | --- | --- |
 > | 新库从零建表 | Alembic（`server/migrations/`） |
-> | 应用启动 | `create_all` + `_add_missing_columns()` |
+> | SQLite 应用启动 | `create_all` + `_add_missing_columns()` |
 > | 老库补新列 | `_add_missing_columns()`（`ALTER TABLE ADD COLUMN`） |
 > | 改列类型 / 删列 / 改约束 | 只能 Alembic |
 >
-> 表数量也已修正：实际是 **15 张表**（不是本节原先写的 11 张），
-> 见 `server/models/` 下 15 个 `__tablename__`。
+> 当前模型共有 **18 张表**。SQLite 启动仍通过 `create_all` 和补列逻辑建表；
+> PostgreSQL 启动只校验数据库可连接且 Alembic heads 与当前代码一致，不会自动迁移。
 >
 > 完整用法、老库纳入版本管理的 `stamp` 流程、以及「加一列」的标准步骤见
 > [`docs/migrations.md`](migrations.md)。
 
 Alembic 单链式 revision，文件名 `<YYYYMMDD>_<HHMM>_<rev>_<slug>.py`：
 
-- `20261028_2020_f6add52fca2e_baseline_existing_13_tables`：基线，13 张表 + 24 个显式索引
-  + 11 个外键。
-- `20261028_2034_e3079cb089af_add_audit_logs_and_operators`：新增 `operators`、
-  `audit_logs` 两张表（操作员与审计）。
-- `20261028_2037_d4f39fe694e0_add_operator_id_to_batches_products_`：给
-  `batches` / `products` / `publish_logs` 加 `operator_id`（可空，batch 模式）。
-- 整条链与 `Base.metadata.create_all()` 逐列核对等价：15 表 / 43 索引 / 12 外键
-  （`python migrations/_verify_baseline.py`）。
+- 迁移链从 13 张表的基线继续增加操作员/审计、操作员归属、自动化结果、登录凭据、
+  按学员认领、妙手账号归属和自动化运行记录；完整 revision 清单见
+  [`docs/migrations.md`](migrations.md)。
+- 当前迁移检查在 SQLite 临时库验证出 18 张表、33 个显式索引、18 个自动唯一/主键索引
+  和 20 个外键；`python server/scripts/ci_migration_check.py` 会跑 upgrade 与 downgrade。
 - 之后每次改表必须提供能真正执行的 `downgrade()`（CI 会跑 `alembic downgrade base` 验一遍）。
-- 应用启动**不**执行 `alembic upgrade head`，理由见上方引用块。
+- SQLite 应用启动不执行 `alembic upgrade head`；PostgreSQL 启动只校验 revision heads，也不自动迁移。
 
 ---
 
@@ -474,7 +471,7 @@ Alembic 单链式 revision，文件名 `<YYYYMMDD>_<HHMM>_<rev>_<slug>.py`：
 - **本地优先**：单机单用户，全部数据在 `%LOCALAPPDATA%\AOHUANG-Listing\data\app.db`，离线可用，备份就是一个文件（`VACUUM INTO` 生成一致性快照）。
 - **量级匹配**：仓库上限 2000 条商品、发布记录万级、图片任务万级，SQLite 在 WAL 下完全够用；旧实现是「每次读写整个 JSON 文件」，2000 条时 gallery 已经要全量反序列化。
 - **事务能力**：认领状态、图片预扣费、发布台账都需要「读-改-写」原子性，JSON 文件靠 `.tmp + replace` 只能保证不写坏，保证不了并发互斥。
-- **可换 Postgres**：全部访问走 SQLAlchemy 2.0 声明式模型 + Alembic，不写 SQLite 方言特有 SQL（FTS 单独封装在 `services/warehouse/search.py`，换库时替换为 `tsvector`）。切换只需改 `DATABASE_URL` 并重跑迁移。
+- **PostgreSQL 支持状态**：可通过 `AOHUANG_DATABASE_URL` 配置 PostgreSQL，启动时会校验连接和迁移版本；生产启动不会自动改 schema。SQLite 到 PostgreSQL 的业务数据导入、凭据重加密、备份/恢复验证尚未实现，当前也没有真实 PostgreSQL 在线 CRUD 与迁移验收。不能把改连接串视为完成数据库切换。
 - **已知限制**：单写者。因此后端强制单 worker，写操作串行在短事务里；长任务（图片、发布）只写状态字段，不做长事务。
 
 ### 4.3 鉴权方案

@@ -26,9 +26,10 @@
 - `env.py` —— 运行环境。关键设置：`target_metadata` 指向 `db.session.Base.metadata`，
   `render_as_batch=True`（SQLite 改列必须走 batch），`compare_type=True` +
   `compare_server_default=True`（否则看不到类型/默认值变化）。
-  连接串不写死在 `alembic.ini` 里，而是从 `core.config.get_settings().db_path` 注入。
+  连接串不写死在 `alembic.ini` 里，而是复用应用 database engine 的 URL
+  （由 `AOHUANG_DATABASE_URL` 或默认本机 SQLite 配置决定）。
 - `script.py.mako` —— 新迁移的模板。
-- `versions/` —— 迁移脚本。当前只有一条基线。
+- `versions/` —— 迁移脚本。当前迁移头为 `20261030_0912`。
 
 ## 和 `_add_missing_columns()` 的分工
 
@@ -40,16 +41,17 @@
 | 新库从零建表 | **Alembic** | 有版本记录，能重放，能校验 |
 | 老用户库升级补新列 | **`_add_missing_columns()`** | 用户双击 exe 升级，不会手动跑 alembic |
 | 改列类型 / 删列 / 改约束 | **只能 Alembic** | `ADD COLUMN` 做不到 |
-| 应用启动 | **`create_all` + 补列** | 打包产物里没有迁移目录，且老库表已存在，`upgrade head` 会直接失败 |
+| SQLite 应用启动 | **`create_all` + 补列** | 兼容桌面端既有 SQLite 库 |
+| PostgreSQL 应用启动 | **校验连接与迁移 heads** | 不自动升级 schema；head 不一致则拒绝启动 |
 
 因此：**新加一列时，模型定义和 Alembic 迁移都要有**。只改模型不写迁移，
 新库（走 alembic 建的）会缺这列；只写迁移不改模型，下次 autogenerate 会把
 这条迁移「撤销」掉。
 
-启动路径刻意**不接** `alembic upgrade head`：打包后的 sidecar 里没有 `migrations/`
-目录，而且老用户库的表已经存在，upgrade 会因 `table already exists` 失败，
-导致应用起不来。这一点与 `docs/architecture.md` §3.13 的早期设想不同，
-以本文档为准。
+SQLite 启动路径刻意**不接** `alembic upgrade head`：打包后的 sidecar 里没有 `migrations/`
+目录，而且老用户库的表已经存在，upgrade 会因 `table already exists` 失败。
+PostgreSQL 启动会检查连接和 revision heads，但不自动执行迁移。PyInstaller 当前也未打包
+迁移目录，因此源码环境的 PostgreSQL 配置不代表打包版已可用；打包部署路径仍需实现并验收。
 
 ## 老库如何纳入版本管理（一次性）
 
@@ -71,9 +73,14 @@ python scripts/db.py stamp head --real
 
 | revision | 内容 |
 | --- | --- |
-| `f6add52fca2e` | 基线：13 张表 + 24 个显式索引 + 11 个外键 |
+| `f6add52fca2e` | 基线：13 张表 |
 | `e3079cb089af` | 新增 `operators`、`audit_logs`（操作员与审计） |
 | `d4f39fe694e0` | `batches`/`products`/`publish_logs` 加 `operator_id`（可空，batch） |
+| `20261029_2044` | 拆分自动化结果商品并完成操作员/商品迁移 |
+| `20261029_2100` | 增加操作员登录凭据 |
+| `20261030_0910` | 增加按操作员隔离的成品认领 |
+| `20261030_0911` | 增加妙手凭据的学员归属 |
+| `20261030_0912` | 持久化采集箱自动化任务和逐商品结果 |
 
 基线的生成方式：把 `AOHUANG_DATA_DIR` 指到 `tempfile.mkdtemp()`，对空库跑
 `alembic revision --autogenerate`，因此里面全是 `create_table`。
@@ -82,17 +89,21 @@ python scripts/db.py stamp head --real
 
 | 项 | create_all | 迁移链 |
 | --- | --- | --- |
-| 表 | 15 | 15 |
-| 索引 | 43 | 43 |
-| 外键 | 12 | 12 |
+| 表 | 18 | 18 |
+| SQLite 索引（含自动索引） | 51 | 51 |
+| 外键 | 20 | 20 |
 
 复核命令：`python migrations/_verify_baseline.py`（逐列比对类型 / 非空 /
 默认值 / 主键，逐表比对索引与外键，两份库都建在临时目录）。
+CI 迁移检查另行统计出 33 个显式索引和 18 个 SQLite 自动唯一/主键索引。
 
-当前 15 张表（基线 13 + 后续 2）：
-`accounts` `audit_logs` `batch_items` `batches` `categories` `groups`
-`image_jobs` `operators` `products` `publish_logs` `schedule_logs`
-`schedules` `settings` `shops` `violation_words`。
+当前 18 张表：
+`accounts` `audit_logs` `automation_run_items` `automation_runs` `batch_items` `batches`
+`categories` `groups` `image_jobs` `operators` `product_claims` `products` `publish_logs`
+`schedule_logs` `schedules` `settings` `shops` `violation_words`。
+
+PostgreSQL 当前仅有连接配置、迁移执行路径和启动 revision 校验；尚无真实 PostgreSQL
+CRUD/在线迁移验收，也无 SQLite 业务数据导入、凭据重加密及备份恢复校验工具。
 
 期望值不要硬编码 —— `scripts/ci_migration_check.py` 与
 `migrations/_selftest.py` 都从 `Base.metadata` 派生表集合，模型加了表会自动跟上。

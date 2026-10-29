@@ -37,7 +37,13 @@ def table_signature(db_path: Path) -> dict[str, dict]:
             columns = {}
             for row in conn.execute(f'PRAGMA table_info("{table}")'):
                 # cid, name, type, notnull, dflt_value, pk
-                columns[row[1]] = [row[2].upper(), bool(row[3]), row[4], bool(row[5])]
+                type_name = row[2].upper()
+                default = row[4]
+                if type_name == "BOOLEAN" and default is not None:
+                    default = default.strip().strip("()")
+                    if len(default) >= 2 and default[0] == default[-1] and default[0] in "'\"":
+                        default = default[1:-1]
+                columns[row[1]] = [type_name, bool(row[3]), default, bool(row[5])]
             indexes = set()
             for row in conn.execute(f'PRAGMA index_list("{table}")'):
                 # seq, name, unique, origin, partial

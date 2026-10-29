@@ -8,7 +8,8 @@
 | 场景 | 谁负责 |
 | --- | --- |
 | 新库从零建表 | **Alembic** |
-| 应用启动（打包后） | `create_all` + `_add_missing_columns()` |
+| SQLite 应用启动 | `create_all` + `_add_missing_columns()` |
+| PostgreSQL 应用启动 | 检查连接与迁移 heads；不自动执行迁移 |
 | 老用户库升级补新列 | `_add_missing_columns()` |
 | 改列类型 / 删列 / 改名 / 改约束 | **只能 Alembic** |
 | 开发时改完模型生成迁移 | `python scripts/db.py revision -m "..."` |
@@ -28,8 +29,10 @@
 实测证据：`python scripts/db.py check` 的第 [4b] 步就是这个场景，
 输出 `exit=1（预期非 0：表已存在）`。
 
-所以启动路径保持 `create_all` + `_add_missing_columns()`，
-Alembic 作为「新库建表」和「结构变更」的正路。
+所以 SQLite 启动路径保持 `create_all` + `_add_missing_columns()`，Alembic 负责新库建表和结构变更。
+PostgreSQL 启动要求数据库已由受控迁移流程升级到当前 heads，不会自动修改 schema。
+当前 PyInstaller 配置没有把 `migrations/` 打进 sidecar，而 PostgreSQL 启动检查需要读取迁移脚本；
+因此打包版 PostgreSQL 部署尚未验证，也不能仅通过配置连接串启用。
 
 ## 常用命令
 
@@ -79,8 +82,7 @@ server/
 连接串不写死在 `alembic.ini` 里，而是：
 
 ```python
-DB_URL = f"sqlite:///{get_settings().db_path.as_posix()}"
-config.set_main_option("sqlalchemy.url", DB_URL)
+DB_URL = engine.url
 ```
 
 写死的后果是「应用写 A 库、迁移改 B 库」，而且输出看不出来：迁移报成功，
@@ -96,9 +98,14 @@ locale 是 GBK，ini 里写中文注释会在启动前就抛 `UnicodeDecodeError
 
 | revision | 内容 |
 | --- | --- |
-| `f6add52fca2e` | 基线：13 张表 + 24 个显式索引 + 11 个外键 |
+| `f6add52fca2e` | 基线：13 张表 |
 | `e3079cb089af` | 新增 `operators`、`audit_logs`（操作员与审计） |
 | `d4f39fe694e0` | 给 `batches` / `products` / `publish_logs` 加 `operator_id`（可空，batch 模式） |
+| `20261029_2044` | 拆分自动化结果商品并完成操作员/商品迁移 |
+| `20261029_2100` | 增加操作员登录凭据 |
+| `20261030_0910` | 增加按操作员隔离的成品认领 |
+| `20261030_0911` | 增加妙手凭据的学员归属 |
+| `20261030_0912` | 持久化采集箱自动化任务和逐商品结果 |
 
 ### 基线（`20261028_2020_f6add52fca2e_baseline_existing_13_tables.py`）
 
@@ -124,15 +131,17 @@ with op.batch_alter_table("batches") as batch_op:
 已有行直接填 NULL，`ALTER TABLE ADD COLUMN` 能正常执行。
 **如果这列是非空且无默认值，SQLite 会拒绝执行** —— 加列时务必注意。
 
-### 整条链与 `create_all()` 的等价性
+### 当前迁移链检查
 
-已逐项核对（两份库都建在临时目录，各自子进程）：
+CI 在 SQLite 临时库验证完整迁移链的 upgrade/downgrade：
 
 | 项 | create_all | 迁移链 |
 | --- | --- | --- |
-| 表 | 15 | 15 |
-| 索引 | 43 | 43 |
-| 外键 | 12 | 12 |
+| 表 | 18 | 18 |
+| SQLite 索引（含自动索引） | 51 | 51 |
+| 外键 | 20 | 20 |
+
+CI 的迁移检查另行统计出 33 个显式索引和 18 个 SQLite 自动唯一/主键索引。
 
 复核命令：
 
@@ -143,10 +152,10 @@ cd server && python migrations/_verify_baseline.py
 输出：
 
 ```
-表数量：create_all=15 / 迁移=15
-索引数量：create_all=43 / 迁移=43
-外键数量：create_all=12 / 迁移=12
-[结论] 基线迁移与 create_all 完全等价（列类型 / 非空 / 默认值 / 主键 / 索引 / 外键）
+表数量：create_all=18 / 迁移=18
+索引数量：create_all=51 / 迁移=51
+外键数量：create_all=20 / 迁移=20
+[结论] 当前 SQLite 临时库模型与迁移链等价；不代表 PostgreSQL 在线验收通过
 ```
 
 它比对的是逐列的「类型 + 是否非空 + 默认值 + 是否主键」，以及逐表的索引
@@ -154,10 +163,14 @@ cd server && python migrations/_verify_baseline.py
 两份库分别建在各自的临时目录、各自的子进程里 —— `db/session.py` 的 engine
 是模块级单例，同进程换环境变量不会生效。
 
-当前 15 张表（基线 13 张 + 后续迁移新增 2 张）：
-`accounts` `audit_logs` `batch_items` `batches` `categories` `groups`
-`image_jobs` `operators` `products` `publish_logs` `schedule_logs`
-`schedules` `settings` `shops` `violation_words`。
+当前 18 张表：
+`accounts` `audit_logs` `automation_run_items` `automation_runs` `batch_items` `batches`
+`categories` `groups` `image_jobs` `operators` `product_claims` `products` `publish_logs`
+`schedule_logs` `schedules` `settings` `shops` `violation_words`。
+
+PostgreSQL 可配置连接并在启动时检查 schema revision，但尚未完成 SQLite 业务数据导入、
+DPAPI/Fernet 凭据重加密、数据备份与恢复校验，也没有真实 PostgreSQL 服务上的 CRUD 和迁移验收。
+不要仅通过设置连接串就迁移生产数据或启动共享服务。
 
 ## 老库如何纳入版本管理
 
@@ -177,9 +190,9 @@ cd server && python scripts/db.py stamp head --real
 `scripts/db.py check` 的第 [4] 步完整验证了这条路径：
 
 ```
-[4a] 老库 create_all：exit=0 业务表=15
+[4a] 老库 create_all：exit=0 业务表=18
 [4b] 老库直接 upgrade head：exit=1（预期非 0：表已存在）
-[4c] 老库 stamp head：exit=0，之后 upgrade head：exit=0，版本表=[('f6add52fca2e',)]
+[4c] 老库 stamp head：exit=0，之后 upgrade head：exit=0，版本表=[('20261030_0912',)]
 ```
 
 ## 加一列的完整流程
