@@ -205,6 +205,34 @@ def _prices_unchanged(original: Mapping[str, Any], actual: Mapping[str, Any]) ->
     return True
 
 
+def _prices_match(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
+    """读回销售价必须与本地应用模板后的目标价格一致。"""
+    for field in _PRICE_FIELDS:
+        if _number(expected.get(field)) != _number(actual.get(field)):
+            return False
+
+    expected_sku = expected.get("skuMap") or {}
+    actual_sku = actual.get("skuMap") or {}
+    if not isinstance(expected_sku, Mapping):
+        return True
+    if expected_sku and not isinstance(actual_sku, Mapping):
+        return False
+    if not isinstance(actual_sku, Mapping):
+        return True
+    for key, sku in expected_sku.items():
+        if not isinstance(sku, Mapping):
+            continue
+        observed = actual_sku.get(key)
+        if not isinstance(observed, Mapping):
+            if any(sku.get(field) not in (None, "") for field in _PRICE_FIELDS):
+                return False
+            continue
+        for field in _PRICE_FIELDS:
+            if _number(sku.get(field)) != _number(observed.get(field)):
+                return False
+    return True
+
+
 def pricing_preserves_origin_price(original: Mapping[str, Any],
                                    actual: Mapping[str, Any]) -> bool:
     """开了定价：`price` 可以变，`originPrice` 不能被改掉。
@@ -281,8 +309,8 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
     comparisons["skuImages"] = _retained_sku_images_unchanged(payload, actual)
 
     if pricing_enabled:
-        # 开定价时价格本来就该变，但采购价必须原样
-        comparisons["prices"] = pricing_preserves_origin_price(original, actual)
+        # 开定价时销售价必须与处理结果一致，采购价必须原样返回。
+        comparisons["prices"] = _prices_match(payload, actual)
         comparisons["originPriceUnchanged"] = pricing_preserves_origin_price(original, actual)
     else:
         comparisons["prices"] = _prices_unchanged(original, actual)

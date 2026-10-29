@@ -82,3 +82,31 @@ def test_processed_draft_blocks_unreadable_result() -> None:
         )
 
     assert raised.value.status == 502
+
+
+def test_processed_draft_blocks_when_template_prices_were_not_saved() -> None:
+    original = _product("Original product title")
+    original.update({
+        "price": "10.00",
+        "originPrice": "5.00",
+        "skuMap": {"sku-1": {"price": "10.00", "originPrice": "5.00"}},
+    })
+    processed = deepcopy(original)
+    processed.update({
+        "title": "Processed product title",
+        "price": "18.50",
+        "skuMap": {"sku-1": {"price": "18.50", "originPrice": "5.00"}},
+    })
+    readback = deepcopy(processed)
+    readback["price"] = "10.00"
+    readback["skuMap"]["sku-1"]["price"] = "10.00"
+
+    with pytest.raises(errors.AppError) as raised:
+        _save_processed_draft(
+            DraftClient(readback=readback),
+            detail_id="123", shop_id="456", oss_md5="version-1",
+            payload=processed, original=original, coverage={}, pricing_enabled=True,
+        )
+
+    assert raised.value.status == 502
+    assert raised.value.details["mismatches"] == ["prices"]
