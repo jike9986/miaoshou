@@ -19,8 +19,8 @@
 早期设计（`docs/architecture.md` §3.13 的初版）设想「启动时
 `alembic upgrade head`，失败就让 sidecar 退出」。落地时这条路有两个硬阻塞：
 
-1. **打包产物里没有迁移目录**。`server.spec` 用 PyInstaller onedir 打包，
-   `migrations/` 不在 `datas` 里，运行时 `script_location` 指向的目录不存在。
+1. PostgreSQL 启动时 Alembic `ScriptDirectory` 需要从文件系统读取迁移脚本；
+   `server.spec` 会把 `migrations/` 随 PyInstaller sidecar 打包。
 2. **老用户库的表已经存在**。他们的 `app.db` 是 `create_all` 建的，没有
    `alembic_version` 表。直接 `upgrade head` 会执行基线迁移的
    `op.create_table('accounts')`，报 `table accounts already exists`，
@@ -31,8 +31,7 @@
 
 所以 SQLite 启动路径保持 `create_all` + `_add_missing_columns()`，Alembic 负责新库建表和结构变更。
 PostgreSQL 启动要求数据库已由受控迁移流程升级到当前 heads，不会自动修改 schema。
-当前 PyInstaller 配置没有把 `migrations/` 打进 sidecar，而 PostgreSQL 启动检查需要读取迁移脚本；
-因此打包版 PostgreSQL 部署尚未验证，也不能仅通过配置连接串启用。
+打包版包含迁移脚本，但完整 PostgreSQL 部署仍需实际数据库和独立凭据密钥验证。
 
 ## 常用命令
 

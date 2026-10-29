@@ -4,6 +4,7 @@
 onedir 而不是 onefile：启动快，且杀毒软件对 onefile 自解压更敏感。
 """
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.building.datastruct import Tree
 
 datas, binaries, hidden = [], [], []
 for pkg in ("uvicorn", "fastapi", "pydantic", "sqlalchemy", "httpx", "cryptography", "anyio"):
@@ -20,6 +21,10 @@ hidden += collect_submodules("services") + collect_submodules("api") + collect_s
 # 主图 OCR 用的 PowerShell 脚本要一起打进去：image_review_service 用
 # Path(__file__).with_name("windows_ocr.ps1") 找它，打包后 = sys._MEIPASS/services/。
 datas += [("services/windows_ocr.ps1", "services")]
+
+# Alembic loads revision files from disk when PostgreSQL startup checks heads.
+# Ship them as runtime data beside the frozen server modules.
+datas += Tree("migrations", prefix="migrations")
 
 a = Analysis(
     ["run_server.py"],

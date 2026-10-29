@@ -10,9 +10,11 @@ from sqlalchemy import (
     String,
     Table,
     create_engine,
+    func,
     insert,
     select,
 )
+from sqlalchemy.exc import IntegrityError
 
 from scripts.migrate_sqlite_to_postgres import (
     _assert_empty_target,
@@ -110,6 +112,27 @@ def test_copy_preserves_ids_json_self_references_and_reencrypted_secret(tmp_path
             == "server:source-envelope"
         )
     source.dispose()
+    target.dispose()
+
+
+def test_copy_failure_rolls_back_all_target_rows(tmp_path) -> None:
+    metadata = _metadata()
+    target = create_engine(f"sqlite:///{tmp_path / 'target.db'}")
+    metadata.create_all(target)
+    rows = {
+        "nodes": [{"id": 10, "parent_id": None, "name": None}],
+        "accounts": [{"id": 7, "app_secret_enc": "server:encrypted"}],
+        "payloads": [],
+    }
+
+    with pytest.raises(IntegrityError):
+        _copy_rows(target, metadata, rows)
+
+    with target.connect() as connection:
+        assert all(
+            connection.scalar(select(func.count()).select_from(table)) == 0
+            for table in metadata.sorted_tables
+        )
     target.dispose()
 
 

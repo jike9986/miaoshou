@@ -48,10 +48,9 @@
 新库（走 alembic 建的）会缺这列；只写迁移不改模型，下次 autogenerate 会把
 这条迁移「撤销」掉。
 
-SQLite 启动路径刻意**不接** `alembic upgrade head`：打包后的 sidecar 里没有 `migrations/`
-目录，而且老用户库的表已经存在，upgrade 会因 `table already exists` 失败。
-PostgreSQL 启动会检查连接和 revision heads，但不自动执行迁移。PyInstaller 当前也未打包
-迁移目录，因此源码环境的 PostgreSQL 配置不代表打包版已可用；打包部署路径仍需实现并验收。
+SQLite 启动路径刻意**不接** `alembic upgrade head`：老用户库的表已经存在，upgrade 会因
+`table already exists` 失败。PostgreSQL 启动会检查连接和 revision heads，但不自动执行迁移。
+PyInstaller 会把 `migrations/` 随 sidecar 打包；部署数据库仍须先通过受控命令升级 schema。
 
 ## 老库如何纳入版本管理（一次性）
 
@@ -103,7 +102,7 @@ CI 迁移检查另行统计出 33 个显式索引和 18 个 SQLite 自动唯一/
 `schedule_logs` `schedules` `settings` `shops` `violation_words`。
 
 PostgreSQL 有连接配置、迁移执行路径和启动 revision 校验。受控 SQLite 导入工具已实现并有 SQLite
-算法测试，但尚无真实 PostgreSQL CRUD/在线迁移/导入验收，也没有 PostgreSQL 备份恢复演练。
+算法测试；真实 PostgreSQL CRUD/在线迁移/导入验收和 PostgreSQL 备份恢复演练仍待完成。
 
 期望值不要硬编码 —— `scripts/ci_migration_check.py` 与
 `migrations/_selftest.py` 都从 `Base.metadata` 派生表集合，模型加了表会自动跟上。

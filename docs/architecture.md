@@ -420,12 +420,12 @@ schedules  1───n publish_logs
 > **实现现状（以此为准，取代本节的早期设想）**
 >
 > 早期设计想的是「启动时 `alembic upgrade head`，失败则让 sidecar 退出」。
-> 落地时这条路走不通，原因有两条：
+> 这条路不能用于所有启动场景：
 >
-> 1. 打包后的 sidecar（PyInstaller onedir）里没有 `migrations/` 目录，
->    `alembic` 连迁移脚本都找不到；
-> 2. 老用户库的表已经存在（`create_all` 建的），`upgrade head` 会以
->    `table already exists` 失败，等于让所有老用户开不了应用。
+> 1. PostgreSQL 启动检查需要从文件系统读取 Alembic 迁移脚本；PyInstaller
+>    sidecar 现在会把 `migrations/` 作为运行时数据一并打包；
+> 2. 老用户 SQLite 库的表已经存在（`create_all` 建的），`upgrade head` 会以
+>    `table already exists` 失败，因此应用启动不会自动迁移数据库。
 >
 > 因此实际分工是：
 >
@@ -471,7 +471,7 @@ Alembic 单链式 revision，文件名 `<YYYYMMDD>_<HHMM>_<rev>_<slug>.py`：
 - **本地优先**：单机单用户，全部数据在 `%LOCALAPPDATA%\AOHUANG-Listing\data\app.db`，离线可用，备份就是一个文件（`VACUUM INTO` 生成一致性快照）。
 - **量级匹配**：仓库上限 2000 条商品、发布记录万级、图片任务万级，SQLite 在 WAL 下完全够用；旧实现是「每次读写整个 JSON 文件」，2000 条时 gallery 已经要全量反序列化。
 - **事务能力**：认领状态、图片预扣费、发布台账都需要「读-改-写」原子性，JSON 文件靠 `.tmp + replace` 只能保证不写坏，保证不了并发互斥。
-- **PostgreSQL 支持状态**：可通过 `AOHUANG_DATABASE_URL` 配置 PostgreSQL，启动时校验独立凭据密钥、连接和迁移版本；生产启动不会自动改 schema。受控 SQLite 导入工具已实现并有 SQLite 算法测试，但当前没有真实 PostgreSQL 在线 CRUD、迁移、导入或备份恢复验收。不能把改连接串视为完成数据库切换。
+- **PostgreSQL 支持状态**：可通过 `AOHUANG_DATABASE_URL` 配置 PostgreSQL，启动时校验独立凭据密钥、连接和迁移版本；生产启动不会自动改 schema。PyInstaller 会打包迁移脚本。受控 SQLite 导入工具已实现并有 SQLite 算法测试，但当前没有真实 PostgreSQL 在线 CRUD、迁移、导入或备份恢复验收。不能把改连接串视为完成数据库切换。
 - **已知限制**：单写者。因此后端强制单 worker，写操作串行在短事务里；长任务（图片、发布）只写状态字段，不做长事务。
 
 ### 4.3 鉴权方案
