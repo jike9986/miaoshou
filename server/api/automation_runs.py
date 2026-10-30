@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter
-from pydantic import Field
+from pydantic import Field, StrictInt
 
 from api.deps import DbSession, OperatorDep, require_permission, require_writable
 from schemas.common import CamelModel
@@ -38,6 +38,11 @@ class PublishResultRequest(CamelModel):
     status: Literal["succeeded", "failed", "needs_review"]
     reason: str = ""
     result: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublishStartRequest(CamelModel):
+    confirmed_product_id: str | None = None
+    confirmed_revision: StrictInt | None = None
 
 
 @router.post("", status_code=201, dependencies=[require_permission("process")])
@@ -97,20 +102,27 @@ def process_result(run_id: str, item_id: str, payload: ProcessResultRequest,
 @router.post("/{run_id}/items/{item_id}/publish-start",
              dependencies=[require_permission("publish")])
 def start_publish(run_id: str, item_id: str, db: DbSession,
-                  operator: OperatorDep) -> dict[str, Any]:
+                  operator: OperatorDep,
+                  payload: PublishStartRequest = PublishStartRequest()) -> dict[str, Any]:
     require_writable(db)
     run = automation_run_service.get(db, run_id, operator)
-    return {"run": automation_run_service.start_publish(db, run, item_id)}
+    return {"run": automation_run_service.start_publish(
+        db, run, item_id,
+        confirmed_product_id=payload.confirmed_product_id,
+        confirmed_revision=payload.confirmed_revision)}
 
 
 @router.post("/{run_id}/items/{item_id}/resume-publish",
              dependencies=[require_permission("publish")])
 def resume_publish(run_id: str, item_id: str, db: DbSession,
-                   operator: OperatorDep) -> dict[str, Any]:
+                   operator: OperatorDep,
+                   payload: PublishStartRequest = PublishStartRequest()) -> dict[str, Any]:
     require_writable(db)
     run = automation_run_service.get(db, run_id, operator)
     return {"run": automation_run_service.resume_publish_after_images(
-        db, run, item_id)}
+        db, run, item_id,
+        confirmed_product_id=payload.confirmed_product_id,
+        confirmed_revision=payload.confirmed_revision)}
 
 
 @router.post("/{run_id}/items/{item_id}/publish-result",

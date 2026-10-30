@@ -333,6 +333,12 @@ export interface AutomationRunRecord {
   items: AutomationRunItemRecord[];
 }
 
+/** Per-product acknowledgement bound to the exact current warehouse revision. */
+export interface AutomationPublishConfirmation {
+  confirmedProductId: string;
+  confirmedRevision: number;
+}
+
 export interface AutomationRunCreateRequest {
   accountId: string;
   shopId: string;

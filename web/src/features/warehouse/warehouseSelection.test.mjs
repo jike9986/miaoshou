@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { partitionMemberSelection, warehouseIdsForClaimedDetails } from "./warehouseSelection.ts";
+import {
+  partitionMemberSelection,
+  selectedQualityReviews,
+  warehouseIdsForClaimedDetails,
+} from "./warehouseSelection.ts";
 
 test("keeps claim and publish actions for selections made on earlier pages", () => {
   const selectedIds = ["page-1-unclaimed", "page-1-claimed", "page-2-unclaimed"];
@@ -32,6 +36,25 @@ test("hides items already published to the selected shop but keeps other shops e
   ), {
     claimable: [],
     publishable: ["published-elsewhere"],
+  });
+});
+
+test("keeps verified quality snapshots for selected products across pages", () => {
+  assert.deepEqual(selectedQualityReviews(
+    ["verified-on-page-1", "unverified-on-page-2"],
+    {
+      "verified-on-page-1": { status: "verified", reasons: [] },
+      "unverified-on-page-2": { status: "needs_review", reasons: ["missing_weight"] },
+    },
+  ), {
+    "verified-on-page-1": { status: "verified", reasons: [] },
+    "unverified-on-page-2": { status: "needs_review", reasons: ["missing_weight"] },
+  });
+});
+
+test("treats a missing quality snapshot as unknown rather than verified", () => {
+  assert.deepEqual(selectedQualityReviews(["unknown-quality"], {}), {
+    "unknown-quality": { status: undefined, reasons: [] },
   });
 });
 

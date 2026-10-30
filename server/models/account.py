@@ -39,6 +39,15 @@ class Account(Base):
     created_at: Mapped[float] = mapped_column(Float, default=now_ts)
     updated_at: Mapped[float] = mapped_column(Float, default=now_ts, onupdate=now_ts)
 
-    __table_args__ = (Index("ix_accounts_status", "status"),
-                       Index("ix_accounts_name", "name"),
-                       Index("ix_accounts_default", "is_default"))
+    __table_args__ = (
+        Index("ix_accounts_status", "status"),
+        Index("ix_accounts_name", "name"),
+        Index("ix_accounts_default", "is_default"),
+        Index(
+            "uq_accounts_app_key_nonempty",
+            "app_key",
+            unique=True,
+            sqlite_where=(app_key != ""),
+            postgresql_where=(app_key != ""),
+        ),
+    )

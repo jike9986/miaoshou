@@ -145,6 +145,37 @@ def _add_missing_columns() -> None:
                 connection.execute(text(ddl))
 
 
+def _ensure_sqlite_account_app_key_index() -> None:
+    """Add the partial unique AppKey index to legacy desktop databases safely.
+
+    Existing databases may contain duplicate non-empty keys. Preserve every row
+    and stop startup with an actionable error instead of silently choosing one.
+    """
+    from sqlalchemy import text
+
+    with engine.begin() as connection:
+        duplicates = connection.execute(text(
+            "SELECT group_concat(id, ',') FROM accounts "
+            "WHERE app_key IS NOT NULL AND app_key <> '' "
+            "GROUP BY app_key HAVING COUNT(*) > 1 ORDER BY MIN(id)"
+        )).scalars().all()
+        if duplicates:
+            details = "; ".join(
+                f"accounts.id=[{','.join(str(int(value)) for value in ids.split(','))}]"
+                for ids in duplicates
+            )
+            raise RuntimeError(
+                "无法升级：accounts 中存在重复的非空妙手 AppKey，未修改数据。"
+                "请人工核对并处理以下账号后重试；应用不会自动合并或删除凭据："
+                f" {details}"
+            )
+
+        connection.execute(text(
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_accounts_app_key_nonempty" '
+            'ON "accounts" ("app_key") WHERE "app_key" <> ""'
+        ))
+
+
 def init_db() -> None:
     """建表 + 补列 + 写入默认设置。
 
@@ -167,6 +198,7 @@ def init_db() -> None:
     importlib.import_module("models")
     Base.metadata.create_all(engine)
     _add_missing_columns()
+    _ensure_sqlite_account_app_key_index()
     _seed_settings()
 
 

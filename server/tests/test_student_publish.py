@@ -29,16 +29,18 @@ def publish_db():
 
 def _identity(db, suffix: str, *, role: str = operator_service.ROLE_MEMBER):
     operator, _token = operator_service.create(db, f"student-{suffix}", role=role)
-    account = Account(name=f"account-{suffix}", shops="[]")
+    account = Account(name=f"account-{suffix}", shops="[]",
+                      owner_operator_id=operator.id)
     db.add(account)
     db.flush()
     return operator, account
 
 
-def _product(db, suffix: str, account: Account) -> Product:
+def _product(db, suffix: str, account: Account, *, detail_id: str = "12345",
+             shop_id: str = "123") -> Product:
     row = Product(
         warehouse_key=f"{suffix}:source-shop", account_id=account.id,
-        detail_id="12345", shop_id="123", shop_name="Target shop",
+        detail_id=detail_id, shop_id=shop_id, shop_name="Target shop",
         title="Finished title", status="ready", claimed=False,
         claimed_at=None, claimed_shop_id=None, collected={},
         price_min=10, price_max=10, payload={
@@ -212,7 +214,13 @@ def test_automation_result_can_publish_after_run_item_is_started(publish_db, mon
     product = _product(db, suffix, account)
     product.automation_result = True
     product.draft_verified_revision = product.revision
-    _automation_run(db, suffix, teacher, account, product, publish_status="running")
+    item = _automation_run(db, suffix, teacher, account, product,
+                           publish_status="running")
+    run = db.get(AutomationRun, item.run_id)
+    run.settings = {**run.settings,
+                    "specificationConfirmations": {
+                        str(product.id): int(product.revision or 0),
+                    }}
     _stub_member_publish(monkeypatch, db, account)
 
     result = publish_service.publish(
@@ -307,14 +315,20 @@ def test_member_publish_status_and_history_are_owner_scoped(publish_db):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]
     first, account = _identity(db, suffix)
-    second, _ = _identity(db, f"second-{suffix}")
+    second, second_account = _identity(db, f"second-{suffix}")
     product = _product(db, suffix, account)
+    second_product = _product(db, f"second-{suffix}", second_account)
     db.add_all([
         ProductClaim(product_id=product.id, owner_operator_id=first.id),
+        ProductClaim(product_id=second_product.id, owner_operator_id=second.id),
+        # Retain a legacy cross-account log to verify it stays hidden.
         ProductClaim(product_id=product.id, owner_operator_id=second.id),
         PublishLog(account_id=account.id, product_id=product.id,
                    detail_id="12345", shop_id="456", title="first",
                    status="success", operator_id=first.id),
+        PublishLog(account_id=account.id, product_id=product.id,
+                   detail_id="12345", shop_id="789", title="other",
+                   status="success", operator_id=second.id),
     ])
     product.status = "published"  # 模拟旧版/老师的共享全局状态
     db.flush()
@@ -322,38 +336,146 @@ def test_member_publish_status_and_history_are_owner_scoped(publish_db):
     first_list = warehouse_service.list_products(db, operator_id=first.id)["items"]
     second_list = warehouse_service.list_products(db, operator_id=second.id)["items"]
     first_item = next(item for item in first_list if item["id"] == str(product.id))
-    second_item = next(item for item in second_list if item["id"] == str(product.id))
+    second_item = next(item for item in second_list
+                       if item["id"] == str(second_product.id))
     assert first_item["status"] == "published"
     assert first_item["publishStatus"] == "success"
     assert first_item["publishedShopIds"] == ["456"]
     assert second_item["status"] == "claimed"
     assert second_item["publishStatus"] is None
     assert second_item["publishedShopIds"] == []
+    second_shared_item = next(item for item in second_list
+                              if item["id"] == str(product.id))
+    assert second_shared_item["status"] == "claimed"
+    assert second_shared_item["publishStatus"] is None
     assert warehouse_service.stats(db, operator_id=first.id)["totalPublished"] == 1
     assert warehouse_service.stats(db, operator_id=second.id)["totalPublished"] == 0
 
     first_detail = warehouse_service.detail(db, product.id, operator_id=first.id)
-    second_detail = warehouse_service.detail(db, product.id, operator_id=second.id)
     assert [row["shopId"] for row in first_detail["publishHistory"]] == ["456"]
     assert first_detail["publishHistory"][0]["status"] == "success"
-    assert second_detail["publishHistory"] == []
-    assert second_detail["product"]["status"] == "claimed"
+    assert warehouse_service.detail(db, second_product.id,
+                                    operator_id=second.id)["publishHistory"] == []
+    assert warehouse_service.detail(db, product.id,
+                                    operator_id=second.id)["publishHistory"] == []
+    assert warehouse_service.detail(db, product.id,
+                                    operator_id=first.id)["product"]["status"] == "published"
+
+
+def test_shared_finished_goods_are_visible_and_unadmitted_results_are_isolated(publish_db):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, own_account = _identity(db, suffix)
+    other, other_account = _identity(db, f"other-{suffix}")
+    teacher, _ = _identity(db, f"teacher-{suffix}", role=operator_service.ROLE_TEACHER)
+    own_product = _product(db, f"own-{suffix}", own_account)
+    other_product = _product(db, f"other-{suffix}", other_account)
+    hidden_result = _product(db, f"hidden-result-{suffix}", other_account,
+                             detail_id=f"hidden-result-{suffix}")
+    hidden_result.automation_result = True
+    own_result = _product(db, f"own-result-{suffix}", own_account,
+                          detail_id=f"own-result-{suffix}")
+    own_result.automation_result = True
+    _automation_run(db, f"own-result-{suffix}", member, own_account, own_result,
+                    publish_status="not_requested")
+
+    visible = warehouse_service.list_products(db, operator_id=member.id, page_size=100)
+    visible_ids = {row["id"] for row in visible["items"]}
+    assert str(own_product.id) in visible_ids
+    assert str(other_product.id) in visible_ids
+    assert str(hidden_result.id) not in visible_ids
+    assert str(own_result.id) not in visible_ids
+    shared_item = next(row for row in visible["items"]
+                       if row["id"] == str(other_product.id))
+    assert shared_item["accountId"] is None
+    assert shared_item["account"] == ""
+    assert visible["facets"]["accounts"] == []
+
+    # The account filter is validated as the member's selected publish account,
+    # but it must not remove shared finished goods from the common catalogue.
+    filtered = warehouse_service.list_products(
+        db, operator_id=member.id, account_id=str(own_account.id), page_size=100)
+    assert str(other_product.id) in {row["id"] for row in filtered["items"]}
+    assert filtered["stats"]["totalProducts"] >= 2
+
+    assert warehouse_service.detail(
+        db, other_product.id, operator_id=member.id)["product"]["accountId"] is None
+
+    with pytest.raises(errors.AppError) as exc:
+        warehouse_service.detail(db, hidden_result.id, operator_id=member.id)
+    assert exc.value.status == 403
+
+    assert warehouse_service.detail(
+        db, own_result.id, operator_id=member.id)["product"]["id"] == str(own_result.id)
+
+    with pytest.raises(errors.AppError) as exc:
+        warehouse_service.claim_product(db, hidden_result.id, member.id)
+    assert exc.value.status == 403
+
+    with pytest.raises(errors.AppError) as exc:
+        warehouse_service.claim_product(db, own_result.id, member.id)
+    assert exc.value.status == 400
+
+    first_claim = warehouse_service.claim_product(db, other_product.id, member.id)
+    second_claim = warehouse_service.claim_product(db, other_product.id, other.id)
+    assert first_claim.owner_operator_id == member.id
+    assert second_claim.owner_operator_id == other.id
+
+    teacher_rows = warehouse_service.list_products(
+        db, operator_id=teacher.id, account_id=str(other_account.id))
+    assert str(other_product.id) in {row["id"] for row in teacher_rows["items"]}
+    teacher_detail = warehouse_service.detail(
+        db, other_product.id, operator_id=teacher.id)
+    assert teacher_detail["product"]["id"] == str(other_product.id)
+    claim = warehouse_service.claim_product(db, other_product.id, teacher.id)
+    assert claim.owner_operator_id == teacher.id
+
+
+def test_members_can_publish_shared_finished_good_with_their_own_accounts(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, own_account = _identity(db, suffix)
+    other, other_account = _identity(db, f"other-{suffix}")
+    product = _product(db, f"foreign-{suffix}", other_account)
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=member.id))
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=other.id))
+    db.flush()
+    _stub_member_publish(monkeypatch, db, own_account)
+    result = publish_service.publish(
+        db, _publish_payload(product, own_account), operator_id=member.id)
+    assert result["published"] == ["98765"]
+    log = db.query(PublishLog).filter(PublishLog.product_id == product.id).one()
+    assert log.account_id == own_account.id
+    assert log.operator_id == member.id
+
+    # Each claimant publishes through their separately bound account.
+    _stub_member_publish(monkeypatch, db, other_account, target_shop_id="789")
+    result = publish_service.publish(
+        db, _publish_payload(product, other_account, shopId="789"),
+        operator_id=other.id)
+    assert result["published"] == ["98765"]
+    assert db.query(PublishLog).filter(
+        PublishLog.product_id == product.id,
+        PublishLog.operator_id == other.id,
+    ).one().account_id == other_account.id
 
 
 def test_member_product_detail_only_exposes_own_image_jobs(publish_db):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]
     first, account = _identity(db, suffix)
-    second, _ = _identity(db, f"second-{suffix}")
+    second, second_account = _identity(db, f"second-{suffix}")
     teacher, _ = _identity(db, f"teacher-{suffix}", role=operator_service.ROLE_TEACHER)
     product = _product(db, suffix, account)
+    second_product = _product(db, f"second-{suffix}", second_account)
     own_id = f"own-{suffix}"
     foreign_id = f"foreign-{suffix}"
     legacy_id = f"legacy-{suffix}"
     db.add_all([
         ImageJob(id=own_id, product_id=product.id, operator_id=first.id,
                  filename="own.png", reserved_milliyuan=24),
-        ImageJob(id=foreign_id, product_id=product.id, operator_id=second.id,
+        ImageJob(id=foreign_id, product_id=second_product.id, operator_id=second.id,
                  filename="foreign.png", reserved_milliyuan=240),
         ImageJob(id=legacy_id, product_id=product.id, operator_id=None,
                  filename="legacy.png", reserved_milliyuan=120),
@@ -363,10 +485,11 @@ def test_member_product_detail_only_exposes_own_image_jobs(publish_db):
     first_detail = warehouse_service.detail(db, product.id, operator_id=first.id)
     second_detail = warehouse_service.detail(db, product.id, operator_id=second.id)
     teacher_detail = warehouse_service.detail(db, product.id, operator_id=teacher.id)
+    teacher_second_detail = warehouse_service.detail(
+        db, second_product.id, operator_id=teacher.id)
 
     assert {job["id"] for job in first_detail["imageJobs"]} == {own_id}
     assert first_detail["imageJobs"][0]["filename"] == "own.png"
-    assert {job["id"] for job in second_detail["imageJobs"]} == {foreign_id}
-    assert {job["id"] for job in teacher_detail["imageJobs"]} == {
-        own_id, foreign_id, legacy_id,
-    }
+    assert second_detail["imageJobs"] == []
+    assert {job["id"] for job in teacher_detail["imageJobs"]} == {own_id, legacy_id}
+    assert {job["id"] for job in teacher_second_detail["imageJobs"]} == {foreign_id}

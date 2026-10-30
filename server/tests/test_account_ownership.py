@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from api import reference
 from api import system as system_api
@@ -435,6 +436,75 @@ def test_app_key_cannot_be_bound_to_multiple_students_but_owner_can_reconnect(
     db = SessionLocal()
     try:
         assert db.query(Account).filter(Account.app_key == app_key).count() == 1
+    finally:
+        db.close()
+
+
+def test_database_rejects_duplicate_nonempty_app_keys(client, identities):
+    del client
+    app_key = f"unique-index-{uuid.uuid4().hex}"
+    db = SessionLocal()
+    try:
+        db.add(Account(
+            name="first unique key", app_key=app_key,
+            app_secret_enc=account_service.crypto.encrypt("secret-one"),
+            owner_operator_id=identities["first_id"], shops="[]",
+        ))
+        db.commit()
+
+        db.add(Account(
+            name="duplicate unique key", app_key=app_key,
+            app_secret_enc=account_service.crypto.encrypt("secret-two"),
+            owner_operator_id=identities["second_id"], shops="[]",
+        ))
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        assert db.query(Account).filter(Account.app_key == app_key).count() == 1
+    finally:
+        db.close()
+
+
+def test_bind_race_after_precheck_returns_conflict_and_preserves_winner(
+        client, identities, monkeypatch):
+    del client
+    app_key = f"bind-race-{uuid.uuid4().hex}"
+    db = SessionLocal()
+
+    class RacingMiaoshouClient:
+        def __init__(self, _app_id, _app_secret):
+            pass
+
+        def shop_list(self, **_kwargs):
+            db.add(Account(
+                name="concurrent winner", app_key=app_key,
+                app_secret_enc=account_service.crypto.encrypt("winner-secret"),
+                owner_operator_id=identities["second_id"], shops="[]",
+            ))
+            db.commit()
+            return {"data": {"shopList": []}}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(account_service, "MiaoshouClient", RacingMiaoshouClient)
+    try:
+        with pytest.raises(AppError) as caught:
+            account_service.connect(
+                db,
+                app_id=app_key,
+                app_secret="request-secret",
+                auto_scan=False,
+                owner_operator_id=identities["first_id"],
+                bound_by_operator_id=identities["first_id"],
+            )
+
+        assert caught.value.status == 409
+        assert "request-secret" not in str(caught.value)
+        rows = db.query(Account).filter(Account.app_key == app_key).all()
+        assert len(rows) == 1
+        assert rows[0].owner_operator_id == identities["second_id"]
     finally:
         db.close()
 

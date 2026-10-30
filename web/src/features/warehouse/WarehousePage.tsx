@@ -76,7 +76,9 @@ import { TransformDialog } from "@/features/warehouse/TransformDialog";
 import { PublishDialog } from "@/features/publish/PublishDialog";
 import {
   partitionMemberSelection,
+  selectedQualityReviews,
   warehouseIdsForClaimedDetails,
+  type QualityReviewSnapshot,
 } from "@/features/warehouse/warehouseSelection";
 import { BatchPanel } from "@/features/batch/BatchPanel";
 
@@ -176,6 +178,8 @@ export function WarehousePage() {
   const [selectedClaimed, setSelectedClaimed] = useState<Record<string, boolean>>({});
   const [selectedPublishedShopIds, setSelectedPublishedShopIds] = useState<Record<string, string[]>>({});
   const [selectedDetailIds, setSelectedDetailIds] = useState<Record<string, string>>({});
+  const [selectedQualityReviewById, setSelectedQualityReviewById] =
+    useState<Record<string, QualityReviewSnapshot>>({});
 
   const [carrierOpen, setCarrierOpen] = useState(false);
   const claimSharedProduct = useMutation({
@@ -223,6 +227,7 @@ export function WarehousePage() {
     setSelectedClaimed({});
     setSelectedPublishedShopIds({});
     setSelectedDetailIds({});
+    setSelectedQualityReviewById({});
   }, [clearSelected]);
 
   const toggleWarehouseSelection = useCallback((id: string) => {
@@ -248,11 +253,20 @@ export function WarehousePage() {
         delete next[id];
         return next;
       });
+      setSelectedQualityReviewById((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
     } else if (item) {
       setSourceShopIds((current) => ({ ...current, [id]: String(item.shopId ?? "") }));
       setSelectedClaimed((current) => ({ ...current, [id]: item.claimed }));
       setSelectedPublishedShopIds((current) => ({ ...current, [id]: item.publishedShopIds ?? [] }));
       setSelectedDetailIds((current) => ({ ...current, [id]: String(item.detailId ?? "") }));
+      setSelectedQualityReviewById((current) => ({
+        ...current,
+        [id]: { status: item.qualityReviewStatus, reasons: item.qualityReviewReasons ?? [] },
+      }));
     }
     toggleSelected(id);
   }, [items, selectedIds, toggleSelected]);
@@ -263,6 +277,10 @@ export function WarehousePage() {
     if (item) setSelectedClaimed((current) => ({ ...current, [id]: item.claimed }));
     if (item) setSelectedPublishedShopIds((current) => ({ ...current, [id]: item.publishedShopIds ?? [] }));
     if (item) setSelectedDetailIds((current) => ({ ...current, [id]: String(item.detailId ?? "") }));
+    if (item) setSelectedQualityReviewById((current) => ({
+      ...current,
+      [id]: { status: item.qualityReviewStatus, reasons: item.qualityReviewReasons ?? [] },
+    }));
     toggleSelected(id);
   }, [items, toggleSelected]);
 
@@ -285,6 +303,11 @@ export function WarehousePage() {
         return next;
       });
       setSelectedDetailIds((current) => {
+        const next = { ...current };
+        for (const id of pageIds) delete next[id];
+        return next;
+      });
+      setSelectedQualityReviewById((current) => {
         const next = { ...current };
         for (const id of pageIds) delete next[id];
         return next;
@@ -312,6 +335,16 @@ export function WarehousePage() {
       for (const item of items) next[item.id] = String(item.detailId ?? "");
       return next;
     });
+    setSelectedQualityReviewById((current) => {
+      const next = { ...current };
+      for (const item of items) {
+        next[item.id] = {
+          status: item.qualityReviewStatus,
+          reasons: item.qualityReviewReasons ?? [],
+        };
+      }
+      return next;
+    });
   }, [allSelectedOnPage, deselectMany, items, pageIds, selectMany]);
 
   // Store filter/page-size changes clear its selection internally; keep the local snapshots in sync.
@@ -330,6 +363,10 @@ export function WarehousePage() {
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
     setSelectedDetailIds((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    setSelectedQualityReviewById((current) => {
       const next = Object.fromEntries(Object.entries(current).filter(([id]) => selected.has(id)));
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
@@ -1052,14 +1089,7 @@ export function WarehousePage() {
         open={publishOpen}
         onOpenChange={setPublishOpen}
         warehouseIds={publishIds}
-        qualityReviewById={Object.fromEntries(
-          items
-            .filter((item) => publishIds.includes(item.id))
-            .map((item) => [item.id, {
-              status: item.qualityReviewStatus,
-              reasons: item.qualityReviewReasons ?? [],
-            }])
-        )}
+        qualityReviewById={selectedQualityReviews(publishIds, selectedQualityReviewById)}
         sourceShopIds={sourceShopIds}
         defaultShopId={currentShopId}
         connected={connected}

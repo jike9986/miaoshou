@@ -24,9 +24,11 @@
 //   · 全结果批量选择 —— 后端 /collect-box 不支持一次返回全量选品，需逐页选择
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Pencil, Play, Square, Tag } from "lucide-react";
-import { apiErrorMessage } from "@/lib/api";
+import { apiErrorMessage, isApiError } from "@/lib/api";
 import { formatCount, cn } from "@/lib/utils";
+import { queryKeys } from "@/lib/queryKeys";
 import { useIsNarrow, useMediaQuery } from "@/hooks/useMediaQuery";
 import {
   useAuthStatus,
@@ -45,10 +47,11 @@ import {
   useStartAutomationPublish,
   useResumeAutomationPublish,
   useAutomationPublishResult,
+  useProductDetail,
 } from "@/lib/queries";
 import { useSizeCharts, pickCharts, pickDefaultUrl, buildDefaultSizeChart } from "@/features/automation/useSizeCharts";
 import { PriceTemplateDialog } from "@/features/warehouse/PriceTemplateDialog";
-import type { AutomationRunRecord, CollectBoxItem } from "@/lib/types";
+import type { AutomationPublishConfirmation, AutomationRunRecord, CollectBoxItem } from "@/lib/types";
 import { PageContent, PageHeader } from "@/components/layout";
 import {
   Badge,
@@ -62,6 +65,7 @@ import {
   toast,
 } from "@/components/ui";
 import { ProcessSettings } from "@/features/automation/ProcessSettings";
+import { pendingAutomationPublishAction } from "@/features/automation/automationPublish";
 import { ProductPicker } from "@/features/automation/ProductPicker";
 import { ProgressPanel } from "@/features/automation/ProgressPanel";
 import { AccountSwitcher } from "@/features/auth/UnlockPage";
@@ -89,6 +93,19 @@ interface SelectionEntry {
 
 const MAX_RUN_ITEMS = 200;
 
+const QUALITY_REASON_LABELS: Record<string, string> = {
+  missing_weight: "缺少重量",
+  missing_dimensions: "缺少包裹尺寸",
+  default_dimensions: "包裹尺寸仍是默认值",
+  unverified: "尚未人工核验",
+  stale_review: "核验记录对应旧版本",
+};
+
+function measureLabel(value: unknown, unit: string): string {
+  if (value === null || value === undefined || value === "") return "未填写";
+  return `${String(value)} ${unit}`;
+}
+
 const DATE_FORMAT = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
   day: "2-digit",
@@ -97,6 +114,7 @@ const DATE_FORMAT = new Intl.DateTimeFormat("zh-CN", {
 });
 
 export function AutomationPage() {
+  const queryClient = useQueryClient();
   const { data: status } = useAuthStatus();
   const connected = status?.connected ?? false;
   const currentShopId = useSessionStore((state) => state.currentShopId);
@@ -239,6 +257,13 @@ export function AutomationPage() {
   const recoveringRunId = useRef<string | null>(null);
   const startingRunRef = useRef(false);
   const [preparingRun, setPreparingRun] = useState(false);
+  const [specificationPrompt, setSpecificationPrompt] = useState<{
+    productId: string;
+    title: string;
+    stale: boolean;
+  } | null>(null);
+  const specificationResolver = useRef<((value: AutomationPublishConfirmation | null) => void) | null>(null);
+  const specificationQuery = useProductDetail(specificationPrompt?.productId ?? null, true);
   const running = run.phase === "running";
   const savedRun = latestRunQuery.data?.run;
   const targetShopId = savedRun?.shopId ?? currentShopId;
@@ -288,7 +313,8 @@ export function AutomationPage() {
     hydratedRunId.current = saved.id;
     persistentRunId.current = saved.id;
     persistentItems.current = new Map(saved.items.map((item) => [item.key, item.id]));
-    const nextSelection = new Map(saved.items.filter((item) => item.processStatus === "queued").map((item) => [item.key, {
+    const nextSelection = new Map(saved.items.filter((item) => item.processStatus === "queued"
+      || pendingAutomationPublishAction(item) !== null).map((item) => [item.key, {
       key: item.key, detailId: item.detailId, shopId: item.shopId, title: item.title,
     }]));
     setSelection(nextSelection);
@@ -351,6 +377,10 @@ export function AutomationPage() {
   useEffect(() => {
     const saved = latestRunQuery.data?.run;
     if (running || !saved || hydratedRunId.current === saved.id || recoveringRunId.current === saved.id) return;
+    if (saved.status === "queued") {
+      hydrateRun(saved);
+      return;
+    }
     recoveringRunId.current = saved.id;
     void (async () => {
       try {
@@ -400,6 +430,56 @@ export function AutomationPage() {
   const publish = usePublish();
   // 新任务跟随顶部店铺，恢复任务继续使用创建时保存的目标店铺。
 
+  const requestSpecificationConfirmation = useCallback((
+    productId: string,
+    title: string,
+    stale: boolean,
+  ): Promise<AutomationPublishConfirmation | null> => new Promise((resolve) => {
+    if (specificationResolver.current) specificationResolver.current(null);
+    specificationResolver.current = resolve;
+    setSpecificationPrompt({ productId, title, stale });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.warehouse.detail(productId, true),
+      exact: true,
+    });
+  }), [queryClient]);
+
+  const resolveSpecificationPrompt = (value: AutomationPublishConfirmation | null): void => {
+    specificationResolver.current?.(value);
+    specificationResolver.current = null;
+    setSpecificationPrompt(null);
+  };
+
+  const startOrResumePublish = async (
+    input: { runId: string; itemId: string; productId: string; title: string; resume: boolean },
+  ): Promise<"started" | "skipped"> => {
+    let confirmation: AutomationPublishConfirmation | undefined;
+    while (true) {
+      try {
+        const request = {
+          runId: input.runId,
+          itemId: input.itemId,
+          ...(confirmation ?? {}),
+        };
+        if (input.resume) await resumePublishMutation.mutateAsync(request);
+        else await startPublishMutation.mutateAsync(request);
+        return "started";
+      } catch (error) {
+        if (!isApiError(error) || error.code !== "QUALITY_REVIEW_REQUIRED") throw error;
+        confirmation = await requestSpecificationConfirmation(
+          input.productId,
+          input.title,
+          error.details?.confirmationStale === true,
+        ) ?? undefined;
+        if (!confirmation) return "skipped";
+      }
+    }
+  };
+
+  const setPublishQueued = (key: string): void => {
+    setStages((prev) => ({ ...prev, [key]: "queued" }));
+  };
+
   const resumePublishTargets = async (
     targets: SelectionEntry[], saved: AutomationRunRecord,
   ): Promise<void> => {
@@ -410,13 +490,38 @@ export function AutomationPage() {
       startedAt: Date.now(), endedAt: null, imageDone: 0, imagePlanned: 0,
       stage: "检查图片并续发…", failures: [], failedKeys: [],
     });
+    const retryableKeys = new Set<string>();
     for (const [index, target] of targets.entries()) {
       const item = saved.items.find((candidate) => candidate.key === target.key);
       if (!item) continue;
       setRun((prev) => ({ ...prev, stage: `续发：${target.title || target.detailId}` }));
       let resumed = false;
       try {
-        await resumePublishMutation.mutateAsync({ runId: saved.id, itemId: item.id });
+        const resume = pendingAutomationPublishAction(item) === "resume";
+        const started = await startOrResumePublish({
+          runId: saved.id,
+          itemId: item.id,
+          productId: String(item.productId ?? ""),
+          title: target.title || item.title || target.detailId,
+          resume,
+        });
+        if (started === "skipped") {
+          retryableKeys.add(target.key);
+          setPublishQueued(target.key);
+          failures.push({
+            key: target.key,
+            title: target.title || item.title || "",
+            detailId: target.detailId,
+            reason: "已跳过本次发布；商品保留在待发布队列，可再次选择后继续。",
+          });
+          setRun((prev) => ({
+            ...prev,
+            done: index + 1,
+            needsReview: failures.length,
+            failures: [...failures],
+          }));
+          continue;
+        }
         resumed = true;
         const response = await publish.mutateAsync({
           items: [{ warehouseId: String(item.productId) }],
@@ -461,6 +566,10 @@ export function AutomationPage() {
             });
           } catch { /* Recovery keeps ambiguous publish submissions from being retried. */ }
         }
+        if (!resumed) {
+          retryableKeys.add(target.key);
+          setPublishQueued(target.key);
+        }
         failures.push({ key: target.key, title: target.title || "", detailId: target.detailId, reason });
       }
       setRun((prev) => ({
@@ -475,7 +584,8 @@ export function AutomationPage() {
       stage: submitted > 0 ? `已提交续发 ${submitted} 件，等待妙手回执`
         : failures.length > 0 ? `${failures.length} 项需检查` : "续发完成",
     }));
-    setSelection(new Map());
+    // 仅移除已尝试提交的项目；规格确认时跳过或启动前失败的项目仍可重试。
+    setSelection((current) => new Map([...current].filter(([key]) => retryableKeys.has(key))));
     if (failures.length > 0) {
       toast.warning(`续发完成，${failures.length} 项需要检查`, {
         description: failures.map((failure) => failure.reason).join("；"),
@@ -514,10 +624,7 @@ export function AutomationPage() {
       toast.info("正在恢复上次任务，请稍后再开始");
       return;
     }
-    const resumable = savedRun?.items.filter((item) =>
-      item.processStatus === "succeeded"
-      && item.publishStatus === "needs_review"
-      && item.publishResult.resumeKind === "images_pending") ?? [];
+    const resumable = savedRun?.items.filter((item) => pendingAutomationPublishAction(item) !== null) ?? [];
     const resumableKeys = new Set(resumable.map((item) => item.key));
     if (targets.some((target) => resumableKeys.has(target.key))) {
       if (targets.some((target) => !resumableKeys.has(target.key))) {
@@ -541,7 +648,8 @@ export function AutomationPage() {
         toast.warning("所选商品存在待核对结果，请先核对妙手处理或发布记录");
         return;
       }
-      if (targets.some((target) => previous.get(target.key)?.processStatus === "succeeded")) {
+      if (targets.some((target) => previous.get(target.key)?.processStatus === "succeeded"
+        && previous.get(target.key)?.publishStatus !== "queued")) {
         toast.warning("所选商品已有成功处理记录，请取消已完成商品后再开始新任务");
         return;
       }
@@ -619,6 +727,7 @@ export function AutomationPage() {
     let publishSubmitted = 0;
     const failedKeys: string[] = [];
     const failures: RunFailure[] = [];
+    const skippedPublishKeys = new Set<string>();
 
     for (const target of targets) {
       if (stopRef.current) {
@@ -736,7 +845,7 @@ export function AutomationPage() {
         if (runSettings.publishEnabled) {
           const warehouseId = result.product?.id;
           if (warehouseId) {
-            const pendingImages = (result.images?.submitted ?? 0) > 0;
+        const pendingImages = (result.images?.submitted ?? 0) > 0;
             if (pendingImages) {
               const reason = "图片翻译任务仍在处理中，已阻止发布旧图片版本；图片完成后请核对并重新处理发布。";
               try {
@@ -754,7 +863,33 @@ export function AutomationPage() {
             } else {
               setRun((prev) => ({ ...prev, stage: `正式发布：${target.title || target.detailId}` }));
               try {
-                await startPublishMutation.mutateAsync({ runId, itemId });
+                const started = await startOrResumePublish({
+                  runId,
+                  itemId,
+                  productId: String(warehouseId),
+                  title: target.title || target.detailId,
+                  resume: false,
+                });
+                if (started === "skipped") {
+                  publishIssues += 1;
+                  skippedPublishKeys.add(target.key);
+                  setPublishQueued(target.key);
+                  failures.push({
+                    key: target.key,
+                    title: (target.title || "") + "（已跳过发布）",
+                    detailId: target.detailId,
+                    reason: "已跳过本次发布；商品保留在待发布队列，可再次选择后继续。",
+                  });
+                  done += 1;
+                  setRun((prev) => ({
+                    ...prev,
+                    done,
+                    imageDone,
+                    textDone,
+                    failures: [...failures],
+                  }));
+                  continue;
+                }
                 const response = await publish.mutateAsync({
                   items: [{ warehouseId: String(warehouseId) }],
                   accountId: durableRun.accountId,
@@ -881,7 +1016,9 @@ export function AutomationPage() {
     }));
     setSelection((prev) => {
       const next = new Map(prev);
-      for (const target of targets) next.delete(target.key);
+      for (const target of targets) {
+        if (!skippedPublishKeys.has(target.key)) next.delete(target.key);
+      }
       return next;
     });
 
@@ -937,10 +1074,7 @@ export function AutomationPage() {
   const templatesOpen = templateDialog === "pick";
   const setTemplatesOpen = (open: boolean): void => setTemplateDialog(open ? "pick" : "none");
   const isResumeSelection = selection.size > 0 && [...selection.keys()].every((key) =>
-    savedRun?.items.some((item) => item.key === key
-      && item.processStatus === "succeeded"
-      && item.publishStatus === "needs_review"
-      && item.publishResult.resumeKind === "images_pending"));
+    savedRun?.items.some((item) => item.key === key && pendingAutomationPublishAction(item) !== null));
 
   return (
     <>
@@ -970,7 +1104,7 @@ export function AutomationPage() {
                     : preparingRun || latestRunQuery.isLoading || recoverRunMutation.isPending
                       ? "正在准备任务或恢复上次任务"
                       : isResumeSelection
-                        ? `校验图片状态后续发 ${selection.size} 件商品`
+                      ? `检查图片和待确认规格后继续发布 ${selection.size} 件商品`
                       : !somethingEnabled
                         ? "文字和图片处理都关着，没有可执行的内容"
                         : publishConfigIssue
@@ -979,7 +1113,7 @@ export function AutomationPage() {
                 }
                 onClick={() => void startRun()}
               >
-                {isResumeSelection ? "续发选中商品" : "开始处理"}
+                {isResumeSelection ? "继续发布选中商品" : "开始处理"}
               </Button>
             )}
           </span>
@@ -1182,6 +1316,80 @@ export function AutomationPage() {
         open={templateDialog === "edit"}
         onOpenChange={(open) => setTemplateDialog(open ? "edit" : "none")}
       />
+
+      <Dialog
+        open={Boolean(specificationPrompt)}
+        onOpenChange={(open) => { if (!open) resolveSpecificationPrompt(null); }}
+        size="md"
+        title="确认商品规格"
+        description={specificationPrompt?.title ?? ""}
+        closeOnOverlay={false}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => resolveSpecificationPrompt(null)}>
+              跳过本件
+            </Button>
+            <Button
+              variant="primary"
+              disabled={!specificationQuery.data?.product || typeof specificationQuery.data.product.revision !== "number"
+                || specificationQuery.isFetching || specificationQuery.isError}
+              onClick={() => {
+                const product = specificationQuery.data?.product;
+                if (!product || typeof product.revision !== "number") return;
+                resolveSpecificationPrompt({
+                  confirmedProductId: String(product.id),
+                  confirmedRevision: product.revision,
+                });
+              }}
+            >
+              确认当前版本并继续
+            </Button>
+          </>
+        }
+      >
+        {specificationQuery.isLoading && <SkeletonRows rows={3} />}
+        {specificationQuery.isError && (
+          <InlineError onRetry={() => void specificationQuery.refetch()}>
+            {apiErrorMessage(specificationQuery.error)}
+          </InlineError>
+        )}
+        {specificationPrompt?.stale && (
+          <p className="mb-3 rounded-md bg-warning-50 px-3 py-2 text-xs leading-5 text-warning-700">
+            商品在确认前发生变化，已重新读取当前版本，请再次核对。
+          </p>
+        )}
+        {specificationQuery.data && (() => {
+          const product = specificationQuery.data.product;
+          const payload = product.payload ?? {};
+          const reasons = (product.qualityReviewReasons ?? []).map((reason) => QUALITY_REASON_LABELS[reason] ?? reason);
+          return (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={product.qualityReviewStatus === "verified" ? "success" : "warning"}>
+                  {product.qualityReviewStatus === "verified" ? "当前版本已核验" : "规格待核验"}
+                </Badge>
+                <span className="text-xs text-fg-muted">当前版本 v{product.revision ?? "未知"}</span>
+              </div>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 rounded-md border border-border-subtle bg-surface-muted p-3 text-sm">
+                <dt className="text-fg-muted">商品重量</dt>
+                <dd className="text-fg">{measureLabel(payload.weight, "kg")}</dd>
+                <dt className="text-fg-muted">包裹尺寸</dt>
+                <dd className="text-fg">
+                  {[payload.packageLength, payload.packageWidth, payload.packageHeight]
+                    .map((value) => measureLabel(value, "cm")).join(" × ")}
+                </dd>
+                {reasons.length > 0 && <>
+                  <dt className="text-fg-muted">待核验项</dt>
+                  <dd className="text-warning-700">{reasons.join("、")}</dd>
+                </>}
+              </dl>
+              <p className="text-xs leading-5 text-fg-muted">
+                请根据商品资料核对重量和包裹尺寸。确认只对上方显示的当前版本生效，不会修改规格数据；跳过后该商品仍留在待发布队列。
+              </p>
+            </div>
+          );
+        })()}
+      </Dialog>
     </>
   );
 }

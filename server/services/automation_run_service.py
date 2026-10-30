@@ -15,7 +15,7 @@ from models.image_job import ImageJob
 from models.operator import Operator
 from models.product import Product
 from models.publish_log import PublishLog
-from services import operator_service
+from services import operator_service, warehouse_service
 
 PROCESS_STATUSES = {"queued", "running", "succeeded", "failed", "needs_review"}
 PUBLISH_STATUSES = {"not_requested", "queued", "running", "succeeded", "failed", "needs_review"}
@@ -128,7 +128,10 @@ def create(db: Session, operator: Operator, *, account_id: Any, shop_id: Any,
     run = AutomationRun(
         id=f"arun_{secrets.token_hex(12)}", owner_operator_id=operator.id,
         account_id=account.id, shop_id=shop_text, status="queued",
-        settings=dict(settings), created_at=now_ts(), updated_at=now_ts(),
+        settings={key: value for key, value in settings.items()
+                  if key not in {"specificationConfirmations",
+                                 "confirmUnverifiedSpecifications"}},
+        created_at=now_ts(), updated_at=now_ts(),
     )
     db.add(run)
     db.flush()
@@ -294,7 +297,40 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
     return get_full(db, run)
 
 
-def start_publish(db: Session, run: AutomationRun, item_id: Any) -> dict[str, Any]:
+def _confirm_automation_specifications(
+        db: Session, run: AutomationRun, product: Product,
+        confirmed_product_id: Any, confirmed_revision: Any) -> None:
+    quality_status, reasons = warehouse_service._quality_review_summary(product)
+    if quality_status == "verified":
+        return
+    product_id = str(product.id)
+    revision = int(product.revision or 0)
+    if (str(confirmed_product_id or "") == product_id
+            and type(confirmed_revision) is int
+            and confirmed_revision == revision):
+        settings = dict(run.settings or {})
+        confirmations = settings.get("specificationConfirmations")
+        confirmations = dict(confirmations) if isinstance(confirmations, dict) else {}
+        confirmations[product_id] = revision
+        settings["specificationConfirmations"] = confirmations
+        settings.pop("confirmUnverifiedSpecifications", None)
+        run.settings = settings
+        return
+    raise errors.AppError(
+        "QUALITY_REVIEW_REQUIRED",
+        "商品重量或包裹尺寸尚未由老师按当前版本核验；明确确认后才能自动发布",
+        status=409,
+        details={"items": [{"warehouseId": product_id, "revision": revision,
+                             "reasons": reasons}],
+                 "field": "confirmedProductId,confirmedRevision",
+                 "confirmationStale": confirmed_product_id is not None
+                 or confirmed_revision is not None},
+    )
+
+
+def start_publish(db: Session, run: AutomationRun, item_id: Any, *,
+                  confirmed_product_id: Any = None,
+                  confirmed_revision: Any = None) -> dict[str, Any]:
     row = _get_item(db, run, item_id)
     if row.process_status != "succeeded" or row.product_id is None:
         raise errors.AppError("CONFLICT", "商品处理完成后才能发布", status=409)
@@ -318,6 +354,8 @@ def start_publish(db: Session, run: AutomationRun, item_id: Any) -> dict[str, An
             or product.draft_verified_revision != product.revision):
         raise errors.AppError(
             "CONFLICT", "商品自处理核验后发生变化，请重新处理并核对", status=409)
+    _confirm_automation_specifications(
+        db, run, product, confirmed_product_id, confirmed_revision)
     if run.settings.get("imagesEnabled") is True:
         unfinished_images = db.query(ImageJob.id).filter(
             ImageJob.product_id == product.id,
@@ -379,7 +417,9 @@ def finish_publish(db: Session, run: AutomationRun, item_id: Any, *, status: str
 
 
 def resume_publish_after_images(db: Session, run: AutomationRun,
-                                item_id: Any) -> dict[str, Any]:
+                                item_id: Any, *,
+                                confirmed_product_id: Any = None,
+                                confirmed_revision: Any = None) -> dict[str, Any]:
     row = _get_item(db, run, item_id)
     result = row.publish_result if isinstance(row.publish_result, dict) else {}
     if (row.publish_status != "needs_review"
@@ -404,6 +444,9 @@ def resume_publish_after_images(db: Session, run: AutomationRun,
             or product.revision != server_verification.get("productRevision")
             or product.draft_verified_revision != product.revision):
         raise errors.AppError("CONFLICT", "商品草稿已变化或核验已失效，请重新核对", status=409)
+
+    _confirm_automation_specifications(
+        db, run, product, confirmed_product_id, confirmed_revision)
 
     unfinished_images = db.query(ImageJob.id).filter(
         ImageJob.product_id == product.id,

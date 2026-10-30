@@ -139,7 +139,7 @@ def _require_started_automation_publish(db: Session, *, entries: list[dict[str, 
         return
     if any(product.account_id != account.id for product in products):
         raise errors.AppError(
-            "CONFLICT", "自动化商品所属账号与发布账号不一致", status=409)
+            "CONFLICT", "自动化商品必须使用创建该自动化任务的妙手账号发布", status=409)
     if any(product.draft_verified_revision != product.revision for product in products):
         raise errors.AppError(
             "CONFLICT", "自动化商品没有与当前版本匹配的妙手草稿读回核验", status=409)
@@ -155,12 +155,35 @@ def _require_started_automation_publish(db: Session, *, entries: list[dict[str, 
                 AutomationRun.shop_id == str(target_shop_id),
             ).all())
     eligible = {
-        item.product_id for item, run in rows
+        item.product_id: run for item, run in rows
         if isinstance(run.settings, dict) and run.settings.get("publishEnabled") is True
     }
-    if product_ids - eligible:
+    if product_ids - set(eligible):
         raise errors.AppError(
             "CONFLICT", "自动化商品必须由已启动的匹配自动化任务发布", status=409)
+    unverified_specs = []
+    for product in products:
+        quality_status, reasons = warehouse_service._quality_review_summary(product)
+        confirmations = eligible[product.id].settings.get(
+            "specificationConfirmations")
+        confirmed_revision = (confirmations.get(str(product.id))
+                              if isinstance(confirmations, dict) else None)
+        confirmed_current_revision = (
+            type(confirmed_revision) is int
+            and confirmed_revision == int(product.revision or 0))
+        if (quality_status != "verified"
+                and not confirmed_current_revision):
+            unverified_specs.append({"warehouseId": str(product.id),
+                                     "revision": int(product.revision or 0),
+                                     "reasons": reasons})
+    if unverified_specs:
+        raise errors.AppError(
+            "QUALITY_REVIEW_REQUIRED",
+            "商品重量或包裹尺寸尚未由老师按当前版本核验；明确确认后才能自动发布",
+            status=409,
+            details={"items": unverified_specs,
+                     "field": "confirmedProductId, confirmedRevision"},
+        )
 
 
 # --- 记录 -----------------------------------------------------------------
@@ -558,6 +581,9 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     operator = operator_service.get(db, operator_id) if operator_id is not None else None
     member_publish = (operator is not None and operator_service.role_of(operator) ==
                       operator_service.ROLE_MEMBER)
+    if member_publish and account.owner_operator_id != operator.id:
+        raise errors.AppError(errors.FORBIDDEN,
+                              "无权使用其他学员的妙手账号发布", status=403)
     # 台账返回里要显示「谁发的」，先取一次名字（一次查询，不逐行查）
     operator_name = ""
     if operator_id is not None:

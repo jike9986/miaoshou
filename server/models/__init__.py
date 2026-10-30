@@ -27,6 +27,7 @@ from models.violation_word import ViolationWord
 # 字母序——加在末尾，review 时一眼就能看出「只多了两行」。
 from models.audit_log import AuditLog
 from models.operator import Operator
+from models.login_rate_limit import LoginRateLimit
 
 __all__ = [
     "Account",
@@ -48,4 +49,5 @@ __all__ = [
     # 0.2 追加
     "AuditLog",
     "Operator",
+    "LoginRateLimit",
 ]

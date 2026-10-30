@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, Request
 from pydantic import BaseModel, Field
 
 from api.deps import (
@@ -52,12 +52,26 @@ class InitializeCredentialsRequest(BaseModel):
 
 
 @login_router.post("/login")
-def login(payload: LoginRequest, db: DbSession) -> dict[str, Any]:
+def login(payload: LoginRequest, request: Request, db: DbSession) -> dict[str, Any]:
+    from core.errors import RATE_LIMITED, AppError
+    from services import login_rate_limit_service
+
+    try:
+        username = operator_service.normalize_username(payload.username)
+    except Exception:
+        username = payload.username.strip().casefold()
+    ip = request.client.host if request.client else "unknown"
+    retry_after = login_rate_limit_service.blocked_retry_after(ip, username)
+    if retry_after:
+        raise AppError(RATE_LIMITED, "登录失败次数过多，请稍后重试", status=429,
+                       details={"retryAfterSeconds": retry_after})
+
     result = operator_service.authenticate_password(db, payload.username, payload.password)
     if result is None:
-        from core.errors import AppError
+        login_rate_limit_service.record_failure(ip, username)
         raise AppError("AUTH_FAILED", "用户名或密码错误", status=401)
     operator, token = result
+    login_rate_limit_service.clear_username(username)
     db.commit()
     return {"operator": {"id": str(operator.id),
                           "name": operator_service.serialize(operator)["name"],

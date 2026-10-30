@@ -412,7 +412,12 @@ async def validation_error_handler(request: Request,
 @app.exception_handler(errors.AppError)
 async def app_error_handler(request: Request, exc: errors.AppError) -> JSONResponse:
     request_id = getattr(request.state, "request_id", "") or new_request_id()
-    return _error_response(exc.code, exc.message, exc.status, request_id, exc.details)
+    response = _error_response(exc.code, exc.message, exc.status, request_id, exc.details)
+    if exc.code == errors.RATE_LIMITED:
+        response.headers["Retry-After"] = str(
+            max(1, int((exc.details or {}).get("retryAfterSeconds", 1)))
+        )
+    return response
 
 
 @app.exception_handler(StarletteHTTPException)

@@ -2,6 +2,7 @@
 // 统一 fetch 封装：Bearer 鉴权、超时、错误归一化（暴露 error.code）、幂等键、请求 id。
 
 import type { ApiErrorCode, ApiErrorPayload } from "@/lib/types";
+import { allowsLocalBootstrapToken } from "@/lib/apiTarget";
 import { operatorToken } from "@/lib/operator";
 import { getSavedApiBase } from "@/lib/serverAddress";
 
@@ -37,21 +38,13 @@ export function resolveApiBase(): string {
 
 function isDefaultApiTarget(): boolean {
   if (typeof window === "undefined") return true;
-  if (getSavedApiBase()) return false;
-  if (window.__AOHUANG_API_BASE__) return false;
-  if (import.meta.env.VITE_API_BASE) return false;
-  const bootBase = window.__DSH_BOOT__?.apiBase?.replace(/\/+$/, "");
-  const queryBase = new URLSearchParams(window.location.search).get("apiBase")?.replace(/\/+$/, "");
-  if (!bootBase && !queryBase) return true;
-  if (bootBase && (!queryBase || queryBase === bootBase)) {
-    try {
-      const host = new URL(bootBase).hostname;
-      return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
-    } catch {
-      return false;
-    }
-  }
-  return false;
+  return allowsLocalBootstrapToken({
+    savedBase: getSavedApiBase(),
+    legacyBase: window.__AOHUANG_API_BASE__,
+    bootBase: window.__DSH_BOOT__?.apiBase,
+    queryBase: new URLSearchParams(window.location.search).get("apiBase"),
+    environmentBase: import.meta.env.VITE_API_BASE,
+  });
 }
 
 function requestToken(path?: string): string | null {
@@ -277,8 +270,10 @@ async function request<T, B = unknown>(
   const { query, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal, idempotencyKey } = options;
 
   const isSoftwareLogin = method === "POST" && path === "/auth/login";
-  const token = isSoftwareLogin ? null : requestToken(path);
-  if (!isSoftwareLogin && !token) {
+  const isPublicCredentialStatus = method === "GET" && path === "/auth/credentials-status";
+  const isPublicAuthRequest = isSoftwareLogin || isPublicCredentialStatus;
+  const token = isPublicAuthRequest ? null : requestToken(path);
+  if (!isPublicAuthRequest && !token) {
     throw new ApiError({
       code: "BOOT_MISSING",
       message: API_ERROR_TEXT.BOOT_MISSING ?? "缺少启动参数",

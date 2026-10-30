@@ -1,3 +1,10 @@
+import type { QualityReviewReason, QualityReviewStatus } from "@/lib/types";
+
+export interface QualityReviewSnapshot {
+  status?: QualityReviewStatus;
+  reasons: QualityReviewReason[];
+}
+
 export function partitionMemberSelection(
   selectedIds: string[],
   claimedById: Record<string, boolean>,
@@ -14,6 +21,16 @@ export function partitionMemberSelection(
     }
   }
   return { claimable, publishable };
+}
+
+export function selectedQualityReviews(
+  selectedIds: string[],
+  snapshots: Record<string, QualityReviewSnapshot>,
+): Record<string, QualityReviewSnapshot> {
+  return Object.fromEntries(selectedIds.map((id) => [
+    id,
+    snapshots[id] ?? { status: undefined, reasons: [] },
+  ]));
 }
 
 export function warehouseIdsForClaimedDetails(

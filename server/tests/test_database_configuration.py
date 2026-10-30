@@ -198,8 +198,82 @@ def test_sqlite_init_keeps_create_patch_and_seed_path(monkeypatch) -> None:
                         lambda *_args, **_kwargs: calls.append("create"))
     monkeypatch.setattr(session_module, "_add_missing_columns",
                         lambda: calls.append("patch"))
+    monkeypatch.setattr(session_module, "_ensure_sqlite_account_app_key_index",
+                        lambda: calls.append("index"))
     monkeypatch.setattr(session_module, "_seed_settings", lambda: calls.append("seed"))
 
     session_module.init_db()
 
-    assert calls == ["create", "patch", "seed"]
+    assert calls == ["create", "patch", "index", "seed"]
+
+
+def _legacy_account_database(path, app_keys: tuple[str, ...]):
+    from sqlalchemy import create_engine, text
+
+    legacy_engine = create_engine(f"sqlite:///{path}")
+    with legacy_engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, app_key VARCHAR(256))"
+        ))
+        for index, app_key in enumerate(app_keys, start=1):
+            connection.execute(
+                text("INSERT INTO accounts (id, app_key) VALUES (:id, :app_key)"),
+                {"id": index, "app_key": app_key},
+            )
+    return legacy_engine
+
+
+def test_sqlite_init_adds_unique_app_key_index_to_legacy_schema(monkeypatch, tmp_path) -> None:
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import IntegrityError
+
+    legacy_engine = _legacy_account_database(
+        tmp_path / "legacy-accounts.db", ("existing-a", "existing-b", "", "")
+    )
+    monkeypatch.setattr(session_module, "engine", legacy_engine)
+    monkeypatch.setattr(session_module, "_seed_settings", lambda: None)
+    try:
+        session_module.init_db()
+
+        index_names = {row["name"] for row in inspect(legacy_engine).get_indexes("accounts")}
+        assert "uq_accounts_app_key_nonempty" in index_names
+        with legacy_engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO accounts (id, app_key) VALUES (10, 'existing-c')"
+            ))
+            with pytest.raises(IntegrityError):
+                connection.execute(text(
+                    "INSERT INTO accounts (id, app_key) VALUES (11, 'existing-a')"
+                ))
+            connection.execute(text(
+                "INSERT INTO accounts (id, app_key) VALUES (12, '')"
+            ))
+    finally:
+        legacy_engine.dispose()
+
+
+def test_sqlite_init_reports_legacy_duplicate_keys_without_deleting_rows(
+        monkeypatch, tmp_path) -> None:
+    from sqlalchemy import inspect, text
+
+    legacy_engine = _legacy_account_database(
+        tmp_path / "legacy-duplicate-accounts.db",
+        ("duplicate-secret-key", "duplicate-secret-key"),
+    )
+    monkeypatch.setattr(session_module, "engine", legacy_engine)
+    monkeypatch.setattr(session_module, "_seed_settings", lambda: None)
+    try:
+        with pytest.raises(RuntimeError, match="重复的非空妙手 AppKey") as caught:
+            session_module.init_db()
+
+        assert "accounts.id=[1,2]" in str(caught.value)
+        assert "duplicate-secret-key" not in str(caught.value)
+        with legacy_engine.connect() as connection:
+            rows = connection.execute(text(
+                "SELECT id, app_key FROM accounts ORDER BY id"
+            )).all()
+            assert rows == [(1, "duplicate-secret-key"), (2, "duplicate-secret-key")]
+        index_names = {row["name"] for row in inspect(legacy_engine).get_indexes("accounts")}
+        assert "uq_accounts_app_key_nonempty" not in index_names
+    finally:
+        legacy_engine.dispose()

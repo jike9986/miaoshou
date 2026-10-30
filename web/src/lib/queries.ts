@@ -16,6 +16,7 @@ import type {
   AutomationResultsImportResponse,
   AutomationResultsResponse,
   AutomationRunCreateRequest,
+  AutomationPublishConfirmation,
   AutomationRunRecord,
   AuthConnectRequest,
   AuthConnectResult,
@@ -817,23 +818,25 @@ export function useAutomationRunProcessResult(): UseMutationResult<
 }
 
 export function useStartAutomationPublish(): UseMutationResult<
-  { run: AutomationRunRecord }, Error, { runId: string; itemId: string }
+  { run: AutomationRunRecord }, Error,
+  { runId: string; itemId: string } & Partial<AutomationPublishConfirmation>
 > {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ runId, itemId }) => api.post<{ run: AutomationRunRecord }>(
-      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/publish-start`),
+    mutationFn: ({ runId, itemId, ...body }) => api.post<{ run: AutomationRunRecord }, typeof body>(
+      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/publish-start`, body),
     onSuccess: () => invalidateAutomationRuns(client),
   });
 }
 
 export function useResumeAutomationPublish(): UseMutationResult<
-  { run: AutomationRunRecord }, Error, { runId: string; itemId: string }
+  { run: AutomationRunRecord }, Error,
+  { runId: string; itemId: string } & Partial<AutomationPublishConfirmation>
 > {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ runId, itemId }) => api.post<{ run: AutomationRunRecord }>(
-      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/resume-publish`),
+    mutationFn: ({ runId, itemId, ...body }) => api.post<{ run: AutomationRunRecord }, typeof body>(
+      `/automation-runs/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}/resume-publish`, body),
     onSuccess: () => invalidateAutomationRuns(client),
   });
 }

@@ -62,7 +62,9 @@ def headers(token: str) -> dict[str, str]:
 
 def create_run(client: TestClient, setup: dict[str, object], *,
                publish_enabled: bool = False,
-               images_enabled: bool | None = None) -> dict:
+               images_enabled: bool | None = None,
+               item_count: int = 1,
+               extra_settings: dict[str, object] | None = None) -> dict:
     if images_enabled is None:
         images_enabled = publish_enabled
     detail_id = str(uuid.uuid4().int % 10**12)
@@ -74,14 +76,21 @@ def create_run(client: TestClient, setup: dict[str, object], *,
             "priceTemplateEnabled": True,
             "template": "Test template",
         })
+    if extra_settings:
+        settings.update(extra_settings)
+    items = []
+    for _ in range(item_count):
+        detail_id = str(uuid.uuid4().int % 10**12)
+        source_shop_id = str(uuid.uuid4().int % 10**12)
+        items.append({"key": f"{detail_id}:{source_shop_id}",
+                      "detailId": detail_id, "shopId": source_shop_id,
+                      "title": "Test item"})
     response = client.post(
         API + "/automation-runs",
         json={
             "accountId": setup["account_id"], "shopId": "22",
             "settings": settings,
-            "items": [{"key": f"{detail_id}:{source_shop_id}",
-                       "detailId": detail_id, "shopId": source_shop_id,
-                       "title": "Test item"}],
+            "items": items,
         },
         headers=headers(str(setup["teacher_token"])),
     )
@@ -90,7 +99,7 @@ def create_run(client: TestClient, setup: dict[str, object], *,
 
 
 def create_automation_product(setup: dict[str, object], detail_id: str,
-                             shop_id: str = "11") -> Product:
+                              shop_id: str = "11", *, verified: bool = True) -> Product:
     db = SessionLocal()
     try:
         product = Product(
@@ -98,6 +107,7 @@ def create_automation_product(setup: dict[str, object], detail_id: str,
             account_id=int(setup["account_id"]), detail_id=detail_id, shop_id=shop_id,
             title="Automation test", status="ready", automation_result=True,
             claimed=False, collected={}, payload={}, draft_verified_revision=1,
+            quality_review={"verifiedRevision": 1, "evidence": "test"} if verified else None,
         )
         db.add(product)
         db.commit()
@@ -105,6 +115,25 @@ def create_automation_product(setup: dict[str, object], detail_id: str,
         return product
     finally:
         db.close()
+
+
+def complete_automation_item(client: TestClient, setup: dict[str, object],
+                             run: dict, item: dict, *, verified: bool = True) -> Product:
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(
+        setup, item["detailId"], item["shopId"], verified=verified)
+    processed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"saved": True, "draftVerified": True,
+                         "images": {"requested": 0, "submitted": 0, "failed": 0}}},
+        headers=auth,
+    )
+    assert processed.status_code == 200, processed.text
+    return product
 
 
 def test_recovery_marks_inflight_item_unknown_and_blocks_reprocessing(client, setup):
@@ -805,6 +834,7 @@ def test_publish_receipt_updates_only_matching_automation_item(
         assert processed.status_code == 200, processed.text
         assert client.post(
             API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+            json={"confirmedProductId": str(product.id), "confirmedRevision": 1},
             headers=auth,
         ).status_code == 200
         submitted = client.post(

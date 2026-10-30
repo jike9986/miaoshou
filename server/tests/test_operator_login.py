@@ -8,9 +8,18 @@ from fastapi.testclient import TestClient
 from core.config import get_settings
 from db.session import SessionLocal, init_db
 from main import app
-from services import operator_service
+from models.login_rate_limit import LoginRateLimit
+from services import login_rate_limit_service, operator_service
 
 API = "/api/v1"
+
+
+@pytest.fixture(autouse=True)
+def isolate_login_ip_rate_limit():
+    ip = "testclient"
+    login_rate_limit_service.clear_ip(ip)
+    yield
+    login_rate_limit_service.clear_ip(ip)
 
 
 @pytest.fixture(scope="module")
@@ -281,3 +290,126 @@ def test_reset_legacy_member_assigns_usable_username(client, tokens):
                         json={"username": username, "password": "reset-pass-456"})
     assert login.status_code == 200, login.text
     assert login.json()["mustChangePassword"] is True
+
+
+def test_login_failures_are_persistently_throttled_and_uniform(client):
+    suffix = uuid.uuid4().hex[:10]
+    ip = "testclient"
+    login_rate_limit_service.clear_ip(ip)
+    unknown = client.post(
+        API + "/auth/login",
+        json={"username": f"missing-{suffix}", "password": "wrong-pass"},
+    )
+    bad_password = client.post(
+        API + "/auth/login",
+        json={"username": f"missing-{suffix}", "password": "other-pass"},
+    )
+    assert unknown.status_code == bad_password.status_code == 401
+    assert unknown.json()["error"]["message"] == bad_password.json()["error"]["message"]
+    login_rate_limit_service.clear(ip, f"missing-{suffix}")
+
+    username = f"limited-{suffix}"
+    ip_key, username_key = login_rate_limit_service.bucket_keys(ip, username)
+    try:
+        responses = [
+            client.post(API + "/auth/login", json={
+                "username": username, "password": "wrong-pass"})
+            for _ in range(login_rate_limit_service.MAX_FAILURES)
+        ]
+        assert [response.status_code for response in responses] == [401] * \
+            login_rate_limit_service.MAX_FAILURES
+        blocked = client.post(API + "/auth/login", json={
+            "username": username, "password": "wrong-pass"})
+        assert blocked.status_code == 429
+        assert blocked.headers["Retry-After"].isdigit()
+        assert blocked.json()["error"]["code"] == "RATE_LIMITED"
+        assert blocked.json()["error"]["details"]["retryAfterSeconds"] > 0
+
+        with SessionLocal() as db:
+            rows = db.query(LoginRateLimit).filter(
+                LoginRateLimit.bucket_key.in_((ip_key, username_key))
+            ).all()
+            assert len(rows) == 2
+            assert {row.failure_count for row in rows} == {
+                login_rate_limit_service.MAX_FAILURES
+            }
+            assert all(row.locked_until > 0 for row in rows)
+
+        # A correct login clears only its username bucket after a prior typo.
+        login_rate_limit_service.clear(ip, username)
+        success_username = f"success-{suffix}"
+        db = SessionLocal()
+        try:
+            operator_service.create_student(
+                db, f"Limited {suffix}", success_username, "correct-pass-456")
+            db.commit()
+        finally:
+            db.close()
+        typo = client.post(API + "/auth/login", json={
+            "username": success_username, "password": "wrong-pass"})
+        assert typo.status_code == 401
+        success = client.post(API + "/auth/login", json={
+            "username": success_username, "password": "correct-pass-456"})
+        assert success.status_code == 200, success.text
+        with SessionLocal() as db:
+            ip_key, username_key = login_rate_limit_service.bucket_keys(
+                ip, success_username)
+            assert db.query(LoginRateLimit).filter(
+                LoginRateLimit.bucket_key == username_key
+            ).count() == 0
+            assert db.query(LoginRateLimit).filter(
+                LoginRateLimit.bucket_key == ip_key
+            ).one().failure_count == 1
+    finally:
+        login_rate_limit_service.clear(ip, username)
+        login_rate_limit_service.clear(ip, f"missing-{suffix}")
+        login_rate_limit_service.clear(ip, f"success-{suffix}")
+
+
+def test_successful_login_does_not_clear_shared_ip_failures(client):
+    suffix = uuid.uuid4().hex[:10]
+    ip = "testclient"
+    usernames = [f"spray-{suffix}-{index}" for index in range(
+        login_rate_limit_service.MAX_FAILURES - 1)]
+    valid_username = f"valid-{suffix}"
+    for username in [*usernames, valid_username, f"after-{suffix}"]:
+        login_rate_limit_service.clear(ip, username)
+
+    db = SessionLocal()
+    try:
+        operator_service.create_student(
+            db, f"Valid login {suffix}", valid_username, "correct-pass-456")
+        db.commit()
+    finally:
+        db.close()
+
+    try:
+        for username in usernames:
+            failed = client.post(API + "/auth/login", json={
+                "username": username, "password": "wrong-pass"})
+            assert failed.status_code == 401
+
+        success = client.post(API + "/auth/login", json={
+            "username": valid_username, "password": "correct-pass-456"})
+        assert success.status_code == 200, success.text
+
+        ip_key, username_key = login_rate_limit_service.bucket_keys(ip, valid_username)
+        with SessionLocal() as db:
+            assert db.query(LoginRateLimit).filter(
+                LoginRateLimit.bucket_key == ip_key
+            ).one().failure_count == login_rate_limit_service.MAX_FAILURES - 1
+            assert db.query(LoginRateLimit).filter(
+                LoginRateLimit.bucket_key == username_key
+            ).count() == 0
+
+        blocked = client.post(API + "/auth/login", json={
+            "username": f"after-{suffix}", "password": "wrong-pass"})
+        assert blocked.status_code == 401
+        locked = client.post(API + "/auth/login", json={
+            "username": f"after-{suffix}", "password": "wrong-pass"})
+        assert locked.status_code == 429
+        assert locked.json()["error"]["code"] == "RATE_LIMITED"
+    finally:
+        for username in [*usernames, valid_username, f"after-{suffix}"]:
+            login_rate_limit_service.clear(ip, username)
+        login_rate_limit_service.clear_ip(ip)

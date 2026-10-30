@@ -139,6 +139,11 @@ def serialize(product: Product, *, account_name: str = "",
     if include_payload:
         body["payload"] = product.payload if isinstance(product.payload, dict) else {}
         body["qualityReview"] = product.quality_review
+    # 成品仓库是跨学员共享的商品目录。学员可以看到并认领商品，
+    # 但不能从返回体或筛选面板反推出商品最初绑定的妙手账号。
+    if member_view:
+        body["accountId"] = None
+        body["account"] = ""
     return body
 
 
@@ -204,13 +209,62 @@ def _is_member(db: Session, operator_id: int | None) -> bool:
         operator_service.ROLE_MEMBER)
 
 
+def _assert_member_account_access(db: Session, account_id: int | None,
+                                  operator_id: int | None) -> None:
+    if not _is_member(db, operator_id):
+        return
+    owned = (account_id is not None and db.query(Account.id).filter(
+        Account.id == account_id,
+        Account.owner_operator_id == operator_id,
+    ).first() is not None)
+    if not owned:
+        raise errors.AppError(errors.FORBIDDEN,
+                              "无权访问其他学员的仓库商品", status=403)
+
+
+def _source_owned_product_ids(db: Session, operator_id: int):
+    return (db.query(AutomationRunItem.product_id)
+            .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
+            .filter(AutomationRun.owner_operator_id == operator_id,
+                    AutomationRunItem.product_id.is_not(None)))
+
+
+def _assert_member_product_access(db: Session, product: Product,
+                                  operator_id: int | None) -> None:
+    if not _is_member(db, operator_id) or not product.automation_result:
+        return
+    source_run = (db.query(AutomationRunItem.id)
+                  .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
+                  .filter(AutomationRunItem.product_id == product.id,
+                          AutomationRun.owner_operator_id == operator_id)
+                  .first())
+    if source_run is None:
+        raise errors.AppError(errors.FORBIDDEN,
+                              "无权访问其他学员的自动化处理结果", status=403)
+
+
+def _scope_member_products(db: Session, query, operator_id: int | None):
+    if _is_member(db, operator_id):
+        # automation_result=False 表示已进入共享成品仓库；此时不能按来源
+        # account_id 过滤，否则老师入仓的成品会对其他学员完全消失。未入仓
+        # 的自动化结果仅允许来源任务的学员看到。
+        query = query.filter(or_(
+            Product.automation_result.is_(False),
+            Product.id.in_(_source_owned_product_ids(db, int(operator_id))),
+        ))
+    return query
+
+
 def _latest_operator_publish_logs(db: Session, operator_id: int | None,
                                   product_ids: list[int]
                                   ) -> dict[int, PublishLog]:
     if operator_id is None or not product_ids:
         return {}
+    owned_accounts = db.query(Account.id).filter(
+        Account.owner_operator_id == operator_id)
     rows = (db.query(PublishLog)
             .filter(PublishLog.operator_id == operator_id,
+                    PublishLog.account_id.in_(owned_accounts),
                     PublishLog.product_id.in_(product_ids))
             .order_by(PublishLog.requested_at.desc(), PublishLog.id.desc()).all())
     latest: dict[int, PublishLog] = {}
@@ -225,8 +279,11 @@ def _successful_operator_publish_shops(
 ) -> dict[int, list[str]]:
     if operator_id is None or not product_ids:
         return {}
+    owned_accounts = db.query(Account.id).filter(
+        Account.owner_operator_id == operator_id)
     rows = (db.query(PublishLog.product_id, PublishLog.shop_id)
             .filter(PublishLog.operator_id == operator_id,
+                    PublishLog.account_id.in_(owned_accounts),
                     PublishLog.product_id.in_(product_ids),
                     PublishLog.status == "success").all())
     shops: dict[int, set[str]] = {}
@@ -287,6 +344,12 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                                  reviewed_revision.is_(None),
                                  reviewed_revision != Product.revision))
     member_view = _is_member(db, operator_id)
+    if member_view and account_id not in (None, ""):
+        text = str(account_id)
+        if not text.isdigit():
+            raise errors.validation("accountId 须为数字", field="accountId")
+        _assert_member_account_access(db, int(text), operator_id)
+    query = _scope_member_products(db, query, operator_id)
     if category_id not in (None, ""):
         cid_value = str(category_id)
         if cid_value.isdigit():
@@ -304,7 +367,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
             query = query.filter(Product.group_name == text)
     if group:
         query = query.filter(Product.group_name == str(group))
-    if account_id not in (None, ""):
+    if account_id not in (None, "") and not member_view:
         text = str(account_id)
         if text.isdigit():
             query = query.filter(Product.account_id == int(text))
@@ -394,7 +457,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         "pageSize": page_size,
         "total": total,
         "hasMore": page * page_size < total,
-        "facets": facets(db),
+        "facets": facets(db, operator_id=operator_id),
         "stats": stats(db, account_id=stats_account_id, operator_id=operator_id),
     }
 
@@ -533,14 +596,15 @@ def rename_custom_category(db: Session, old: Any, new: Any) -> list[dict[str, An
     return _save_custom_categories(db, updated)
 
 
-def facets(db: Session) -> dict[str, Any]:
+def facets(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
     """筛选面板计数：分组优先，未分组的商品才计入平台类目。
 
     运营自定义标签（`warehouse.customCategories`）也是类目维度的一条：商品的
     `categoryName` 等于某个自定义标签时计入该标签桶，`cid` 留空——自定义标签
     本来就没有平台 cid，塞个假 cid 会让前端拿去调类目接口。
     """
-    visible = active_query(db).filter(Product.automation_result.is_(False))
+    visible = _scope_member_products(
+        db, active_query(db).filter(Product.automation_result.is_(False)), operator_id)
     rows = (visible
             .with_entities(Product.group_id, Product.group_name, Product.cid,
                            Product.category_id, Product.category_name)
@@ -618,7 +682,7 @@ def facets(db: Session) -> dict[str, Any]:
     for (acc_id,) in visible.with_entities(Product.account_id).all():
         account_counts[acc_id] = account_counts.get(acc_id, 0) + 1
     names = account_names(db)
-    account_list = [
+    account_list = [] if _is_member(db, operator_id) else [
         {"accountId": str(acc_id) if acc_id else None,
          "name": names.get(acc_id or 0, "未标注"),
          "count": count}
@@ -632,9 +696,15 @@ def stats(db: Session, *, account_id: int | None = None,
     """仓库统计。传 account_id 时只数当前账号的商品——
     多账号共用一台机器时，「已认领 355 件」是全账号加总，用户分不清哪些是自己的。"""
     base = active_query(db).filter(Product.automation_result.is_(False))
-    if account_id is not None:
-        base = base.filter(Product.account_id == account_id)
     member_view = _is_member(db, operator_id)
+    if member_view:
+        if account_id is not None:
+            _assert_member_account_access(db, account_id, operator_id)
+        base = _scope_member_products(db, base, operator_id)
+    # 对学员来说 account_id 只是当前发布账号的权限校验；共享成品的
+    # 数量、容量和可认领目录不应因来源账号不同而被切掉。
+    if account_id is not None and not member_view:
+        base = base.filter(Product.account_id == account_id)
     total = base.count()
     return {
         "totalProducts": total,
@@ -649,6 +719,8 @@ def stats(db: Session, *, account_id: int | None = None,
             base.filter(db.query(PublishLog.id).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
+                PublishLog.account_id.in_(db.query(Account.id).filter(
+                    Account.owner_operator_id == operator_id)),
                 PublishLog.status == "success",
             ).exists()).count() if member_view else
             base.filter(Product.status == "published").count()
@@ -731,6 +803,7 @@ def admit_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
 def detail(db: Session, ident: Any, *, include_payload: bool = False,
            operator_id: int | None = None) -> dict[str, Any]:
     product = resolve_product(db, ident)
+    _assert_member_product_access(db, product, operator_id)
     names = account_names(db)
     operators = operator_names(db)
     claim = None
@@ -749,7 +822,11 @@ def detail(db: Session, ident: Any, *, include_payload: bool = False,
                      member_view=member_view, publish_log=own_publish_log)
     history_query = db.query(PublishLog).filter(PublishLog.product_id == product.id)
     if member_view:
-        history_query = history_query.filter(PublishLog.operator_id == operator_id)
+        history_query = history_query.filter(
+            PublishLog.operator_id == operator_id,
+            PublishLog.account_id.in_(db.query(Account.id).filter(
+                Account.owner_operator_id == operator_id)),
+        )
     history = history_query.order_by(
         PublishLog.requested_at.desc()).limit(20).all()
     jobs_query = db.query(ImageJob).filter(ImageJob.product_id == product.id)
@@ -782,6 +859,7 @@ def detail(db: Session, ident: Any, *, include_payload: bool = False,
 
 def claim_product(db: Session, ident: Any, owner_operator_id: int) -> ProductClaim:
     product = resolve_product(db, ident)
+    _assert_member_product_access(db, product, owner_operator_id)
     if product.automation_result:
         raise errors.validation("自动化结果加入成品仓库后才能认领", field="id")
     existing = db.query(ProductClaim).filter(

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core import errors
@@ -394,7 +395,18 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
     account.shops_synced_at = stamp
     if existing is None:
         account.is_default = db.query(Account).count() == 0
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        duplicate = (db.query(Account.id)
+                     .filter(Account.app_key == (app_id or ""))
+                     .first())
+        if duplicate is not None:
+            raise errors.AppError(
+                "CONFLICT", "这个妙手账号已被绑定或连接，请刷新后重试", status=409
+            ) from None
+        raise
     sync_shop_table(db, account, shops)
 
     scan: dict[str, Any] = {}

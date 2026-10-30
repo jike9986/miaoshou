@@ -171,7 +171,7 @@ def warehouse_stats(db: DbSession, operator: OperatorDep,
             raise errors.validation("accountId 须为数字", field="accountId") from None
     return {"stats": warehouse_service.stats(
                 db, account_id=account_id, operator_id=operator.id),
-            "facets": warehouse_service.facets(db)}
+            "facets": warehouse_service.facets(db, operator_id=operator.id)}
 
 
 # --- 自定义分类标签（老版 warehouse.custom_categories）----------------------
