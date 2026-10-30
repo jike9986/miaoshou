@@ -112,7 +112,8 @@ def _assert_empty_target(engine: Engine, metadata: MetaData) -> None:
     missing = set(metadata.tables) - tables
     extra = tables - set(metadata.tables) - {"alembic_version"}
     if missing - OPTIONAL_TABLES:
-        raise ValueError(f"target schema is incomplete; missing={sorted(missing - OPTIONAL_TABLES)}")
+        missing_required = sorted(missing - OPTIONAL_TABLES)
+        raise ValueError(f"target schema is incomplete; missing={missing_required}")
     if extra:
         raise ValueError("target contains unrelated tables; refusing to touch that database")
     with engine.connect() as connection:
