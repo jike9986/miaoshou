@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Pencil, Play, Square, Tag } from "lucide-react";
+import { Pencil, Play, RefreshCw, Square, Tag } from "lucide-react";
 import { apiErrorMessage, isApiError } from "@/lib/api";
 import { formatCount, cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/queryKeys";
@@ -46,7 +46,9 @@ import {
   useAutomationRunProcessResult,
   useStartAutomationPublish,
   useResumeAutomationPublish,
+  useRetryAutomationPublish,
   useAutomationPublishResult,
+  useRefreshPublishLogs,
   useProductDetail,
 } from "@/lib/queries";
 import { useSizeCharts, pickCharts, pickDefaultUrl, buildDefaultSizeChart } from "@/features/automation/useSizeCharts";
@@ -250,7 +252,9 @@ export function AutomationPage() {
   const recordProcessMutation = useAutomationRunProcessResult();
   const startPublishMutation = useStartAutomationPublish();
   const resumePublishMutation = useResumeAutomationPublish();
+  const retryPublishMutation = useRetryAutomationPublish();
   const recordPublishMutation = useAutomationPublishResult();
+  const refreshPublishLogsMutation = useRefreshPublishLogs();
   const persistentRunId = useRef<string | null>(null);
   const persistentItems = useRef<Map<string, string>>(new Map());
   const hydratedRunId = useRef<string | null>(null);
@@ -497,10 +501,13 @@ export function AutomationPage() {
       const action = pendingAutomationPublishAction(item);
       setRun((prev) => ({
         ...prev,
-        stage: `${action === "resume" ? "续发" : "发布"}：${target.title || target.detailId}`,
+        stage: `${action === "resume" ? "续发" : action === "retry" ? "重试发布" : "发布"}：${target.title || target.detailId}`,
       }));
       let resumed = false;
       try {
+        if (action === "retry") {
+          await retryPublishMutation.mutateAsync({ runId: saved.id, itemId: item.id });
+        }
         const resume = action === "resume";
         const started = await startOrResumePublish({
           runId: saved.id,
@@ -1077,6 +1084,7 @@ export function AutomationPage() {
   const [templateDialog, setTemplateDialog] = useState<"none" | "pick" | "edit">("none");
   const templatesOpen = templateDialog === "pick";
   const setTemplatesOpen = (open: boolean): void => setTemplateDialog(open ? "pick" : "none");
+  const hasPublishNeedsReview = savedRun?.items.some((item) => item.publishStatus === "needs_review") ?? false;
   const isResumeSelection = selection.size > 0 && [...selection.keys()].every((key) =>
     savedRun?.items.some((item) => item.key === key && pendingAutomationPublishAction(item) !== null));
 
@@ -1221,6 +1229,49 @@ export function AutomationPage() {
               "min-h-0 overflow-hidden overscroll-contain pb-1 max-lg:shrink-0 max-lg:overflow-visible",
               scrollLayout && "overflow-visible",
             )}>
+              {hasPublishNeedsReview && (
+                <div className="mb-2 flex justify-end">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<RefreshCw className={cn(refreshPublishLogsMutation.isPending && "animate-spin")} />}
+                    loading={refreshPublishLogsMutation.isPending}
+                    loadingText="刷新中"
+                    onClick={() => {
+                      void (async () => {
+                        try {
+                          const result = await refreshPublishLogsMutation.mutateAsync();
+                          const refreshed = await latestRunQuery.refetch();
+                          const recovered = refreshed.data?.run;
+                          const retryable = recovered?.items.filter((item) =>
+                            pendingAutomationPublishAction(item) === "retry") ?? [];
+                          if (retryable.length > 0) {
+                            setSelection((current) => {
+                              const next = new Map(current);
+                              for (const item of retryable) {
+                                next.set(item.key, {
+                                  key: item.key,
+                                  detailId: item.detailId,
+                                  shopId: item.shopId,
+                                  title: item.title,
+                                });
+                              }
+                              return next;
+                            });
+                          }
+                          if (result.degraded) toast.warning("暂时无法读取妙手发布记录");
+                          else if (result.updated > 0) toast.success(`已更新 ${result.updated} 条发布回执`);
+                          else toast.info("暂未匹配到最终回执，商品仍需核对");
+                        } catch (error) {
+                          toast.warning(apiErrorMessage(error));
+                        }
+                      })();
+                    }}
+                  >
+                    刷新回执
+                  </Button>
+                </div>
+              )}
               <ProgressPanel
                 run={run}
                 settings={settings}

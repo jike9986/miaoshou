@@ -13,7 +13,7 @@ from models.automation_run import AutomationRunItem
 from models.image_job import ImageJob
 from models.product import Product
 from models.publish_log import PublishLog
-from services import operator_service, setting_service
+from services import automation_run_service, operator_service, setting_service
 
 API = "/api/v1"
 
@@ -944,8 +944,51 @@ def test_publish_receipt_updates_only_matching_automation_item(
         assert saved_run["status"] == expected_run_status
         assert saved_item["publishResult"]["platformStatus"] == remote_status
         assert saved_item["publishResult"]["publishLogId"] == str(log.id)
+        if remote_status == "fail":
+            retried = client.post(
+                API + f"/automation-runs/{run['id']}/items/{item['id']}/retry-publish",
+                headers=auth,
+            )
+            assert retried.status_code == 200, retried.text
+            assert retried.json()["run"]["items"][0]["publishStatus"] == "queued"
+            started_again = client.post(
+                API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+                json={"confirmedProductId": str(product.id), "confirmedRevision": 1},
+                headers=auth,
+            )
+            assert started_again.status_code == 200, started_again.text
+            assert started_again.json()["run"]["items"][0]["publishStatus"] == "running"
+            assert not automation_run_service.reconcile_publish_log(db, log)
     finally:
         db.close()
+
+
+def test_automation_retry_rejects_publish_without_final_receipt(client, setup):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    product = complete_automation_item(client, setup, run, item)
+    started = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        headers=auth,
+    )
+    assert started.status_code == 200, started.text
+    pending = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-result",
+        json={"status": "needs_review", "reason": "request timed out",
+              "result": {"batchId": "unknown-batch"}},
+        headers=auth,
+    )
+    assert pending.status_code == 200, pending.text
+
+    retry = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/retry-publish",
+        headers=auth,
+    )
+    assert retry.status_code == 409, retry.text
+    current = client.get(API + f"/automation-runs/{run['id']}", headers=auth)
+    assert current.json()["run"]["items"][0]["publishStatus"] == "needs_review"
+    assert product.id == int(current.json()["run"]["items"][0]["productId"])
 
 
 @pytest.mark.parametrize(("remote_shop_id", "expected_updated"), [("33", 1), (None, 0)])

@@ -478,6 +478,41 @@ def resume_publish_after_images(db: Session, run: AutomationRun,
     return get_full(db, run)
 
 
+def retry_publish(db: Session, run: AutomationRun, item_id: Any) -> dict[str, Any]:
+    row = _get_item(db, run, item_id)
+    result = row.publish_result if isinstance(row.publish_result, dict) else {}
+    log_id = result.get("publishLogId")
+    platform_status = result.get("platformStatus")
+    if (row.process_status != "succeeded" or row.publish_status != "failed"
+            or platform_status not in {"fail", "cancel"}
+            or not str(log_id or "").isdigit()):
+        raise errors.AppError(
+            "CONFLICT", "只有妙手回执确认失败或取消的商品才可以重试", status=409)
+
+    log = db.query(PublishLog).filter(
+        PublishLog.id == int(log_id),
+        PublishLog.account_id == run.account_id,
+        PublishLog.product_id == row.product_id,
+        PublishLog.shop_id == run.shop_id,
+        PublishLog.batch_id == str(result.get("batchId") or ""),
+        PublishLog.status.in_(("fail", "cancel")),
+    ).one_or_none()
+    if log is None or log.status != platform_status:
+        raise errors.AppError(
+            "CONFLICT", "发布失败记录已变化或无法匹配，请刷新发布记录后再试", status=409)
+
+    row.publish_status = "queued"
+    row.publish_reason = ""
+    row.publish_result = {
+        "retryOfBatchId": log.batch_id,
+        "retryOfPublishLogId": str(log.id),
+    }
+    row.updated_at = now_ts()
+    _recompute(run, _items(db, run.id))
+    db.commit()
+    return get_full(db, run)
+
+
 def reconcile_publish_log(db: Session, log: PublishLog) -> bool:
     """Copy a final publish receipt to the automation item that submitted it."""
     if log.status not in {"success", "fail", "cancel"} or not log.batch_id:

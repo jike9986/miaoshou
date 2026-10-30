@@ -431,6 +431,34 @@ def test_shared_finished_goods_are_visible_and_unadmitted_results_are_isolated(p
     assert claim.owner_operator_id == teacher.id
 
 
+def test_product_payload_redacts_credentials_for_members_and_teachers(publish_db):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, member_account = _identity(db, suffix)
+    teacher, _ = _identity(db, f"teacher-{suffix}", role=operator_service.ROLE_TEACHER)
+    product = _product(db, f"payload-{suffix}", member_account)
+    product.payload = {
+        "weight": "0.5",
+        "appKey": "upstream-app-key",
+        "app_secret": "upstream-app-secret",
+        "nested": {
+            "access_token": "access-token",
+            "skuMap": {"sku-1": {"price": "10", "weight": "0.5"}},
+        },
+    }
+    db.flush()
+
+    for operator in (member, teacher):
+        body = warehouse_service.detail(
+            db, product.id, include_payload=True, operator_id=operator.id)
+        payload = body["product"]["payload"]
+        assert payload["weight"] == "0.5"
+        assert payload["nested"]["skuMap"]["sku-1"]["price"] == "10"
+        assert "appKey" not in payload
+        assert "app_secret" not in payload
+        assert "access_token" not in payload["nested"]
+
+
 def test_members_can_publish_shared_finished_good_with_their_own_accounts(
         publish_db, monkeypatch):
     db = publish_db

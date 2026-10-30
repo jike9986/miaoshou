@@ -9,6 +9,7 @@ try {
   New-Item -ItemType Directory -Path $buildTmp -Force | Out-Null
   $env:TEMP = $buildTmp
   $env:TMP = $buildTmp
+  $env:AOHUANG_DATA_DIR = Join-Path $buildTmp "regression-data"
 
   Write-Host "0/6 静态检查（pyflakes + tsc + 回归）..." -ForegroundColor Cyan
   Push-Location server
@@ -28,6 +29,12 @@ try {
   Pop-Location
 
   # P0/P1 回归：mock 上游、跑完自动清理，基线应为 355 商品 / 0 定时任务
+  Push-Location server
+  python -c "from db.session import init_db; init_db()"
+  $dbInitExitCode = $LASTEXITCODE
+  Pop-Location
+  if ($dbInitExitCode -ne 0) { throw "回归测试数据库初始化失败" }
+
   python scripts\regression.py
   if ($LASTEXITCODE -ne 0) { throw "P0/P1 回归未通过（详见上方 FAIL 行）" }
 

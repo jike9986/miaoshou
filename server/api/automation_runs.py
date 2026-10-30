@@ -125,6 +125,15 @@ def resume_publish(run_id: str, item_id: str, db: DbSession,
         confirmed_revision=payload.confirmed_revision)}
 
 
+@router.post("/{run_id}/items/{item_id}/retry-publish",
+             dependencies=[require_permission("publish")])
+def retry_publish(run_id: str, item_id: str, db: DbSession,
+                  operator: OperatorDep) -> dict[str, Any]:
+    require_writable(db)
+    run = automation_run_service.get(db, run_id, operator)
+    return {"run": automation_run_service.retry_publish(db, run, item_id)}
+
+
 @router.post("/{run_id}/items/{item_id}/publish-result",
              dependencies=[require_permission("publish")])
 def publish_result(run_id: str, item_id: str, payload: PublishResultRequest,

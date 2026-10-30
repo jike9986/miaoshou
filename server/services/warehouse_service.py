@@ -64,8 +64,27 @@ SORTS = {
     "titleAsc": (Product.title.asc(), Product.id.asc()),
 }
 STATUSES = {"ready", "claimed", "published", "archived"}
+_SENSITIVE_PAYLOAD_KEY_PARTS = (
+    "secret", "password", "token", "authorization", "credential", "cookie",
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if any(part in normalized for part in _SENSITIVE_PAYLOAD_KEY_PARTS):
+                continue
+            if normalized in {"appkey", "accesskey", "privatekey"}:
+                continue
+            safe[str(key)] = _redact_payload(item)
+        return safe
+    if isinstance(value, list):
+        return [_redact_payload(item) for item in value]
+    return value
 
 
 # --- 序列化 ---------------------------------------------------------------
@@ -137,7 +156,8 @@ def serialize(product: Product, *, account_name: str = "",
         "qualityReviewReasons": quality_review_reasons,
     }
     if include_payload:
-        body["payload"] = product.payload if isinstance(product.payload, dict) else {}
+        payload = product.payload if isinstance(product.payload, dict) else {}
+        body["payload"] = _redact_payload(payload)
         body["qualityReview"] = product.quality_review
     # 成品仓库是跨学员共享的商品目录。学员可以看到并认领商品，
     # 但不能从返回体或筛选面板反推出商品最初绑定的妙手账号。

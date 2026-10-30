@@ -4,7 +4,7 @@
 onedir 而不是 onefile：启动快，且杀毒软件对 onefile 自解压更敏感。
 """
 from PyInstaller.utils.hooks import collect_all, collect_submodules
-from PyInstaller.building.datastruct import Tree
+from pathlib import Path
 
 datas, binaries, hidden = [], [], []
 for pkg in (
@@ -28,7 +28,11 @@ datas += [("services/windows_ocr.ps1", "services")]
 
 # Alembic loads revision files from disk when PostgreSQL startup checks heads.
 # Ship them as runtime data beside the frozen server modules.
-datas += Tree("migrations", prefix="migrations")
+datas += [
+    (str(path), str(path.parent))
+    for path in Path("migrations").rglob("*")
+    if path.is_file() and path.suffix in {".py", ".mako", ".md"}
+]
 
 a = Analysis(
     ["run_server.py"],

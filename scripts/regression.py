@@ -38,20 +38,26 @@ def main() -> int:
     from fastapi.testclient import TestClient
 
     import main as app_main
-    from core.config import get_settings
     from db.session import SessionLocal
+    from models.account import Account
     from models.product import Product
     from models.schedule import Schedule
     from services import (
         account_service,
         carrier_service,
+        operator_service,
         product_service,
         publish_service,
         schedule_service,
         warehouse_service,
     )
 
-    token = get_settings().local_secret()
+    db = SessionLocal()
+    _operator, token = operator_service.create(
+        db, f"build-regression-{uuid.uuid4().hex[:8]}", role=operator_service.ROLE_TEACHER)
+    db.commit()
+    token_is_valid = operator_service.resolve(db, token) is not None
+    db.close()
     client = TestClient(app_main.app, raise_server_exceptions=False)
     H = {"Authorization": f"Bearer {token}"}
 
@@ -63,7 +69,7 @@ def main() -> int:
         code = ""
     check("P0-1 采集箱不再 500 NameError",
           response.status_code < 500 or code == "UPSTREAM_ERROR",
-          f"HTTP {response.status_code} {code}")
+          f"HTTP {response.status_code} {code}; operator token valid={token_is_valid}")
 
     # --- P0-5：日志配对 ---
     entries = [{"detailId": "111"}, {"detailId": "222"}]
@@ -89,11 +95,26 @@ def main() -> int:
 
     # --- P0-7 + P0-3：入仓端到端 ---
     detail_id, shop_id = "900000777", "18077147"
+    from services import crypto
+    db = SessionLocal()
+    regression_account = Account(
+        name="__build_regression__", app_key="build-regression-key",
+        app_secret_enc=crypto.encrypt("build-regression-secret"),
+        secret_hint="cret", app_id_hint="key", site="MY", is_default=True,
+        status="active", shops='[{"shopId":"18077147","name":"Regression"}]',
+    )
+    db.add(regression_account)
+    db.commit()
+    regression_account_id = regression_account.id
+    db.close()
     fixture = {"data": {"ossMd5": "smoke", "editModel": "shop", "shopCollectItemInfo": {
         "detailId": detail_id, "shopId": shop_id,
-        "title": "Regression Shoe", "mainImgUrl": "https://img.example.com/a.jpg",
+        "title": "Regression Shoe Comfortable Sneaker", "mainImgUrl": "https://img.example.com/a.jpg",
         "imgUrls": ["https://img.example.com/a.jpg"], "cid": "200000001",
-        "skuPropertyList": [{"attrName": "颜色", "attrValueList": [
+        "weight": "0.5",
+        "notes": "Regression fixture description",
+        "packageLength": "30", "packageWidth": "20", "packageHeight": "10",
+        "skuPropertyList": [{"attrName": "Color", "attrValueList": [
             {"attrValueId": "1", "attrValue": "Y18[beige]"}]}],
         "skuMap": {"1": {"skuId": "s1", "price": "30", "originPrice": "30",
                          "stock": "10", "weight": "0.5", "propPath": "1",
@@ -101,8 +122,17 @@ def main() -> int:
         "description": "d"}}}
 
     class FakeClient:
+        def __init__(self):
+            self.saved_payload = None
+
         def shop_detail(self, *_a, **_k):
+            if self.saved_payload is not None:
+                return {"data": {"ossMd5": "smoke", "editModel": "shop",
+                                 "shopCollectItemInfo": self.saved_payload}}
             return fixture
+
+        def save_shop(self, _detail_id, _shop_id, _oss_md5, payload):
+            self.saved_payload = dict(payload)
 
         def close(self):
             pass
@@ -118,15 +148,17 @@ def main() -> int:
     db.close()
     try:
         response = client.post(f"/api/v1/collect-box/{detail_id}/process", headers=H,
-                               json={"shopId": shop_id, "language": "ms", "save": False})
+                               json={"shopId": shop_id, "save": False})
         db = SessionLocal()
         preview_count = db.query(Product).count()
         db.close()
         check("P0-3 save=false 只预览", response.status_code == 200 and preview_count == before,
-              f"HTTP {response.status_code}, {before}->{preview_count}")
+              f"HTTP {response.status_code}, {before}->{preview_count}, "
+              f"{response.json() if response.status_code != 200 else ''}")
 
         response = client.post(f"/api/v1/collect-box/{detail_id}/process", headers=H,
-                               json={"shopId": shop_id, "language": "ms", "save": True})
+                               json={"shopId": shop_id, "save": True,
+                                     "skipImageReview": True})
         db = SessionLocal()
         saved_count = db.query(Product).count()
         row = (db.query(Product)
@@ -137,7 +169,7 @@ def main() -> int:
         if row:
             def colors_of(source):
                 return [v.get("attrValue") for p in (source or [])
-                        if str(p.get("attrName")) == "颜色"
+                        if str(p.get("attrName") or "").casefold() in {"颜色", "color"}
                         for v in (p.get("attrValueList") or [])]
             colors = colors_of(row.sku_properties)
             payload_colors = colors_of((row.payload or {}).get("skuPropertyList"))
@@ -145,7 +177,8 @@ def main() -> int:
             db.commit()
         db.close()
         check("P0-3 save=true 真实写入", response.status_code == 200 and saved_count == before + 1,
-              f"HTTP {response.status_code}, {before}->{saved_count}")
+              f"HTTP {response.status_code}, {before}->{saved_count}, "
+              f"{response.json() if response.status_code != 200 else ''}")
         check("P0-7 两字段颜色一致", colors == payload_colors and bool(colors),
               f"{colors} == {payload_colors}")
         check("P0-7 颜色已规范化", all("Y18" not in c and "[" not in c for c in colors),
@@ -271,7 +304,10 @@ def main() -> int:
 
     # --- P2-10 词库真启停（enable/disable 走 HTTP，不再只能删词） ---
     from models.violation_word import ViolationWord
+    from services import word_service
     db = SessionLocal()
+    word_service.seed(db)
+    db.commit()
     sample = db.query(ViolationWord).first()
     word = sample.word if sample else ""
     was_enabled = bool(sample.enabled) if sample else True
@@ -385,6 +421,13 @@ def main() -> int:
         missing = image_review_service.check_local_file(Path(tmp) / "nope.png")
         check("P1-1 结果图缺失不崩溃",
               missing.get("error") is True, f"reason={missing.get('reason')}")
+
+    db = SessionLocal()
+    test_account = db.get(Account, regression_account_id)
+    if test_account is not None:
+        db.delete(test_account)
+        db.commit()
+    db.close()
 
     # --- 基线 ---
     db = SessionLocal()
