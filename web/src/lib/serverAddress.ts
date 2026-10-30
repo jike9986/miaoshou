@@ -10,6 +10,9 @@ function isIpv4Loopback(hostname: string): boolean {
 export function normalizeApiBase(value: string): string {
   const input = value.trim();
   if (!input) return "";
+  if (input.includes("\\")) {
+    throw new Error("服务端地址路径不能包含反斜杠");
+  }
 
   let url: URL;
   try {
@@ -21,14 +24,23 @@ export function normalizeApiBase(value: string): string {
   const hostname = url.hostname.toLowerCase();
   const loopback = hostname === "localhost" || hostname === "[::1]" || isIpv4Loopback(hostname);
   if (url.username || url.password) throw new Error("服务端地址不能包含用户名或密码");
-  if (url.pathname !== "/" || url.search || url.hash) {
-    throw new Error("服务端地址只填写域名和端口，不要填写路径、参数或片段");
+  if (url.search || url.hash) {
+    throw new Error("服务端地址不能包含查询参数或片段");
+  }
+  const path = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
+  const segments = path.split("/").slice(1);
+  if (
+    segments.some(
+      (segment) => !/^[A-Za-z0-9._~-]+$/.test(segment) || segment === "." || segment === "..",
+    )
+  ) {
+    throw new Error("服务端地址路径只能包含字母、数字、点、下划线、波浪号和连字符");
   }
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     throw new Error("远程服务必须使用 HTTPS；HTTP 仅允许本机回环地址");
   }
 
-  return url.origin.replace(/\/$/, "");
+  return `${url.origin}${path}`;
 }
 
 export function getSavedApiBase(): string {

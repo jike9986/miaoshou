@@ -4,6 +4,10 @@ import { normalizeApiBase } from "./serverAddress.ts";
 
 test("normalizes HTTPS origins and removes a trailing slash", () => {
   assert.equal(normalizeApiBase(" https://api.example.com:8443/ "), "https://api.example.com:8443");
+  assert.equal(
+    normalizeApiBase("https://api.example.com/miaoshou-platform/"),
+    "https://api.example.com/miaoshou-platform",
+  );
 });
 
 test("allows HTTP only for loopback addresses", () => {
@@ -13,10 +17,11 @@ test("allows HTTP only for loopback addresses", () => {
   assert.throws(() => normalizeApiBase("http://192.168.1.8:8812"), /HTTPS/);
 });
 
-test("rejects credentials, paths, query strings, fragments, and other protocols", () => {
+test("rejects credentials, unsafe path characters, query strings, fragments, and other protocols", () => {
   for (const value of [
     "https://user:pass@example.com",
-    "https://example.com/api",
+    "https://example.com/api%2fprivate",
+    "https://example.com/api\\private",
     "https://example.com?tenant=1",
     "https://example.com#fragment",
     "ftp://example.com",

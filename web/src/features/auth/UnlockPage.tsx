@@ -500,7 +500,7 @@ function ServerAddressControl() {
             value={address}
             autoComplete="url"
             spellCheck={false}
-            placeholder="留空使用本机服务，例如 https://api.example.com"
+            placeholder="留空使用本机服务，例如 https://aohuang888.com/miaoshou-platform"
             invalid={Boolean(error)}
             onChange={(event) => setAddress(event.currentTarget.value)}
             onKeyDown={(event) => {
