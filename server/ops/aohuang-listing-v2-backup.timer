@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily backup of the AOHUANG Listing v2 PostgreSQL database
+
+[Timer]
+OnCalendar=*-*-* 02:40:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=aohuang-listing-v2-backup.service
+
+[Install]
+WantedBy=timers.target

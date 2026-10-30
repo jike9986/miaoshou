@@ -28,9 +28,12 @@ The verified SQLite snapshot is kept outside the repository at:
 
 An initial PostgreSQL custom-format backup is stored at
 `/var/backups/miaoshou-listing-v2/initial-migration-20261030.dump` with mode `0600`.
-It was restored into a temporary isolated database and verified at 4 accounts,
-355 products, 4 operators, and 1 size-chart bookmark. The temporary restore database
-was removed after verification. No recurring backup timer is configured yet.
+A daily systemd timer (`aohuang-listing-v2-backup.timer`) keeps the latest and previous
+custom-format dumps in the same app-specific directory. Each dump is checked with
+`pg_restore --list` before it replaces the latest copy. The latest dump was restored
+into a temporary isolated database and verified at 4 accounts, 355 products,
+4 operators, and 1 size-chart bookmark. The temporary restore database was removed
+after verification.
 
 ## Client Setup
 
