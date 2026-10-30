@@ -47,6 +47,14 @@ def _metadata() -> MetaData:
         Column("id", Integer, primary_key=True),
         Column("app_secret_enc", String, nullable=False),
     )
+    Table(
+        "size_charts",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("name", String(128), nullable=False),
+        Column("site", String(8), nullable=False),
+        Column("url", String, nullable=False),
+    )
     return metadata
 
 
@@ -154,6 +162,34 @@ def test_preflight_rejects_nonempty_or_unrelated_target_tables(tmp_path) -> None
     with pytest.raises(ValueError, match="unrelated tables"):
         _assert_empty_target(unrelated, metadata)
     unrelated.dispose()
+
+
+def test_optional_size_chart_table_is_preserved_when_target_does_not_have_it(tmp_path) -> None:
+    metadata = _metadata()
+    source = create_engine(f"sqlite:///{tmp_path / 'source.db'}")
+    target = create_engine(f"sqlite:///{tmp_path / 'target.db'}")
+    metadata.create_all(source)
+    for table in metadata.sorted_tables:
+        if table.name != "size_charts":
+            table.create(target)
+    with source.begin() as connection:
+        connection.execute(
+            metadata.tables["size_charts"].insert().values(
+                id=7, name="default", site="MY", url="https://example.com/chart.png"
+            )
+        )
+
+    _assert_empty_target(target, metadata)
+    rows = _read_source(source, metadata, lambda value: value)
+    _copy_rows(target, metadata, rows)
+
+    with target.connect() as connection:
+        assert connection.execute(
+            select(metadata.tables["size_charts"].c.id,
+                   metadata.tables["size_charts"].c.url)
+        ).one() == (7, "https://example.com/chart.png")
+    source.dispose()
+    target.dispose()
 
 
 def test_backup_is_verified_and_source_remains_unchanged(tmp_path) -> None:

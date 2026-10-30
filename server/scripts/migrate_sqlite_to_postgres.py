@@ -24,6 +24,8 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+OPTIONAL_TABLES = {"size_charts"}
+
 
 def _source_engine(path: Path) -> Engine:
     return create_engine(URL.create("sqlite", database=str(path)))
@@ -35,11 +37,14 @@ def _read_source(
     inspector = inspect(engine)
     actual = set(inspector.get_table_names()) - {"alembic_version"}
     expected = set(metadata.tables)
-    if actual != expected:
-        missing, extra = sorted(expected - actual), sorted(actual - expected)
+    missing_optional = expected - actual
+    if actual - expected or missing_optional - OPTIONAL_TABLES:
+        missing, extra = sorted(missing_optional - OPTIONAL_TABLES), sorted(actual - expected)
         raise ValueError(f"source schema table mismatch; missing={missing}, extra={extra}")
 
     for table in metadata.sorted_tables:
+        if table.name not in actual:
+            continue
         actual_columns = {column["name"] for column in inspector.get_columns(table.name)}
         expected_columns = {column.name for column in table.columns}
         if actual_columns != expected_columns:
@@ -55,6 +60,9 @@ def _read_source(
 
         result: dict[str, list[dict[str, Any]]] = {}
         for table in metadata.sorted_tables:
+            if table.name not in actual:
+                result[table.name] = []
+                continue
             rows = [dict(row) for row in connection.execute(select(table)).mappings()]
             if table.name == "accounts":
                 for row in rows:
@@ -103,8 +111,8 @@ def _assert_empty_target(engine: Engine, metadata: MetaData) -> None:
     tables = set(inspector.get_table_names())
     missing = set(metadata.tables) - tables
     extra = tables - set(metadata.tables) - {"alembic_version"}
-    if missing:
-        raise ValueError(f"target schema is incomplete; missing={sorted(missing)}")
+    if missing - OPTIONAL_TABLES:
+        raise ValueError(f"target schema is incomplete; missing={sorted(missing - OPTIONAL_TABLES)}")
     if extra:
         raise ValueError("target contains unrelated tables; refusing to touch that database")
     with engine.connect() as connection:
@@ -115,6 +123,7 @@ def _assert_rows_empty(connection, metadata: MetaData) -> None:
     nonempty = [
         table.name
         for table in metadata.sorted_tables
+        if table.name in inspect(connection).get_table_names()
         if connection.scalar(select(func.count()).select_from(table))
     ]
     if nonempty:
@@ -146,6 +155,10 @@ def _set_sequences(connection, metadata: MetaData) -> None:
 def _copy_rows(
     engine: Engine, metadata: MetaData, rows_by_table: dict[str, list[dict[str, Any]]]
 ) -> None:
+    existing = set(inspect(engine).get_table_names())
+    for name in OPTIONAL_TABLES & set(metadata.tables):
+        if name not in existing:
+            metadata.tables[name].create(engine)
     with engine.begin() as connection:
         if connection.dialect.name == "postgresql":
             for table in metadata.sorted_tables:
@@ -173,9 +186,16 @@ def _backup_source(source: Path, backup_dir: Path, metadata: MetaData) -> Path:
     if backup.exists():
         raise FileExistsError("backup path already exists")
     with sqlite3.connect(source) as connection:
+        source_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
         source_counts = {
             table.name: connection.execute(f'SELECT COUNT(*) FROM "{table.name}"').fetchone()[0]
             for table in metadata.sorted_tables
+            if table.name in source_tables
         }
         quoted_path = str(backup).replace("'", "''")
         connection.execute(f"VACUUM INTO '{quoted_path}'")
@@ -191,13 +211,12 @@ def _backup_source(source: Path, backup_dir: Path, metadata: MetaData) -> Path:
         backup_counts = {
             table.name: connection.execute(f'SELECT COUNT(*) FROM "{table.name}"').fetchone()[0]
             for table in metadata.sorted_tables
+            if table.name in tables
         }
-    if (
-        integrity != "ok"
-        or violations
-        or tables != (set(metadata.tables) | (tables & {"alembic_version"}))
-        or source_counts != backup_counts
-    ):
+    missing = set(metadata.tables) - tables
+    extra = tables - set(metadata.tables) - {"alembic_version"}
+    if (integrity != "ok" or violations or missing - OPTIONAL_TABLES or extra
+            or source_counts != backup_counts):
         raise RuntimeError("source backup verification failed")
     return backup
 
@@ -234,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["AOHUANG_DATA_DIR"] = runtime_data.name
     try:
         importlib.import_module("models")
+        # size_charts is a known app-owned table created lazily by its service,
+        # so older databases may not have it until the size-chart feature is used.
+        importlib.import_module("services.size_chart_service")
         from db.session import Base, _assert_postgresql_schema_current, engine
         from services.crypto import (
             DPAPI_PREFIX,
