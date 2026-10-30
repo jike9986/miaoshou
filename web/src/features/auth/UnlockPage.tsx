@@ -469,7 +469,7 @@ export function UnlockPage() {
 }
 
 function ServerAddressControl() {
-  const [address, setAddress] = useState(() => getSavedApiBase());
+  const [address, setAddress] = useState(() => getSavedApiBase() || resolveApiBase());
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -500,7 +500,7 @@ function ServerAddressControl() {
             value={address}
             autoComplete="url"
             spellCheck={false}
-            placeholder="留空使用本机服务，例如 https://aohuang888.com/miaoshou-platform"
+            placeholder="留空使用默认服务器"
             invalid={Boolean(error)}
             onChange={(event) => setAddress(event.currentTarget.value)}
             onKeyDown={(event) => {

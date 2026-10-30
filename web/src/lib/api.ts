@@ -11,20 +11,23 @@ import { getSavedApiBase } from "@/lib/serverAddress";
  * ------------------------------------------------------------------ */
 
 const DEFAULT_API_BASE = "";
-const FALLBACK_API_BASE = "http://127.0.0.1:8812";
+const PRODUCTION_API_BASE = "https://aohuang888.com/miaoshou-platform";
 const API_PREFIX = "/api/v1";
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
  * 后端 base（不含 /api/v1）。
- * 优先级：用户保存的地址 → window.__DSH_BOOT__.apiBase（Electron 注入的实探端口）→ ?apiBase= 查询参数 →
- * window.__AOHUANG_API_BASE__（旧注入点）→ VITE_API_BASE（.env.development）→
- * dev 走 Vite 代理（空串，相对路径）→ 生产兜底本机 8812。
+ * 开发模式使用 Electron 探测到的本机端口或 Vite 代理；生产模式默认连接部署服务器。
+ * 用户保存的地址优先级最高，方便切换到其他环境。
  */
 export function resolveApiBase(): string {
   if (typeof window === "undefined") return DEFAULT_API_BASE;
   const savedBase = getSavedApiBase();
   if (savedBase) return savedBase;
+  if (!import.meta.env.DEV) {
+    const envBase = import.meta.env.VITE_API_BASE;
+    return envBase ? envBase.replace(/\/+$/, "") : PRODUCTION_API_BASE;
+  }
   const boot = window.__DSH_BOOT__;
   if (boot?.apiBase) return boot.apiBase.replace(/\/+$/, "");
   // Electron 生产模式用 file:// 加载页面，没有 Vite 代理，地址通过查询参数传入。
@@ -33,11 +36,12 @@ export function resolveApiBase(): string {
   if (window.__AOHUANG_API_BASE__) return window.__AOHUANG_API_BASE__.replace(/\/+$/, "");
   const envBase = import.meta.env.VITE_API_BASE;
   if (envBase) return envBase.replace(/\/+$/, "");
-  return import.meta.env.DEV ? DEFAULT_API_BASE : FALLBACK_API_BASE;
+  return DEFAULT_API_BASE;
 }
 
 function isDefaultApiTarget(): boolean {
   if (typeof window === "undefined") return true;
+  if (!import.meta.env.DEV) return false;
   return allowsLocalBootstrapToken({
     savedBase: getSavedApiBase(),
     legacyBase: window.__AOHUANG_API_BASE__,
