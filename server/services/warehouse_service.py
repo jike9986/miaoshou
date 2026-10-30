@@ -67,11 +67,15 @@ STATUSES = {"ready", "claimed", "published", "archived"}
 _SENSITIVE_PAYLOAD_KEY_PARTS = (
     "secret", "password", "token", "authorization", "credential", "cookie",
 )
+_MEMBER_PRIVATE_PAYLOAD_KEYS = {
+    "accountid", "accountname", "operatorid", "owneroperatorid",
+    "boundbyoperatorid",
+}
 
 logger = logging.getLogger(__name__)
 
 
-def _redact_payload(value: Any) -> Any:
+def _redact_payload(value: Any, *, member_view: bool = False) -> Any:
     if isinstance(value, dict):
         safe: dict[str, Any] = {}
         for key, item in value.items():
@@ -80,10 +84,12 @@ def _redact_payload(value: Any) -> Any:
                 continue
             if normalized in {"appkey", "accesskey", "privatekey"}:
                 continue
-            safe[str(key)] = _redact_payload(item)
+            if member_view and normalized in _MEMBER_PRIVATE_PAYLOAD_KEYS:
+                continue
+            safe[str(key)] = _redact_payload(item, member_view=member_view)
         return safe
     if isinstance(value, list):
-        return [_redact_payload(item) for item in value]
+        return [_redact_payload(item, member_view=member_view) for item in value]
     return value
 
 
@@ -157,13 +163,15 @@ def serialize(product: Product, *, account_name: str = "",
     }
     if include_payload:
         payload = product.payload if isinstance(product.payload, dict) else {}
-        body["payload"] = _redact_payload(payload)
+        body["payload"] = _redact_payload(payload, member_view=member_view)
         body["qualityReview"] = product.quality_review
     # 成品仓库是跨学员共享的商品目录。学员可以看到并认领商品，
     # 但不能从返回体或筛选面板反推出商品最初绑定的妙手账号。
     if member_view:
         body["accountId"] = None
         body["account"] = ""
+        body["collected"] = {}
+        body["legacyClaimed"] = False
     return body
 
 

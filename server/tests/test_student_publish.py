@@ -370,6 +370,10 @@ def test_shared_finished_goods_are_visible_and_unadmitted_results_are_isolated(p
     teacher, _ = _identity(db, f"teacher-{suffix}", role=operator_service.ROLE_TEACHER)
     own_product = _product(db, f"own-{suffix}", own_account)
     other_product = _product(db, f"other-{suffix}", other_account)
+    other_product.claimed = True
+    other_product.collected = {
+        other_account.name: {"at": 1_800_000_000, "detailId": other_product.detail_id},
+    }
     hidden_result = _product(db, f"hidden-result-{suffix}", other_account,
                              detail_id=f"hidden-result-{suffix}")
     hidden_result.automation_result = True
@@ -389,6 +393,8 @@ def test_shared_finished_goods_are_visible_and_unadmitted_results_are_isolated(p
                        if row["id"] == str(other_product.id))
     assert shared_item["accountId"] is None
     assert shared_item["account"] == ""
+    assert shared_item["collected"] == {}
+    assert shared_item["legacyClaimed"] is False
     assert visible["facets"]["accounts"] == []
 
     # The account filter is validated as the member's selected publish account,
@@ -398,8 +404,12 @@ def test_shared_finished_goods_are_visible_and_unadmitted_results_are_isolated(p
     assert str(other_product.id) in {row["id"] for row in filtered["items"]}
     assert filtered["stats"]["totalProducts"] >= 2
 
-    assert warehouse_service.detail(
-        db, other_product.id, operator_id=member.id)["product"]["accountId"] is None
+    shared_detail = warehouse_service.detail(db, other_product.id, operator_id=member.id)
+    assert shared_detail["product"]["accountId"] is None
+    assert shared_detail["product"]["collected"] == {}
+    teacher_detail = warehouse_service.detail(db, other_product.id, operator_id=teacher.id)
+    assert teacher_detail["product"]["collected"] == other_product.collected
+    assert teacher_detail["product"]["legacyClaimed"] is True
 
     with pytest.raises(errors.AppError) as exc:
         warehouse_service.detail(db, hidden_result.id, operator_id=member.id)
@@ -434,15 +444,18 @@ def test_shared_finished_goods_are_visible_and_unadmitted_results_are_isolated(p
 def test_product_payload_redacts_credentials_for_members_and_teachers(publish_db):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]
-    member, member_account = _identity(db, suffix)
+    member, _member_account = _identity(db, suffix)
+    source_member, source_account = _identity(db, f"source-{suffix}")
     teacher, _ = _identity(db, f"teacher-{suffix}", role=operator_service.ROLE_TEACHER)
-    product = _product(db, f"payload-{suffix}", member_account)
+    product = _product(db, f"payload-{suffix}", source_account)
     product.payload = {
         "weight": "0.5",
         "appKey": "upstream-app-key",
         "app_secret": "upstream-app-secret",
         "nested": {
             "access_token": "access-token",
+            "accountId": str(source_account.id),
+            "ownerOperatorId": source_member.id,
             "skuMap": {"sku-1": {"price": "10", "weight": "0.5"}},
         },
     }
@@ -457,6 +470,12 @@ def test_product_payload_redacts_credentials_for_members_and_teachers(publish_db
         assert "appKey" not in payload
         assert "app_secret" not in payload
         assert "access_token" not in payload["nested"]
+        if operator is member:
+            assert "accountId" not in payload["nested"]
+            assert "ownerOperatorId" not in payload["nested"]
+        else:
+            assert payload["nested"]["accountId"] == str(source_account.id)
+            assert payload["nested"]["ownerOperatorId"] == source_member.id
 
 
 def test_members_can_publish_shared_finished_good_with_their_own_accounts(
