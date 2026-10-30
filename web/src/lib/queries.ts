@@ -670,6 +670,8 @@ export interface CollectBoxListParams extends PageParams {
   keyword?: string;
   shopId?: string | null;
   sort?: "default" | "savedDesc";
+  /** 当前妙手账号；参与 queryKey，切换账号不会串用缓存 */
+  accountId?: string | null;
 }
 
 export function useCollectBoxList(
@@ -678,6 +680,7 @@ export function useCollectBoxList(
 ): UseQueryResult<CollectBoxPage> {
   return useQuery({
     queryKey: queryKeys.collectBox.list({
+      accountId: params.accountId ?? null,
       page: params.page,
       pageSize: params.pageSize,
       status: params.status,

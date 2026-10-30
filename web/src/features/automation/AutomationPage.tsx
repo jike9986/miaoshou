@@ -130,7 +130,12 @@ export function AutomationPage() {
   const [filter, setFilter] = useState<ListFilter>("all");
 
   const listQuery = useCollectBoxList(
-    { page, pageSize, status: "all" },
+    // status 必须传 "notPublished"：后端把 "all" 翻译成 upstream_status=None，
+    // 等于让妙手不做发布状态过滤，已发布的老商品会被一起扫进来。
+    // 用户打开妙手采集箱看到的是「未发布」那一条，两边必须对齐，
+    // 否则就会出现「页面 20 条、实际 1 条」的错位。
+    // 页面上的「全部/已勾选/待处理…」是本地筛选（ListFilter），不参与这个参数。
+    { page, pageSize, status: "notPublished", accountId: status?.accountId ?? null },
     connected
   );
 

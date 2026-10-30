@@ -15,7 +15,9 @@ export const queryKeys = {
   },
   collectBox: {
     all: ["collect-box"] as const,
+    // accountId 参与 key：切换妙手账号后不能复用上一个账号的采集箱缓存
     list: (params: {
+      accountId?: string | null;
       page: number;
       pageSize: number;
       status?: string;
