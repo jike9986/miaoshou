@@ -188,21 +188,26 @@ def recover(db: Session, run: AutomationRun) -> dict[str, Any]:
             row.publish_reason = "客户端在发布响应前中断；请先核对妙手发布记录。"
             row.updated_at = now_ts()
         elif row.process_status == "succeeded" and row.publish_status == "queued":
-            row.publish_status = "needs_review"
-            row.publish_reason = "商品已处理但发布未完成；请核对图片与商品信息后再发布。"
             process_result = row.process_result if isinstance(row.process_result, dict) else {}
             image_result = process_result.get("images")
             has_image_job = (db.query(ImageJob.id).filter(
                 ImageJob.product_id == row.product_id,
             ).first() if row.product_id is not None else None)
-            if (run.settings.get("publishEnabled") is True
-                    and run.settings.get("imagesEnabled") is True
-                    and isinstance(image_result, Mapping)
-                    and isinstance(image_result.get("submitted"), int)
-                    and image_result["submitted"] > 0
-                    and has_image_job is not None):
-                row.publish_result = {"resumeKind": "images_pending"}
-            row.updated_at = now_ts()
+            image_work_submitted = (
+                run.settings.get("publishEnabled") is True
+                and run.settings.get("imagesEnabled") is True
+                and isinstance(image_result, Mapping)
+                and isinstance(image_result.get("submitted"), int)
+                and image_result["submitted"] > 0
+            )
+            if image_work_submitted:
+                row.publish_status = "needs_review"
+                row.publish_reason = "图片处理尚需核对；请确认图片任务状态后再发布。"
+                row.publish_result = (
+                    {"resumeKind": "images_pending"}
+                    if has_image_job is not None else {}
+                )
+                row.updated_at = now_ts()
     _recompute(run, _items(db, run.id))
     db.commit()
     return get_full(db, run)

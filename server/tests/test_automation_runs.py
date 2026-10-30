@@ -774,7 +774,7 @@ def test_publish_receipt_endpoint_rejects_client_success_status(client, setup):
     assert response.status_code == 409, response.text
 
 
-def test_recovery_closes_unstarted_publish_after_successful_processing(client, setup):
+def test_recovery_keeps_unstarted_publish_available_after_processing(client, setup):
     run = create_run(client, setup, publish_enabled=True)
     item = run["items"][0]
     auth = headers(str(setup["teacher_token"]))
@@ -792,8 +792,72 @@ def test_recovery_closes_unstarted_publish_after_successful_processing(client, s
     recovered = client.post(API + f"/automation-runs/{run['id']}/recover", headers=auth)
     assert recovered.status_code == 200, recovered.text
     result = recovered.json()["run"]
-    assert result["items"][0]["publishStatus"] == "needs_review"
-    assert result["status"] == "needs_review"
+    assert result["items"][0]["publishStatus"] == "queued"
+    assert result["status"] == "queued"
+
+    started = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        headers=auth,
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["run"]["items"][0]["publishStatus"] == "running"
+
+    repeated = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        headers=auth,
+    )
+    assert repeated.status_code == 409, repeated.text
+
+
+def test_automation_publish_confirmation_is_bound_to_product_and_revision(client, setup):
+    run = create_run(client, setup, publish_enabled=True)
+    item = run["items"][0]
+    auth = headers(str(setup["teacher_token"]))
+    assert client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/start", headers=auth,
+    ).status_code == 200
+    product = create_automation_product(
+        setup, item["detailId"], item["shopId"], verified=False)
+    processed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/process-result",
+        json={"status": "succeeded", "productId": str(product.id),
+              "result": {"images": {"requested": 0, "submitted": 0, "failed": 0}}},
+        headers=auth,
+    )
+    assert processed.status_code == 200, processed.text
+
+    missing = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        headers=auth,
+    )
+    assert missing.status_code == 409, missing.text
+    missing_error = missing.json()["error"]
+    assert missing_error["code"] == "QUALITY_REVIEW_REQUIRED"
+    assert missing_error["details"]["confirmationStale"] is False
+    assert missing_error["details"]["items"][0]["warehouseId"] == str(product.id)
+
+    stale = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        json={"confirmedProductId": str(product.id), "confirmedRevision": 0},
+        headers=auth,
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["error"]["details"]["confirmationStale"] is True
+
+    confirmed = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        json={"confirmedProductId": str(product.id), "confirmedRevision": product.revision},
+        headers=auth,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["run"]["items"][0]["publishStatus"] == "running"
+
+    repeated = client.post(
+        API + f"/automation-runs/{run['id']}/items/{item['id']}/publish-start",
+        json={"confirmedProductId": str(product.id), "confirmedRevision": product.revision},
+        headers=auth,
+    )
+    assert repeated.status_code == 409, repeated.text
 
 
 @pytest.mark.parametrize(

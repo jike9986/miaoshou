@@ -494,10 +494,14 @@ export function AutomationPage() {
     for (const [index, target] of targets.entries()) {
       const item = saved.items.find((candidate) => candidate.key === target.key);
       if (!item) continue;
-      setRun((prev) => ({ ...prev, stage: `续发：${target.title || target.detailId}` }));
+      const action = pendingAutomationPublishAction(item);
+      setRun((prev) => ({
+        ...prev,
+        stage: `${action === "resume" ? "续发" : "发布"}：${target.title || target.detailId}`,
+      }));
       let resumed = false;
       try {
-        const resume = pendingAutomationPublishAction(item) === "resume";
+        const resume = action === "resume";
         const started = await startOrResumePublish({
           runId: saved.id,
           itemId: item.id,
@@ -628,7 +632,7 @@ export function AutomationPage() {
     const resumableKeys = new Set(resumable.map((item) => item.key));
     if (targets.some((target) => resumableKeys.has(target.key))) {
       if (targets.some((target) => !resumableKeys.has(target.key))) {
-        toast.warning("图片续发请只选择待续发商品");
+        toast.warning("请只选择同一任务中待发布或续发的商品");
         return;
       }
       if (!savedRun) return;
