@@ -14,6 +14,7 @@ import {
   Zap,
 } from "lucide-react";
 import { AppShell, BrandMark } from "@/components/layout/AppShell";
+import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import type { SidebarNavGroup } from "@/components/layout/Sidebar";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { AppToaster, toast } from "@/components/ui/toast";
@@ -28,6 +29,7 @@ import { SettingsPage } from "@/features/settings/SettingsPage";
 import { useAuthStatus, useVersion } from "@/lib/queries";
 import { hasRuntimeToken } from "@/lib/bootstrap";
 import { clearOperator, operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
+import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 import { Skeleton } from "@/components/ui";
 
 /* ------------------------------------------------------------------ *
@@ -66,8 +68,10 @@ function Shell() {
   const navigate = useNavigate();
   const location = useLocation();
   const operatorIdentity = useOperatorIdentity();
-  const { data: status } = useAuthStatus(Boolean(operatorIdentity));
-  const versionQuery = useVersion(Boolean(operatorIdentity), hasRuntimeToken());
+  // 单机模式：不再等「有人登录」才查状态 —— 本机令牌就能查，否则未登录时
+  // 侧栏永远显示「妙手未连接」、版本检查也不跑。
+  const { data: status } = useAuthStatus(true);
+  const versionQuery = useVersion(true, hasRuntimeToken());
   const notifiedVersion = useRef<string | null>(null);
 
   useEffect(() => {
@@ -104,11 +108,11 @@ function Shell() {
       <AppShell
         nav={NAV}
         brand={{ icon: <BrandMark className="size-4" />, name: "奥皇上品" }}
-        account={{
+        account={SHOW_ACCOUNT_UI ? {
           name: operatorLabel,
           detail: `${roleLabel} · 妙手${connected ? "已连接" : "未连接"}`,
-        }}
-        onAccountClick={() => navigate("/settings")}
+        } : null}
+        onAccountClick={SHOW_ACCOUNT_UI ? () => navigate("/settings") : undefined}
         // 标题栏不再放账号/店铺切换：账号和店铺已经挪到「开始处理」旁边，
         // 这里再放一份就是两套重复控件，只会占掉标题栏高度。
         // 也不传 routeMeta：标题栏中部不显示「功能 / 板块名」面包屑。
@@ -127,8 +131,15 @@ function RequireSoftwareLogin() {
     if (identity && session.isError) clearOperator();
   }, [identity, session.isError]);
 
-  if (!identity || identity.mustChangePassword) {
+  // 单机模式不再要求软件账号登录：本机令牌（Electron 注入）就是这台机器的身份，
+  // 后端 deps.require_token 也认它。只有两种情况还挡：
+  //   1. 有个人身份但被要求改密码 —— 得先去改；
+  //   2. 有个人身份但令牌已失效 —— 清掉后按游客放行，避免卡在白屏。
+  if (identity?.mustChangePassword) {
     return <Navigate to="/unlock" replace state={{ from: location.pathname }} />;
+  }
+  if (!identity) {
+    return <Outlet />;
   }
   if (session.isLoading) {
     return <div className="grid min-h-0 flex-1 place-items-center p-8"><Skeleton className="h-24 w-full max-w-[520px]" /></div>;
@@ -175,26 +186,30 @@ function TokenNotice() {
 export default function App() {
   return (
     <>
-      <Routes>
-        <Route path="/" element={<Shell />}>
-          <Route index element={<Navigate to="/automation" replace />} />
-          <Route path="unlock" element={<UnlockPage />} />
-          <Route element={<RequireSoftwareLogin />}>
-            <Route path="automation" element={<AutomationPage />} />
-            <Route path="warehouse" element={<WarehousePage />} />
-            <Route path="schedules" element={<SchedulesPage />} />
-            <Route path="words" element={<WordsPage />} />
-            <Route path="words/*" element={<WordsPage />} />
-            <Route path="settings" element={<SettingsPage />} />
-            <Route path="collect" element={<Navigate to="/automation" replace />} />
-            <Route path="collect-box" element={<Navigate to="/automation" replace />} />
-            <Route path="images" element={<Navigate to="/automation" replace />} />
-            <Route path="carrier" element={<Navigate to="/warehouse" replace />} />
-            <Route path="publish" element={<Navigate to="/schedules" replace />} />
+      {/* 顶层兜底：连路由骨架本身抛错也不许白屏。页面级兜底在 AppShell 里，
+          这一层管 Shell/Sidebar 之类的外壳。 */}
+      <ErrorBoundary title="界面没能启动">
+        <Routes>
+          <Route path="/" element={<Shell />}>
+            <Route index element={<Navigate to="/automation" replace />} />
+            <Route path="unlock" element={<UnlockPage />} />
+            <Route element={<RequireSoftwareLogin />}>
+              <Route path="automation" element={<AutomationPage />} />
+              <Route path="warehouse" element={<WarehousePage />} />
+              <Route path="schedules" element={<SchedulesPage />} />
+              <Route path="words" element={<WordsPage />} />
+              <Route path="words/*" element={<WordsPage />} />
+              <Route path="settings" element={<SettingsPage />} />
+              <Route path="collect" element={<Navigate to="/automation" replace />} />
+              <Route path="collect-box" element={<Navigate to="/automation" replace />} />
+              <Route path="images" element={<Navigate to="/automation" replace />} />
+              <Route path="carrier" element={<Navigate to="/warehouse" replace />} />
+              <Route path="publish" element={<Navigate to="/schedules" replace />} />
+            </Route>
+            <Route path="*" element={<NotFoundPage />} />
           </Route>
-          <Route path="*" element={<NotFoundPage />} />
-        </Route>
-      </Routes>
+        </Routes>
+      </ErrorBoundary>
       <AppToaster position="bottom-right" />
     </>
   );

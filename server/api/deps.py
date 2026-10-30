@@ -50,10 +50,9 @@ def require_token(
 ) -> str:
     """校验访问令牌：Authorization: Bearer 或 X-Local-Token，二者取其一。
 
-    仅接受个人操作员 token。本机 secret.key 只可用于首次设置老师登录，
-    不得作为业务身份。
-
-    这道门与 `current_operator` 都要求个人 token，防止本机令牌绕过软件登录。
+    单机模式下本机 secret.key 就是这台机器的身份：它可以直接作为业务凭据，
+    不再要求先建老师账号再登录（多人协作/共享部署仍然走个人 token）。
+    判定顺序：先认个人 token，认不出再看是不是本机令牌。
 
     停用的操作员在这里就拒：`resolve` 不看 enabled，`require_enabled` 才拦，
     否则「停用」只是界面上的一个标记，被停的人照样能改数据。
@@ -63,16 +62,12 @@ def require_token(
         raise errors.AppError(errors.AUTH_REQUIRED,
                               "缺少访问令牌：请带上 Authorization: Bearer <token>",
                               status=401)
-    expected = get_settings().local_secret()
-    if _same_secret(supplied, expected):
-        raise errors.AppError(
-            errors.AUTH_REQUIRED,
-            "本机令牌仅可用于首次设置老师登录；业务请求必须使用个人账号登录",
-            status=401,
-        )
     operator = operator_service.resolve(db, supplied)
     if operator is not None:
         operator_service.require_enabled(operator)
+        return supplied
+    if _same_secret(supplied, get_settings().local_secret()):
+        # 本机令牌：单机身份，直接放行（内置「本机」记录由 ensure_default 保证存在）
         return supplied
     raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
 
@@ -81,20 +76,15 @@ def require_token(
 def _authenticate(db: Session, supplied: str) -> Operator:
     """把一串凭据解析成操作员；解析不出就按 401/403 拒。
 
-    仅从操作员表解析个人 token；本机 secret 只用于一次性首次接管：
-      1. 表里有这个 token → 就是那个人（每人一个 token 的正常路径）；
-      2. token 不存在 → 401 TOKEN_INVALID。
+    单机模式下本机 secret 也是合法身份：它代表这台机器，落到内置「本机」
+    记录上，这样审计留痕仍然是「本机」而不是凭空一个人。
     """
-    if _same_secret(supplied, get_settings().local_secret()):
-        raise errors.AppError(
-            errors.AUTH_REQUIRED,
-            "本机令牌不能作为操作员身份，请使用个人账号登录",
-            status=401,
-        )
     operator = operator_service.resolve(db, supplied)
-    if operator is None:
-        raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
-    return operator
+    if operator is not None:
+        return operator
+    if _same_secret(supplied, get_settings().local_secret()):
+        return operator_service.ensure_default(db)
+    raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
 
 
 def _declared_operator(db: Session, declared: str) -> Operator | None:
@@ -242,9 +232,6 @@ def optional_operator(
     declared = (x_operator or "").strip()
     if not declared and not auth_token:
         return None
-    if _same_secret(auth_token, get_settings().local_secret()):
-        raise errors.AppError(errors.AUTH_REQUIRED,
-                              "本机令牌仅可用于首次设置老师登录", status=401)
     if declared:
         operator = _declared_operator(db, declared)
         if operator is None:

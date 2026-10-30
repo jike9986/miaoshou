@@ -75,10 +75,12 @@ export function PublishDialog({
   const templates = templatesQuery.data?.templates ?? [];
   const usableTemplates = templates.filter((item) => !item.invalid);
   const requiresTemplate = !allowClaimOnly;
-  const hasValidTemplate = usableTemplates.some((item) => item.name === template);
 
   const [shopId, setShopId] = useState<string | null>(defaultShopId);
   const [template, setTemplate] = useState<string>("");
+  // 注意顺序：hasValidTemplate 依赖 template 状态，必须写在 useState 之后，
+  // 否则会命中「Cannot access 'Q' before initialization」的 TDZ 崩溃。
+  const hasValidTemplate = usableTemplates.some((item) => item.name === template);
   // 汇率覆盖：留空则用商品自身的 originPrice/price 比值（老版 wh-price-rate）
   const [exchangeRate, setExchangeRate] = useState<string>("");
   const [language, setLanguage] = useState<string>("");

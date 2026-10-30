@@ -20,6 +20,7 @@ import { AuditLogPanel } from "@/features/settings/AuditLogPanel";
 import { PublishSettingsPanel } from "@/features/settings/PublishSettingsPanel";
 import { ImageServiceCard } from "@/features/automation/ImageServiceCard";
 import { VersionPanel } from "@/features/settings/VersionPanel";
+import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 
 export type SettingsTab = "operators" | "processing" | "audit" | "about";
 
@@ -30,7 +31,7 @@ export interface SettingsPageProps {
 
 const SETTINGS_TABS: SettingsTab[] = ["operators", "processing", "audit", "about"];
 
-export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
+export function SettingsPage({ initialTab = SHOW_ACCOUNT_UI ? "operators" : "about" }: SettingsPageProps) {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab");
   const tab = SETTINGS_TABS.includes(requestedTab as SettingsTab)
@@ -41,10 +42,13 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
   const role = operatorsQuery.data?.current?.role ?? identity?.role;
   const canManage =
     role === "teacher" || role === "admin" || operatorsQuery.data?.current?.admin === true;
-  const activeTab =
-    canManage || tab === "operators" || tab === "about" ? tab : "operators";
+  const activeTab = SHOW_ACCOUNT_UI
+    ? canManage || tab === "operators" || tab === "about" ? tab : "operators"
+    : canManage && (tab === "processing" || tab === "audit") ? tab : "about";
   const settingsTabs = [
-    { value: "operators", label: canManage ? "账号与权限" : "账号", icon: <Users className="size-3.5" /> },
+    ...(SHOW_ACCOUNT_UI
+      ? [{ value: "operators", label: canManage ? "账号与权限" : "账号", icon: <Users className="size-3.5" /> }]
+      : []),
     ...(canManage
       ? [
           { value: "processing", label: "处理配置", icon: <SlidersHorizontal className="size-3.5" /> },
@@ -80,7 +84,7 @@ export function SettingsPage({ initialTab = "operators" }: SettingsPageProps) {
           aria-labelledby={tabId("settings", activeTab)}
           className="contents"
         >
-          {activeTab === "operators" && <OperatorsPanel />}
+          {SHOW_ACCOUNT_UI && activeTab === "operators" && <OperatorsPanel />}
           {activeTab === "processing" && canManage && (
             <div className="flex flex-col gap-4">
               <PublishSettingsPanel />

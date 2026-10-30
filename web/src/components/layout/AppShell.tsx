@@ -11,6 +11,7 @@ import { ease } from "@/lib/motion";
 import { useIsNarrow } from "@/hooks/useMediaQuery";
 import { isMac, useHotkey } from "@/hooks/useHotkey";
 import { Sidebar, type SidebarAccount, type SidebarNavGroup } from "@/components/layout/Sidebar";
+import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { TitleBar, TitleBarBreadcrumb, type TitleBarBrand } from "@/components/layout/TitleBar";
 import { useFocusTrap, useTabTrap } from "@/components/ui/dialog";
 
@@ -187,7 +188,11 @@ export function AppShell({
             transition={{ duration: 0.22, ease: ease.out }}
             className="flex min-h-0 flex-1 flex-col overflow-hidden"
           >
-            <Outlet />
+            {/* 页面级兜底：某一页抛错只让这一页显示错误，侧栏和标题栏还在，
+                不会整窗变白。key 跟路由走，切走再回来会重置错误态。 */}
+            <ErrorBoundary key={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
           </motion.div>
         </main>
       </div>

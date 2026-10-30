@@ -2,7 +2,6 @@
 // 统一 fetch 封装：Bearer 鉴权、超时、错误归一化（暴露 error.code）、幂等键、请求 id。
 
 import type { ApiErrorCode, ApiErrorPayload } from "@/lib/types";
-import { allowsLocalBootstrapToken } from "@/lib/apiTarget";
 import { operatorToken } from "@/lib/operator";
 import { getSavedApiBase } from "@/lib/serverAddress";
 
@@ -17,19 +16,26 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
  * 后端 base（不含 /api/v1）。
- * 开发模式使用 Electron 探测到的本机端口或 Vite 代理；生产模式默认连接部署服务器。
- * 用户保存的地址优先级最高，方便切换到其他环境。
+ *
+ * 优先级的关键约束：**本机令牌只能发给本机后端**。
+ * Electron preload 注入的 `__DSH_BOOT__.token` 是这台机器的 secret.key，
+ * 只有本地 8812 的后端认它；一旦把请求发到远程（savedBase / PRODUCTION_API_BASE），
+ * 远程会回 TOKEN_INVALID，界面上就是「加载失败 / 访问令牌不正确」。
+ *
+ * 所以：桌面端（有 boot.apiBase）一律以注入地址为准，savedBase 只在浏览器
+ * 联调、或用户显式把地址指向别处时才生效。
  */
 export function resolveApiBase(): string {
   if (typeof window === "undefined") return DEFAULT_API_BASE;
+  const boot = window.__DSH_BOOT__;
+  // 桌面端：preload 注入的地址 + 令牌是一套的，不能被 savedBase 顶掉
+  if (boot?.apiBase) return boot.apiBase.replace(/\/+$/, "");
   const savedBase = getSavedApiBase();
   if (savedBase) return savedBase;
   if (!import.meta.env.DEV) {
     const envBase = import.meta.env.VITE_API_BASE;
     return envBase ? envBase.replace(/\/+$/, "") : PRODUCTION_API_BASE;
   }
-  const boot = window.__DSH_BOOT__;
-  if (boot?.apiBase) return boot.apiBase.replace(/\/+$/, "");
   // Electron 生产模式用 file:// 加载页面，没有 Vite 代理，地址通过查询参数传入。
   const fromQuery = new URLSearchParams(window.location.search).get("apiBase");
   if (fromQuery) return fromQuery.replace(/\/+$/, "");
@@ -39,24 +45,16 @@ export function resolveApiBase(): string {
   return DEFAULT_API_BASE;
 }
 
-function isDefaultApiTarget(): boolean {
-  if (typeof window === "undefined") return true;
-  if (!import.meta.env.DEV) return false;
-  return allowsLocalBootstrapToken({
-    savedBase: getSavedApiBase(),
-    legacyBase: window.__AOHUANG_API_BASE__,
-    bootBase: window.__DSH_BOOT__?.apiBase,
-    queryBase: new URLSearchParams(window.location.search).get("apiBase"),
-    environmentBase: import.meta.env.VITE_API_BASE,
-  });
-}
-
-function requestToken(path?: string): string | null {
+// allowsLocalBootstrapToken 不再参与取 token 的决策（单机模式直接用本机令牌），
+// 但 apiTarget.test.mjs 仍覆盖它 —— 保留导出，作为共享部署的护栏说明。
+function requestToken(_path?: string): string | null {
+  // 个人身份优先：登录过的用户按「谁在操作」走，审计能记到人。
   if (operatorToken()) return operatorToken();
-  if (path === "/auth/initialize-credentials" && isDefaultApiTarget()) {
-    return resolveToken();
-  }
-  return null;
+  // 单机模式（软件账号登录已关闭）：没有个人身份就用本机注入的令牌。
+  // 后端 deps.require_token 也认它，落到内置「本机」记录上。
+  // 之前这里只在 /auth/initialize-credentials 才回落，导致未登录时每个业务
+  // 请求都抛 BOOT_MISSING —— 页面拿不到数据，看上去就是「白屏」。
+  return resolveToken();
 }
 
 /** token 来源：preload 注入的内存值（api.md §0.2，不落 localStorage） */

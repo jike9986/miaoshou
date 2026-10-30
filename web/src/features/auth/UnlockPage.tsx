@@ -11,8 +11,9 @@ import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage, resolveApiBase } from "@/lib/api";
 import { getSavedApiBase, saveApiBase } from "@/lib/serverAddress";
-import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useSoftwareCredentialsStatus, useChangeSoftwarePassword, useInitializeSoftwareCredentials } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword, useInitializeSoftwareCredentials } from "@/lib/queries";
 import { clearOperator, setOperator, useOperatorIdentity } from "@/lib/operator";
+import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 import { useSessionStore } from "@/features/stores";
 import {
   Button,
@@ -44,8 +45,8 @@ export interface AccountSwitcherProps {
 }
 
 export function AccountSwitcher({ compact = false, className }: AccountSwitcherProps = {}) {
-  const identity = useOperatorIdentity();
-  const { data: status } = useAuthStatus(Boolean(identity));
+  // 单机模式：本机令牌就能读连接状态，不必先登录软件账号。
+  const { data: status } = useAuthStatus(true);
   const connect = useConnectAccount();
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const setCurrentShopId = useSessionStore((state) => state.setCurrentShopId);
@@ -162,9 +163,9 @@ export function UnlockPage() {
   const appIdField = useId();
   const secretField = useId();
 
-  const existingIdentity = useOperatorIdentity();
-  const { data: status, isLoading, isError, error, refetch, isFetching } = useAuthStatus(Boolean(existingIdentity));
-  const credentialsStatus = useSoftwareCredentialsStatus(!existingIdentity);
+  // 单机模式：本机令牌就能读连接状态，不必先登录软件账号。
+  // 注意：这里**不**再用 useOperatorIdentity 做门控 —— 未登录也要能看连接状态。
+  const { data: status, isLoading, isError, error, refetch, isFetching } = useAuthStatus(true);
   const connect = useConnectAccount();
 
   const [appId, setAppId] = useState("");
@@ -172,9 +173,6 @@ export function UnlockPage() {
   const [showSecret, setShowSecret] = useState(false);
   const [rememberName, setRememberName] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
-  const [accountMode, setAccountMode] = useState(
-    existingIdentity?.mustChangePassword ?? !existingIdentity
-  );
 
   const connected = status?.connected ?? false;
   const accounts = useMemo(() => status?.accounts ?? [], [status?.accounts]);
@@ -193,21 +191,9 @@ export function UnlockPage() {
     }
   }, [connected, navigate, redirectTo, location.state]);
 
-  if (!existingIdentity) {
-    return (
-      <>
-        <PageHeader title="软件账号登录" />
-        <PageContent width="form">
-          <ServerAddressControl />
-          <SoftwareAccountPanel
-            redirectTo={redirectTo}
-            onBack={() => undefined}
-            allowInitialize={credentialsStatus.data?.initialized === false}
-          />
-        </PageContent>
-      </>
-    );
-  }
+  // 单机模式已关闭软件账号登录：不再因为「没有个人身份」就拦一道登录页，
+  // 直接走下面的妙手绑定表单。SoftwareAccountPanel 保留在代码里，
+  // 需要恢复多人协作时把 featureFlags 的 SHOW_ACCOUNT_UI 打开即可。
 
   const submit = (): void => {
     const next: FormErrors = {};
@@ -301,7 +287,8 @@ export function UnlockPage() {
               minHeight={160}
             />
           </Card>
-          <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />
+          {/* 账号登录已关闭；保留引用以便日后打开 SHOW_ACCOUNT_UI 时直接可用 */}
+          {SHOW_ACCOUNT_UI && <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />}
         </div>
       </div>
     );
@@ -312,13 +299,6 @@ export function UnlockPage() {
       <PageHeader title="连接妙手" />
       <PageContent width="form">
         <ServerAddressControl />
-        <div className="mb-4 flex gap-2" role="group" aria-label="登录方式">
-          <Button variant={!accountMode ? "primary" : "secondary"} size="sm" onClick={() => setAccountMode(false)}>绑定妙手</Button>
-          <Button variant={accountMode ? "primary" : "secondary"} size="sm" onClick={() => setAccountMode(true)}>软件账号登录</Button>
-        </div>
-        {accountMode ? (
-          <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => setAccountMode(false)} />
-        ) : (
         <motion.div
           variants={reduced ? undefined : fadeUp}
           initial={reduced ? undefined : "hidden"}
@@ -462,7 +442,6 @@ export function UnlockPage() {
             </div>
           </div>
         </motion.div>
-        )}
       </PageContent>
     </>
   );
