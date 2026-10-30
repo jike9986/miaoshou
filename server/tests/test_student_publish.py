@@ -394,7 +394,7 @@ def test_shared_finished_goods_are_visible_and_unadmitted_results_are_isolated(p
     assert shared_item["accountId"] is None
     assert shared_item["account"] == ""
     assert shared_item["collected"] == {}
-    assert shared_item["legacyClaimed"] is False
+    assert shared_item["legacyClaimed"] is True
     assert visible["facets"]["accounts"] == []
 
     # The account filter is validated as the member's selected publish account,

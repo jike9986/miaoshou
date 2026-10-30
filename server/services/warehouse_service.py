@@ -171,7 +171,6 @@ def serialize(product: Product, *, account_name: str = "",
         body["accountId"] = None
         body["account"] = ""
         body["collected"] = {}
-        body["legacyClaimed"] = False
     return body
 
 
