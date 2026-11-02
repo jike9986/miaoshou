@@ -385,34 +385,46 @@ def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None) -> list
 def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                      progress: Callable[[dict[str, Any]], None] | None = None,
                      max_rounds: int = 8) -> list[int]:
-    """产出 count 个新草稿并返回 detailId。链接失败即退役并换下一个。"""
+    """优先复制公共采集箱已有商品，返回上游明确确认的新草稿 ID。"""
     if count < 1:
         raise CarrierError("需要至少 1 个载体", required=0)
     details: list[int] = []
-    rounds = 0
-    while len(details) < count and rounds < max_rounds:
-        rounds += 1
-        link = take_link(db)
-        if link is None:
-            raise CarrierError(
-                "链接池里没有可用的 1688 链接了。请先按来源链接采集一件商品，"
-                "或把采集箱里的商品链接加入链接池",
-                available=len(details), required=count,
-            )
-        remaining = count - len(details)
-        url = str(link.get("url") or "")
-        offer = offer_id(url)
-        common_id = find_in_common_box(client, offer) if offer else None
+    common_id = None
+    try:
+        listing = client.common_box_list(page_no=1, page_size=20)
+        rows = (listing.get("data") or {}).get("detailList") or []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            status = str(row.get("status") or "").lower()
+            value = row.get("commonCollectBoxDetailId")
+            if status in {"success", "collectsuccess"} and str(value).isdigit():
+                common_id = int(value)
+                break
+    except MiaoshouError as exc:
+        raise CarrierError("读取当前账号的公共采集箱失败，请稍后重试") from exc
+    url = ""
+    failures = 0
+    while len(details) < count and failures < max_rounds:
+        link = take_link(db) if common_id is None else None
+        if common_id is None and link is None:
+            raise CarrierError("公共采集箱没有可用商品，且没有可采集的货源链接",
+                               available=len(details), required=count)
+        if link:
+            url = str(link.get("url") or "")
+            offer = offer_id(url)
+            common_id = find_in_common_box(client, offer) if offer else None
         if common_id:
             if progress:
                 progress({"stage": "reuse", "link": url, "commonId": common_id})
         else:
             if progress:
-                progress({"stage": "collect", "link": url, "need": remaining})
+                progress({"stage": "collect", "link": url, "need": count - len(details)})
             try:
                 fetched = client.fetch_items([url])
             except MiaoshouError as exc:
                 mark(db, url, ok=False)
+                failures += 1
                 if progress:
                     progress({"stage": "link_failed", "link": url,
                               "error": str(exc)[:120]})
@@ -421,6 +433,7 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
             ids = [int(value) for value in mapping.values() if str(value).isdigit()]
             if not ids:
                 mark(db, url, ok=False)
+                failures += 1
                 if progress:
                     progress({"stage": "link_failed", "link": url,
                               "error": "采集未返回商品"})
@@ -428,37 +441,35 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
             common_id = ids[0]
             if not wait_until_collected(client, common_id, progress=progress):
                 mark(db, url, ok=False)
+                failures += 1
+                common_id = None
                 if progress:
                     progress({"stage": "collect_failed", "link": url})
                 continue
 
-        copies = min(remaining, 100)
+        copies = 1
         if progress:
             progress({"stage": "claim", "commonId": common_id, "copies": copies})
         try:
             claimed = client.claim_common_to_platform([(common_id, "tiktok", copies)])
         except MiaoshouError as exc:
-            mark(db, url, ok=False)
-            if progress:
-                progress({"stage": "claim_failed", "error": str(exc)[:120]})
-            continue
-        mark(db, url, ok=True)
+            raise CarrierError("复制结果未确认，请先检查采集箱，勿重复操作",
+                               available=len(details), required=count) from exc
+        if url:
+            mark(db, url, ok=True)
         new_ids = claimed_detail_ids(claimed)
         if not new_ids:
-            # 认领已成功（费用已产生）却解析不出 detailId，先回头读采集箱捞草稿，
-            # 否则这批载体既拿不到又白扣一次认领
-            new_ids = _fresh_box_ids(client, common_id)
-            if new_ids and progress:
-                progress({"stage": "fresh_box", "commonId": common_id,
-                          "found": len(new_ids)})
-        if not new_ids:
-            raise CarrierError("认领成功但没有拿到载体的 detailId",
+            raise CarrierError("复制请求已提交但未返回新商品 ID，请先检查采集箱，勿重复操作",
                                commonId=common_id, required=count)
+        before = len(details)
         for detail_id in new_ids:
             if len(details) >= count:
                 break
             if detail_id not in details:
                 details.append(detail_id)
+        if len(details) == before:
+            raise CarrierError("复制接口未返回新的商品 ID，请先检查采集箱，勿重复操作",
+                               commonId=common_id, required=count)
     if len(details) < count:
         raise CarrierError(f"只创建了 {len(details)} 个载体，需要 {count} 个",
                            available=len(details), required=count)
