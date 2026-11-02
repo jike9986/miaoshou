@@ -24,6 +24,8 @@ class ScheduleLog(Base):
     # 冗余存名字/账号：任务被删掉后历史仍要能读懂
     task_name: Mapped[str] = mapped_column(String(120), default="")
     account_id: Mapped[int | None] = mapped_column(Integer)
+    # Copy the task owner so history remains private after task deletion.
+    owner_operator_id: Mapped[int | None] = mapped_column(Integer)
     # ok / partial / failed / empty
     status: Mapped[str] = mapped_column(String(16), default="")
     reason: Mapped[str] = mapped_column(String(500), default="")
@@ -38,4 +40,5 @@ class ScheduleLog(Base):
     __table_args__ = (
         Index("ix_schedule_logs_task", "task_id"),
         Index("ix_schedule_logs_at", "at"),
+        Index("ix_schedule_logs_owner_at", "owner_operator_id", "at"),
     )

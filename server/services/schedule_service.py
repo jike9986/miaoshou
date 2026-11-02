@@ -367,6 +367,7 @@ def record_log(db: Session, task: Schedule, summary: Mapping[str, Any],
         task_id=str(task.id),
         task_name=str(task.name or ""),
         account_id=task.account_id,
+        owner_operator_id=task.owner_operator_id,
         status=str(summary.get("status") or ""),
         reason=str(summary.get("reason") or "")[:500],
         requested=int(summary.get("requested") or 0),
@@ -418,6 +419,8 @@ def list_logs(db: Session, *, task_id: str = "", account_id: Any = None,
         visible = _visible_account_ids(db, operator)
         if visible is not None:
             query = query.filter(ScheduleLog.account_id.in_(visible or [-1]))
+    if operator is not None and not _is_global_operator(operator):
+        query = query.filter(ScheduleLog.owner_operator_id == operator.id)
     total = query.count()
     rows = (query.order_by(ScheduleLog.at.desc(), ScheduleLog.id.desc())
             .limit(count).all())
@@ -443,7 +446,6 @@ def list_logs(db: Session, *, task_id: str = "", account_id: Any = None,
 # --- CRUD -----------------------------------------------------------------
 def _is_global_operator(operator: Operator | None) -> bool:
     return (operator is None
-            or operator.name == operator_service.CLIENT_OPERATOR_NAME
             or operator_service.role_of(operator) in {
                 operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER})
 
@@ -458,6 +460,14 @@ def _assert_operator_account_access(db: Session, account_id: Any,
         raise errors.not_found(f"账号 {account_id} 不存在", accountId=str(account_id)) from None
     if not account_service.has_account_access(db, account_pk, operator.id):
         raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的定时任务", status=403)
+
+
+def _assert_schedule_owner(row: Schedule, operator: Operator | None) -> None:
+    """Keep tasks private within a shared Miaoshou account."""
+    if _is_global_operator(operator):
+        return
+    if row.owner_operator_id != operator.id:
+        raise errors.not_found(f"定时任务 {row.id} 不存在", taskId=str(row.id))
 
 
 def _visible_account_ids(db: Session, operator: Operator | None) -> list[int] | None:
@@ -483,6 +493,8 @@ def list_schedules(db: Session, *, account_id: Any = None,
         visible = _visible_account_ids(db, operator)
         if visible is not None:
             query = query.filter(Schedule.account_id.in_(visible or [-1]))
+    if operator is not None and not _is_global_operator(operator):
+        query = query.filter(Schedule.owner_operator_id == operator.id)
     if enabled is not None:
         query = query.filter(Schedule.enabled.is_(bool(enabled)))
     rows = query.order_by(Schedule.created_at.asc()).all()
@@ -534,6 +546,7 @@ def get_schedule(db: Session, task_id: str,
     if row is None:
         raise errors.not_found(f"定时任务 {task_id} 不存在", taskId=str(task_id))
     _assert_operator_account_access(db, row.account_id, operator)
+    _assert_schedule_owner(row, operator)
     return row
 
 
@@ -569,7 +582,8 @@ def create(db: Session, payload: Mapping[str, Any],
     row = Schedule(id=f"task-{uuid.uuid4().hex[:12]}", created_at=now_ts(),
                    updated_at=now_ts(),
                    last_run_date="", attempt_date="", attempts=0,
-                   next_due_at=None, last_result={})
+                   next_due_at=None, last_result={},
+                   owner_operator_id=(operator.id if operator is not None else None))
     for key, value in fields.items():
         setattr(row, key, value)
     due = next_due(as_dict(row), datetime.now())
@@ -642,7 +656,8 @@ def note_result(db: Session, task_id: str, *, success: bool, result: dict[str, A
 
 
 def pick_products(db: Session, *, account_id: int | None, count: int,
-                  template: str = "", claim_only: bool = False
+                  template: str = "", claim_only: bool = False,
+                  operator_id: int | None = None
                   ) -> list[dict[str, Any]]:
     """挑出本轮要处理的商品：该账号、未发布、按 saved_at 倒序，最多 per_run 件。
 
@@ -650,13 +665,28 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
     不报错（少跑可补救，错跑不可撤销）。
     """
     from models.product import Product
+    from models.product_claim import ProductClaim
 
     query = db.query(Product).filter(Product.deleted_at.is_(None))
     if account_id is not None:
         query = query.filter(Product.account_id == account_id)
+    operator = (operator_service.get(db, operator_id)
+                if operator_id is not None else None)
+    if (operator is not None
+            and operator_service.role_of(operator) == operator_service.ROLE_MEMBER):
+        if claim_only:
+            raise errors.AppError(errors.FORBIDDEN,
+                                  "学员定时任务只能发布已认领的成品商品",
+                                  status=403)
+        # Shared warehouse products are visible to all students, but each student
+        # may schedule only the products they personally claimed.
+        claimed_ids = (db.query(ProductClaim.product_id)
+                       .filter(ProductClaim.owner_operator_id == operator.id,
+                               ProductClaim.status == "claimed"))
+        query = query.filter(Product.id.in_(claimed_ids))
     if not claim_only:
         query = query.filter(Product.status != "published")
-    published = _published_identities(db, account_id)
+    published = _published_identities(db, account_id, operator_id)
     # 分页扫完全部候选，而不是只取最近 count*4 件。
     # 只取一页时，若最近那批都已发布（很常见：连着几天跑过），本轮就取到 0 件，
     # 更早的未发布商品永远轮不到——表现为「定时任务明明有货却一直跳过」。
@@ -692,12 +722,17 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
     return picked
 
 
-def _published_identities(db: Session, account_id: int | None) -> dict[str, set[str]]:
+def _published_identities(db: Session, account_id: int | None,
+                          operator_id: int | None) -> dict[str, set[str]]:
     from models.publish_log import PublishLog
 
     query = db.query(PublishLog).filter(PublishLog.status.in_(("success", "processing")))
     if account_id is not None:
         query = query.filter(PublishLog.account_id == account_id)
+    # A shared Miaoshou account can have several software-user ledgers. Match
+    # only this schedule owner's records; NULL remains the isolated legacy
+    # ledger used by ownerless schedules and must not leak into member tasks.
+    query = query.filter(PublishLog.operator_id == operator_id)
     detail_ids: set[str] = set()
     keys: set[str] = set()
     for row in query.all():
@@ -894,7 +929,7 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
                     with_results: bool = False, moment: datetime | None = None
                     ) -> dict[str, Any]:
     """execute 的主体：进来时词库已置为「批次运行中」，这里只管跑。"""
-    from services import publish_service
+    from services import account_service, publish_service
 
     requested = int(task.per_run or 10)
     selected = 0
@@ -904,16 +939,24 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
         # 而且报的是通用 SHOP_NOT_IN_ACCOUNT，没有可操作信息。
         if task.shop_id:
             from models.account import Account
-            from services import account_service
 
             account = (db.query(Account)
                        .filter(Account.id == task.account_id).one_or_none())
             if account is not None:
                 account_service.require_shop(db, account, task.shop_id)
+        if task.owner_operator_id is not None:
+            owner = operator_service.get(db, task.owner_operator_id)
+            if (operator_service.role_of(owner) == operator_service.ROLE_MEMBER
+                    and not account_service.has_account_access(
+                        db, task.account_id, owner.id)):
+                raise errors.AppError(errors.FORBIDDEN,
+                                      "定时任务创建者已无法访问所选妙手账号",
+                                      status=403)
         # 直接读 ORM 字段：as_dict() 只含调度判定需要的键，不含账号/店铺/模板
         items = pick_products(db, account_id=task.account_id, count=requested,
                               template=str(task.template_name or ""),
-                              claim_only=bool(task.claim_only))
+                              claim_only=bool(task.claim_only),
+                              operator_id=task.owner_operator_id)
         selected = len(items)
         if not items:
             # 判断到底是「都发完了」还是「账号/仓库选错了」
@@ -943,7 +986,8 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
             "items": [{"warehouseId": str(item["id"])} for item in items],
             "batchId": f"sched-{task.id}",
             "scheduleId": str(task.id),
-        })
+        }, operator_id=task.owner_operator_id,
+            _log_operator_id=task.owner_operator_id)
         published = _count(outcome.get("published"))
         if not published and bool(task.claim_only):
             # 认领模式没有 published，成功数是 claimed

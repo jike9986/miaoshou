@@ -12,11 +12,14 @@ from core.errors import AppError
 from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
+from models.account_binding import AccountBinding
+from models.automation_run import AutomationRun, AutomationRunItem
 from models.batch import Batch
 from models.image_job import ImageJob
 from models.product import Product
 from models.publish_log import PublishLog
 from services import account_service, image_service, operator_service, setting_service
+from services.miaoshou import MiaoshouError
 
 API = "/api/v1"
 
@@ -86,7 +89,6 @@ def _headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-@pytest.mark.skip(reason="妙手账号已改为多人共享（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的「不能读取他人账号」已不成立")
 def test_member_can_bind_own_key_and_cannot_read_other_account(
         client, identities, monkeypatch):
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
@@ -97,8 +99,8 @@ def test_member_can_bind_own_key_and_cannot_read_other_account(
     )
     assert first.status_code == 200, first.text
     first_account_id = first.json()["accountId"]
-    assert first.json()["ownerOperatorId"] == str(identities["first_id"])
-    assert first.json()["boundByOperatorId"] == str(identities["first_id"])
+    assert "ownerOperatorId" not in first.json()
+    assert "boundByOperatorId" not in first.json()
 
     db = SessionLocal()
     try:
@@ -121,6 +123,8 @@ def test_member_can_bind_own_key_and_cannot_read_other_account(
     assert first_status.status_code == 200, first_status.text
     assert first_status.json()["accountId"] == first_account_id
     assert [row["id"] for row in first_status.json()["accounts"]] == [first_account_id]
+    assert all("ownerOperatorId" not in row and "boundByOperatorId" not in row
+               for row in first_status.json()["accounts"])
 
     foreign = client.get(API + "/shops", params={"accountId": second_account_id},
                          headers=_headers(identities["first_token"]))
@@ -165,7 +169,6 @@ def test_member_can_bind_own_key_and_cannot_read_other_account(
                for row in teacher_accounts.values())
 
 
-@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
 def test_unbound_member_does_not_inherit_legacy_default_account(client, identities):
     response = client.get(API + "/auth/status",
                           headers=_headers(identities["unbound_token"]))
@@ -175,30 +178,77 @@ def test_unbound_member_does_not_inherit_legacy_default_account(client, identiti
     assert response.json()["accounts"] == []
 
 
-@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
+def test_member_explicit_binding_blocks_legacy_owner_fallback(client, identities):
+    """Once a member has a binding, owner_operator_id cannot expose old extras."""
+    db = SessionLocal()
+    try:
+        member, member_token = operator_service.create(
+            db, f"legacy-fallback-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        bound = Account(
+            name=f"bound-account-{uuid.uuid4().hex[:8]}",
+            app_key=f"bound-key-{uuid.uuid4().hex[:8]}",
+            app_secret_enc="", owner_operator_id=member.id, shops="[]",
+            is_default=False,
+        )
+        legacy_extra = Account(
+            name=f"legacy-extra-{uuid.uuid4().hex[:8]}",
+            app_key=f"legacy-extra-key-{uuid.uuid4().hex[:8]}",
+            app_secret_enc="", owner_operator_id=member.id, shops="[]",
+            is_default=False,
+        )
+        db.add_all([bound, legacy_extra])
+        db.flush()
+        db.add(AccountBinding(account_id=bound.id, operator_id=member.id))
+        db.commit()
+
+        assert account_service.has_account_access(db, bound.id, member.id) is True
+        assert account_service.has_account_access(db, legacy_extra.id, member.id) is False
+        bound_id, legacy_extra_id = str(bound.id), str(legacy_extra.id)
+    finally:
+        db.rollback()
+        db.close()
+
+    status = client.get(API + "/auth/status", headers=_headers(member_token))
+    assert status.status_code == 200, status.text
+    assert [row["id"] for row in status.json()["accounts"]] == [bound_id]
+    forbidden = client.get(
+        API + "/shops", params={"accountId": legacy_extra_id},
+        headers=_headers(member_token))
+    assert forbidden.status_code == 403, forbidden.text
+
+
 def test_member_reads_are_scoped_to_owned_account(client, identities):
     db = SessionLocal()
     try:
-        own = (db.query(Account)
-               .filter(Account.owner_operator_id == identities["first_id"])
-               .order_by(Account.last_used.desc().nullslast(), Account.id.desc())
-               .first())
-        if own is None:
-            own = Account(
-                name="read scope own", app_key="read-own-key", app_secret_enc="",
-                owner_operator_id=identities["first_id"], shops="[]", is_default=False,
-            )
-            db.add(own)
-        foreign = Account(
-            name="read scope foreign", app_key="read-foreign-key", app_secret_enc="",
-            owner_operator_id=identities["second_id"], shops="[]", is_default=False,
+        own_operator, own_token = operator_service.create(
+            db, f"read-scope-own-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        foreign_operator, _ = operator_service.create(
+            db, f"read-scope-foreign-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        own = Account(
+            name="read scope own", app_key=f"read-own-{uuid.uuid4().hex[:8]}",
+            app_secret_enc="", owner_operator_id=own_operator.id,
+            shops="[]", is_default=False,
         )
-        db.add(foreign)
+        foreign = Account(
+            name="read scope foreign", app_key=f"read-foreign-{uuid.uuid4().hex[:8]}",
+            app_secret_enc="", owner_operator_id=foreign_operator.id,
+            shops="[]", is_default=False,
+        )
+        db.add_all([own, foreign])
         db.flush()
+        db.add_all([
+            AccountBinding(account_id=own.id, operator_id=own_operator.id),
+            AccountBinding(account_id=foreign.id, operator_id=foreign_operator.id),
+        ])
         own_log = PublishLog(account_id=own.id, detail_id="own-detail",
-                             shop_id="own-shop", title="own publish")
+                             shop_id="own-shop", title="own publish",
+                             operator_id=own_operator.id)
         foreign_log = PublishLog(account_id=foreign.id, detail_id="foreign-detail",
-                                 shop_id="foreign-shop", title="foreign publish")
+                                 shop_id="foreign-shop", title="foreign publish",
+                                 operator_id=foreign_operator.id)
         own_product = Product(
             warehouse_key=f"scope-own-{uuid.uuid4().hex[:10]}",
             detail_id="scope-own", shop_id="shop-own", account_id=own.id,
@@ -217,11 +267,13 @@ def test_member_reads_are_scoped_to_owned_account(client, identities):
     finally:
         db.close()
 
-    member_headers = _headers(identities["first_token"])
+    member_headers = _headers(own_token)
     foreign_logs = client.get(
         API + "/publish/logs", params={"accountId": str(foreign_id)},
         headers=member_headers)
-    own_logs = client.get(API + "/publish/logs", headers=member_headers)
+    own_logs = client.get(
+        API + "/publish/logs", params={"accountId": str(own_id)},
+        headers=member_headers)
     assert foreign_logs.status_code == 403, foreign_logs.text
     assert own_logs.status_code == 200, own_logs.text
     assert "own publish" in {row["title"] for row in own_logs.json()["items"]}
@@ -231,7 +283,9 @@ def test_member_reads_are_scoped_to_owned_account(client, identities):
     foreign_sources = client.get(
         API + "/warehouse/source-item-ids", params={"accountId": str(foreign_id)},
         headers=member_headers)
-    own_sources = client.get(API + "/warehouse/source-item-ids", headers=member_headers)
+    own_sources = client.get(
+        API + "/warehouse/source-item-ids", params={"accountId": str(own_id)},
+        headers=member_headers)
     assert foreign_sources.status_code == 403, foreign_sources.text
     assert own_sources.status_code == 200, own_sources.text
     assert "190001" in own_sources.json()["ids"]
@@ -240,7 +294,9 @@ def test_member_reads_are_scoped_to_owned_account(client, identities):
     foreign_templates = client.get(
         API + "/system/templates", params={"accountId": str(foreign_id)},
         headers=member_headers)
-    own_templates = client.get(API + "/system/templates", headers=member_headers)
+    own_templates = client.get(
+        API + "/system/templates", params={"accountId": str(own_id)},
+        headers=member_headers)
     foreign_preview = client.post(
         API + "/system/price-preview",
         json={"purchaseCny": 10, "weightKg": 1,
@@ -266,21 +322,31 @@ def test_member_reads_are_scoped_to_owned_account(client, identities):
     assert own_id != foreign_id
 
 
-@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
 def test_member_price_defaults_are_scoped_to_owned_account(
-        client, identities, monkeypatch):
+        client, monkeypatch):
     db = SessionLocal()
     try:
+        own_operator, own_token = operator_service.create(
+            db, f"price-own-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        foreign_operator, _ = operator_service.create(
+            db, f"price-foreign-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
         own = Account(
             name="price defaults own", app_key="price-own-key", app_secret_enc="",
-            owner_operator_id=identities["first_id"], shops="[]", is_default=False,
+            owner_operator_id=own_operator.id, shops="[]", is_default=False,
         )
         foreign = Account(
             name="price defaults foreign", app_key="price-foreign-key",
-            app_secret_enc="", owner_operator_id=identities["second_id"],
+            app_secret_enc="", owner_operator_id=foreign_operator.id,
             shops="[]", is_default=False,
         )
         db.add_all([own, foreign])
+        db.flush()
+        db.add_all([
+            AccountBinding(account_id=own.id, operator_id=own_operator.id),
+            AccountBinding(account_id=foreign.id, operator_id=foreign_operator.id),
+        ])
         db.commit()
         own_id, foreign_id = str(own.id), str(foreign.id)
     finally:
@@ -295,7 +361,7 @@ def test_member_price_defaults_are_scoped_to_owned_account(
         reference, "cached",
         lambda _account, _key, _loader, *, refresh: ({"data": {}}, False, False, 0),
     )
-    headers = _headers(identities["first_token"])
+    headers = _headers(own_token)
 
     own_response = client.get(
         API + "/system/price-defaults", params={"accountId": own_id},
@@ -309,52 +375,90 @@ def test_member_price_defaults_are_scoped_to_owned_account(
     assert foreign_response.status_code == 403, foreign_response.text
 
 
-@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
 def test_member_bootstrap_hides_other_members_accounts_and_batches(client, identities):
     db = SessionLocal()
     try:
+        own_operator, own_token = operator_service.create(
+            db, f"bootstrap-own-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        foreign_operator, _ = operator_service.create(
+            db, f"bootstrap-foreign-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
         own_account = Account(
             name="bootstrap own", app_key="bootstrap-own", app_secret_enc="",
-            owner_operator_id=identities["first_id"], shops="[]", is_default=False,
+            owner_operator_id=own_operator.id, shops="[]", is_default=False,
         )
         foreign_account = Account(
             name="bootstrap foreign", app_key="bootstrap-foreign", app_secret_enc="",
-            owner_operator_id=identities["second_id"], shops="[]", is_default=False,
+            owner_operator_id=foreign_operator.id, shops="[]", is_default=False,
         )
         db.add_all([own_account, foreign_account])
         db.flush()
         own_account_id = str(own_account.id)
         foreign_account_id = str(foreign_account.id)
+        db.add_all([
+            AccountBinding(account_id=own_account.id, operator_id=own_operator.id),
+            AccountBinding(account_id=foreign_account.id,
+                           operator_id=foreign_operator.id),
+        ])
         own_batch_id = f"bootstrap-own-{uuid.uuid4().hex[:8]}"
         foreign_batch_id = f"bootstrap-foreign-{uuid.uuid4().hex[:8]}"
         db.add_all([
             Batch(id=own_batch_id,
-                  account_id=own_account.id, operator_id=identities["first_id"],
+                  account_id=own_account.id, operator_id=own_operator.id,
                   shop_id="own-shop", detail_ids=["101"], settings={}, results=[]),
             Batch(id=foreign_batch_id,
-                  account_id=foreign_account.id, operator_id=identities["second_id"],
+                  account_id=foreign_account.id, operator_id=foreign_operator.id,
                   shop_id="foreign-shop", detail_ids=["202"], settings={}, results=[]),
         ])
         db.commit()
     finally:
         db.close()
 
-    response = client.get(API + "/system/bootstrap",
-                          headers=_headers(identities["first_token"]))
-    assert response.status_code == 200, response.text
-    body = response.json()
-    visible_accounts = {row["id"] for row in body["accounts"]}
-    assert own_account_id in visible_accounts
-    assert foreign_account_id not in visible_accounts
-    visible_batches = {row["id"] for row in body["batches"]["items"]}
-    assert own_batch_id in visible_batches
-    assert foreign_batch_id not in visible_batches
+    db = SessionLocal()
+    try:
+        previous_selection = setting_service.get(
+            db, setting_service.PRICING_SELECTED_KEY)
+        selected = setting_service.selected_templates(db)
+        selected[own_account_id] = "own template"
+        selected[foreign_account_id] = "foreign template"
+        setting_service.put(db, setting_service.PRICING_SELECTED_KEY,
+                            {"accounts": selected})
+        db.commit()
+    finally:
+        db.close()
 
-    teacher_response = client.get(
-        API + "/system/bootstrap", headers=_headers(identities["teacher_token"]))
-    assert teacher_response.status_code == 200, teacher_response.text
-    teacher_batches = {row["id"] for row in teacher_response.json()["batches"]["items"]}
-    assert {own_batch_id, foreign_batch_id} <= teacher_batches
+    try:
+        response = client.get(API + "/system/bootstrap",
+                              headers=_headers(own_token))
+        assert response.status_code == 200, response.text
+        body = response.json()
+        visible_accounts = {row["id"] for row in body["accounts"]}
+        assert own_account_id in visible_accounts
+        assert foreign_account_id not in visible_accounts
+        visible_batches = {row["id"] for row in body["batches"]["items"]}
+        assert own_batch_id in visible_batches
+        assert foreign_batch_id not in visible_batches
+        assert body["templates"]["selected"].get(own_account_id) == "own template"
+        assert foreign_account_id not in body["templates"]["selected"]
+
+        teacher_response = client.get(
+            API + "/system/bootstrap",
+            headers=_headers(identities["teacher_token"]))
+        assert teacher_response.status_code == 200, teacher_response.text
+        teacher_body = teacher_response.json()
+        teacher_batches = {row["id"] for row in teacher_body["batches"]["items"]}
+        assert {own_batch_id, foreign_batch_id} <= teacher_batches
+        assert teacher_body["templates"]["selected"].get(
+            foreign_account_id) == "foreign template"
+    finally:
+        db = SessionLocal()
+        try:
+            setting_service.put(db, setting_service.PRICING_SELECTED_KEY,
+                                previous_selection)
+            db.commit()
+        finally:
+            db.close()
 
 
 def test_teacher_must_target_a_student_to_bind_key(client, identities, monkeypatch):
@@ -452,20 +556,100 @@ def test_app_key_can_be_bound_to_multiple_students_but_each_student_has_one(
         extra, extra_token = operator_service.create(
             db, f"owner-shared-{uuid.uuid4().hex[:8]}",
             role=operator_service.ROLE_MEMBER)
+        shared_account = db.query(Account).filter(
+            Account.id == int(first_account_id)).one()
+        shared_account.shops = '[{"shopId":"protected-shop","name":"keep"}]'
+        shared_account.shops_synced_at = 123
+        original_ciphertext = shared_account.app_secret_enc
         db.commit()
         extra_id = extra.id
     finally:
         db.close()
 
+    wrong_secret = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": "different-secret", "autoScan": False},
+        headers=_headers(extra_token),
+    )
+    assert wrong_secret.status_code == 403, wrong_secret.text
+
+    # Knowing a saved account ID must not let an unbound student reuse the
+    # server-side secret. Joining is allowed only when both submitted values
+    # match the credentials that were originally verified and stored.
+    account_id_only = client.post(
+        API + "/auth/connect",
+        json={"accountId": first_account_id, "autoScan": False},
+        headers=_headers(extra_token),
+    )
+    wrong_key_for_id = client.post(
+        API + "/auth/connect",
+        json={"accountId": first_account_id, "appId": "wrong-key",
+              "appSecret": app_secret, "autoScan": False},
+        headers=_headers(extra_token),
+    )
+    wrong_secret_for_id = client.post(
+        API + "/auth/connect",
+        json={"accountId": first_account_id, "appId": app_key,
+              "appSecret": "wrong-secret", "autoScan": False},
+        headers=_headers(extra_token),
+    )
+    for denied in (account_id_only, wrong_key_for_id, wrong_secret_for_id):
+        assert denied.status_code == 403, denied.text
+        assert app_secret not in denied.text
+
+    db = SessionLocal()
+    try:
+        unchanged = db.query(Account).filter(
+            Account.id == int(first_account_id)).one()
+        assert unchanged.app_secret_enc == original_ciphertext
+        assert unchanged.status == "active"
+        assert unchanged.shops == '[{"shopId":"protected-shop","name":"keep"}]'
+        assert unchanged.shops_synced_at == 123
+        assert db.query(AccountBinding).filter(
+            AccountBinding.operator_id == extra_id).count() == 0
+    finally:
+        db.close()
+
     duplicate = client.post(
         API + "/auth/connect",
-        json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
+        json={"accountId": first_account_id, "appId": app_key,
+              "appSecret": app_secret, "autoScan": False},
         headers=_headers(extra_token),
     )
     assert duplicate.status_code == 200, duplicate.text
     assert duplicate.json()["accountId"] == first_account_id
-    assert duplicate.json()["ownerOperatorId"] == str(first_id)
     assert app_secret not in duplicate.text
+    assert "ownerOperatorId" not in duplicate.json()
+    assert "boundByOperatorId" not in duplicate.json()
+
+    # Once bound, this student still cannot add a second stored account, even
+    # when they know its exact credentials.
+    second_key = f"second-shared-key-{uuid.uuid4().hex[:8]}"
+    second_secret = "second-shared-secret"
+    db = SessionLocal()
+    try:
+        second_owner, second_owner_token = operator_service.create(
+            db, f"owner-second-shared-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        db.commit()
+    finally:
+        db.close()
+    second_account = client.post(
+        API + "/auth/connect",
+        json={"appId": second_key, "appSecret": second_secret,
+              "autoScan": False},
+        headers=_headers(second_owner_token),
+    )
+    assert second_account.status_code == 200, second_account.text
+    second_account_id = second_account.json()["accountId"]
+    second_binding = client.post(
+        API + "/auth/connect",
+        json={"accountId": second_account_id, "appId": second_key,
+              "appSecret": second_secret, "autoScan": False},
+        headers=_headers(extra_token),
+    )
+    assert second_binding.status_code == 409, second_binding.text
+    assert second_secret not in second_binding.text
 
     reconnected = client.post(
         API + "/auth/connect",
@@ -474,7 +658,27 @@ def test_app_key_can_be_bound_to_multiple_students_but_each_student_has_one(
     )
     assert reconnected.status_code == 200, reconnected.text
     assert reconnected.json()["accountId"] == first_account_id
-    assert reconnected.json()["ownerOperatorId"] == str(first_id)
+    assert "ownerOperatorId" not in reconnected.json()
+    assert "boundByOperatorId" not in reconnected.json()
+
+    # Learners see the shared account as their own connection, while its
+    # ownership and binder metadata remain visible only to global managers.
+    for token in (first_token, extra_token):
+        status = client.get(API + "/auth/status", headers=_headers(token))
+        assert status.status_code == 200, status.text
+        assert status.json()["accountId"] == first_account_id
+        assert all("ownerOperatorId" not in row and "boundByOperatorId" not in row
+                   for row in status.json()["accounts"])
+
+    teacher_accounts_response = client.get(
+        API + "/auth/accounts", headers=_headers(identities["teacher_token"]))
+    assert teacher_accounts_response.status_code == 200, teacher_accounts_response.text
+    teacher_account = next(
+        row for row in teacher_accounts_response.json()["accounts"]
+        if row["id"] == first_account_id)
+    assert teacher_account["ownerOperatorId"] == str(first_id)
+    assert teacher_account["boundByOperatorId"] == str(first_id)
+    assert "appSecret" not in teacher_account and "app_secret_enc" not in teacher_account
 
     db = SessionLocal()
     try:
@@ -534,6 +738,11 @@ def test_bind_race_after_precheck_returns_conflict_and_preserves_winner(
     del client
     app_key = f"bind-race-{uuid.uuid4().hex}"
     db = SessionLocal()
+    requester, _ = operator_service.create(
+        db, f"bind-race-requester-{uuid.uuid4().hex[:8]}",
+        role=operator_service.ROLE_MEMBER)
+    requester_id = requester.id
+    db.commit()
 
     class RacingMiaoshouClient:
         def __init__(self, _app_id, _app_secret):
@@ -565,8 +774,8 @@ def test_bind_race_after_precheck_returns_conflict_and_preserves_winner(
                 app_id=app_key,
                 app_secret="request-secret",
                 auto_scan=False,
-                owner_operator_id=identities["first_id"],
-                bound_by_operator_id=identities["first_id"],
+                owner_operator_id=requester_id,
+                bound_by_operator_id=requester_id,
             )
 
         assert caught.value.status == 409
@@ -583,15 +792,27 @@ def test_bind_race_after_precheck_returns_conflict_and_preserves_winner(
         db.close()
 
 
-@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
-def test_teacher_cannot_reassign_another_students_bound_key(client, identities, monkeypatch):
+def test_teacher_can_bind_shared_key_to_another_student_without_reassigning_owner(
+        client, identities, monkeypatch):
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
     app_key = f"owned-key-{uuid.uuid4().hex[:8]}"
     app_secret = "private-app-secret"
+    db = SessionLocal()
+    try:
+        owner, owner_token = operator_service.create(
+            db, f"teacher-shared-owner-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        recipient, recipient_token = operator_service.create(
+            db, f"teacher-shared-recipient-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        db.commit()
+        owner_id, recipient_id = owner.id, recipient.id
+    finally:
+        db.close()
     connected = client.post(
         API + "/auth/connect",
         json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
-        headers=_headers(identities["first_token"]),
+        headers=_headers(owner_token),
     )
     assert connected.status_code == 200, connected.text
 
@@ -599,19 +820,150 @@ def test_teacher_cannot_reassign_another_students_bound_key(client, identities, 
         API + "/auth/connect",
         json={"accountId": connected.json()["accountId"],
               "appId": app_key, "appSecret": app_secret,
-              "studentOperatorId": str(identities["second_id"]),
+              "studentOperatorId": str(recipient_id),
               "autoScan": False},
         headers=_headers(identities["teacher_token"]),
     )
-    assert response.status_code == 403, response.text
+    assert response.status_code == 200, response.text
+    assert response.json()["accountId"] == connected.json()["accountId"]
+    assert response.json()["ownerOperatorId"] == str(owner_id)
+    assert response.json()["boundByOperatorId"] == str(identities["teacher_id"])
     assert app_secret not in response.text
 
     db = SessionLocal()
     try:
         account = db.query(Account).filter(Account.app_key == app_key).one()
-        assert account.owner_operator_id == identities["first_id"]
+        assert account.owner_operator_id == owner_id
+        bindings = (db.query(account_service.AccountBinding)
+                    .filter(account_service.AccountBinding.account_id == account.id)
+                    .all())
+        assert {binding.operator_id for binding in bindings} >= {
+            owner_id, recipient_id}
     finally:
         db.close()
+
+    for token in (owner_token, recipient_token):
+        status = client.get(API + "/auth/status", headers=_headers(token))
+        assert status.status_code == 200, status.text
+        assert status.json()["accountId"] == connected.json()["accountId"]
+
+
+def test_failed_reconnect_does_not_invalidate_or_rewrite_existing_account(
+        client, monkeypatch):
+    db = SessionLocal()
+    try:
+        _, owner_token = operator_service.create(
+            db, f"failed-reconnect-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        db.commit()
+    finally:
+        db.close()
+
+    app_key = f"failed-reconnect-key-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
+    connected = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": "stored-secret", "autoScan": False},
+        headers=_headers(owner_token),
+    )
+    assert connected.status_code == 200, connected.text
+    account_id = int(connected.json()["accountId"])
+
+    db = SessionLocal()
+    try:
+        account = db.query(Account).filter(Account.id == account_id).one()
+        account.shops = '[{"shopId":"cached-shop","name":"cached"}]'
+        account.shops_synced_at = 456
+        db.commit()
+        original_ciphertext = account.app_secret_enc
+    finally:
+        db.close()
+
+    class RejectingMiaoshouClient:
+        def __init__(self, _app_key, _app_secret):
+            pass
+
+        def shop_list(self, **_kwargs):
+            raise MiaoshouError("invalid candidate", code="invalidSignature", status=401)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(account_service, "MiaoshouClient", RejectingMiaoshouClient)
+    rejected = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": "bad-candidate", "autoScan": False},
+        headers=_headers(owner_token),
+    )
+    assert rejected.status_code != 200
+
+    db = SessionLocal()
+    try:
+        unchanged = db.query(Account).filter(Account.id == account_id).one()
+        assert unchanged.status == "active"
+        assert unchanged.app_secret_enc == original_ciphertext
+        assert unchanged.shops == '[{"shopId":"cached-shop","name":"cached"}]'
+        assert unchanged.shops_synced_at == 456
+    finally:
+        db.close()
+
+
+def test_account_owner_and_teacher_can_rotate_shared_account_secret(
+        client, identities, monkeypatch):
+    monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
+    db = SessionLocal()
+    try:
+        _, owner_token = operator_service.create(
+            db, f"rotate-owner-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        recipient, recipient_token = operator_service.create(
+            db, f"rotate-recipient-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        db.commit()
+        recipient_id = recipient.id
+    finally:
+        db.close()
+
+    app_key = f"rotate-key-{uuid.uuid4().hex[:8]}"
+    connected = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": "initial-secret", "autoScan": False},
+        headers=_headers(owner_token),
+    )
+    assert connected.status_code == 200, connected.text
+
+    owner_rotation = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": "owner-rotated-secret", "autoScan": False},
+        headers=_headers(owner_token),
+    )
+    assert owner_rotation.status_code == 200, owner_rotation.text
+
+    teacher_rotation = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": "teacher-rotated-secret",
+              "studentOperatorId": str(recipient_id), "autoScan": False},
+        headers=_headers(identities["teacher_token"]),
+    )
+    assert teacher_rotation.status_code == 200, teacher_rotation.text
+
+    db = SessionLocal()
+    try:
+        account = db.query(Account).filter(Account.app_key == app_key).one()
+        assert account_service.crypto.decrypt(account.app_secret_enc) == (
+            "teacher-rotated-secret")
+    finally:
+        db.close()
+
+    # The student bound by the teacher can use the shared credential but cannot
+    # replace it with a different one.
+    denied = client.post(
+        API + "/auth/connect",
+        json={"appId": app_key, "appSecret": "recipient-rotated-secret",
+              "autoScan": False},
+        headers=_headers(recipient_token),
+    )
+    assert denied.status_code == 403, denied.text
 
 
 def test_image_jobs_and_result_files_are_isolated_by_operator(client, identities):
@@ -649,6 +1001,56 @@ def test_image_jobs_and_result_files_are_isolated_by_operator(client, identities
     assert teacher_jobs.status_code == 200, teacher_jobs.text
     teacher_ids = {row["id"] for row in teacher_jobs.json()["items"]}
     assert {own_id, foreign_id} <= teacher_ids
+
+
+def test_transform_preview_hides_another_members_automation_result(client, identities):
+    db = SessionLocal()
+    try:
+        account = Account(
+            name="transform ownership fixture",
+            app_key=f"transform-{uuid.uuid4().hex[:10]}",
+            app_secret_enc="", owner_operator_id=identities["second_id"],
+            shops="[]", is_default=False,
+        )
+        db.add(account)
+        db.flush()
+        detail_id = f"transform-{uuid.uuid4().hex[:8]}"
+        product = Product(
+            warehouse_key=f"{detail_id}:source-shop",
+            account_id=account.id, detail_id=detail_id, shop_id="source-shop",
+            title="private automation title", payload={"title": "private automation title"},
+            automation_result=True,
+        )
+        db.add(product)
+        db.flush()
+        run = AutomationRun(
+            id=f"transform-{uuid.uuid4().hex[:12]}",
+            owner_operator_id=identities["second_id"],
+            account_id=account.id, shop_id="source-shop", settings={},
+        )
+        db.add(run)
+        db.flush()
+        db.add(AutomationRunItem(
+            run_id=run.id, key=detail_id, detail_id=detail_id,
+            source_shop_id="source-shop", product_id=product.id,
+        ))
+        db.commit()
+        product_id = str(product.id)
+    finally:
+        db.close()
+
+    hidden = client.post(
+        API + "/warehouse/transform", json={"ids": [product_id]},
+        headers=_headers(identities["first_token"]),
+    )
+    assert hidden.status_code == 403, hidden.text
+
+    teacher_preview = client.post(
+        API + "/warehouse/transform", json={"ids": [product_id]},
+        headers=_headers(identities["teacher_token"]),
+    )
+    assert teacher_preview.status_code == 200, teacher_preview.text
+    assert teacher_preview.json()["items"][0]["title"] == "private automation title"
 
 
 def test_member_cannot_reuse_another_operators_image_translation(client, identities,

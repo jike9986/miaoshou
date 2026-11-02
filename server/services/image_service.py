@@ -77,28 +77,41 @@ def budget_limit(db: Session) -> int:
     return value if value > 0 else IMAGE_BUDGET_MILLIYUAN
 
 
-def reserved_total(db: Session) -> int:
-    total = db.query(func.coalesce(func.sum(ImageJob.reserved_milliyuan), 0)).scalar()
+def reserved_total(db: Session, *, operator_id: int | None = None) -> int:
+    query = db.query(func.coalesce(func.sum(ImageJob.reserved_milliyuan), 0))
+    if operator_id is not None:
+        query = query.filter(ImageJob.operator_id == operator_id)
+    total = query.scalar()
     return int(total or 0)
 
 
-def usage(db: Session) -> dict[str, Any]:
+def usage(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
+    """Return image usage, optionally scoped to one operator.
+
+    Operational quota checks omit ``operator_id`` and remain installation-wide.
+    The account-facing usage endpoint passes the signed-in member's id so that
+    activity and reserved-cost totals do not disclose other members' work.
+    """
     now = time.time()
     limits = rate_limits(db)
     used: dict[str, int] = {}
     for name, window in WINDOWS.items():
-        used[name] = (db.query(ImageJob)
-                      .filter(ImageJob.created_at >= now - window).count())
+        query = db.query(ImageJob).filter(ImageJob.created_at >= now - window)
+        if operator_id is not None:
+            query = query.filter(ImageJob.operator_id == operator_id)
+        used[name] = query.count()
     next_slot = 0.0
     for name, window in WINDOWS.items():
         if used[name] >= limits[name]:
-            oldest = (db.query(ImageJob.created_at)
-                      .filter(ImageJob.created_at >= now - window)
-                      .order_by(ImageJob.created_at.asc())
+            query = db.query(ImageJob.created_at).filter(
+                ImageJob.created_at >= now - window)
+            if operator_id is not None:
+                query = query.filter(ImageJob.operator_id == operator_id)
+            oldest = (query.order_by(ImageJob.created_at.asc())
                       .offset(max(0, used[name] - limits[name])).first())
             if oldest and oldest[0]:
                 next_slot = max(next_slot, float(oldest[0]) + window - now)
-    reserved = reserved_total(db)
+    reserved = reserved_total(db, operator_id=operator_id)
     limit = budget_limit(db)
     return {
         "usedToday": used["day"],
@@ -500,7 +513,7 @@ def list_jobs(db: Session, *, batch_id: str | None = None, product_id: Any = Non
         "pageSize": page_size,
         "total": total,
         "hasMore": page * page_size < total,
-        "budget": usage(db)["budget"],
+        "budget": usage(db, operator_id=operator_id)["budget"],
     }
 
 

@@ -1,12 +1,13 @@
 """认证路由：连接 / 状态 / 断开 / 账号管理。"""
 from __future__ import annotations
 
-import secrets
-import time
+import logging
 from typing import Any
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, BackgroundTasks, Header, Request
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import func, text
+from sqlalchemy.exc import IntegrityError
 
 from api.deps import (
     AdminDep,
@@ -31,15 +32,19 @@ from core.constants import (
     SUPPORTED_LANGUAGES,
 )
 from models.operator import Operator
-from models.password_reset_token import PasswordResetToken
 from schemas.requests import ConnectRequest
-from services import account_service, audit_service, operator_service, setting_service
+from services import (
+    account_service,
+    audit_service,
+    email_code_service,
+    email_service,
+    operator_service,
+    setting_service,
+)
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 login_router = APIRouter(prefix="/auth", tags=["认证"])
-
-PASSWORD_RESET_TTL_SECONDS = 15 * 60
-
+logger = logging.getLogger(__name__)
 
 class LoginRequest(BaseModel):
     # `username` is the original client field. `identifier` is the current UI
@@ -68,6 +73,15 @@ class RegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=8, max_length=128)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class EmailCodeRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class EmailCodeConfirmRequest(EmailCodeRequest):
+    code: str = Field(pattern=r"^\d{6}$")
 
 
 class ChangePasswordRequest(BaseModel):
@@ -80,7 +94,8 @@ class PasswordResetRequest(BaseModel):
 
 
 class PasswordResetConfirmRequest(BaseModel):
-    token: str = Field(min_length=16, max_length=256)
+    email: str = Field(min_length=3, max_length=254)
+    code: str = Field(pattern=r"^\d{6}$")
     newPassword: str = Field(min_length=8, max_length=128)
 
 
@@ -114,83 +129,217 @@ def login(payload: LoginRequest, request: Request, db: DbSession) -> dict[str, A
     db.commit()
     return {"operator": {"id": str(operator.id),
                           "name": operator_service.serialize(operator)["name"],
-                          "role": operator_service.role_of(operator)},
+                          "role": (operator_service.ROLE_ADMIN
+                                   if operator_service.is_superadmin(db, operator)
+                                   else operator_service.role_of(operator))},
             "token": token, "mustChangePassword": operator.must_change_password}
 
 
 @login_router.post("/register", status_code=201)
-def register(payload: RegisterRequest, request: Request,
-             db: DbSession) -> dict[str, Any]:
+def register(payload: RegisterRequest, db: DbSession) -> dict[str, Any]:
     """Public email registration creates a least-privileged student account."""
-    from core.errors import RATE_LIMITED, AppError
-    from services import login_rate_limit_service
+    email = operator_service.normalize_deliverable_email(payload.email)
+    invalid_code = errors.AppError(
+        "AUTH_FAILED", "邮箱验证码无效或已过期", status=400)
+    if not email_code_service.consume(
+            db, purpose=email_code_service.PURPOSE_REGISTRATION,
+            email=email, code=payload.code):
+        db.commit()  # Persist invalid-code attempts and the five-attempt cap.
+        raise invalid_code
 
-    email = operator_service.normalize_email(payload.email)
-    ip = request.client.host if request.client else "unknown"
-    bucket = f"registration:{email}"
-    retry_after = login_rate_limit_service.blocked_retry_after(ip, bucket)
-    if retry_after:
-        raise AppError(RATE_LIMITED, "注册请求过于频繁，请稍后重试", status=429,
-                       details={"retryAfterSeconds": retry_after})
-    # Limit repeated sign-ups from one source as well as attempts against one address.
-    login_rate_limit_service.record_failure(ip, bucket)
-    operator, token = operator_service.register_email_account(
-        db, payload.name, email, payload.password)
-    db.commit()
+    # Consume a valid code before checking mailbox ownership so a duplicate
+    # registration has the same public response as an invalid code.
+    if (db.query(Operator.id)
+            .filter(func.lower(func.trim(Operator.email)) == email)
+            .first() is not None):
+        db.commit()
+        raise invalid_code
+
+    try:
+        operator, token = operator_service.register_email_account(
+            db, payload.name, email, payload.password)
+        db.commit()
+    except errors.AppError as exc:
+        if exc.code != "CONFLICT":
+            raise
+        # A concurrent registration can win after the ownership check. The
+        # service may have rolled the transaction back, so consume again; if
+        # the original mark is still pending this is a harmless no-op.
+        email_code_service.consume(
+            db, purpose=email_code_service.PURPOSE_REGISTRATION,
+            email=email, code=payload.code)
+        db.commit()
+        raise invalid_code from None
+    except IntegrityError:
+        db.rollback()
+        # Treat a unique-email race like the ordinary duplicate path. Do not
+        # hide unrelated integrity failures such as a display-name collision.
+        if (db.query(Operator.id)
+                .filter(func.lower(func.trim(Operator.email)) == email)
+                .first() is None):
+            raise
+        email_code_service.consume(
+            db, purpose=email_code_service.PURPOSE_REGISTRATION,
+            email=email, code=payload.code)
+        db.commit()
+        raise invalid_code from None
     return {"operator": {"id": str(operator.id),
                           "name": operator_service.serialize(operator)["name"],
-                          "role": operator_service.role_of(operator)},
+                          "role": operator_service.role_of(operator),
+                          "emailVerified": operator_service.serialize(operator)["emailVerified"]},
             "token": token, "mustChangePassword": False}
+
+
+@login_router.post("/registration-code/request", status_code=202)
+def request_registration_code(payload: EmailCodeRequest, request: Request,
+                              db: DbSession) -> dict[str, bool]:
+    email = operator_service.normalize_deliverable_email(payload.email)
+    ip = request.client.host if request.client else "unknown"
+    email_code_service.enforce_send_limit(
+        ip, email_code_service.PURPOSE_REGISTRATION, email)
+    code = email_code_service.issue(
+        db, purpose=email_code_service.PURPOSE_REGISTRATION, email=email)
+    try:
+        email_service.send_verification_code(
+            recipient=email, display_name="", code=code,
+            purpose=email_code_service.PURPOSE_REGISTRATION,
+            expires_minutes=email_code_service.CODE_TTL_SECONDS // 60,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"ok": True}
+
+
+@router.post("/email-verification/request", status_code=202)
+def request_email_verification(payload: EmailCodeRequest, request: Request,
+                               db: DbSession,
+                               operator: OperatorDep,
+                               background_tasks: BackgroundTasks) -> dict[str, bool]:
+    """Request a code to bind or verify the signed-in user's recovery mailbox."""
+    email = operator_service.normalize_deliverable_email(payload.email)
+    ip = request.client.host if request.client else "unknown"
+    email_code_service.enforce_send_limit(
+        ip, email_code_service.PURPOSE_EMAIL_VERIFICATION, email)
+
+    existing = (db.query(Operator.id)
+                .filter(func.lower(func.trim(Operator.email)) == email,
+                        Operator.id != operator.id)
+                .first())
+    if existing is not None:
+        # Keep the response indistinguishable without sending mail to another
+        # user's address or invalidating their own verification challenge.
+        return {"ok": True}
+
+    code = email_code_service.issue(
+        db, purpose=email_code_service.PURPOSE_EMAIL_VERIFICATION, email=email)
+    db.commit()
+    background_tasks.add_task(
+        _deliver_email_verification_code,
+        recipient=email,
+        display_name=operator.name,
+        code=code,
+    )
+    return {"ok": True}
+
+
+@router.post("/email-verification/confirm")
+def confirm_email_verification(payload: EmailCodeConfirmRequest,
+                               db: DbSession,
+                               operator: OperatorDep) -> dict[str, Any]:
+    email = operator_service.normalize_deliverable_email(payload.email)
+    if not email_code_service.consume(
+            db, purpose=email_code_service.PURPOSE_EMAIL_VERIFICATION,
+            email=email, code=payload.code):
+        db.commit()
+        raise errors.AppError("AUTH_FAILED", "邮箱验证码无效或已过期", status=400)
+
+    # Consume a correct code before checking ownership so that a mailbox already
+    # bound elsewhere is indistinguishable from an invalid/expired challenge.
+    if (db.query(Operator.id)
+            .filter(func.lower(func.trim(Operator.email)) == email,
+                    Operator.id != operator.id)
+            .first() is not None):
+        db.commit()
+        raise errors.AppError("AUTH_FAILED", "邮箱验证码无效或已过期", status=400)
+
+    operator.email = email
+    operator.email_verified = True
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise errors.AppError("AUTH_FAILED", "邮箱验证码无效或已过期", status=400) from None
+    return {"ok": True, "email": operator_service.mask_email(email),
+            "emailVerified": True}
+
+
+def _deliver_email_verification_code(*, recipient: str, display_name: str,
+                                     code: str) -> None:
+    """Deliver a verification code after the public response has completed."""
+    try:
+        email_service.send_verification_code(
+            recipient=recipient,
+            display_name=display_name,
+            code=code,
+            purpose=email_code_service.PURPOSE_EMAIL_VERIFICATION,
+            expires_minutes=email_code_service.CODE_TTL_SECONDS // 60,
+        )
+    except Exception as exc:  # pragma: no cover - exercised by background runner
+        logger.warning("email verification code delivery failed: %s",
+                       type(exc).__name__)
 
 
 @login_router.post("/password-reset/request", status_code=202)
 def request_password_reset(payload: PasswordResetRequest, request: Request,
-                           db: DbSession) -> dict[str, bool]:
+                           db: DbSession,
+                           background_tasks: BackgroundTasks) -> dict[str, bool]:
     """Send a short-lived recovery code without exposing account existence."""
-    from services import email_service, login_rate_limit_service
-
-    email = operator_service.normalize_email(payload.email)
+    email = operator_service.normalize_deliverable_email(payload.email)
     ip = request.client.host if request.client else "unknown"
-    bucket = f"password-reset:{email}"
-    retry_after = login_rate_limit_service.blocked_retry_after(ip, bucket)
-    if retry_after:
-        from core.errors import AppError
-        raise AppError("RATE_LIMITED", "请求过于频繁，请稍后重试", status=429,
-                       details={"retryAfterSeconds": retry_after})
-    # Count all requests, including successful deliveries, to prevent mailbox spam.
-    login_rate_limit_service.record_failure(ip, bucket)
+    email_code_service.enforce_send_limit(
+        ip, email_code_service.PURPOSE_PASSWORD_RESET, email)
 
     target = (db.query(Operator)
-              .filter(Operator.email == email, Operator.enabled.is_(True))
+              .filter(func.lower(func.trim(Operator.email)) == email,
+                      Operator.enabled.is_(True),
+                      Operator.email_verified.is_(True))
               .one_or_none())
-    if target is None:
-        return {"ok": True}
-    now = time.time()
-    db.query(PasswordResetToken).filter(
-        PasswordResetToken.operator_id == target.id,
-        PasswordResetToken.used_at.is_(None),
-    ).update({PasswordResetToken.used_at: now}, synchronize_session=False)
-    token = secrets.token_urlsafe(32)
-    db.add(PasswordResetToken(
-        operator_id=target.id,
-        token_hash=operator_service.hash_token(token),
-        created_at=now,
-        expires_at=now + PASSWORD_RESET_TTL_SECONDS,
-        requested_ip=ip[:64],
-    ))
-    db.flush()
-    try:
-        email_service.send_password_reset(
+    # Persist the replacement for both known and unknown addresses.  This keeps
+    # the request path the same length without revealing whether an account
+    # exists; only a known account gets a background delivery task.
+    code = email_code_service.issue(
+        db, purpose=email_code_service.PURPOSE_PASSWORD_RESET, email=email)
+    db.commit()
+    if target is not None:
+        background_tasks.add_task(
+            _deliver_password_reset_code,
             recipient=email,
             display_name=target.name,
-            token=token,
-            expires_minutes=PASSWORD_RESET_TTL_SECONDS // 60,
+            code=code,
         )
-    except Exception:
-        db.rollback()
-        raise
-    db.commit()
     return {"ok": True}
+
+
+def _deliver_password_reset_code(*, recipient: str, display_name: str,
+                                 code: str) -> None:
+    """Deliver recovery mail after the public request has completed.
+
+    Recovery requests deliberately do not expose SMTP failures or account
+    existence.  Log only the exception class so credentials, addresses and
+    server responses never enter application logs.
+    """
+    try:
+        email_service.send_verification_code(
+            recipient=recipient,
+            display_name=display_name,
+            code=code,
+            purpose=email_code_service.PURPOSE_PASSWORD_RESET,
+            expires_minutes=email_code_service.CODE_TTL_SECONDS // 60,
+        )
+    except Exception as exc:  # pragma: no cover - exercised by background runner
+        logger.warning("password reset code delivery failed: %s", type(exc).__name__)
 
 
 @login_router.post("/password-reset/confirm")
@@ -198,29 +347,22 @@ def confirm_password_reset(payload: PasswordResetConfirmRequest,
                            db: DbSession) -> dict[str, Any]:
     from core.errors import AppError
 
-    now = time.time()
-    token_hash = operator_service.hash_token(payload.token.strip())
-    reset = (db.query(PasswordResetToken)
-             .filter(PasswordResetToken.token_hash == token_hash,
-                     PasswordResetToken.used_at.is_(None),
-                     PasswordResetToken.expires_at > now)
-             .one_or_none())
-    if reset is None:
+    email = operator_service.normalize_deliverable_email(payload.email)
+    if not email_code_service.consume(
+            db, purpose=email_code_service.PURPOSE_PASSWORD_RESET,
+            email=email, code=payload.code):
+        db.commit()  # Persist invalid-code attempts and the five-attempt cap.
         raise AppError("AUTH_FAILED", "找回密码验证码无效或已过期", status=400)
     target = (db.query(Operator)
-              .filter(Operator.id == reset.operator_id,
-                      Operator.enabled.is_(True))
+              .filter(func.lower(func.trim(Operator.email)) == email,
+                      Operator.enabled.is_(True),
+                      Operator.email_verified.is_(True))
               .one_or_none())
     if target is None:
+        db.commit()
         raise AppError("AUTH_FAILED", "找回密码验证码无效或已过期", status=400)
     token = operator_service.set_password(
         db, target, payload.newPassword, must_change=False, rotate_token=True)
-    reset.used_at = now
-    db.query(PasswordResetToken).filter(
-        PasswordResetToken.operator_id == target.id,
-        PasswordResetToken.id != reset.id,
-        PasswordResetToken.used_at.is_(None),
-    ).update({PasswordResetToken.used_at: now}, synchronize_session=False)
     db.commit()
     return {
         "ok": True,
@@ -269,8 +411,23 @@ def initialize_credentials(
     if not _same_secret(supplied, get_settings().local_secret()):
         raise errors.AppError(errors.AUTH_REQUIRED,
                               "首次接管必须使用本机令牌", status=401)
+    settings = get_settings()
+    if settings.shared_mode:
+        raise errors.AppError(errors.FORBIDDEN,
+                              "共享服务不支持通过客户端初始化最高权限账号", status=403)
+
+    _acquire_credential_initialization_lock(db)
     builtin = operator_service.ensure_default(db)
-    if builtin.username is not None or builtin.password_hash is not None:
+    initialized_admin = (db.query(Operator.id)
+                         .filter(Operator.enabled.is_(True),
+                                 Operator.name != operator_service.DEFAULT_OPERATOR_NAME,
+                                 Operator.username.is_not(None),
+                                 Operator.password_hash.is_not(None),
+                                 Operator.role.in_((operator_service.ROLE_TEACHER,
+                                                    operator_service.ROLE_ADMIN)))
+                         .first())
+    if (builtin.username is not None or builtin.password_hash is not None
+            or initialized_admin is not None):
         from core.errors import AppError
         raise AppError("CONFLICT", "登录凭据已初始化", status=409,
                        details={"reason": "credentials_initialized"})
@@ -294,7 +451,7 @@ def initialize_credentials(
                               details={"reason": "credentials_initialized"})
 
     operator, token = operator_service.create(
-        db, payload.username, role=operator_service.ROLE_TEACHER)
+        db, payload.username, role=operator_service.ROLE_ADMIN)
     operator_service.set_password(
         db, operator, payload.password, must_change=False,
         username=username)
@@ -303,10 +460,22 @@ def initialize_credentials(
         "ok": True,
         "operator": {"id": str(operator.id),
                      "name": operator_service.serialize(operator)["name"],
-                     "role": operator_service.ROLE_TEACHER},
+                     "role": operator_service.ROLE_ADMIN},
         "token": token,
         "mustChangePassword": False,
     }
+
+
+def _acquire_credential_initialization_lock(db: Any) -> None:
+    """Serialize HTTP bootstrap against another concurrent bootstrap request."""
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"),
+                   {"key": 684_210_771})
+    elif dialect == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+    else:
+        raise RuntimeError(f"Unsupported database for credential initialization: {dialect}")
 
 
 @router.post("/connect", summary="连接妙手账号",

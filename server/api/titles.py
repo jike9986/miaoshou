@@ -63,12 +63,14 @@ class TitleSaveRequest(CamelModel):
 
 # --- 预览 -----------------------------------------------------------------
 @router.post("/preview", summary="标题清理预览（不写库、不调妙手）")
-def preview_titles(payload: TitlePreviewRequest, db: DbSession) -> dict[str, Any]:
+def preview_titles(payload: TitlePreviewRequest, db: DbSession,
+                   operator: OperatorDep) -> dict[str, Any]:
     """按违规词库算出清理后的标题；只读接口，不写库也不调上游。"""
     return title_service.preview(db, titles=payload.titles,
                                  warehouse_ids=payload.warehouse_ids,
                                  limit=payload.limit,
-                                 refresh_years=payload.refresh_years)
+                                 refresh_years=payload.refresh_years,
+                                 operator_id=operator.id)
 
 
 # --- 保存 -----------------------------------------------------------------

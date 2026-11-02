@@ -17,6 +17,7 @@
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { api, apiErrorMessage, isApiError } from "@/lib/api";
+import { useOperatorIdentity } from "@/lib/operator";
 import type { SizeChart, SizeChartsResponse } from "@/features/automation/types";
 
 export const sizeChartsKey = ["size-charts"] as const;
@@ -33,9 +34,14 @@ export interface SizeChartsListResponse extends SizeChartsResponse {
   defaultUrl: string;
 }
 
-export function useSizeCharts(enabled = true): UseQueryResult<SizeChartsListResponse> {
+export function useSizeCharts(
+  enabled = true,
+  operatorId?: string | null
+): UseQueryResult<SizeChartsListResponse> {
+  const identity = useOperatorIdentity();
+  const scopedOperatorId = operatorId === undefined ? identity?.id ?? null : operatorId;
   return useQuery({
-    queryKey: sizeChartsKey,
+    queryKey: [...sizeChartsKey, scopedOperatorId ?? "current"],
     queryFn: () => api.get<SizeChartsListResponse>("/size-charts"),
     enabled,
     staleTime: 30_000,

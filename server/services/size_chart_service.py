@@ -299,7 +299,7 @@ def _sites(db: Session) -> list[str]:
 
 
 # --- 读 -------------------------------------------------------------------
-def default_url(db: Session) -> str:
+def default_url(db: Session, operator_id: int | None = None) -> str:
     """项目默认尺码图地址：本地一条都没上传时也能直接用的那个 URL。
 
     老版 `SizeChartService.list()` 返回 `{"charts": [...], "defaultUrl": ...}`，
@@ -313,7 +313,7 @@ def default_url(db: Session) -> str:
 
     url = ""
     try:
-        defaults = setting_service.workflow_defaults(db)
+        defaults = setting_service.workflow_defaults(db, operator_id=operator_id)
         url = clean_text(defaults.get("sizeChartUrl"))
     except Exception:  # noqa: BLE001 - 设置读坏不该让整个尺码图库 500
         url = ""
@@ -543,7 +543,8 @@ def _pick_default(rows: list[Any]) -> Any:
     return rows[0] if rows else None
 
 
-def resolve_for_site(db: Session, site: Any = None) -> dict[str, Any]:
+def resolve_for_site(db: Session, site: Any = None,
+                     operator_id: int | None = None) -> dict[str, Any]:
     """该站点该用的尺寸表地址：本地库（站点 → 通用）> settings 默认 > 空。"""
     _ensure(db)
     wanted = _validate_site(site)
@@ -559,7 +560,7 @@ def resolve_for_site(db: Session, site: Any = None) -> dict[str, Any]:
             "chartId": str(chart.id),
             "source": "local",
         }
-    fallback = default_url(db)
+    fallback = default_url(db, operator_id=operator_id)
     if fallback:
         return {"site": wanted, "url": fallback, "name": "", "chartId": None,
                 "source": "settings"}

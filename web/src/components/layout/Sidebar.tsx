@@ -2,7 +2,8 @@
 // 导航项高 36px，px-2.5 rounded-md gap-2.5 text-[13px] font-medium，图标 18px；
 // 当前项 bg-surface text-brand-700 shadow-1 + 左侧 2px 品牌色指示条；分组标题 11/16 500 letter-spacing .04em。
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { NavLink } from "react-router-dom";
 import {
   CalendarClock,
@@ -13,6 +14,8 @@ import {
   Play,
   ShieldBan,
   ChevronRight,
+  LogOut,
+  Settings,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -358,6 +361,7 @@ export interface SidebarProps {
   brand?: { icon?: ReactNode; name?: string };
   account?: SidebarAccount | null;
   onAccountClick?: () => void;
+  onAccountLogout?: () => void;
   collapseTogglePosition?: "top" | "bottom";
   /** 移动端抽屉内使用时关闭折叠按钮 */
   showCollapseToggle?: boolean;
@@ -373,13 +377,44 @@ export function Sidebar({
   brand,
   account,
   onAccountClick,
+  onAccountLogout,
   collapseTogglePosition = "bottom",
   showCollapseToggle = true,
   className,
   onNavigate,
 }: SidebarProps) {
   const [internalCollapsed, setInternalCollapsed] = useState(defaultCollapsed);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [accountMenuPosition, setAccountMenuPosition] = useState<{ left: number; bottom: number } | null>(null);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+  const accountButtonRef = useRef<HTMLButtonElement>(null);
   const collapsed = collapsedProp ?? internalCollapsed;
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const rect = accountButtonRef.current?.getBoundingClientRect();
+    if (rect) {
+      setAccountMenuPosition({
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - 232)),
+        bottom: Math.max(8, window.innerHeight - rect.top + 8),
+      });
+    }
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target as Node;
+      if (!accountMenuRef.current?.contains(target) && !accountButtonRef.current?.contains(target)) {
+        setAccountMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setAccountMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [accountMenuOpen]);
 
   const toggle = (): void => {
     const next = !collapsed;
@@ -460,28 +495,16 @@ export function Sidebar({
         )}
 
         {account && (
-          <button
-            type="button"
-            onClick={onAccountClick}
-            aria-label="打开账号与设置"
-            title={`当前账号：${account.name}`}
-            className={cn(
-              "flex h-16 w-full items-center border-t border-border bg-sidebar px-3 text-left",
-              "transition-colors duration-fast hover:bg-surface-hover",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32",
-              collapsed ? "justify-center px-0" : "gap-2.5"
-            )}
-          >
-            <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-100 text-[12px] font-semibold text-brand-800 ring-2 ring-brand-50">
-              {account.avatarUrl ? (
-                <img src={account.avatarUrl} alt="" className="size-full object-cover" loading="lazy" />
-              ) : (
-                (account.initial ?? Array.from(account.name)[0] ?? "妙")
-              )}
-            </span>
-            {!collapsed && (
-              <>
-                <span className="min-w-0 flex-1">
+          <div className="relative">
+            {accountMenuOpen && accountMenuPosition && createPortal(
+              <div
+                ref={accountMenuRef}
+                role="menu"
+                aria-label="账号菜单"
+                style={{ left: accountMenuPosition.left, bottom: accountMenuPosition.bottom, width: 224 }}
+                className="fixed z-[100] rounded-md border border-border bg-elevated p-1.5 shadow-2"
+              >
+                <div className="border-b border-border-subtle px-2.5 py-2">
                   <span className="block text-[11px] leading-4 text-fg-muted">当前账号</span>
                   <span className="block truncate text-[13px] font-semibold leading-5 text-fg">
                     {account.name}
@@ -491,11 +514,76 @@ export function Sidebar({
                       {account.detail}
                     </span>
                   )}
-                </span>
-                <ChevronRight aria-hidden className="size-4 shrink-0 text-fg-muted" strokeWidth={1.8} />
-              </>
+                </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    onAccountClick?.();
+                  }}
+                  className="flex h-9 w-full items-center gap-2 rounded-sm px-2.5 text-left text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
+                >
+                  <Settings aria-hidden className="size-4 text-fg-muted" />
+                  账号与设置
+                </button>
+                {onAccountLogout && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountMenuOpen(false);
+                      onAccountLogout();
+                    }}
+                    className="flex h-9 w-full items-center gap-2 rounded-sm px-2.5 text-left text-[13px] text-danger-700 transition-colors hover:bg-danger-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger-600/32"
+                  >
+                    <LogOut aria-hidden className="size-4" />
+                    退出登录
+                  </button>
+                )}
+              </div>,
+              document.body
             )}
-          </button>
+            <button
+              ref={accountButtonRef}
+              type="button"
+              onClick={() => setAccountMenuOpen((open) => !open)}
+              aria-label={`当前账号：${account.name}，打开账号菜单`}
+              aria-expanded={accountMenuOpen}
+              aria-haspopup="menu"
+              title={`当前账号：${account.name}`}
+              className={cn(
+                "flex h-16 w-full items-center border-t border-border bg-sidebar px-3 text-left",
+                "transition-colors duration-fast hover:bg-surface-hover",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32",
+                collapsed ? "justify-center px-0" : "gap-2.5"
+              )}
+            >
+              <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-100 text-[12px] font-semibold text-brand-800 ring-2 ring-brand-50">
+                {account.avatarUrl ? (
+                  <img src={account.avatarUrl} alt="" className="size-full object-cover" loading="lazy" />
+                ) : (
+                  (account.initial ?? Array.from(account.name)[0] ?? "妙")
+                )}
+              </span>
+              {!collapsed && (
+                <>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[11px] leading-4 text-fg-muted">当前账号</span>
+                    <span className="block truncate text-[13px] font-semibold leading-5 text-fg">
+                      {account.name}
+                    </span>
+                    {account.detail && (
+                      <span className="block truncate text-[11px] leading-4 text-fg-muted">
+                        {account.detail}
+                      </span>
+                    )}
+                  </span>
+                  <ChevronRight aria-hidden className="size-4 shrink-0 text-fg-muted" strokeWidth={1.8} />
+                </>
+              )}
+            </button>
+          </div>
         )}
       </div>
     </aside>

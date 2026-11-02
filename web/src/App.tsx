@@ -28,7 +28,9 @@ import { WordsPage } from "@/features/words/WordsPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { useAuthStatus, useVersion } from "@/lib/queries";
 import { hasRuntimeToken } from "@/lib/bootstrap";
-import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
+import { clearOperator, operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
+import { clearOperatorQueryClients } from "@/lib/operatorQueryClientRegistry.mjs";
+import { resetOperatorSessionUiState } from "@/features/stores";
 import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 
 /* ------------------------------------------------------------------ *
@@ -101,6 +103,13 @@ function Shell() {
     ? "老师"
     : operatorIdentity ? "学员" : "未登录";
 
+  const logout = (): void => {
+    clearOperatorQueryClients();
+    resetOperatorSessionUiState();
+    clearOperator();
+    navigate("/login", { replace: true });
+  };
+
   return (
     <>
       <TokenNotice />
@@ -112,6 +121,7 @@ function Shell() {
           detail: `${roleLabel} · 妙手${connected ? "已连接" : "未连接"}`,
         } : null}
         onAccountClick={SHOW_ACCOUNT_UI ? () => navigate("/settings") : undefined}
+        onAccountLogout={SHOW_ACCOUNT_UI ? logout : undefined}
         // 标题栏不再放账号/店铺切换：账号和店铺已经挪到「开始处理」旁边，
         // 这里再放一份就是两套重复控件，只会占掉标题栏高度。
         // 也不传 routeMeta：标题栏中部不显示「功能 / 板块名」面包屑。

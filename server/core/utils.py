@@ -13,6 +13,23 @@ from urllib.parse import urlsplit
 
 _ID_SAFE = re.compile(r"[^0-9A-Za-z_.:-]")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_EMAIL_LOCAL = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+")
+_EMAIL_DOMAIN_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
+
+
+def is_valid_email_address(value: str) -> bool:
+    """Validate exactly one plain mailbox; reject header and recipient-list syntax."""
+    if not value or len(value) > 254 or value.count("@") != 1:
+        return False
+    local, domain = value.rsplit("@", 1)
+    if (not local or len(local) > 64 or not domain or len(domain) > 253
+            or local.startswith(".") or local.endswith(".") or ".." in local
+            or not _EMAIL_LOCAL.fullmatch(local)):
+        return False
+    labels = domain.split(".")
+    return (len(labels) >= 2
+            and all(len(label) <= 63 and _EMAIL_DOMAIN_LABEL.fullmatch(label)
+                    for label in labels))
 
 
 # --- 时间 -----------------------------------------------------------------

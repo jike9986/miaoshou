@@ -271,7 +271,8 @@ def price_preview_wrong_method() -> None:
 
 
 @router.post("/price-preview", summary="按模板试算售价（不发布、不写库、不调上游）")
-def price_preview(payload: PricePreviewRequest, db: DbSession) -> dict[str, Any]:
+def price_preview(payload: PricePreviewRequest, db: DbSession,
+                  operator: OperatorDep) -> dict[str, Any]:
     if not payload.items:
         raise errors.validation("请至少选择一件要试算的商品", field="items")
     if len(payload.items) > PRICE_PREVIEW_MAX_ITEMS:
@@ -293,7 +294,8 @@ def price_preview(payload: PricePreviewRequest, db: DbSession) -> dict[str, Any]
     entries: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     for index, item in enumerate(payload.items):
-        entry, warning = _preview_one(db, index, item, template, rate)
+        entry, warning = _preview_one(
+            db, index, item, template, rate, operator_id=operator.id)
         if entry is not None:
             entries.append(entry)
         if warning is not None:
@@ -515,6 +517,10 @@ def transform(payload: TransformRequest, db: DbSession,
             warnings.append({"index": index, "id": ident, "code": exc.code,
                              "message": exc.message})
             continue
+        # Preview is read-only, but its response still contains another
+        # student's title and transformation report. Enforce the same product
+        # visibility rule used by detail and price preview before reading it.
+        warehouse_service._assert_member_product_access(db, product, operator.id)
         current = product.payload if isinstance(product.payload, dict) else {}
         if not current:
             warnings.append({"index": index, "id": ident, "code": "EMPTY_PAYLOAD",
@@ -605,6 +611,7 @@ def batch_delete(payload: BatchDeleteRequest, db: DbSession,
 
 @router.post("/pre-save-gate", summary="入仓前闸门检查（只读：不写库、不改妙手）")
 def pre_save_gate(payload: PreSaveGateRequest, db: DbSession,
+                  operator: OperatorDep,
                   credentials: CredentialsHeader = None) -> dict[str, Any]:
     """问一次「这件现在能不能入仓」，回答标题 review 词和主图 OCR 两道闸。
 
@@ -620,7 +627,8 @@ def pre_save_gate(payload: PreSaveGateRequest, db: DbSession,
 
     info, identity = gate_service.load_info(
         db, warehouse_id=payload.warehouseId,
-        detail_id=payload.detailId, shop_id=payload.shopId)
+        detail_id=payload.detailId, shop_id=payload.shopId,
+        operator_id=operator.id)
     result = gate_service.pre_save_gate(
         db, info,
         allow_title_review=payload.allowTitleReview is True,
@@ -681,6 +689,7 @@ def confirm_save(payload: ConfirmSaveRequest, db: DbSession,
                 allow_title_review=payload.allowTitleReview is True,
                 allow_image_review=payload.allowImageReview is True,
                 skip_image_review=payload.skipImageReview is True,
+                operator_id=getattr(operator, "id", None),
             )
             actual = str((preview.get("payloadReview") or {}).get("payloadHash") or "")
             if actual != expected:
@@ -783,7 +792,8 @@ def _preview_warning(index: int, item: PricePreviewItem, code: str, message: str
 
 
 def _preview_one(db: Session, index: int, item: PricePreviewItem,
-                 template: Mapping[str, Any], rate: Any
+                 template: Mapping[str, Any], rate: Any, *,
+                 operator_id: int | None = None
                  ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """算一件；成功返回 (条目, None)，失败返回 (None, warning)。"""
     ident = _preview_ident(item)
@@ -797,6 +807,9 @@ def _preview_one(db: Session, index: int, item: PricePreviewItem,
         if exc.code != errors.NOT_FOUND:
             raise
         return None, _preview_warning(index, item, "NOT_FOUND", exc.message)
+    # A price preview returns title, detailId, SKU prices and weight. Apply the
+    # same ownership gate as warehouse detail before reading the product payload.
+    warehouse_service._assert_member_product_access(db, product, operator_id)
     payload = product.payload if isinstance(product.payload, dict) else {}
     if not payload:
         return None, _preview_warning(

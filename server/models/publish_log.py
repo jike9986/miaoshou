@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.utils import now_ts
@@ -52,7 +52,19 @@ class PublishLog(Base):
     operator_id: Mapped[int | None] = mapped_column(Integer)
 
     __table_args__ = (
-        UniqueConstraint("account_id", "detail_id", "shop_id", name="uq_publish_logs_request"),
+        # A shared Miaoshou account may be used by several software users. Keep
+        # each user's retry/idempotency ledger independent while retaining one
+        # row for unowned legacy and scheduled records.
+        Index("uq_publish_logs_request_owner",
+              "account_id", "detail_id", "shop_id", "operator_id",
+              unique=True,
+              sqlite_where=text("operator_id IS NOT NULL"),
+              postgresql_where=text("operator_id IS NOT NULL")),
+        Index("uq_publish_logs_request_unowned",
+              "account_id", "detail_id", "shop_id",
+              unique=True,
+              sqlite_where=text("operator_id IS NULL"),
+              postgresql_where=text("operator_id IS NULL")),
         Index("ix_publish_logs_time", "requested_at"),
         Index("ix_publish_logs_status", "status"),
         Index("ix_publish_logs_batch", "batch_id"),

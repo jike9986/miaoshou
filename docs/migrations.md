@@ -107,6 +107,35 @@ locale 是 GBK，ini 里写中文注释会在启动前就抛 `UnicodeDecodeError
 | `20261030_0912` | 持久化采集箱自动化任务和逐商品结果 |
 | `20261030_0913` | 增加独立商品质量核验依据 |
 | `20261030_0914` | 将妙手草稿读回核验绑定到商品版本 |
+| `20261030_0915` | 记录违规词来源和站点规则 |
+| `20261030_0916` | 妙手 App ID 唯一约束 |
+| `20261030_0917` | 持久化登录与验证码请求限流 |
+| `20261102_1000` | 增加账号找回邮箱和密码重置令牌 |
+| `20261102_1001` | 支持多个软件用户绑定同一妙手账号 |
+| `20261102_1002` | 增加邮箱验证码和规范化邮箱唯一约束 |
+| `20261102_1003` | 按软件用户隔离定时任务和历史 |
+| `20261102_1004` | 发布台账幂等键按软件用户隔离，保留无归属历史行 |
+| `20261103_1005` | 跟踪账号找回邮箱是否通过验证码验证 |
+| `20261103_1006` | 禁止重复的旧妙手账号归属在移除显式绑定后重新获得回退访问 |
+
+迁移 `20261102_1001` 的降级只允许当所有绑定都能由旧版 `accounts.owner_operator_id` 完整表示时执行；
+多人共享关系无法表示时会拒绝降级并保留绑定表。`20261102_1003` 的降级会删除定时任务与历史的操作员归属，
+`20261102_1000` 会删除找回邮箱和密码重置令牌，`20261103_1005` 会删除邮箱验证状态，
+降级前应确认这些数据不再需要。`20261102_1004` 在同一商品/店铺已有多位用户发布记录时会拒绝降级，
+避免把用户隔离数据强行合并回旧的全局唯一约束。`20261103_1006` 在仍有被标记的重复旧归属时会拒绝降级，
+避免旧版本重新按含歧义的 `owner_operator_id` 授权；应先核对并处置这些账号归属，再决定是否回退。
+
+### 发布台账的学员隔离
+
+共享妙手账号下，不同软件用户的发布日志、重试和重复发布拦截按
+`operator_id` 区分。迁移删除旧的 `(account_id, detail_id, shop_id)` 全局唯一
+约束，改成两条部分唯一索引：有归属记录按操作员唯一；无归属（历史/系统任务）
+记录仍按原三列唯一。历史日志原样保留，迁移不会猜测旧记录属于哪个学员；
+学员只读自己的日志，老师仍可查看全局记录。
+
+服务器 PostgreSQL 通过 `20261102_1004` 显式迁移。桌面 SQLite 不运行 Alembic，
+启动时会在一个事务中重建旧 `publish_logs` 表、复制所有已知列和行，再建立相同
+部分索引；如检测到未知列会停止升级而保留原表，避免静默丢数据。
 
 ### 基线（`20261028_2020_f6add52fca2e_baseline_existing_13_tables.py`）
 
@@ -138,11 +167,11 @@ CI 在 SQLite 临时库验证完整迁移链的 upgrade/downgrade：
 
 | 项 | create_all | 迁移链 |
 | --- | --- | --- |
-| 表 | 18 | 18 |
-| SQLite 索引（含自动索引） | 51 | 51 |
-| 外键 | 20 | 20 |
+| 表 | 22 | 22 |
+| SQLite 索引（含自动索引） | 67 | 67 |
+| 外键 | 23 | 23 |
 
-CI 的迁移检查另行统计出 33 个显式索引和 18 个 SQLite 自动唯一/主键索引。
+CI 的迁移检查另行统计出 46 个显式索引和 21 个 SQLite 自动唯一/主键索引。
 
 复核命令：
 
@@ -153,9 +182,9 @@ cd server && python migrations/_verify_baseline.py
 输出：
 
 ```
-表数量：create_all=18 / 迁移=18
-索引数量：create_all=51 / 迁移=51
-外键数量：create_all=20 / 迁移=20
+表数量：create_all=22 / 迁移=22
+索引数量：create_all=67 / 迁移=67
+外键数量：create_all=23 / 迁移=23
 [结论] 当前 SQLite 临时库模型与迁移链等价；不代表 PostgreSQL 在线验收通过
 ```
 
@@ -164,10 +193,11 @@ cd server && python migrations/_verify_baseline.py
 两份库分别建在各自的临时目录、各自的子进程里 —— `db/session.py` 的 engine
 是模块级单例，同进程换环境变量不会生效。
 
-当前 18 张表：
-`accounts` `audit_logs` `automation_run_items` `automation_runs` `batch_items` `batches`
-`categories` `groups` `image_jobs` `operators` `product_claims` `products` `publish_logs`
-`schedule_logs` `schedules` `settings` `shops` `violation_words`。
+当前 22 张表：
+`account_bindings` `accounts` `audit_logs` `automation_run_items` `automation_runs`
+`batch_items` `batches` `categories` `email_verification_codes` `groups` `image_jobs`
+`login_rate_limits` `operators` `password_reset_tokens` `product_claims` `products`
+`publish_logs` `schedule_logs` `schedules` `settings` `shops` `violation_words`。
 
 PostgreSQL 可配置连接并在启动时检查 schema revision。受控 SQLite 导入工具已实现，但尚无真实
 PostgreSQL 服务上的 CRUD、迁移或导入验收；PostgreSQL 备份/恢复演练也尚未实现。不要仅通过设置
@@ -213,9 +243,9 @@ cd server && python scripts/db.py stamp head --real
 `scripts/db.py check` 的第 [4] 步完整验证了这条路径：
 
 ```
-[4a] 老库 create_all：exit=0 业务表=18
+[4a] 老库 create_all：exit=0 业务表=22
 [4b] 老库直接 upgrade head：exit=1（预期非 0：表已存在）
-[4c] 老库 stamp head：exit=0，之后 upgrade head：exit=0，版本表=[('20261030_0914',)]
+[4c] 老库 stamp head：exit=0，之后 upgrade head：exit=0，版本表=[('20261103_1006',)]
 ```
 
 ## 加一列的完整流程

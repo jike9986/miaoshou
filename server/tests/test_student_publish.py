@@ -7,14 +7,20 @@ import pytest
 from core import errors
 from db.session import SessionLocal, init_db
 from models.account import Account
+from models.account_binding import AccountBinding
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.image_job import ImageJob
 from models.operator import Operator
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
-from services import (account_service, operator_service, publish_service,
-                      setting_service, warehouse_service)
+from services import (
+    account_service,
+    operator_service,
+    publish_service,
+    setting_service,
+    warehouse_service,
+)
 from services.price_template import DEFAULT_TEMPLATE
 
 
@@ -87,11 +93,73 @@ def _publish_payload(product: Product, account: Account, **overrides):
     }
 
 
+def test_shared_miaoshou_account_claim_state_is_per_member(publish_db):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    first, _ = _identity(db, f"shared-claim-first-{suffix}")
+    second, _ = _identity(db, f"shared-claim-second-{suffix}")
+    teacher, _ = _identity(db, f"shared-claim-teacher-{suffix}",
+                            role=operator_service.ROLE_TEACHER)
+
+    shared_account = Account(
+        name=f"shared-claim-account-{suffix}", owner_operator_id=first.id,
+        shops="[]", is_default=False,
+    )
+    db.add(shared_account)
+    db.flush()
+    db.add_all([
+        AccountBinding(account_id=shared_account.id, operator_id=first.id),
+        AccountBinding(account_id=shared_account.id, operator_id=second.id),
+    ])
+    product = _product(db, f"shared-claim-product-{suffix}", shared_account)
+    product.collected = {
+        f"account:{shared_account.id}": {
+            "at": 1_800_000_000, "detailId": product.detail_id,
+        },
+    }
+    db.flush()
+    warehouse_service.claim_product(db, product.id, first.id)
+    db.flush()
+    product_id = str(product.id)
+    account_id = str(shared_account.id)
+
+    first_list = warehouse_service.list_products(
+        db, operator_id=first.id, claim_account_id=account_id,
+        claimed=True, status="claimed")
+    second_claimed = warehouse_service.list_products(
+        db, operator_id=second.id, claim_account_id=account_id, claimed=True)
+    second_unclaimed = warehouse_service.list_products(
+        db, operator_id=second.id, claim_account_id=account_id,
+        claimed=False, status="ready")
+
+    assert product_id in {row["id"] for row in first_list["items"]}
+    assert first_list["stats"]["totalClaimed"] == 1
+    assert product_id not in {row["id"] for row in second_claimed["items"]}
+    assert second_claimed["stats"]["totalClaimed"] == 0
+    second_item = next(row for row in second_unclaimed["items"]
+                       if row["id"] == product_id)
+    assert second_item["claimed"] is False
+    assert second_item["status"] == "ready"
+    assert product_id in {row["id"] for row in second_unclaimed["items"]}
+
+    # Teachers retain the existing account-level collected view and filters.
+    teacher_list = warehouse_service.list_products(
+        db, operator_id=teacher.id, claim_account_id=account_id,
+        claimed=True, status="claimed", account_id=account_id)
+    teacher_item = next(row for row in teacher_list["items"]
+                        if row["id"] == product_id)
+    assert teacher_item["claimed"] is True
+    assert teacher_item["status"] == "ready"
+    assert teacher_list["stats"]["totalClaimed"] == 1
+
+
 def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db, monkeypatch):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]
-    operator = Operator(name=operator_service.CLIENT_OPERATOR_NAME, token=f"test-{suffix}",
-                        role=operator_service.ROLE_MEMBER, enabled=True, is_admin=False)
+    # Shared client tokens are transport credentials only; use an explicit
+    # teacher identity for this service-level carrier bookkeeping test.
+    operator = Operator(name=f"carrier-teacher-{suffix}", token=f"test-{suffix}",
+                        role=operator_service.ROLE_TEACHER, enabled=True, is_admin=False)
     db.add(operator)
     db.flush()
     _, first_account = _identity(db, suffix + "a")
@@ -127,7 +195,7 @@ def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db
     result = publish_service.publish(db, {"confirm": True, "claimOnly": True, "shopId": "123",
                                           "items": [{"warehouseId": str(p.id)}
                                                     for p in (first, second, third)]},
-                                     operator_id=operator.id)
+                                     _log_operator_id=operator.id)
     assert result["claimedWarehouseIds"] == [str(first.id), str(third.id)]
     key = f"account:{first_account.id}"
     assert first.collected[key]["detailId"] == "91"
@@ -286,6 +354,48 @@ def test_member_can_publish_claimed_product_with_template_without_mutating_share
     assert log.operator_id == operator.id
 
 
+def test_shared_account_publish_ledgers_and_duplicate_guards_are_owner_scoped(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    first, account = _identity(db, suffix)
+    second, _ = _identity(db, f"second-{suffix}")
+    product = _product(db, suffix, account)
+    db.add_all([
+        ProductClaim(product_id=product.id, owner_operator_id=first.id),
+        ProductClaim(product_id=product.id, owner_operator_id=second.id),
+    ])
+    db.flush()
+    _stub_member_publish(monkeypatch, db, account)
+
+    publish_service.publish(db, _publish_payload(product, account),
+                            operator_id=first.id)
+    publish_service.publish(db, _publish_payload(product, account),
+                            operator_id=second.id)
+
+    rows = db.query(PublishLog).filter(
+        PublishLog.account_id == account.id,
+        PublishLog.product_id == product.id,
+    ).all()
+    assert {row.operator_id for row in rows} == {first.id, second.id}
+    assert publish_service.list_logs(db, account_id=account.id,
+                                     operator_id=first.id)["total"] == 1
+    assert publish_service.list_logs(db, account_id=account.id,
+                                     operator_id=second.id)["total"] == 1
+
+    # The publish response is asynchronous and leaves each ledger row in
+    # processing until the upstream reconciliation confirms success. Duplicate
+    # publish protection applies only after that confirmation.
+    for row in rows:
+        row.status = "success"
+    db.flush()
+
+    with pytest.raises(errors.AppError) as duplicate:
+        publish_service.publish(db, _publish_payload(product, account),
+                                operator_id=first.id)
+    assert duplicate.value.code == "ALREADY_PUBLISHED"
+
+
 def test_automation_result_cannot_publish_before_run_item_is_started(publish_db, monkeypatch):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]
@@ -404,6 +514,24 @@ def test_member_cannot_publish_unclaimed_foreign_or_direct_detail_item(
 
     with pytest.raises(errors.AppError) as exc:
         publish_service.publish(db, payload, operator_id=operator.id)
+    assert exc.value.status == 403
+
+
+def test_member_cannot_use_direct_claim_only_publish_request(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    _stub_member_publish(monkeypatch, db, account)
+
+    with pytest.raises(errors.AppError) as exc:
+        publish_service.publish(
+            db,
+            {"confirm": True, "claimOnly": True, "accountId": str(account.id),
+             "shopId": "123", "items": [{"warehouseId": str(product.id)}]},
+            operator_id=operator.id,
+        )
+
     assert exc.value.status == 403
 
 

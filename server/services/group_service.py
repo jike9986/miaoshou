@@ -12,10 +12,10 @@ from models.group import Group
 from models.product import Product
 
 
-def _counts(db: Session) -> dict[int, int]:
+def _counts(db: Session, *, operator_id: int | None = None) -> dict[int, int]:
     from services import warehouse_service
 
-    return warehouse_service.group_counts(db)
+    return warehouse_service.group_counts(db, operator_id=operator_id)
 
 
 def serialize(row: Group, *, count: int = 0) -> dict[str, Any]:
@@ -30,8 +30,8 @@ def serialize(row: Group, *, count: int = 0) -> dict[str, Any]:
     }
 
 
-def list_groups(db: Session) -> dict[str, Any]:
-    counts = _counts(db)
+def list_groups(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
+    counts = _counts(db, operator_id=operator_id)
     rows = db.query(Group).order_by(Group.sort.asc(), Group.id.asc()).all()
     items = [serialize(row, count=counts.get(row.id, 0)) for row in rows]
     return {"groups": items, "items": items, "total": len(items)}

@@ -39,8 +39,6 @@ from models.automation_run import AutomationRun, AutomationRunItem
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
-
-logger = logging.getLogger("aohuang.publish")
 from services import (
     carrier_service,
     product_service,
@@ -57,6 +55,8 @@ from services.account_service import (
 )
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
+logger = logging.getLogger("aohuang.publish")
+
 PUBLISH_STATUSES = ("processing", "success", "fail", "cancel")
 
 # 「这件还在发布中」的时间窗（秒）。发布是异步的：本工具把商品提交给平台后
@@ -69,7 +69,7 @@ PUBLISH_PROCESSING_SECONDS = 600.0
 
 
 def _in_flight_blocker(db: Session, *, account: Account,
-                       keys: list[str]) -> None:
+                       keys: list[str], operator_id: int | None) -> None:
     """本地台账里还有 processing 的同一件商品就拒绝。
 
     锁只管得住同一进程；进程重启、或者有人另起一个实例时锁是空的，
@@ -81,8 +81,11 @@ def _in_flight_blocker(db: Session, *, account: Account,
     if not wanted:
         return
     cutoff = now_ts() - PUBLISH_PROCESSING_SECONDS
+    owner_filter = (PublishLog.operator_id.is_(None) if operator_id is None
+                    else PublishLog.operator_id == operator_id)
     rows = (db.query(PublishLog)
             .filter(PublishLog.account_id == account.id,
+                    owner_filter,
                     PublishLog.status == "processing",
                     PublishLog.requested_at >= cutoff)
             .all())
@@ -99,7 +102,8 @@ def _in_flight_blocker(db: Session, *, account: Account,
 
 def _already_published_blocker(db: Session, *, account: Account,
                                entries: list[dict[str, Any]],
-                               target_shop_id: str) -> None:
+                               target_shop_id: str,
+                               operator_id: int | None) -> None:
     """拒绝将同一成品重复发布到同一店铺；失败/取消和其他店铺仍可重试。"""
     product_ids = {
         entry["product"].id for entry in entries
@@ -109,8 +113,11 @@ def _already_published_blocker(db: Session, *, account: Account,
         product_key(entry["detailId"], target_shop_id)
         for entry in entries if not isinstance(entry.get("product"), Product)
     }
+    owner_filter = (PublishLog.operator_id.is_(None) if operator_id is None
+                    else PublishLog.operator_id == operator_id)
     query = (db.query(PublishLog)
              .filter(PublishLog.account_id == account.id,
+                     owner_filter,
                      PublishLog.shop_id == str(target_shop_id),
                      PublishLog.status == "success"))
     clauses = []
@@ -228,7 +235,8 @@ def list_logs(db: Session, *, page: int = 1, page_size: int = 20,
               shop_id: str | None = None, schedule_id: str | None = None,
               since: float | None = None,
               platform_total: int | None = None,
-              degraded: bool = False) -> dict[str, Any]:
+              degraded: bool = False,
+              operator_id: int | None = None) -> dict[str, Any]:
     if status is not None and status != "" and status not in PUBLISH_STATUSES:
         raise errors.validation("发布状态筛选无效", field="status", value=status)
     if page < 1:
@@ -248,6 +256,8 @@ def list_logs(db: Session, *, page: int = 1, page_size: int = 20,
         query = query.filter(PublishLog.schedule_id == str(schedule_id))
     if since is not None:
         query = query.filter(PublishLog.requested_at >= float(since))
+    if operator_id is not None:
+        query = query.filter(PublishLog.operator_id == operator_id)
     total = query.count()
     rows = (query.order_by(PublishLog.requested_at.desc(), PublishLog.id.desc())
             .offset((page - 1) * page_size).limit(page_size).all())
@@ -307,7 +317,8 @@ def _upsert_log(db: Session, *, account: Account, product: Product | None,
     stable_key = (str(warehouse_key or "").strip()
                   or (product.warehouse_key if product is not None else ""))
     row = _find_log(db, account_id=account.id, detail_id=str(detail_id),
-                    shop_id=str(shop_id), warehouse_key=stable_key)
+                    shop_id=str(shop_id), warehouse_key=stable_key,
+                    operator_id=operator_id)
     if row is None:
         row = PublishLog(account_id=account.id, detail_id=str(detail_id),
                          shop_id=str(shop_id), batch_id=batch_id,
@@ -334,8 +345,8 @@ def _upsert_log(db: Session, *, account: Account, product: Product | None,
     row.reason = ""
     row.finished_at = None
     row.schedule_id = schedule_id
-    # 「谁发的」：定时任务那条路没有操作员上下文，operator_id 为 None，
-    # 这一列就留空——不编一个「系统」假操作员，那样反而要维护一条假记录。
+    # 用户触发的发布记录真实操作人；后台定时任务没有请求上下文，但会传入
+    # 任务所有者用于学员隔离，不把后台执行伪装成一次手动操作。
     if operator_id is not None:
         row.operator_id = operator_id
     db.flush()
@@ -343,7 +354,7 @@ def _upsert_log(db: Session, *, account: Account, product: Product | None,
 
 
 def _find_log(db: Session, *, account_id: int, detail_id: str, shop_id: str,
-              warehouse_key: str) -> PublishLog | None:
+              warehouse_key: str, operator_id: int | None) -> PublishLog | None:
     """先按「明细 + 店铺」找，找不到再按「仓库键 + 店铺」找。
 
     载体模式会把商品重建成一个新 detailId，同一张仓库行因此先后用两个 id
@@ -354,8 +365,11 @@ def _find_log(db: Session, *, account_id: int, detail_id: str, shop_id: str,
     事、应该两行记录；只按仓库键命中会把 A 店铺那条改写成 B 店铺的，历史
     直接丢一次。命中多行时取最新一条，避免脏数据把发布流程打挂。
     """
+    owner_filter = (PublishLog.operator_id.is_(None) if operator_id is None
+                    else PublishLog.operator_id == operator_id)
     row = (db.query(PublishLog)
            .filter(PublishLog.account_id == account_id,
+                   owner_filter,
                    PublishLog.detail_id == detail_id,
                    PublishLog.shop_id == shop_id)
            .order_by(PublishLog.id.desc()).first())
@@ -366,6 +380,7 @@ def _find_log(db: Session, *, account_id: int, detail_id: str, shop_id: str,
         return None
     return (db.query(PublishLog)
             .filter(PublishLog.account_id == account_id,
+                    owner_filter,
                     PublishLog.warehouse_key == key,
                     PublishLog.shop_id == shop_id)
             .order_by(PublishLog.id.desc()).first())
@@ -553,7 +568,8 @@ def _find_template(db: Session, name: str | None) -> Mapping[str, Any] | None:
 
 
 def publish(db: Session, payload: Mapping[str, Any], *,
-            operator_id: int | None = None) -> dict[str, Any]:
+            operator_id: int | None = None,
+            _log_operator_id: int | None = None) -> dict[str, Any]:
     """POST /publish。发布不可撤销，所有守卫都在这里。
 
     学员发布必须由已认领的仓库商品触发，并始终走个人店铺载体流程。
@@ -587,16 +603,14 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     operator = operator_service.get(db, operator_id) if operator_id is not None else None
     member_publish = (operator is not None
                       and operator_service.role_of(operator) == operator_service.ROLE_MEMBER
-                      # 内置「客户端」身份不是培训学员：它代表「装了这个软件的人」，
-                      # 不该受「只能发布已认领商品」等学员规则限制（否则发给别人的
-                      # 客户端连认领都做不了）。负责人 2026-11-02 明确。
-                      and operator.name != operator_service.CLIENT_OPERATOR_NAME)
+                      )
     # 妙手账号是团队共享资源（负责人 2026-11-02 明确：一个账号可以多人绑定），
     # 因此不再按 owner_operator_id 拦「其他学员的账号」。
     # 台账返回里要显示「谁发的」，先取一次名字（一次查询，不逐行查）
+    log_operator_id = operator_id if operator_id is not None else _log_operator_id
     operator_name = ""
-    if operator_id is not None:
-        operator_name = warehouse_service.operator_names(db).get(int(operator_id), "")
+    if log_operator_id is not None:
+        operator_name = warehouse_service.operator_names(db).get(int(log_operator_id), "")
     entries = _resolve_items(db, items)
     _require_started_automation_publish(
         db, entries=entries, account=account, target_shop_id=target_shop_id)
@@ -693,15 +707,20 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     # 会话级锁：一直持到路由里 commit 之后。函数级的锁在这里同样会漏 ——
     # 台账行（processing）是在提交时才可见的，锁早放一秒，第二个人就查不到
     # 这行在途记录，然后对同一件商品再发一次。
+    # 同一个妙手账号可能绑定多个软件用户。锁和台账阻止重复发布时按软件
+    # 用户隔离，避免一个学员的操作锁住或覆盖另一个学员的记录。
+    scoped_publish_keys = [f"{log_operator_id or 0}:{key}" for key in publish_keys]
     hold_for_session(
-        db, publish_keys, blocking=False,
+        db, scoped_publish_keys, blocking=False,
         busy_message="这件正在发布中，请等上一轮结束")
     try:
-        _in_flight_blocker(db, account=account, keys=publish_keys)
+        _in_flight_blocker(db, account=account, keys=publish_keys,
+                           operator_id=log_operator_id)
         if not claim_only:
             _already_published_blocker(
                 db, account=account, entries=entries,
-                target_shop_id=str(target_shop_id))
+                target_shop_id=str(target_shop_id),
+                operator_id=log_operator_id)
         if claim_only:
             # 认领的本质：把「服务器里存着的商品」分发一份到目标账号/店铺的采集箱。
             # 仓库是本地权威数据源（标题/图片/SKU/价格/重量都在 payload 里），
@@ -849,7 +868,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                               warehouse_key=(
                                   product_key(entry["originDetailId"], target_shop_id)
                                   if entry.get("originDetailId") else None),
-                              operator_id=operator_id)
+                              operator_id=log_operator_id)
             logged.append(row)
         db.flush()
         if published and not claim_only and not member_publish:

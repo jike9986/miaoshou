@@ -15,6 +15,42 @@ import type {
  * 会话级：当前店铺（顶部店铺下拉，跨页面共享）
  * ================================================================== */
 
+const CURRENT_SHOP_STORAGE_KEY = "aohuang.session.current-shop.v1";
+const OPERATOR_ID_STORAGE_KEY = "aohuang.operator.id";
+
+function currentShopStorageKey(): string | null {
+  let operatorId: string | null = null;
+  try {
+    operatorId = typeof window === "undefined"
+      ? null
+      : window.localStorage.getItem(OPERATOR_ID_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  return operatorId ? `${CURRENT_SHOP_STORAGE_KEY}.${encodeURIComponent(operatorId)}` : null;
+}
+
+function readCurrentOperatorShop(): string | null {
+  const key = currentShopStorageKey();
+  if (!key || typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function persistCurrentOperatorShop(shopId: string | null): void {
+  const key = currentShopStorageKey();
+  if (!key || typeof window === "undefined") return;
+  try {
+    if (shopId) window.localStorage.setItem(key, shopId);
+    else window.localStorage.removeItem(key);
+  } catch {
+    // 店铺选择写入失败不应阻断当前页面操作。
+  }
+}
+
 export interface SessionState {
   /** 顶部下拉选中的店铺 id；null 表示未选 */
   currentShopId: string | null;
@@ -22,8 +58,11 @@ export interface SessionState {
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
-  currentShopId: null,
-  setCurrentShopId: (shopId) => set({ currentShopId: shopId }),
+  currentShopId: readCurrentOperatorShop(),
+  setCurrentShopId: (shopId) => {
+    persistCurrentOperatorShop(shopId);
+    set({ currentShopId: shopId });
+  },
 }));
 
 /* ================================================================== *
@@ -153,6 +192,32 @@ export const useWordsStore = create<WordsState>((set) => ({
   setWords: (words) => set({ selectedWords: words }),
   clearWords: () => set({ selectedWords: [] }),
 }));
+
+/** Clear selections and shop context that must not carry across software users. */
+export function resetOperatorSessionUiState(): void {
+  useSessionStore.setState({ currentShopId: readCurrentOperatorShop() });
+  useWarehouseStore.setState({
+    page: 1,
+    pageSize: 20,
+    sort: "savedDesc",
+    searchDraft: "",
+    q: "",
+    claimed: null,
+    status: null,
+    qualityStatus: null,
+    category: { kind: "all" },
+    selected: [],
+  });
+  useWordsStore.setState({
+    page: 1,
+    pageSize: 100,
+    category: null,
+    searchDraft: "",
+    q: "",
+    selectedWords: [],
+  });
+  usePublishLogsStore.setState({ page: 1, pageSize: 20, status: null });
+}
 
 /* ================================================================== *
  * 发布记录

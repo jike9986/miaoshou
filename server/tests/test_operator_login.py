@@ -5,11 +5,18 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from core import errors
 from core.config import get_settings
 from db.session import SessionLocal, init_db
 from main import app
+from models.email_verification_code import EmailVerificationCode
 from models.login_rate_limit import LoginRateLimit
-from services import login_rate_limit_service, operator_service
+from services import (
+    email_code_service,
+    email_service,
+    login_rate_limit_service,
+    operator_service,
+)
 
 API = "/api/v1"
 
@@ -110,17 +117,30 @@ def test_teacher_creates_student_and_student_changes_password(client, tokens):
                              "password": "new-pass-456"}).json()["mustChangePassword"] is False
 
 
-def test_email_registration_and_email_login_keep_username_compatibility(client):
+def test_email_registration_and_email_login_keep_username_compatibility(
+        client, monkeypatch):
     suffix = uuid.uuid4().hex[:8]
     email = f"Signup-{suffix}@Example.com"
+    sent: dict[str, str] = {}
+
+    def fake_send(**kwargs):
+        sent.update({key: str(value) for key, value in kwargs.items()})
+
+    monkeypatch.setattr(email_service, "send_verification_code", fake_send)
+    code_response = client.post(API + "/auth/registration-code/request", json={
+        "email": f"  {email}  ",
+    })
+    assert code_response.status_code == 202, code_response.text
     registered = client.post(API + "/auth/register", json={
         "name": f"Email Student {suffix}",
         "email": f"  {email}  ",
         "password": "signup-pass-456",
+        "code": sent["code"],
     })
     assert registered.status_code == 201, registered.text
     body = registered.json()
     assert body["operator"]["role"] == operator_service.ROLE_MEMBER
+    assert body["operator"]["emailVerified"] is True
     assert body["mustChangePassword"] is False
     assert body["token"]
 
@@ -132,12 +152,94 @@ def test_email_registration_and_email_login_keep_username_compatibility(client):
         assert login.status_code == 200, login.text
         assert login.json()["operator"]["id"] == body["operator"]["id"]
 
+    duplicate_code = client.post(API + "/auth/registration-code/request", json={
+        "email": email.lower(),
+    })
+    assert duplicate_code.status_code == 202, duplicate_code.text
     duplicate = client.post(API + "/auth/register", json={
         "name": f"Duplicate {suffix}",
         "email": email.lower(),
         "password": "another-pass-456",
+        "code": sent["code"],
     })
-    assert duplicate.status_code == 409, duplicate.text
+    invalid_code = "000000" if sent["code"] != "000000" else "000001"
+    invalid = client.post(API + "/auth/register", json={
+        "name": f"Invalid Code {suffix}",
+        "email": email.lower(),
+        "password": "another-pass-456",
+        "code": invalid_code,
+    })
+    assert duplicate.status_code == invalid.status_code == 400
+    assert {key: value for key, value in duplicate.json()["error"].items()
+            if key != "requestId"} == {
+        key: value for key, value in invalid.json()["error"].items()
+        if key != "requestId"
+    }
+
+    # A correct code rejected for a duplicate mailbox is still consumed.
+    with SessionLocal() as db:
+        stored = (db.query(EmailVerificationCode)
+                  .filter_by(purpose=email_code_service.PURPOSE_REGISTRATION,
+                             email=email.lower())
+                  .order_by(EmailVerificationCode.id.desc())
+                  .first())
+        assert stored is not None and stored.used_at is not None
+    replay = client.post(API + "/auth/register", json={
+        "name": f"Duplicate Replay {suffix}",
+        "email": email.lower(),
+        "password": "another-pass-456",
+        "code": sent["code"],
+    })
+    assert replay.status_code == duplicate.status_code
+    assert {key: value for key, value in replay.json()["error"].items()
+            if key != "requestId"} == {
+        key: value for key, value in duplicate.json()["error"].items()
+        if key != "requestId"
+    }
+
+
+def test_registration_email_uniqueness_race_is_generic_and_consumes_code(
+        client, monkeypatch):
+    suffix = uuid.uuid4().hex[:8]
+    email = f"race-{suffix}@example.com"
+    sent: dict[str, str] = {}
+    monkeypatch.setattr(email_service, "send_verification_code",
+                        lambda **kwargs: sent.update(kwargs))
+    requested = client.post(API + "/auth/registration-code/request", json={
+        "email": email,
+    })
+    assert requested.status_code == 202, requested.text
+
+    def concurrent_registration_wins(db, name, requested_email, password):
+        # Simulate another request committing after the route's ownership check.
+        db.rollback()
+        suffix = uuid.uuid4().hex[:8]
+        operator_service.create_student(
+            db, f"Race Winner {suffix}", f"race-winner-{suffix}",
+            "winner-pass-456", email=requested_email)
+        db.commit()
+        raise errors.AppError("CONFLICT", "该邮箱已注册", status=409)
+
+    monkeypatch.setattr(operator_service, "register_email_account",
+                        concurrent_registration_wins)
+    payload = {"name": f"Race Loser {suffix}", "email": email,
+               "password": "loser-pass-456", "code": sent["code"]}
+    raced = client.post(API + "/auth/register", json=payload)
+    invalid_code = "000000" if sent["code"] != "000000" else "000001"
+    invalid = client.post(API + "/auth/register", json={**payload, "code": invalid_code})
+    assert raced.status_code == invalid.status_code == 400
+    assert {key: value for key, value in raced.json()["error"].items()
+            if key != "requestId"} == {
+        key: value for key, value in invalid.json()["error"].items()
+        if key != "requestId"
+    }
+    with SessionLocal() as db:
+        stored = (db.query(EmailVerificationCode)
+                  .filter_by(purpose=email_code_service.PURPOSE_REGISTRATION,
+                             email=email)
+                  .order_by(EmailVerificationCode.id.desc())
+                  .first())
+        assert stored is not None and stored.used_at is not None
 
 
 def test_login_accepts_email_in_legacy_username_field(client):
@@ -160,6 +262,49 @@ def test_login_accepts_email_in_legacy_username_field(client):
     })
     assert login.status_code == 200, login.text
     assert login.json()["operator"]["id"] == operator_id
+
+
+def test_password_authentication_uses_dummy_hash_for_unknown_and_disabled_accounts(
+        monkeypatch):
+    suffix = uuid.uuid4().hex[:8]
+    username = f"timing-{suffix}"
+    password = "timing-pass-456"
+    db = SessionLocal()
+    seen_hashes: list[str | None] = []
+    verify = operator_service.verify_password
+
+    def tracked_verify(candidate: str, encoded: str | None) -> bool:
+        seen_hashes.append(encoded)
+        return verify(candidate, encoded)
+
+    monkeypatch.setattr(operator_service, "verify_password", tracked_verify)
+    try:
+        row = operator_service.create_student(
+            db, f"Timing {suffix}", username, password)
+        db.commit()
+        saved_hash = row.password_hash
+
+        assert operator_service.authenticate_password(
+            db, f"unknown-{suffix}", password) is None
+        row.enabled = False
+        db.commit()
+        assert operator_service.authenticate_password(db, username, password) is None
+        row.enabled = True
+        db.commit()
+        assert operator_service.authenticate_password(
+            db, username, "incorrect-pass-456") is None
+        authenticated = operator_service.authenticate_password(db, username, password)
+
+        assert authenticated is not None
+        assert authenticated[0].id == row.id
+        assert seen_hashes == [
+            operator_service.DUMMY_PASSWORD_HASH,
+            operator_service.DUMMY_PASSWORD_HASH,
+            saved_hash,
+            saved_hash,
+        ]
+    finally:
+        db.close()
 
 
 def test_reset_only_targets_students_and_revokes_old_token(client, tokens):
@@ -187,6 +332,36 @@ def test_reset_only_targets_students_and_revokes_old_token(client, tokens):
                                "password": "reset-pass-456"})
     assert latest.status_code == 200, latest.text
     assert latest.json()["mustChangePassword"] is True
+
+
+def test_teacher_password_reset_cannot_replace_student_recovery_email(client, tokens):
+    suffix = uuid.uuid4().hex[:8]
+    original_email = f"student-{suffix}@example.com"
+    replacement_email = f"replacement-{suffix}@example.com"
+    created = client.post(
+        API + "/operators/students",
+        json={"name": f"Student {suffix}", "username": f"student-{suffix}",
+              "password": "initial-pass-123", "email": original_email},
+        headers=auth(tokens, "admin"),
+    )
+    assert created.status_code == 201, created.text
+    ident = created.json()["operator"]["id"]
+    with SessionLocal() as db:
+        student = operator_service.get(db, ident)
+        student.email_verified = True
+        db.commit()
+
+    reset = client.post(
+        API + f"/operators/{ident}/reset-password",
+        json={"password": "reset-pass-456", "email": replacement_email},
+        headers=auth(tokens, "teacher"),
+    )
+    assert reset.status_code == 400, reset.text
+
+    with SessionLocal() as db:
+        student = operator_service.get(db, ident)
+        assert student.email == original_email
+        assert student.email_verified is True
 
 
 def test_login_failure_is_uniform_and_roles_cannot_manage_teachers(client, tokens):
@@ -235,13 +410,13 @@ def test_legacy_token_can_initialize_password_login(client, tokens):
         assert builtin.role == operator_service.ROLE_MEMBER
     finally:
         db.close()
-    teacher_headers = {"Authorization": f"Bearer {initialized.json()['token']}"}
-    assert client.get(API + "/operators", headers=teacher_headers).status_code == 200
-    assert client.get(API + "/warehouse", headers=teacher_headers).status_code == 200
+    admin_headers = {"Authorization": f"Bearer {initialized.json()['token']}"}
+    assert client.get(API + "/operators", headers=admin_headers).status_code == 200
+    assert client.get(API + "/warehouse", headers=admin_headers).status_code == 200
     login = client.post(API + "/auth/login",
                         json={"username": "LEGACY-ADMIN", "password": "legacy-pass-456"})
     assert login.status_code == 200, login.text
-    assert login.json()["operator"]["role"] == "teacher"
+    assert login.json()["operator"]["role"] == operator_service.ROLE_ADMIN
     assert login.json()["operator"]["name"] == "legacy-admin"
     login_headers = {"Authorization": f"Bearer {login.json()['token']}"}
     assert client.get(API + "/operators", headers=login_headers).json()[
@@ -263,8 +438,11 @@ def test_legacy_credential_initialization_is_one_time(client):
     suffix = uuid.uuid4().hex[:8]
     db = SessionLocal()
     try:
-        _legacy, legacy_token = operator_service.create(
+        legacy, _legacy_token = operator_service.create(
             db, f"Legacy admin {suffix}", role=operator_service.ROLE_ADMIN)
+        operator_service.set_password(
+            db, legacy, "existing-admin-pass-456", must_change=False,
+            username=f"legacy-admin-{suffix}")
         operator_service.create_student(
             db, f"Student {suffix}", f"taken-{suffix}", "student-pass-456")
         db.commit()
@@ -278,6 +456,26 @@ def test_legacy_credential_initialization_is_one_time(client):
     )
     assert response.status_code == 409, response.text
     assert response.json()["error"]["details"]["reason"] == "credentials_initialized"
+
+
+def test_credential_initialization_is_disabled_in_shared_mode(client, monkeypatch):
+    from types import SimpleNamespace
+
+    import api.auth as auth_module
+
+    local_secret = get_settings().local_secret()
+    monkeypatch.setattr(
+        auth_module, "get_settings",
+        lambda: SimpleNamespace(shared_mode=True, local_secret=lambda: local_secret),
+    )
+    response = client.post(
+        API + "/auth/initialize-credentials",
+        json={"username": f"shared-init-{uuid.uuid4().hex[:8]}",
+              "password": "initialize-pass-456"},
+        headers={"Authorization": f"Bearer {local_secret}"},
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "FORBIDDEN"
 
 
 def test_role_change_keeps_existing_operator_token_valid(client, tokens):

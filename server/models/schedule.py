@@ -23,6 +23,9 @@ class Schedule(Base):
     account_id: Mapped[int | None] = mapped_column(
         ForeignKey("accounts.id", ondelete="CASCADE")
     )
+    # Task ownership is independent from the shared Miaoshou account. Existing
+    # rows stay NULL and are visible to teachers/admins only.
+    owner_operator_id: Mapped[int | None] = mapped_column(Integer)
     shop_id: Mapped[str] = mapped_column(String(32), default="")
     template_name: Mapped[str] = mapped_column(String(64), default="")
     # daily / weekly / monthly / range
@@ -47,4 +50,7 @@ class Schedule(Base):
     created_at: Mapped[float] = mapped_column(Float, default=now_ts)
     updated_at: Mapped[float] = mapped_column(Float, default=now_ts, onupdate=now_ts)
 
-    __table_args__ = (Index("ix_schedules_due", "next_due_at", "enabled"),)
+    __table_args__ = (
+        Index("ix_schedules_due", "next_due_at", "enabled"),
+        Index("ix_schedules_owner_created", "owner_operator_id", "created_at"),
+    )

@@ -9,6 +9,7 @@ import { BrowserRouter, HashRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "@/App";
 import { bootstrapRuntime } from "@/lib/bootstrap";
+import { OperatorQueryCacheBoundary } from "@/lib/OperatorQueryCacheBoundary";
 import "@/styles/tokens.css";
 import "@/styles/tokens-additions.css";
 import "@/styles/animations.css";
@@ -72,11 +73,13 @@ void bootstrapRuntime().finally(() => {
   root.render(
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
-        {/* Electron 用 file:// 加载，没有服务端路由；桌面端必须走 hash 路由，
-            浏览器开发/预览仍用 BrowserRouter 以保留干净的 URL。 */}
-        <Router>
-          <App />
-        </Router>
+        <OperatorQueryCacheBoundary>
+          {/* Electron 用 file:// 加载，没有服务端路由；桌面端必须走 hash 路由，
+              浏览器开发/预览仍用 BrowserRouter 以保留干净的 URL。 */}
+          <Router>
+            <App />
+          </Router>
+        </OperatorQueryCacheBoundary>
       </QueryClientProvider>
     </React.StrictMode>
   );

@@ -87,6 +87,13 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
 
 const SETTINGS_STORAGE_KEY = "aohuang.automation.settings.v1";
 
+/** 软件账号各自保存处理参数，避免共用这台电脑时复用其他人的店铺与规则。 */
+function settingsStorageKey(operatorId: string | null): string {
+  return operatorId
+    ? `${SETTINGS_STORAGE_KEY}.${encodeURIComponent(operatorId)}`
+    : SETTINGS_STORAGE_KEY;
+}
+
 /** 只允许这些键落盘：将来加字段不会把旧存档里的脏值带进来 */
 const PERSISTED_KEYS: Array<keyof AutomationSettings> = [
   "language",
@@ -111,9 +118,9 @@ const PERSISTED_KEYS: Array<keyof AutomationSettings> = [
  * 读回上次的设置。任何异常都退回默认值 —— 存档坏了不该让页面起不来。
  * 类型逐项对齐 DEFAULT_SETTINGS 的同名字段，避免存档里的字符串污染数字字段。
  */
-export function loadSettings(): AutomationSettings {
+export function loadSettings(operatorId: string | null = null): AutomationSettings {
   try {
-    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(settingsStorageKey(operatorId));
     if (!raw) return DEFAULT_SETTINGS;
     const saved = JSON.parse(raw) as Record<string, unknown>;
     const merged: AutomationSettings = { ...DEFAULT_SETTINGS };
@@ -150,11 +157,11 @@ export function loadSettings(): AutomationSettings {
 }
 
 /** 落盘。写不进去（隐私模式 / 磁盘满）只警告，不影响当前这次处理。 */
-export function saveSettings(settings: AutomationSettings): void {
+export function saveSettings(settings: AutomationSettings, operatorId: string | null = null): void {
   try {
     const body: Record<string, unknown> = {};
     for (const key of PERSISTED_KEYS) body[key] = settings[key];
-    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(body));
+    window.localStorage.setItem(settingsStorageKey(operatorId), JSON.stringify(body));
   } catch {
     // 存档失败不阻断操作：设置丢了是小事，处理跑不起来才是大事
   }

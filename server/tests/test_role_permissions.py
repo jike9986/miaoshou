@@ -65,6 +65,7 @@ def test_schedule_is_available_to_shared_client_and_members():
 @pytest.mark.parametrize("path", [
     "/warehouse", "/words", "/groups", "/size-charts",
     "/publish/settings", "/images/usage", "/auth/status",
+    "/schedules",
 ])
 def test_member_can_read_business_pages(client, tokens, path):
     response = client.get(API + path, headers=auth(tokens, "member"))
@@ -156,7 +157,6 @@ def test_word_rule_provenance_is_bound_over_http_and_in_list(client, tokens):
     ("POST", "/sync/source-links"),
     ("POST", "/batch"),
     ("POST", "/carrier/links"),
-    ("POST", "/publish/logs/refresh"),
 ])
 def test_member_cannot_write_business_data(client, tokens, method, path):
     response = client.request(method, API + path, json={}, headers=auth(tokens, "member"))
@@ -182,6 +182,28 @@ def test_member_cannot_write_business_data(client, tokens, method, path):
 ])
 def test_member_cannot_manage_system_or_identities(client, tokens, method, path):
     response = client.request(method, API + path, json={}, headers=auth(tokens, "member"))
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.parametrize("path", [
+    "/system/logs/tail",
+    "/system/maintenance/backfill",
+    "/system/maintenance/prune",
+])
+@pytest.mark.parametrize("role", ["teacher", "admin"])
+def test_teacher_and_admin_can_read_global_system_diagnostics(client, tokens,
+                                                              path, role):
+    response = client.get(API + path, headers=auth(tokens, role))
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("path", [
+    "/system/logs/tail",
+    "/system/maintenance/backfill",
+    "/system/maintenance/prune",
+])
+def test_member_cannot_read_global_system_diagnostics(client, tokens, path):
+    response = client.get(API + path, headers=auth(tokens, "member"))
     assert response.status_code == 403, response.text
 
 
@@ -241,11 +263,64 @@ def test_member_dynamic_write_branches_are_closed(client, tokens):
     assert sync.status_code == 403, sync.text
     for path in (
         "/categories?refresh=true",
-        "/publish/logs?refresh=true",
         "/images/jobs/not-a-job?refresh=true",
     ):
         response = client.get(API + path, headers=headers)
         assert response.status_code == 403, response.text
+
+
+def test_member_can_refresh_own_publish_receipts(client, tokens):
+    """Publishing a claimed item and refreshing its receipt use one member gate."""
+    for method, path in (("GET", "/publish/logs?refresh=true"),
+                         ("POST", "/publish/logs/refresh")):
+        response = client.request(method, API + path, json={} if method == "POST" else None,
+                                  headers=auth(tokens, "member"))
+        # With no connected account this may be a business/connection error, but
+        # the member must get past the permission dependency.
+        assert response.status_code != 403, response.text
+
+
+def test_member_schedule_routes_remain_available(client, tokens):
+    headers = auth(tokens, "member")
+    listed = client.get(API + "/schedules", headers=headers)
+    assert listed.status_code == 200, listed.text
+    created = client.post(API + "/schedules", json={}, headers=headers)
+    # The empty request is rejected by input validation, proving the member
+    # passed the schedule permission gate without creating a task.
+    assert created.status_code == 400, created.text
+
+
+def test_teacher_cannot_manage_superadmin_credentials(client, tokens):
+    db = SessionLocal()
+    try:
+        superadmin = operator_service.resolve(db, tokens["admin"])
+        assert superadmin is not None
+        target_id = str(superadmin.id)
+    finally:
+        db.close()
+
+    headers = auth(tokens, "teacher")
+    for method, path, body in (
+        ("POST", f"/operators/{target_id}/disable", None),
+        ("POST", f"/operators/{target_id}/enable", None),
+        ("POST", f"/operators/{target_id}/rotate", None),
+        ("PATCH", f"/operators/{target_id}", {"enabled": False}),
+        ("PATCH", f"/operators/{target_id}", {"name": "should-not-change"}),
+    ):
+        response = client.request(method, API + path, json=body, headers=headers)
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["details"]["reason"] == "superadmin_target"
+
+
+def test_create_operator_rejects_unknown_role(client, tokens):
+    response = client.post(
+        API + "/operators",
+        json={"name": f"invalid-role-{uuid.uuid4().hex[:8]}", "role": "not-a-role"},
+        headers=auth(tokens, "admin"),
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["details"]["field"] == "role"
 
 
 def test_display_name_is_not_a_login_token_but_remains_a_declaration(client, tokens):
@@ -277,7 +352,7 @@ def test_admin_can_read_audit_and_change_shared_settings(client, tokens):
     assert settings.status_code == 200, settings.text
 
 
-def test_teacher_has_same_global_management_permissions_as_legacy_admin(client, tokens):
+def test_teacher_has_global_management_but_cannot_grant_teacher_role(client, tokens):
     headers = auth(tokens, "teacher")
     audit = client.get(API + "/audit-logs", headers=headers)
     assert audit.status_code == 200, audit.text
@@ -291,11 +366,73 @@ def test_teacher_has_same_global_management_permissions_as_legacy_admin(client, 
     operator_id = created.json()["operator"]["id"]
     changed = client.patch(API + f"/operators/{operator_id}",
                            json={"role": "teacher"}, headers=headers)
-    assert changed.status_code == 200, changed.text
-    assert changed.json()["operator"]["role"] == "teacher"
+    assert changed.status_code == 403, changed.text
+    assert changed.json()["error"]["code"] == "FORBIDDEN"
     disabled = client.post(API + f"/operators/{operator_id}/disable", headers=headers)
     assert disabled.status_code == 200, disabled.text
     assert disabled.json()["operator"]["enabled"] is False
+
+
+def test_operator_cannot_disable_self_using_zero_padded_id(client, tokens):
+    headers = auth(tokens, "teacher")
+    current = client.get(API + "/operators", headers=headers)
+    assert current.status_code == 200, current.text
+    operator_id = int(current.json()["current"]["id"])
+
+    disabled = client.post(
+        API + f"/operators/{operator_id:06d}/disable", headers=headers)
+    assert disabled.status_code == 403, disabled.text
+    assert disabled.json()["error"]["details"]["reason"] == "self"
+
+
+def test_admin_can_grant_and_revoke_teacher_role(client, tokens):
+    headers = auth(tokens, "admin")
+    name = f"admin-managed-{uuid.uuid4().hex[:8]}"
+    created = client.post(API + "/operators", json={"name": name, "role": "member"},
+                          headers=headers)
+    assert created.status_code == 201, created.text
+    operator_id = created.json()["operator"]["id"]
+
+    promoted = client.patch(API + f"/operators/{operator_id}",
+                            json={"role": "teacher"}, headers=headers)
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json()["operator"]["role"] == "teacher"
+
+    demoted = client.patch(API + f"/operators/{operator_id}",
+                           json={"role": "member"}, headers=headers)
+    assert demoted.status_code == 200, demoted.text
+    assert demoted.json()["operator"]["role"] == "member"
+
+
+def test_superadmin_cannot_demote_self_but_another_superadmin_can_manage_them(client, tokens):
+    db = SessionLocal()
+    try:
+        target, target_token = operator_service.create(
+            db, f"self-demote-admin-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_ADMIN)
+        target_id = str(target.id)
+        _other_superadmin, other_token = operator_service.create(
+            db, f"second-admin-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_ADMIN)
+        db.commit()
+    finally:
+        db.close()
+
+    self_change = client.patch(
+        API + f"/operators/{target_id}",
+        json={"role": operator_service.ROLE_TEACHER},
+        headers={"Authorization": f"Bearer {target_token}"},
+    )
+    assert self_change.status_code == 403, self_change.text
+    assert self_change.json()["error"]["details"]["reason"] == "superadmin_self_demotion"
+
+    other_change = client.patch(
+        API + f"/operators/{target_id}",
+        json={"role": operator_service.ROLE_TEACHER},
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert other_change.status_code == 200, other_change.text
+    assert other_change.json()["operator"]["role"] == operator_service.ROLE_TEACHER
 
 
 def test_explicit_teacher_role_overrides_legacy_admin_flag(client, tokens):
@@ -741,6 +878,9 @@ READ_ONLY_POSTS = {
 }
 # 同一路由按 body 区分预览与写入，由上面的真实 HTTP 用例覆盖写分支。
 DYNAMIC_WRITE_ROUTES = {
+    # Members can change only their own processing preferences on this mixed-scope
+    # route; the handler separately guards global read-only/publish switches.
+    ("POST", API + "/system/settings"),
     ("POST", "/api/v1/warehouse/transform"),
     ("POST", "/api/v1/sync/price-templates"),
     # Binding is available to a member only for their own operator owner id.
@@ -749,14 +889,25 @@ DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/operators/students"),
     ("POST", "/api/v1/operators/{operator_id}/reset-password"),
     ("POST", "/api/v1/auth/change-password"),
+    # Recovery mailbox requests mutate only the authenticated operator's own
+    # email, and require the signed-in OperatorDep at the handler.
+    ("POST", "/api/v1/auth/email-verification/request"),
+    ("POST", "/api/v1/auth/email-verification/confirm"),
     ("POST", "/api/v1/auth/initialize-credentials"),
     # 找回密码需要在未登录状态下使用；接口自身有令牌、过期和频率限制。
     ("POST", "/api/v1/auth/password-reset/request"),
     ("POST", "/api/v1/auth/password-reset/confirm"),
+    # Email registration is intentionally public; the code request has its
+    # own IP/mailbox throttles and does not mutate an authenticated account.
+    ("POST", "/api/v1/auth/register"),
+    ("POST", "/api/v1/auth/registration-code/request"),
     # Member claim creation is an intentional owner-scoped write.
     ("POST", "/api/v1/warehouse/{ident}/claim"),
     # Member publishing is allowed only after publish_service verifies every claim.
     ("POST", "/api/v1/publish"),
+    # Receipt refresh is allowed for claimed-product publishers and is scoped
+    # to the requesting member's own publish rows in the handler.
+    ("POST", "/api/v1/publish/logs/refresh"),
     ("POST", "/api/v1/claim-jobs"),
     # 登录是唯一公开的写入路由，认证失败统一返回 401。
     ("POST", "/api/v1/auth/login"),

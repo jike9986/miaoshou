@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from core import errors
 from core.config import get_settings
-from core.utils import clean_text, now_ts
+from core.utils import clean_text, is_valid_email_address, now_ts
 from models.operator import Operator
 
 logger = logging.getLogger(__name__)
@@ -40,10 +40,16 @@ TOUCH_INTERVAL_SECONDS = 60.0
 # 显示名长度上限，与 models/operator.py 的 String(64) 对齐
 NAME_MAX_LENGTH = 64
 USERNAME_MAX_LENGTH = 64
-EMAIL_MAX_LENGTH = 254
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 128
 TOKEN_HASH_PREFIX = "sha256:"
+# A fixed, valid scrypt hash keeps missing/disabled-account logins on the same
+# expensive verification path as an ordinary password check.
+DUMMY_PASSWORD_HASH = (
+    "scrypt$000102030405060708090a0b0c0d0e0f$"
+    "336e0228bfeba2457ef167649c11500343eb97253102869ecf5048c9acf5ee40"
+    "4c958fa567fd6faa313f2bfaac899d89b58259b2b7e50867081eab98ff037e88"
+)
 
 
 # 三级角色定义
@@ -58,8 +64,38 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     ROLE_ADMIN: {"*"},
     ROLE_TEACHER: {"*"},
     ROLE_MEMBER: {"warehouse", "words", "product_claim", "publish_claimed",
+                  "workflow.settings",
                   "account.bind", "schedule"},
 }
+
+
+def is_superadmin(db: Session, operator: Operator) -> bool:
+    """Whether this account may grant or revoke teacher privileges.
+
+    Older installations treated every teacher as a global administrator. When
+    such a database has no explicit admin yet, the first enabled teacher keeps
+    the top-level role so upgrades do not strand account management. New
+    installations create an explicit admin during credential initialization.
+    """
+    role = role_of(operator)
+    if role == ROLE_ADMIN:
+        return True
+    if role != ROLE_TEACHER or not operator.enabled:
+        return False
+    has_admin = (db.query(Operator.id)
+                 .filter(Operator.enabled.is_(True),
+                         or_(Operator.is_admin.is_(True),
+                             Operator.role == ROLE_ADMIN))
+                 .first() is not None)
+    if has_admin:
+        return False
+    first_teacher = (db.query(Operator.id)
+                     .filter(Operator.enabled.is_(True),
+                             Operator.is_admin.is_(False),
+                             Operator.role == ROLE_TEACHER)
+                     .order_by(Operator.id.asc())
+                     .first())
+    return bool(first_teacher and int(first_teacher[0]) == int(operator.id))
 
 
 def normalize_username(value: Any) -> str:
@@ -73,13 +109,18 @@ def normalize_username(value: Any) -> str:
 
 def normalize_email(value: Any, *, required: bool = True) -> str | None:
     """Normalize a login/recovery address without storing user-supplied whitespace."""
-    text = str(value or "").strip().casefold()
+    text = str(value or "").strip().lower()
     if not text and not required:
         return None
-    local, separator, domain = text.partition("@")
-    if (not text or len(text) > EMAIL_MAX_LENGTH or not separator or not local
-            or not domain or any(ch.isspace() for ch in text)):
+    if not is_valid_email_address(text):
         raise errors.validation("邮箱格式不正确", field="email")
+    return text
+
+
+def normalize_deliverable_email(value: Any) -> str:
+    """Normalize and validate a mailbox before issuing a code for delivery."""
+    text = normalize_email(value)
+    assert text is not None
     return text
 
 
@@ -87,7 +128,12 @@ def normalize_login_identifier(value: Any) -> str:
     """Normalize an existing username or an email address used for sign-in."""
     text = str(value or "").strip()
     if "@" in text:
-        return normalize_email(text) or ""
+        try:
+            return normalize_email(text) or ""
+        except errors.AppError:
+            # Keep accepting legacy usernames containing '@'; strict mailbox
+            # validation still applies to registration and recovery addresses.
+            return normalize_username(text)
     return normalize_username(text)
 
 
@@ -320,7 +366,7 @@ def _clean_name(name: Any) -> str:
 
 
 def _email_exists(db: Session, email: str, *, exclude_id: int | None = None) -> bool:
-    query = db.query(Operator.id).filter(func.lower(Operator.email) == email)
+    query = db.query(Operator.id).filter(func.lower(func.trim(Operator.email)) == email)
     if exclude_id is not None:
         query = query.filter(Operator.id != exclude_id)
     return query.first() is not None
@@ -371,6 +417,8 @@ def _set_email(db: Session, row: Operator, value: Any) -> None:
     normalized = normalize_email(value, required=False)
     if normalized is not None and _email_exists(db, normalized, exclude_id=row.id):
         raise errors.validation("邮箱已绑定其他账号", field="email")
+    if normalized != row.email:
+        row.email_verified = False
     row.email = normalized
 
 
@@ -402,11 +450,20 @@ def register_email_account(db: Session, name: Any, email: Any,
     if _email_exists(db, normalized_email):
         raise errors.AppError("CONFLICT", "该邮箱已注册", status=409)
     display_name = _unique_registration_name(db, name)
-    row, token = create(db, display_name, role=ROLE_MEMBER, email=normalized_email)
-    row.password_hash = hash_password(password)
-    row.must_change_password = False
-    db.flush()
-    return row, token
+    try:
+        row, token = create(db, display_name, role=ROLE_MEMBER, email=normalized_email)
+        row.password_hash = hash_password(password)
+        row.must_change_password = False
+        # This function is called only after the registration OTP is consumed.
+        row.email_verified = True
+        db.flush()
+        return row, token
+    except IntegrityError:
+        # The database index is the final guard against concurrent registrations.
+        db.rollback()
+        if _email_exists(db, normalized_email):
+            raise errors.AppError("CONFLICT", "该邮箱已注册", status=409) from None
+        raise
 
 
 def authenticate_password(db: Session, username: Any, password: str) -> tuple[Operator, str] | None:
@@ -416,14 +473,17 @@ def authenticate_password(db: Session, username: Any, password: str) -> tuple[Op
         return None
     if "@" in identifier:
         row = (db.query(Operator)
-               .filter(func.lower(Operator.email) == identifier)
+               .filter(func.lower(func.trim(Operator.email)) == identifier)
                .one_or_none())
         if row is None:
             # Preserve legacy accounts whose usernames happen to contain '@'.
             row = db.query(Operator).filter(Operator.username == identifier).one_or_none()
     else:
         row = db.query(Operator).filter(Operator.username == identifier).one_or_none()
-    if row is None or not row.enabled or not verify_password(password, row.password_hash):
+    encoded_hash = (row.password_hash if row is not None and row.enabled
+                    else DUMMY_PASSWORD_HASH)
+    password_matches = verify_password(password, encoded_hash)
+    if row is None or not row.enabled or not password_matches:
         return None
     token = secrets.token_urlsafe(32)
     row.token = hash_token(token)
@@ -475,6 +535,7 @@ def serialize(row: Operator) -> dict[str, Any]:
         "username": row.username,
         "email": mask_email(row.email),
         "hasEmail": bool(row.email),
+        "emailVerified": bool(row.email_verified),
         "hasLoginCredentials": bool((row.username or row.email) and row.password_hash),
         "enabled": bool(row.enabled),
         "admin": bool(row.is_admin),
@@ -527,9 +588,15 @@ def _require_admin(is_admin_operator: bool, action: str) -> None:
 
 def _check_last_admin(db: Session, row: Operator, *, action: str) -> None:
     """不能停用/降级最后一个启用中的全局管理账号。"""
+    has_admin = (db.query(Operator.id)
+                 .filter(Operator.enabled.is_(True),
+                         or_(Operator.is_admin.is_(True),
+                             Operator.role == ROLE_ADMIN))
+                 .first() is not None)
+    roles = (ROLE_ADMIN,) if has_admin else (ROLE_ADMIN, ROLE_TEACHER)
     remaining = (db.query(Operator)
                  .filter(or_(Operator.is_admin.is_(True),
-                             Operator.role.in_((ROLE_ADMIN, ROLE_TEACHER))),
+                             Operator.role.in_(roles)),
                          Operator.enabled.is_(True),
                          Operator.id != row.id).count())
     if remaining == 0:

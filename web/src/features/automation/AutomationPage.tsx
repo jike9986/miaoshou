@@ -23,7 +23,7 @@
 //   · 上传尺码图 —— 后端只有「登记图床地址」的 POST /size-charts，没有文件上传接口
 //   · 全结果批量选择 —— 后端 /collect-box 不支持一次返回全量选品，需逐页选择
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Pencil, Play, RefreshCw, Square, Tag } from "lucide-react";
 import { apiErrorMessage, isApiError, resolveApiBase, resolveToken } from "@/lib/api";
@@ -72,6 +72,7 @@ import { ProductPicker } from "@/features/automation/ProductPicker";
 import { ProgressPanel } from "@/features/automation/ProgressPanel";
 import { AccountSwitcher } from "@/features/auth/UnlockPage";
 import { useSessionStore } from "@/features/stores";
+import { useOperatorIdentity } from "@/lib/operator";
 import {
   DEFAULT_SETTINGS,
   IDLE_RUN,
@@ -118,6 +119,8 @@ const DATE_FORMAT = new Intl.DateTimeFormat("zh-CN", {
 export function AutomationPage() {
   const queryClient = useQueryClient();
   const { data: status } = useAuthStatus();
+  const operatorIdentity = useOperatorIdentity();
+  const operatorId = operatorIdentity?.id ?? null;
   const connected = status?.connected ?? false;
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const narrow = useIsNarrow();
@@ -147,25 +150,55 @@ export function AutomationPage() {
 
   /* ---------------- 处理设置 ---------------- */
   // 惰性初始化：先读存档，读不到才用默认值（老版 persistTaskPreferences 的等价物）
-  const [settings, setSettings] = useState<AutomationSettings>(loadSettings);
+  const settingsScopeRef = useRef(operatorId);
+  const [scopedSettings, setScopedSettings] = useState(() => ({
+    operatorId,
+    value: loadSettings(operatorId),
+  }));
+  const settingsReadyForOperator = scopedSettings.operatorId === operatorId;
+  const settings = settingsReadyForOperator ? scopedSettings.value : loadSettings(operatorId);
+  const syncedFromServer = useRef(false);
+  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const updateSettings = useCallback((updater: (current: AutomationSettings) => AutomationSettings) => {
+    setScopedSettings((previous) => {
+      const current = previous.operatorId === operatorId ? previous.value : loadSettings(operatorId);
+      return { operatorId, value: updater(current) };
+    });
+  }, [operatorId]);
   const patchSettings = useCallback((patch: Partial<AutomationSettings>) => {
-    setSettings((prev) => ({ ...prev, ...patch }));
-  }, []);
+    updateSettings((prev) => ({ ...prev, ...patch }));
+  }, [updateSettings]);
+
+  // 软件账号切换时重新装载本账号的处理参数，避免沿用上一个账号的店铺和模板。
+  useLayoutEffect(() => {
+    if (settingsScopeRef.current !== operatorId) {
+      settingsScopeRef.current = operatorId;
+      syncedFromServer.current = false;
+      if (pushTimer.current) clearTimeout(pushTimer.current);
+      pushTimer.current = null;
+      setScopedSettings({ operatorId, value: loadSettings(operatorId) });
+      return;
+    }
+    if (settingsReadyForOperator) saveSettings(scopedSettings.value, operatorId);
+  }, [operatorId, scopedSettings, settingsReadyForOperator]);
 
   /* ---------- 工作流默认值同步（重量/包裹尺寸/尺码图 → 后端） ----------
      后端 save_from_collect_box 读的是 workflow.defaults，不是这里的 localStorage。
      改动这三个值时必须同步过去，否则「界面上调了参数，处理时用的还是旧值」。 */
-  const workflowQuery = useWorkflowDefaults(connected);
-  const saveWorkflow = useSaveWorkflowDefaults();
-  const sizeChartsQuery = useSizeCharts(connected);
+  const workflowQuery = useWorkflowDefaults(operatorId, connected);
+  const saveWorkflow = useSaveWorkflowDefaults(operatorId);
+  const sizeChartsQuery = useSizeCharts(connected, operatorId);
   const chartList = useMemo(() => pickCharts(sizeChartsQuery.data), [sizeChartsQuery.data]);
   const defaultChartUrl = pickDefaultUrl(sizeChartsQuery.data);
   const fallbackChart = buildDefaultSizeChart(defaultChartUrl);
 
   // 首次拿到后端值时回填本地显示（后端为准），之后本地改动再推上去
-  const syncedFromServer = useRef(false);
   useEffect(() => {
-    if (syncedFromServer.current || !workflowQuery.data?.workflowDefaults) return;
+    if (
+      syncedFromServer.current ||
+      !workflowQuery.data?.workflowDefaults ||
+      !sizeChartsQuery.data
+    ) return;
     const server = workflowQuery.data.workflowDefaults;
     const patch: Partial<AutomationSettings> = {};
     if (typeof server.weightIncrement === "number") patch.weightExtraKg = server.weightIncrement;
@@ -174,37 +207,57 @@ export function AutomationPage() {
       patch.widthCm = server.packageDimensions.packageWidth;
       patch.heightCm = server.packageDimensions.packageHeight;
     }
-    if (Object.keys(patch).length > 0) setSettings((prev) => ({ ...prev, ...patch }));
+    const serverChartUrl = server.sizeChartUrl?.trim();
+    if (serverChartUrl) {
+      const selectedChart = chartList.find((chart) => chart.url.trim() === serverChartUrl);
+      if (selectedChart) {
+        patch.sizeChartId = selectedChart.id;
+      } else if (serverChartUrl === defaultChartUrl) {
+        patch.sizeChartId = null;
+      } else {
+        return;
+      }
+    }
+    if (Object.keys(patch).length > 0) updateSettings((prev) => ({ ...prev, ...patch }));
     syncedFromServer.current = true;
-  }, [workflowQuery.data]);
+  }, [workflowQuery.data, sizeChartsQuery.data, chartList, defaultChartUrl, updateSettings]);
 
   // 本地改动 → 推送到后端（防抖 800ms，避免拖动数字时连打）
-  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (!connected || !syncedFromServer.current) return;
+    if (
+      !connected ||
+      !syncedFromServer.current ||
+      !settingsReadyForOperator ||
+      settingsScopeRef.current !== operatorId
+    ) return;
     if (pushTimer.current) clearTimeout(pushTimer.current);
+    const saveOperatorId = operatorId;
     pushTimer.current = setTimeout(() => {
       const selectedChart = chartList.find((c) => c.id === settings.sizeChartId);
       const chartUrl = selectedChart?.url ?? (settings.sizeChartId === null ? (fallbackChart?.url ?? "") : "");
-      saveWorkflow.mutate({
-        weightIncrement: settings.weightExtraKg,
-        packageDimensions: {
-          packageLength: settings.lengthCm,
-          packageWidth: settings.widthCm,
-          packageHeight: settings.heightCm,
+      saveWorkflow.mutate(
+        {
+          weightIncrement: settings.weightExtraKg,
+          packageDimensions: {
+            packageLength: settings.lengthCm,
+            packageWidth: settings.widthCm,
+            packageHeight: settings.heightCm,
+          },
+          sizeChartUrl: chartUrl,
         },
-        sizeChartUrl: chartUrl,
-      });
+        {
+          onError: (error) => {
+            if (settingsScopeRef.current !== saveOperatorId) return;
+            toast.error("处理默认设置同步失败", {
+              description: `本地设置已保留，服务器处理可能仍会使用旧值。${apiErrorMessage(error)}`,
+            });
+          },
+        }
+      );
     }, 800);
     return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.weightExtraKg, settings.lengthCm, settings.widthCm, settings.heightCm, settings.sizeChartId, connected]);
-
-  // 每次改动都落盘。放在 effect 里而不是 patchSettings 内：模板/尺码图可能
-  // 由别处 setSettings 改，统一在这里兜住。
-  useEffect(() => {
-    saveSettings(settings);
-  }, [settings]);
+  }, [settings.weightExtraKg, settings.lengthCm, settings.widthCm, settings.heightCm, settings.sizeChartId, connected, operatorId, settingsReadyForOperator]);
 
   const templatesQuery = useTemplates(connected);
   const templateNames = useMemo(
@@ -328,7 +381,7 @@ export function AutomationPage() {
     }]));
     setSelection(nextSelection);
     const savedSettings = saved.settings;
-    setSettings((current) => ({
+    updateSettings((current) => ({
       ...current,
       ...Object.fromEntries(Object.entries(savedSettings).filter(([key, value]) =>
         key in current && typeof value === typeof current[key as keyof AutomationSettings])),
@@ -409,7 +462,7 @@ export function AutomationPage() {
         setRun((prev) => ({ ...prev, imageDone: ready, imagePlanned: total, imageFailed: failedJobs }));
       }
     })();
-  }, []);
+  }, [updateSettings]);
 
   useEffect(() => {
     const saved = latestRunQuery.data?.run;

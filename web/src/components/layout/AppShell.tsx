@@ -69,6 +69,7 @@ export interface AppShellProps {
   /** 底部账户区 */
   account?: SidebarAccount | null;
   onAccountClick?: () => void;
+  onAccountLogout?: () => void;
   /** 标题栏中部（默认：全局搜索入口 > 面包屑） */
   titleBarCenter?: ReactNode;
   /** 标题栏右侧附加入口（最多 1 个） */
@@ -85,6 +86,7 @@ export function AppShell({
   brand,
   account,
   onAccountClick,
+  onAccountLogout,
   titleBarCenter,
   titleBarExtra,
   onOpenSearch,
@@ -145,6 +147,7 @@ export function AppShell({
       brand={{ icon: <BrandMark />, name: "奥皇上品" }}
       account={account}
       onAccountClick={onAccountClick}
+      onAccountLogout={onAccountLogout}
       collapseTogglePosition="top"
       showCollapseToggle={!narrow}
       onNavigate={() => setDrawerOpen(false)}

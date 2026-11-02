@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import event
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 
 from core.config import Settings
 from db import session as session_module
@@ -198,6 +199,14 @@ def test_sqlite_init_keeps_create_patch_and_seed_path(monkeypatch) -> None:
                         lambda *_args, **_kwargs: calls.append("create"))
     monkeypatch.setattr(session_module, "_add_missing_columns",
                         lambda: calls.append("patch"))
+    monkeypatch.setattr(session_module, "_ensure_sqlite_operator_username_index",
+                        lambda: calls.append("username_index"))
+    monkeypatch.setattr(session_module, "_ensure_sqlite_operator_email_index",
+                        lambda: calls.append("email_index"))
+    monkeypatch.setattr(session_module, "_ensure_sqlite_schedule_ownership_indexes",
+                        lambda: calls.append("schedule_indexes"))
+    monkeypatch.setattr(session_module, "_ensure_sqlite_publish_log_ownership",
+                        lambda: calls.append("publish_log_ownership"))
     monkeypatch.setattr(session_module, "_backfill_sqlite_account_bindings",
                         lambda: calls.append("backfill"))
     monkeypatch.setattr(session_module, "_ensure_sqlite_account_app_key_index",
@@ -206,7 +215,116 @@ def test_sqlite_init_keeps_create_patch_and_seed_path(monkeypatch) -> None:
 
     session_module.init_db()
 
-    assert calls == ["create", "patch", "backfill", "index", "seed"]
+    assert calls == ["create", "patch", "username_index", "email_index", "schedule_indexes",
+                     "publish_log_ownership",
+                     "backfill", "index", "seed"]
+
+
+def test_sqlite_init_rebuilds_legacy_publish_key_and_preserves_rows(
+        monkeypatch, tmp_path) -> None:
+    from sqlalchemy import create_engine, inspect, text
+
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy-publish-logs.db'}")
+    with legacy_engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE publish_logs (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER,
+                product_id INTEGER,
+                schedule_id VARCHAR(32),
+                warehouse_key VARCHAR(64) NOT NULL DEFAULT '',
+                detail_id VARCHAR(32) NOT NULL DEFAULT '',
+                shop_id VARCHAR(32) NOT NULL DEFAULT '',
+                shop_name VARCHAR(255) NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                status VARCHAR(16) NOT NULL DEFAULT 'processing',
+                reason TEXT NOT NULL DEFAULT '',
+                platform_item_id VARCHAR(64),
+                item_edit_url TEXT,
+                mode VARCHAR(16) NOT NULL DEFAULT 'direct',
+                batch_id VARCHAR(32) NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 1,
+                detail JSON NOT NULL DEFAULT '{}',
+                requested_at FLOAT NOT NULL DEFAULT 0,
+                last_requested_at FLOAT,
+                finished_at FLOAT,
+                CONSTRAINT uq_publish_logs_request
+                    UNIQUE (account_id, detail_id, shop_id)
+            )
+        """))
+        connection.execute(text(
+            "INSERT INTO publish_logs (id, account_id, detail_id, shop_id) "
+            "VALUES (1, 7, '12345', '9')"
+        ))
+
+    monkeypatch.setattr(session_module, "engine", legacy_engine)
+    monkeypatch.setattr(session_module, "_seed_settings", lambda: None)
+    try:
+        session_module.init_db()
+
+        inspector = inspect(legacy_engine)
+        assert not any(
+            set(row.get("column_names") or []) == {"account_id", "detail_id", "shop_id"}
+            for row in inspector.get_unique_constraints("publish_logs")
+        )
+        index_names = {row["name"] for row in inspector.get_indexes("publish_logs")}
+        assert "uq_publish_logs_request_owner" in index_names
+        assert "uq_publish_logs_request_unowned" in index_names
+
+        with legacy_engine.begin() as connection:
+            original = connection.execute(text(
+                "SELECT id, account_id, detail_id, shop_id, operator_id "
+                "FROM publish_logs WHERE id = 1"
+            )).one()
+            assert tuple(original) == (1, 7, "12345", "9", None)
+            connection.execute(text(
+                "INSERT INTO publish_logs "
+                "(id, account_id, warehouse_key, detail_id, shop_id, shop_name, title, "
+                "status, reason, mode, batch_id, attempts, detail, requested_at, operator_id) "
+                "VALUES (2, 7, '', '12345', '9', '', '', 'success', '', 'direct', '', "
+                "1, '{}', 0, 21), "
+                "(3, 7, '', '12345', '9', '', '', 'success', '', 'direct', '', 1, '{}', 0, 22)"
+            ))
+            with pytest.raises(IntegrityError):
+                connection.execute(text(
+                    "INSERT INTO publish_logs "
+                    "(id, account_id, warehouse_key, detail_id, shop_id, shop_name, title, "
+                    "status, reason, mode, batch_id, attempts, detail, requested_at, operator_id) "
+                    "VALUES (4, 7, '', '12345', '9', '', '', 'success', '', 'direct', '', "
+                    "1, '{}', 0, 21)"
+                ))
+    finally:
+        legacy_engine.dispose()
+
+
+def test_sqlite_init_adds_schedule_ownership_indexes_to_legacy_schema(
+        monkeypatch, tmp_path) -> None:
+    from sqlalchemy import create_engine, inspect, text
+
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy-schedules.db'}")
+    with legacy_engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE schedules (id VARCHAR(32) PRIMARY KEY, created_at FLOAT)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE schedule_logs (id INTEGER PRIMARY KEY, at FLOAT)"
+        ))
+
+    monkeypatch.setattr(session_module, "engine", legacy_engine)
+    monkeypatch.setattr(session_module, "_seed_settings", lambda: None)
+    try:
+        session_module.init_db()
+
+        schedule_indexes = {
+            row["name"] for row in inspect(legacy_engine).get_indexes("schedules")
+        }
+        history_indexes = {
+            row["name"] for row in inspect(legacy_engine).get_indexes("schedule_logs")
+        }
+        assert "ix_schedules_owner_created" in schedule_indexes
+        assert "ix_schedule_logs_owner_at" in history_indexes
+    finally:
+        legacy_engine.dispose()
 
 
 def _legacy_account_database(path, app_keys: tuple[str, ...]):
@@ -277,6 +395,116 @@ def test_sqlite_init_reports_legacy_duplicate_keys_without_deleting_rows(
             assert rows == [(1, "duplicate-secret-key"), (2, "duplicate-secret-key")]
         index_names = {row["name"] for row in inspect(legacy_engine).get_indexes("accounts")}
         assert "uq_accounts_app_key_nonempty" not in index_names
+    finally:
+        legacy_engine.dispose()
+
+
+def test_sqlite_init_adds_normalized_email_index_to_legacy_schema(
+        monkeypatch, tmp_path) -> None:
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import IntegrityError
+
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy-operator-email.db'}")
+    with legacy_engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE operators (id INTEGER PRIMARY KEY, name VARCHAR(64), "
+            "email VARCHAR(254))"
+        ))
+        connection.execute(text(
+            "INSERT INTO operators (id, name, email) VALUES "
+            "(1, 'teacher', ' Teacher@Example.com ')"
+        ))
+
+    monkeypatch.setattr(session_module, "engine", legacy_engine)
+    monkeypatch.setattr(session_module, "_seed_settings", lambda: None)
+    try:
+        session_module.init_db()
+
+        with legacy_engine.begin() as connection:
+            index_names = set(connection.execute(text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'operators'"
+            )).scalars())
+            assert "uq_operators_email_normalized" in index_names
+            with pytest.raises(IntegrityError):
+                connection.execute(text(
+                    "INSERT INTO operators (id, name, email) VALUES "
+                    "(2, 'student', 'teacher@example.com')"
+                ))
+            connection.execute(text(
+                "INSERT INTO operators (id, name, email) VALUES "
+                "(3, 'other', 'other@example.com')"
+            ))
+    finally:
+        legacy_engine.dispose()
+
+
+def test_sqlite_init_restores_username_uniqueness_on_legacy_schema(
+        monkeypatch, tmp_path) -> None:
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import IntegrityError
+
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy-operator-username.db'}")
+    with legacy_engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE operators (id INTEGER PRIMARY KEY, name VARCHAR(64), "
+            "token VARCHAR(128))"
+        ))
+        connection.execute(text(
+            "INSERT INTO operators (id, name, token) VALUES "
+            "(1, 'local', 'token-1'), (2, 'student', 'token-2')"
+        ))
+
+    monkeypatch.setattr(session_module, "engine", legacy_engine)
+    monkeypatch.setattr(session_module, "_seed_settings", lambda: None)
+    try:
+        session_module.init_db()
+
+        with legacy_engine.connect() as connection:
+            index_names = set(connection.execute(text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'operators'"
+            )).scalars())
+        assert "uq_operators_username" in index_names
+        with legacy_engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE operators SET username = 'student' WHERE id = 2"
+            ))
+            with pytest.raises(IntegrityError):
+                connection.execute(text(
+                    "UPDATE operators SET username = 'student' WHERE id = 1"
+                ))
+    finally:
+        legacy_engine.dispose()
+
+
+def test_sqlite_init_stops_on_duplicate_legacy_usernames_without_mutating_rows(
+        monkeypatch, tmp_path) -> None:
+    from sqlalchemy import create_engine, text
+
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy-duplicate-usernames.db'}")
+    with legacy_engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE operators (id INTEGER PRIMARY KEY, name VARCHAR(64), "
+            "username VARCHAR(64), token VARCHAR(128))"
+        ))
+        connection.execute(text(
+            "INSERT INTO operators (id, name, username, token) VALUES "
+            "(1, 'first', 'shared', 'token-1'), (2, 'second', 'shared', 'token-2')"
+        ))
+
+    monkeypatch.setattr(session_module, "engine", legacy_engine)
+    monkeypatch.setattr(session_module, "_seed_settings", lambda: None)
+    try:
+        with pytest.raises(RuntimeError, match="重复用户名") as caught:
+            session_module.init_db()
+
+        assert "operators.id=[1,2]" in str(caught.value)
+        with legacy_engine.connect() as connection:
+            rows = connection.execute(text(
+                "SELECT id, username, token FROM operators ORDER BY id"
+            )).all()
+        assert rows == [(1, "shared", "token-1"), (2, "shared", "token-2")]
     finally:
         legacy_engine.dispose()
 

@@ -118,7 +118,8 @@ def normalize_limit(limit: Any) -> int:
 
 
 def preview(db: Session, *, titles: Any = None, warehouse_ids: Any = None,
-            limit: Any = None, refresh_years: bool = False) -> dict[str, Any]:
+            limit: Any = None, refresh_years: bool = False,
+            operator_id: int | None = None) -> dict[str, Any]:
     """标题清理预览：不写库、不调上游。
 
     `titles` 与 `warehouseIds` 二选一；都没有（或全是空串）→ 400 VALIDATION_ERROR。
@@ -138,6 +139,8 @@ def preview(db: Session, *, titles: Any = None, warehouse_ids: Any = None,
         for ident in raw_idents:
             product = _find_active(db, ident)
             if product is not None:
+                warehouse_service._assert_member_product_access(
+                    db, product, operator_id)
                 sources.append(product.title or "")
 
     sources = sources[:normalize_limit(limit)]

@@ -9,6 +9,15 @@ down_revision: str | None = "20261102_1000"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+_OWNER_BACKFILL_QUERY = sa.text(
+    "SELECT a.id, a.owner_operator_id, a.bound_by_operator_id, a.bound_at "
+    "FROM accounts AS a "
+    "WHERE a.owner_operator_id IS NOT NULL "
+    "AND a.id = (SELECT MIN(a2.id) FROM accounts AS a2 "
+    "           WHERE a2.owner_operator_id = a.owner_operator_id) "
+    "ORDER BY a.owner_operator_id"
+)
+
 
 def upgrade() -> None:
     op.create_table(
@@ -29,10 +38,7 @@ def upgrade() -> None:
     # Preserve the legacy owner for existing users while making it an explicit
     # binding. Duplicate rows are ignored so upgrades remain repeatable.
     connection = op.get_bind()
-    rows = connection.execute(sa.text(
-        "SELECT id, owner_operator_id, bound_by_operator_id, bound_at "
-        "FROM accounts WHERE owner_operator_id IS NOT NULL"
-    )).mappings()
+    rows = connection.execute(_OWNER_BACKFILL_QUERY).mappings()
     for row in rows:
         connection.execute(sa.text(
             "INSERT INTO account_bindings "
@@ -48,5 +54,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    connection = op.get_bind()
+    unrepresentable = connection.execute(sa.text(
+        "SELECT bindings.account_id, bindings.operator_id "
+        "FROM account_bindings AS bindings "
+        "LEFT JOIN accounts AS accounts ON accounts.id = bindings.account_id "
+        "WHERE accounts.id IS NULL "
+        "   OR accounts.owner_operator_id IS NULL "
+        "   OR accounts.owner_operator_id <> bindings.operator_id "
+        "ORDER BY bindings.account_id, bindings.operator_id LIMIT 1"
+    )).first()
+    if unrepresentable is not None:
+        raise RuntimeError(
+            "Cannot downgrade account bindings while relationships cannot be "
+            "represented by accounts.owner_operator_id; "
+            f"account_id={int(unrepresentable[0])}, "
+            f"operator_id={int(unrepresentable[1])}."
+        )
     op.drop_index("ix_account_bindings_account", table_name="account_bindings")
     op.drop_table("account_bindings")

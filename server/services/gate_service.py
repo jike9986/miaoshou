@@ -220,7 +220,8 @@ def pre_save_gate(db: Any, info: Any, *, allow_title_review: bool = False,
 
 
 def load_info(db: Any, *, warehouse_id: Any = None, detail_id: Any = None,
-              shop_id: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
+              shop_id: Any = None,
+              operator_id: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """取一件商品的 info（闸门的输入），返回 (info, identity)。
 
     先查仓库：已入仓的商品不必再调上游，一次闸门检查不该产生网络请求。
@@ -232,6 +233,7 @@ def load_info(db: Any, *, warehouse_id: Any = None, detail_id: Any = None,
         from services import warehouse_service
 
         product = warehouse_service.resolve_product(db, ident)
+        warehouse_service._assert_member_product_access(db, product, operator_id)
         payload = product.payload if isinstance(product.payload, dict) else {}
         if not payload:
             # 老库 / 手工建的行可能只有展示字段，用它们拼一份够闸门用的最小 info
@@ -251,9 +253,13 @@ def load_info(db: Any, *, warehouse_id: Any = None, detail_id: Any = None,
     row = (db.query(Product)
            .filter(Product.warehouse_key == key, Product.deleted_at.is_(None))
            .one_or_none())
-    if row is not None and isinstance(row.payload, dict) and row.payload:
-        return dict(row.payload), {"source": "warehouse", "warehouseId": str(row.id),
-                                   "detailId": detail, "shopId": shop}
+    if row is not None:
+        from services import warehouse_service
+
+        warehouse_service._assert_member_product_access(db, row, operator_id)
+        if isinstance(row.payload, dict) and row.payload:
+            return dict(row.payload), {"source": "warehouse", "warehouseId": str(row.id),
+                                       "detailId": detail, "shopId": shop}
 
     from services import account_service
     from services.miaoshou import MiaoshouError

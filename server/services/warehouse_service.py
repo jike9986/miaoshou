@@ -493,22 +493,29 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
     member_view = _is_member(db, operator_id)
     account_claim_keys: list[str] | None = None
     if claim_account_id not in (None, "") and operator_id is not None:
-        from services import operator_service
-        operator = operator_service.get(db, operator_id)
-        if operator.name == operator_service.CLIENT_OPERATOR_NAME:
-            text = str(claim_account_id)
-            if not text.isdigit():
-                raise errors.validation("claimAccountId 须为数字", field="claimAccountId")
-            account = db.query(Account).filter(Account.id == int(text)).one_or_none()
-            if account is None:
-                raise errors.not_found("妙手账号不存在", accountId=text)
-            account_claim_keys = [f"account:{account.id}"]
-            if (account.name and
-                    db.query(Account.id).filter(Account.name == account.name).count() == 1):
-                account_claim_keys.append(account.name)
+        text = str(claim_account_id)
+        if not text.isdigit():
+            raise errors.validation("claimAccountId 须为数字", field="claimAccountId")
+        account = db.query(Account).filter(Account.id == int(text)).one_or_none()
+        if account is None:
+            raise errors.not_found("妙手账号不存在", accountId=text)
+        _assert_member_account_access(db, account.id, operator_id)
+        account_claim_keys = [f"account:{account.id}"]
+        if (account.name and
+                db.query(Account.id).filter(Account.name == account.name).count() == 1):
+            account_claim_keys.append(account.name)
     account_claim_expr = (or_(*(Product.collected[key].as_string().is_not(None)
                                 for key in account_claim_keys))
                           if account_claim_keys else None)
+    # `Product.collected` records whether a Miaoshou account collected this
+    # product. A Miaoshou account can be bound to multiple software users, so
+    # it cannot represent an individual member's warehouse claim state.
+    # Keep validating claim_account_id above, but use the member's ProductClaim
+    # records for their status, filters, and counts. Teacher views retain the
+    # account-level collected status below.
+    if member_view:
+        account_claim_expr = None
+        account_claim_keys = None
     if member_view and account_id not in (None, ""):
         text = str(account_id)
         if not text.isdigit():
@@ -1847,12 +1854,21 @@ def batch_delete(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
 #   - 尺码图完全不写 → 规则 4 被 size_chart_url="" 跳过。
 # 结果是「校验都过、上架全缺」，平台侧运费与尺码表都错。
 
-def _workflow_setting(db: Session, key: str, fallback: Any) -> Any:
+def _workflow_setting(db: Session, key: str, fallback: Any,
+                      operator_id: int | None = None) -> Any:
     """读工作流设置里的一个键；读不到就用 fallback，不因设置缺失而报错。"""
     from services import setting_service
 
     try:
-        value = setting_service.workflow_defaults(db).get(key)
+        scope_id = operator_id
+        if operator_id is not None:
+            from services import operator_service
+
+            actor = operator_service.get(db, operator_id)
+            if (actor is not None
+                    and operator_service.role_of(actor) != operator_service.ROLE_MEMBER):
+                scope_id = None
+        value = setting_service.workflow_defaults(db, operator_id=scope_id).get(key)
     except Exception:  # noqa: BLE001 - 设置读坏了不该挡住入仓
         return fallback
     return fallback if value is None else value
@@ -2048,7 +2064,7 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                 .one_or_none())
     already_processed = bool(existing is not None and existing.saved_at)
 
-    increment = _workflow_setting(db, "weightIncrement", 0.1)
+    increment = _workflow_setting(db, "weightIncrement", 0.1, operator_id)
     # 注意：定价必须在「重量加完增量之后」再算 —— 运费按最终包裹重量计费，
     # 先用原始重量算价、再把重量加 0.1 保存，会导致「价格按 1.85kg 算、实际存 1.95kg」，
     # 报价与实际重量不符（老版 product_workflow 是 prepare_weight 之后才 apply 定价）。
@@ -2101,7 +2117,7 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 包裹尺寸：优先用运营在设置里显式配的；没配（或就是旧默认 30×20×10）时
     # 按品类给合理值 —— 鞋盒与软包装的跨境运费差很多，用统一默认会算错价。
     _configured_dims = normalize_package_dimensions(
-        _workflow_setting(db, "packageDimensions", None))
+        _workflow_setting(db, "packageDimensions", None, operator_id))
     _is_legacy_default = (_configured_dims.get("packageLength") == 30
                           and _configured_dims.get("packageWidth") == 20
                           and _configured_dims.get("packageHeight") == 10)
@@ -2121,7 +2137,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     else:
         dimensions = _configured_dims
     payload.update(dimensions)
-    chart_url = normalize_size_chart_url(_workflow_setting(db, "sizeChartUrl", ""))
+    chart_url = normalize_size_chart_url(
+        _workflow_setting(db, "sizeChartUrl", "", operator_id))
     if chart_url:
         payload["sizeChart"] = chart_url
         payload["sizeChartType"] = "image"
@@ -2614,8 +2631,9 @@ def trim_overflow(db: Session, *, confirm: bool = False) -> int:
     return len(rows)
 
 
-def group_counts(db: Session) -> dict[int, int]:
-    rows = (active_query(db).filter(Product.group_id.is_not(None))
+def group_counts(db: Session, *, operator_id: int | None = None) -> dict[int, int]:
+    visible = _scope_member_products(db, active_query(db), operator_id)
+    rows = (visible.filter(Product.group_id.is_not(None))
             .with_entities(Product.group_id, func.count(Product.id))
             .group_by(Product.group_id).all())
     return {int(group_id): int(total) for group_id, total in rows if group_id is not None}

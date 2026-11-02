@@ -11,25 +11,35 @@
 //   · 学员看不到停用 / 重置按钮（不是禁用，是不渲染）——
 //     权限不够的按钮摆在那里只会招来一串 403。
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
+  BadgeCheck,
   CheckCircle2,
   KeyRound,
+  Mail,
   Pencil,
   ShieldCheck,
   UserPlus,
   Users,
 } from "lucide-react";
-import { cn, formatRelative } from "@/lib/utils";
+import { cn, formatDate, formatRelative } from "@/lib/utils";
+import { normalizeEmailForVerification } from "@/features/auth/emailBinding.mjs";
+import {
+  EMAIL_CODE_RESEND_COOLDOWN_SECONDS,
+  retryAfterSecondsFromError,
+} from "@/features/auth/authFormHelpers.mjs";
+import { useEmailCodeCooldown } from "@/features/auth/useEmailCodeCooldown";
 import { api, apiErrorMessage } from "@/lib/api";
-import type { OperatorsResponse } from "@/lib/types";
+import type { Operator, OperatorsResponse } from "@/lib/types";
 import { queryKeys } from "@/lib/queryKeys";
 import {
   useCreateOperator,
   useCreateStudent,
+  useConfirmEmailVerification,
   useOperators,
+  useRequestEmailVerificationCode,
   useRenameOperator,
   useRotateOperator,
   useSetRole,
@@ -181,7 +191,7 @@ function SwitchIdentityDialog({
     setBusy(true);
     // 显式带上这串 token 探一次：能拿到 current 就说明它有效
     api
-      .get<OperatorsResponse>("/operators", { headers: { Authorization: `Bearer ${value}` } })
+      .get<OperatorsResponse>("/operators", { authToken: value })
       .then((data) => {
         const who = data.current ?? null;
         setOperator({ token: value, id: who?.id ?? null, name: who?.name ?? "操作员", role: who?.role });
@@ -276,10 +286,12 @@ function CreateOperatorDialog({
   open,
   onOpenChange,
   onToken,
+  canManageRoles,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onToken: (token: string, name: string) => void;
+  canManageRoles: boolean;
 }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState<"teacher" | "member">("member");
@@ -368,13 +380,15 @@ function CreateOperatorDialog({
             }}
           />
         </Field>
-        <Field label="角色" hint="老师可以管理账号、共享设置和业务数据；学员只能访问本人认领的商品。">
-          <Select
-            value={role}
-            onChange={(value) => setRole(value as "teacher" | "member")}
-            options={ROLE_OPTIONS}
-          />
-        </Field>
+        {canManageRoles ? (
+          <Field label="角色" hint="老师可以管理共享业务数据；学员只能访问本人认领的商品。">
+            <Select
+              value={role}
+              onChange={(value) => setRole(value as "teacher" | "member")}
+              options={ROLE_OPTIONS}
+            />
+          </Field>
+        ) : <p className="text-xs leading-[18px] text-fg-muted">新建账号将设为学员。</p>}
       </div>
     </Dialog>
   );
@@ -512,6 +526,11 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
   }, [identity, operators, operatorsQuery.data]);
 
   const canManage = me?.role === "teacher" || me?.role === "admin" || me?.admin === true;
+  const canManageRoles = operatorsQuery.data?.current?.canManageRoles === true;
+
+  const accountEmailPanel = identity && me && !me.builtin
+    ? <AccountEmailPanel key={me.id} operator={me} />
+    : null;
 
   if (operatorsQuery.isLoading) return <SkeletonRows rows={4} />;
   if (operatorsQuery.isError) {
@@ -521,16 +540,19 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
   }
   if (!canManage) {
     return (
-      <Card padding="normal">
-        <CardTitle>当前账号</CardTitle>
-        <div className="mt-3 flex items-center gap-2">
-          <span className="text-[13px] font-medium text-fg">{me?.name ?? identity?.name ?? "学员"}</span>
-          <Badge variant="neutral" size="sm">学员</Badge>
-        </div>
-        <p className="mt-2 text-xs leading-[18px] text-fg-muted">
-          学员账号和密码由老师管理；如需调整，请联系老师。
-        </p>
-      </Card>
+      <div className="flex flex-col gap-4">
+        <Card padding="normal">
+          <CardTitle>当前账号</CardTitle>
+          <div className="mt-3 flex items-center gap-2">
+            <span className="text-[13px] font-medium text-fg">{me?.name ?? identity?.name ?? "学员"}</span>
+            <Badge variant="neutral" size="sm">学员</Badge>
+          </div>
+          <p className="mt-2 text-xs leading-[18px] text-fg-muted">
+            学员账号和密码由老师管理；如需调整，请联系老师。
+          </p>
+        </Card>
+        {accountEmailPanel}
+      </div>
     );
   }
 
@@ -578,6 +600,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
 
   return (
     <div className={cn("flex flex-col gap-4", className)}>
+      {accountEmailPanel}
       <StudentAccountsPanel />
       <details className="group rounded-md border border-border bg-surface">
         <summary className="flex min-h-10 cursor-pointer list-none items-center px-3 text-[13px] font-medium text-fg-secondary marker:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32">
@@ -715,7 +738,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                               />
                             </Tooltip>
                           )}
-                          {canManageOthers && (
+                          {canManageOthers && canManageRoles && (
                             <>
                               <Tooltip content="改角色">
                                 <Select
@@ -778,6 +801,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
         open={createOpen}
         onOpenChange={setCreateOpen}
         onToken={(token, name) => setIssuedToken({ token, name, mode: "created" })}
+        canManageRoles={canManageRoles}
       />
 
       <SwitchIdentityDialog open={switchOpen} onOpenChange={setSwitchOpen} />
@@ -895,13 +919,238 @@ function StudentAccountsPanel() {
       <div className="mt-4 border-t border-border-subtle pt-3">
         <div className="mb-2 flex items-center gap-2 text-[13px] font-medium text-fg">学员列表 <span className="text-xs font-normal text-fg-muted">{students.length}</span></div>
         {list.isLoading ? <SkeletonRows rows={2} /> : list.isError ? <InlineError onRetry={() => void list.refetch()}>{apiErrorMessage(list.error)}</InlineError> : students.length === 0 ? <p className="py-3 text-[13px] text-fg-muted">还没有学员账号</p> : <ul className="divide-y divide-border-subtle">
-          {students.map((student) => <li key={student.id} className="flex min-h-11 items-center gap-3 py-2">
-            <span className="min-w-0 flex-1 truncate text-[13px] text-fg">{student.name}</span>
-            <span className="hidden truncate text-xs text-fg-muted sm:block">{(student as typeof student & { username?: string }).username ?? student.id}</span>
-            <Button size="sm" variant="secondary" loading={reset.isPending && reset.variables?.id === student.id} onClick={() => resetNow(student)}>重置密码</Button>
-          </li>)}
+          {students.map((student) => {
+            const binding = student.miaoshouBinding;
+            const linked = binding?.linked === true;
+            const status = miaoshouBindingStatus(binding?.status);
+            return (
+              <li key={student.id} className="flex min-h-11 flex-col gap-2 py-3 sm:flex-row sm:items-center sm:gap-3">
+                <div className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] font-medium text-fg">{student.name}</span>
+                  <span className="mt-0.5 block truncate text-xs text-fg-muted">{student.username ?? student.id}</span>
+                </div>
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-fg-secondary">
+                  <Badge variant={linked ? "success" : "neutral"} size="sm">
+                    {binding === undefined ? "绑定状态不可用" : linked ? "已绑定" : "未绑定"}
+                  </Badge>
+                  {linked && binding && (
+                    <>
+                      <span>App ID <span className="font-mono text-fg">{maskCredentialHint(binding.appIdHint) ?? "—"}</span></span>
+                      <span>Secret <span className="font-mono text-fg">{maskCredentialHint(binding.secretHint) ?? "—"}</span></span>
+                      <Badge variant={status.variant} size="sm">{status.label}</Badge>
+                      <span title={`绑定时间 ${formatDate(binding.boundAt)}`}>
+                        绑定于 {binding.boundAt === null ? "时间未知" : formatRelative(binding.boundAt)}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <Button size="sm" variant="secondary" className="self-end sm:self-auto" loading={reset.isPending && reset.variables?.id === student.id} onClick={() => resetNow(student)}>重置密码</Button>
+              </li>
+            );
+          })}
         </ul>}
       </div>
+    </Card>
+  );
+}
+
+function maskCredentialHint(value: string | null): string | null {
+  const suffix = value?.trim().replace(/^(?:…+|\.{3,}|\*+)/u, "");
+  if (!suffix) return null;
+  return `…${Array.from(suffix).slice(-4).join("")}`;
+}
+
+function miaoshouBindingStatus(status?: string): { label: string; variant: "success" | "danger" | "warning" | "neutral" } {
+  switch (status) {
+    case "active": return { label: "有效", variant: "success" };
+    case "invalid": return { label: "凭据失效", variant: "danger" };
+    case "rate_limited": return { label: "请求受限", variant: "warning" };
+    default: return { label: "未知", variant: "neutral" };
+  }
+}
+
+function AccountEmailPanel({ operator }: { operator: Operator }) {
+  const emailFieldId = useId();
+  const codeFieldId = useId();
+  const requestCode = useRequestEmailVerificationCode();
+  const confirmCode = useConfirmEmailVerification();
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const codeCooldown = useEmailCodeCooldown();
+  const [editing, setEditing] = useState(operator.emailVerified !== true);
+  const [error, setError] = useState<string | null>(null);
+  const isVerified = operator.emailVerified === true;
+  const normalizedEmail = normalizeEmailForVerification(email);
+  const canRequestCode = normalizedEmail !== null;
+
+  const submitRequest = () => {
+    if (!normalizedEmail) {
+      setError("请填写有效的邮箱地址");
+      return;
+    }
+    if (codeCooldown.remainingSeconds > 0) return;
+    setError(null);
+    requestCode.mutate({ email: normalizedEmail }, {
+      onSuccess: () => {
+        setCodeSent(true);
+        setCode("");
+        codeCooldown.startCooldown(EMAIL_CODE_RESEND_COOLDOWN_SECONDS);
+      },
+      onError: (reason) => {
+        const retryAfter = retryAfterSecondsFromError(reason);
+        if (retryAfter > 0) codeCooldown.startCooldown(retryAfter);
+        setError(apiErrorMessage(reason));
+      },
+    });
+  };
+
+  const submitConfirm = () => {
+    if (!normalizedEmail) {
+      setError("请填写有效的邮箱地址");
+      return;
+    }
+    if (!/^\d{6}$/.test(code)) {
+      setError("请输入 6 位邮箱验证码");
+      return;
+    }
+    setError(null);
+    confirmCode.mutate({ email: normalizedEmail, code }, {
+      onSuccess: () => {
+        setEmail("");
+        setCode("");
+        setCodeSent(false);
+        setEditing(false);
+        toast.success("邮箱绑定并验证成功");
+      },
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
+  return (
+    <Card padding="normal">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <CardTitle>找回密码邮箱</CardTitle>
+          <p className="mt-1 text-xs leading-[18px] text-fg-muted">
+            用于接收密码找回验证码。更换邮箱后需要验证新地址。
+          </p>
+        </div>
+        <Badge
+          variant={isVerified ? "success" : "warning"}
+          size="sm"
+          icon={isVerified ? <BadgeCheck className="size-3" /> : <Mail className="size-3" />}
+        >
+          {isVerified ? "已验证" : operator.hasEmail ? "待验证" : "未绑定"}
+        </Badge>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]">
+        <span className="text-fg-secondary">当前邮箱</span>
+        <span className="font-medium text-fg">{operator.email || "尚未绑定"}</span>
+      </div>
+
+      {!editing ? (
+        <Button
+          className="mt-4"
+          size="sm"
+          variant="secondary"
+          icon={<Mail />}
+          onClick={() => {
+            setError(null);
+            setEditing(true);
+          }}
+        >
+          更换邮箱
+        </Button>
+      ) : (
+        <div className="mt-4 flex flex-col gap-3 border-t border-border-subtle pt-3">
+          <Field label="新邮箱" required htmlFor={emailFieldId}>
+            <Input
+              id={emailFieldId}
+              type="email"
+              autoComplete="email"
+              value={email}
+              disabled={requestCode.isPending || confirmCode.isPending}
+              placeholder="name@example.com"
+              onChange={(event) => {
+                setEmail(event.currentTarget.value);
+                setCodeSent(false);
+                setCode("");
+                setError(null);
+                codeCooldown.startCooldown(0);
+              }}
+            />
+          </Field>
+          {!codeSent ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={requestCode.isPending}
+              disabled={!canRequestCode || codeCooldown.remainingSeconds > 0}
+              onClick={submitRequest}
+            >
+              {codeCooldown.remainingSeconds > 0
+                ? `等待 ${codeCooldown.remainingSeconds} 秒后重发`
+                : "发送验证码"}
+            </Button>
+          ) : (
+            <>
+              <p role="status" className="text-xs leading-[18px] text-fg-muted">
+                验证码已发送，请查看邮箱；验证码 15 分钟内有效。重新发送会使之前的验证码失效。
+                {codeCooldown.remainingSeconds > 0 && ` ${codeCooldown.remainingSeconds} 秒后可重新发送。`}
+              </p>
+              <Field label="邮箱验证码" required htmlFor={codeFieldId}>
+                <Input
+                  id={codeFieldId}
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={code}
+                  onChange={(event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") submitConfirm();
+                  }}
+                />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  loading={confirmCode.isPending}
+                  disabled={code.length !== 6}
+                  onClick={submitConfirm}
+                >
+                  验证并绑定
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  loading={requestCode.isPending}
+                  disabled={codeCooldown.remainingSeconds > 0}
+                  onClick={submitRequest}
+                >
+                  {codeCooldown.remainingSeconds > 0
+                    ? `重新发送（${codeCooldown.remainingSeconds} 秒）`
+                    : "重新发送"}
+                </Button>
+              </div>
+            </>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setEditing(false);
+              setCodeSent(false);
+              setCode("");
+              setError(null);
+            }}
+          >
+            取消
+          </Button>
+          {error && <InlineError>{error}</InlineError>}
+        </div>
+      )}
     </Card>
   );
 }

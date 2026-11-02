@@ -5,13 +5,27 @@ import { BrandMark, TitleBar } from "@/components/layout";
 import { SoftwareAccountPanel } from "@/features/auth/UnlockPage";
 import { useSoftwareCredentialsStatus } from "@/lib/queries";
 import { useOperatorIdentity } from "@/lib/operator";
+import { resolveApiBase } from "@/lib/api";
+
+function isLocalApi(): boolean {
+  const base = resolveApiBase();
+  if (!base) {
+    return ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+  }
+  try {
+    return ["localhost", "127.0.0.1", "::1"].includes(new URL(base).hostname);
+  } catch {
+    return false;
+  }
+}
 
 /** 独立的软件账号入口。妙手凭据绑定留在登录后的 /unlock 页面。 */
 export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const identity = useOperatorIdentity();
-  const credentialsStatus = useSoftwareCredentialsStatus(true);
+  const localApi = isLocalApi();
+  const credentialsStatus = useSoftwareCredentialsStatus(localApi);
   const redirectTo = useMemo(() => {
     const state = location.state as { from?: string } | null;
     return state?.from && state.from !== "/login" ? state.from : "/automation";
@@ -77,7 +91,7 @@ export function LoginPage() {
           <SoftwareAccountPanel
             redirectTo={redirectTo}
             onBack={() => undefined}
-            allowInitialize={!credentialsStatus.data?.initialized}
+            allowInitialize={localApi && !credentialsStatus.data?.initialized}
             allowRegister
             showBack={false}
           />

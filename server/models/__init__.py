@@ -30,6 +30,7 @@ from models.audit_log import AuditLog
 from models.operator import Operator
 from models.login_rate_limit import LoginRateLimit
 from models.password_reset_token import PasswordResetToken
+from models.email_verification_code import EmailVerificationCode
 
 __all__ = [
     "Account",
@@ -54,4 +55,5 @@ __all__ = [
     "Operator",
     "LoginRateLimit",
     "PasswordResetToken",
+    "EmailVerificationCode",
 ]

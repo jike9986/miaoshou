@@ -43,6 +43,18 @@ def _same_secret(supplied: str, expected: str) -> bool:
         return False
 
 
+def _is_shared_client_token(supplied: str) -> bool:
+    """The installation-wide token identifies a client, never a user."""
+    client_token = (getattr(get_settings(), "client_token", "") or "").strip()
+    return bool(client_token and _same_secret(supplied, client_token))
+
+
+def _reject_client_identity() -> None:
+    raise errors.AppError(errors.TOKEN_INVALID,
+                          "共享客户端令牌不能访问业务数据；请先登录个人账号",
+                          status=401)
+
+
 def require_token(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
     x_local_token: Annotated[str | None, Header(alias="X-Local-Token")] = None,
@@ -63,12 +75,10 @@ def require_token(
                               "缺少访问令牌：请带上 Authorization: Bearer <token>",
                               status=401)
     settings = get_settings()
-    # 共享部署的「客户端免登录令牌」：软件发给别人用、装上就能用、不出现账号界面。
-    # 部署方通过 AOHUANG_CLIENT_TOKEN 统一配置，客户端内置同一把。
-    # 放在本机 secret 判断之前：它是明确授权的共享凭据，不受 shared_mode 拒绝影响。
-    client_token = (getattr(settings, "client_token", "") or "").strip()
-    if client_token and _same_secret(supplied, client_token):
-        return supplied
+    # The legacy installation-wide token cannot identify which student's data
+    # this request may access, so it is never accepted as a business credential.
+    if _is_shared_client_token(supplied):
+        _reject_client_identity()
     if _same_secret(supplied, settings.local_secret()):
         # 本机 secret 视部署模式而定：
         #  · 单机（默认，绑 127.0.0.1）：它就是这台机器的身份，直接放行，
@@ -83,6 +93,8 @@ def require_token(
         return supplied
     operator = operator_service.resolve(db, supplied)
     if operator is not None:
+        if operator.name == operator_service.CLIENT_OPERATOR_NAME:
+            _reject_client_identity()
         operator_service.require_enabled(operator)
         return supplied
     raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
@@ -96,10 +108,8 @@ def _authenticate(db: Session, supplied: str) -> Operator:
     记录上，这样审计留痕仍然是「本机」而不是凭空一个人。
     """
     settings = get_settings()
-    # 客户端免登录令牌：落到内置「客户端」身份（ensure_client_operator 保证存在）。
-    client_token = (getattr(settings, "client_token", "") or "").strip()
-    if client_token and _same_secret(supplied, client_token):
-        return operator_service.ensure_client(db)
+    if _is_shared_client_token(supplied):
+        _reject_client_identity()
     if _same_secret(supplied, settings.local_secret()):
         # 单机模式：本机 secret 代表这台机器，落到内置「本机」记录；
         # 共享模式：拒绝（secret 不是个人身份）。
@@ -111,6 +121,8 @@ def _authenticate(db: Session, supplied: str) -> Operator:
         return operator_service.ensure_default(db)
     operator = operator_service.resolve(db, supplied)
     if operator is not None:
+        if operator.name == operator_service.CLIENT_OPERATOR_NAME:
+            _reject_client_identity()
         return operator
     raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
 
@@ -232,7 +244,7 @@ def require_permission(permission: str):
 
 
 def require_admin(operator: OperatorDep) -> Operator:
-    """管理员专属：账号、操作员与全局配置写接口统一走这一入口。"""
+    """老师与最高权限账号可用的全局业务管理入口。"""
     return operator_service.require_role(operator, "admin")
 
 

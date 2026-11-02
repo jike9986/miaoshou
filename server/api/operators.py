@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from api.deps import (
     AdminDep,
@@ -38,7 +38,7 @@ from api.deps import (
 )
 from core import errors
 from schemas.common import CamelModel
-from services import audit_service, operator_service
+from services import audit_service, operator_binding_service, operator_service
 
 router = APIRouter(prefix="/operators", tags=["操作员"])
 
@@ -56,15 +56,37 @@ class StudentCreateRequest(CamelModel):
 
 
 class PasswordResetRequest(CamelModel):
+    # This endpoint must never silently accept recovery-email edits. Email
+    # changes are handled only by the signed-in owner after code verification.
+    model_config = ConfigDict(extra="forbid")
+
     password: str = Field(min_length=8, max_length=128)
     username: str | None = Field(default=None, max_length=64)
-    email: str | None = Field(default=None, max_length=254)
 
 
 def _require_teacher_or_admin(operator: Any) -> None:
     if operator_service.role_of(operator) not in {
             operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}:
         raise errors.AppError("FORBIDDEN", "无权管理学员账号", status=403)
+
+
+def _require_superadmin_target(db: DbSession, operator_id: str,
+                               operator: Any) -> Any:
+    """Protect the top-level account from teacher account-management actions.
+
+    ``AdminDep`` intentionally grants teachers the same day-to-day management
+    surface as the legacy admin role.  The top-level account is different: a
+    teacher must never be able to disable, re-enable, or rotate its credentials,
+    otherwise the only account that can recover global access could be locked
+    out.  Keep this check at the HTTP boundary so every mutation route shares it.
+    """
+    target = operator_service.get(db, operator_id)
+    if (operator_service.is_superadmin(db, target)
+            and not operator_service.is_superadmin(db, operator)):
+        raise errors.AppError(
+            "FORBIDDEN", "只有最高权限账号可以管理最高权限账号", status=403,
+            details={"reason": "superadmin_target"})
+    return target
 
 
 @router.post("/students", status_code=201,
@@ -95,7 +117,7 @@ def reset_student_password(operator_id: str, payload: PasswordResetRequest,
     require_writable(db)
     operator_service.set_password(
         db, target, payload.password, must_change=True, rotate_token=True,
-        username=payload.username, email=payload.email)
+        username=payload.username)
     db.commit()
     audit_service.record(db, operator=operator, action="operator.student_reset_password",
                          target_kind="operator", target_id=str(target.id),
@@ -143,8 +165,23 @@ def list_operators(db: DbSession,
     can_manage_accounts = operator_service.role_of(operator) in {
         operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}
     current_data = operator_service.serialize(current)
+    current_data["canManageRoles"] = operator_service.is_superadmin(db, current)
+    if operator_service.is_superadmin(db, current):
+        current_data["role"] = operator_service.ROLE_ADMIN
+        current_data["admin"] = True
+        current_data["isAdmin"] = True
     if can_manage_accounts:
         rows = operator_service.list_all(db)
+        miaoshou_bindings = operator_binding_service.student_miaoshou_bindings(db)
+        for row in rows:
+            row["miaoshouBinding"] = miaoshou_bindings.get(row["id"])
+        current_data["miaoshouBinding"] = miaoshou_bindings.get(str(current.id))
+        if operator_service.is_superadmin(db, current):
+            for row in rows:
+                if row["id"] == str(current.id):
+                    row["role"] = operator_service.ROLE_ADMIN
+                    row["admin"] = True
+                    row["isAdmin"] = True
     else:
         current_data.pop("username", None)
         current_data.pop("hasLoginCredentials", None)
@@ -163,11 +200,19 @@ def create_operator(payload: OperatorCreateRequest, db: DbSession,
                     operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
     is_admin = bool(payload.isAdmin if payload.admin is None else payload.admin)
-    role = payload.role if payload.role in operator_service.VALID_ROLES else None
+    if payload.role is not None and payload.role not in operator_service.VALID_ROLES:
+        raise errors.validation(
+            f"角色无效：{payload.role}，可选 admin/teacher/member",
+            field="role", value=payload.role)
+    role = payload.role
     # 传了角色就按角色来，没传就按 isAdmin 推
     if role is None:
         role = operator_service.ROLE_ADMIN if is_admin else operator_service.ROLE_MEMBER
-    # role 优先于旧 isAdmin 字段；admin 只保留为旧客户端兼容的角色值。
+    if role == operator_service.ROLE_ADMIN:
+        raise errors.validation("不能创建新的最高权限账号", field="role")
+    if role == operator_service.ROLE_TEACHER and not operator_service.is_superadmin(db, operator):
+        raise errors.AppError("FORBIDDEN", "只有最高权限账号可以设置老师身份", status=403)
+    # admin is reserved for the initial top-level account and legacy databases.
     is_admin = role == operator_service.ROLE_ADMIN
     row, token = operator_service.create(db, payload.name, is_admin=is_admin,
                                           role=role, email=payload.email)
@@ -188,9 +233,20 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
     if payload.name is None and payload.enabled is None and payload.role is None:
         raise errors.validation("至少提供一个要修改的字段（name / enabled / role）",
                                 field="name")
+    target = _require_superadmin_target(db, operator_id, operator)
     result: dict[str, Any] = {}
     if payload.role is not None:
-        # 改角色：老师可管理，且不能移除最后一位全局管理者
+        if not operator_service.is_superadmin(db, operator):
+            raise errors.AppError("FORBIDDEN", "只有最高权限账号可以设置老师身份", status=403)
+        if (int(target.id) == int(operator.id)
+                and operator_service.is_superadmin(db, target)
+                and payload.role != operator_service.ROLE_ADMIN):
+            raise errors.AppError(
+                "FORBIDDEN", "最高权限账号不能自行降级", status=403,
+                details={"reason": "superadmin_self_demotion"})
+        if payload.role == operator_service.ROLE_ADMIN:
+            raise errors.validation("不能分配最高权限身份", field="role")
+        # Only the top-level account can promote or demote a teacher.
         result = operator_service.set_role(
             db, operator_id, payload.role,
             is_admin_operator=operator_service.can(operator, "admin"))
@@ -200,7 +256,7 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
                              detail={"name": result["name"], "role": payload.role})
         db.commit()
     if payload.name is not None:
-        row = operator_service.get(db, operator_id)
+        row = target
         old_name = row.name
         result = operator_service.rename(db, operator_id, payload.name)
         db.commit()
@@ -228,9 +284,14 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
 
 def _disable(db: DbSession, operator_id: str, operator: Any) -> dict[str, Any]:
     """停用的公共实现：PATCH 与 POST /disable 共用，保证两条路一样严。"""
-    if str(operator.id) == str(operator_id):
+    try:
+        is_self = int(operator.id) == int(operator_id)
+    except (TypeError, ValueError):
+        is_self = False
+    if is_self:
         # 停自己 = 立刻把自己锁在门外，而界面上没有任何补救入口。挡的是手滑。
         raise errors.forbidden("不能停用自己的账号", reason="self")
+    _require_superadmin_target(db, operator_id, operator)
     result = operator_service.disable(
         db, operator_id,
         is_admin_operator=operator_service.can(operator, "admin"))
@@ -253,6 +314,7 @@ def disable_operator(operator_id: str, db: DbSession,
 def enable_operator(operator_id: str, db: DbSession,
                     operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
+    _require_superadmin_target(db, operator_id, operator)
     result = operator_service.enable(
         db, operator_id, is_admin_operator=operator_service.can(operator, "admin"))
     db.commit()
@@ -267,6 +329,7 @@ def enable_operator(operator_id: str, db: DbSession,
 def rotate_operator(operator_id: str, db: DbSession,
                     operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
+    _require_superadmin_target(db, operator_id, operator)
     result, token = operator_service.rotate(db, operator_id)
     db.commit()
     # detail 里**不记 token**：审计表是给全员看的，塞进去等于公开它

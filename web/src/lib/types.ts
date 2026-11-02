@@ -87,6 +87,8 @@ export type AccountStatus = "active" | "disabled" | "invalid";
 export interface Account {
   id: string;
   name: string;
+  /** Teacher-visible owner of this shared Miaoshou account. */
+  ownerOperatorId?: string | null;
   appIdHint: string;
   site: string | null;
   isDefault: boolean;
@@ -110,6 +112,8 @@ export interface AuthConnectResult {
 
 export interface AuthConnectRequest {
   accountId?: string | null;
+  /** Shared deployment: a teacher/admin connects this Miaoshou account for one student. */
+  studentOperatorId?: string;
   name?: string | null;
   appId?: string;
   appSecret?: string;
@@ -1342,6 +1346,10 @@ export interface Operator {
   id: string;
   name: string;
   username?: string | null;
+  /** 已绑定邮箱的脱敏显示；完整地址只在用户输入时短暂存在前端表单。 */
+  email?: string | null;
+  hasEmail?: boolean;
+  emailVerified?: boolean;
   hasLoginCredentials?: boolean;
   /** 管理员能改名 / 停用 / 重置别人的 token */
   admin: boolean;
@@ -1352,8 +1360,20 @@ export interface Operator {
   /** 最后一次带该 token 发起请求的时间（Unix 秒）；从未用过为 null */
   lastActiveAt: number | null;
   createdAt: number;
+  /** 只有最高权限账号可以授予或撤销老师身份 */
+  canManageRoles?: boolean;
   /** 内置「本机」操作员：不可改名、不可停用、不可重置 */
   builtin?: boolean;
+  /** 老师可见的学员妙手账号绑定摘要，不包含密钥明文。 */
+  miaoshouBinding?: MiaoshouBindingSummary | null;
+}
+
+export interface MiaoshouBindingSummary {
+  linked: boolean;
+  appIdHint: string | null;
+  secretHint: string | null;
+  status: string;
+  boundAt: number | null;
 }
 
 export interface SoftwareLoginResponse {
@@ -1366,6 +1386,25 @@ export interface SoftwareRegisterRequest {
   name: string;
   email: string;
   password: string;
+  code: string;
+}
+
+export interface EmailCodeRequest {
+  email: string;
+}
+
+export interface EmailCodeConfirmRequest {
+  email: string;
+  code: string;
+}
+
+export interface EmailCodeResponse {
+  ok: true;
+}
+
+export interface EmailVerificationResponse extends EmailCodeResponse {
+  email: string;
+  emailVerified: true;
 }
 
 export interface StudentCreateRequest {

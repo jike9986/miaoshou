@@ -212,7 +212,9 @@ def system_bootstrap(db: DbSession, operator: OperatorDep,
             {"code": code, "label": LANGUAGE_LABELS.get(code, code)}
             for code in SUPPORTED_LANGUAGES
         ],
-        "workflowDefaults": setting_service.workflow_defaults(db),
+        "workflowDefaults": setting_service.workflow_defaults(
+            db, operator_id=(operator.id if operator_service.role_of(operator)
+                             == operator_service.ROLE_MEMBER else None)),
         "imageLimits": setting_service.image_limits(db),
     }
     # 下面每段单独兜：数据库里某张表读失败（例如老库缺列）不该让首屏全挂。
@@ -220,7 +222,7 @@ def system_bootstrap(db: DbSession, operator: OperatorDep,
     # 直接塞进响应会 PydanticSerializationError 整页 500。
     for key, loader in (
         ("accounts", lambda: account_service.account_summaries(db)),
-        ("templates", lambda: _bootstrap_templates(db)),
+        ("templates", lambda: _bootstrap_templates(db, operator)),
         ("stats", lambda: warehouse_service.stats(db, operator_id=operator.id)),
         ("batches", lambda: batch_service.list_batches(
             db, limit=5, operator_id=operator.id if operator_service.role_of(operator)
@@ -235,17 +237,31 @@ def system_bootstrap(db: DbSession, operator: OperatorDep,
     return view
 
 
-def _bootstrap_templates(db: DbSession) -> dict[str, Any]:
+def _bootstrap_templates(db: DbSession,
+                         operator: Operator | None = None) -> dict[str, Any]:
     """模板库 + 当前选中名，单独成函数便于上面那段 try/except 包住。"""
     stored = setting_service.price_templates(db)
     items = []
     for name in stored:
         items.append({"name": name})
+    selected = setting_service.selected_templates(db)
+    selected_account_id = None
+    if (isinstance(operator, Operator)
+            and operator_service.role_of(operator) == operator_service.ROLE_MEMBER):
+        visible_account_ids = {
+            row["id"] for row in account_service.account_summaries(db)
+        }
+        selected = {
+            account_id: name for account_id, name in selected.items()
+            if account_id == "" or account_id in visible_account_ids
+        }
+        selected_account_id = _member_account_scope(db, operator, None)
     # selectedName 走四级兜底：首屏拿到的就是「这次会用哪套模板」，
     # 前端不必自己去猜 accounts[""] / 妙手侧记录 / 唯一那一套。
     return {"items": items, "total": len(items),
-            "selected": setting_service.selected_templates(db),
-            "selectedName": setting_service.selected_template_name(db)}
+            "selected": selected,
+            "selectedName": setting_service.selected_template_name(
+                db, selected_account_id)}
 
 
 def _validate_workflow_defaults(raw: dict[str, Any]) -> dict[str, Any]:
@@ -274,8 +290,8 @@ def _validate_workflow_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
-@router.get("/settings", summary="只读模式与发布开关")
-def system_settings(db: DbSession) -> dict[str, Any]:
+@router.get("/settings", summary="只读模式、发布开关与当前账号处理参数")
+def system_settings(db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     settings = get_settings()
     return {
         "readOnly": setting_service.is_read_only(db),
@@ -284,18 +300,27 @@ def system_settings(db: DbSession) -> dict[str, Any]:
         "dbPath": str(settings.db_path),
         "imageKeyConfigured": bool(settings.image_api_key()),
         "sharedMode": bool(settings.shared_mode),
-        "workflowDefaults": setting_service.workflow_defaults(db),
+        "workflowDefaults": setting_service.workflow_defaults(
+            db, operator_id=(operator.id if operator_service.role_of(operator)
+                             == operator_service.ROLE_MEMBER else None)),
         "imageLimits": setting_service.image_limits(db),
     }
 
 
-@router.post("/settings", summary="切换只读模式 / 发布开关",
-             dependencies=[require_permission("admin")])
+@router.post("/settings", summary="更新系统设置或当前账号处理参数",
+             dependencies=[require_permission("workflow.settings")])
 def patch_system_settings(payload: dict[str, Any], db: DbSession,
                           operator: OperatorDep) -> dict[str, Any]:
-    # 改系统设置是管理员专属：只读模式能让所有人立刻写不进去，
-    # 发布开关能控制全员的发布能力——普通操作员不该有这个能力。
-    operator_service.require_role(operator, "settings")
+    # 工作流重量/尺寸/尺码图是当前操作员的处理偏好；系统只读与发布开关
+    # 会影响所有人，仍然只允许老师/管理员修改。
+    unknown_fields = set(payload) - {
+        "securityReadOnly", "publishEnabled", "workflowDefaults"}
+    if unknown_fields:
+        raise errors.validation("包含未知的系统设置项", field="settings",
+                                fields=sorted(unknown_fields))
+    shared_fields = {"securityReadOnly", "publishEnabled"}.intersection(payload)
+    if shared_fields or not payload:
+        operator_service.require_role(operator, "settings")
     # 关闭只读模式本身属于「恢复可写」，不能反过来被只读守卫拦住
     turning_off_readonly = ("securityReadOnly" in payload
                             and parse_bool(payload.get("securityReadOnly"),
@@ -318,18 +343,33 @@ def patch_system_settings(payload: dict[str, Any], db: DbSession,
         # 只接受白名单键，做服务端校验：非法值在这里就 422，
         # 不能等到入仓时才让 normalize_package_dimensions 抛「请填写包裹长宽高」。
         cleaned = _validate_workflow_defaults(raw)
-        setting_service.save_workflow_defaults(db, cleaned)
+        scoped_operator_id = (operator.id
+                              if operator_service.role_of(operator)
+                              == operator_service.ROLE_MEMBER else None)
+        setting_service.save_workflow_defaults(
+            db, cleaned, operator_id=scoped_operator_id)
         changed["workflowDefaults"] = sorted(cleaned)
     db.commit()
-    if changed:
-        # 共享设置一改全员受影响（只读模式能让所有人立刻写不进去），
-        # 这类改动最该答得出「谁在什么时候关的」。
+    shared_changed = set(changed).intersection({"securityReadOnly", "publishEnabled"})
+    if shared_changed:
         audit_service.record(db, operator=operator, action="settings.change",
                              target_kind="setting",
-                             target_id=",".join(sorted(changed)),
-                             detail={"name": "共享设置", **changed})
+                             target_id=",".join(sorted(shared_changed)),
+                             detail={"name": "共享设置", **{
+                                 key: changed[key] for key in shared_changed}})
         db.commit()
-    return system_settings(db)
+    if "workflowDefaults" in changed:
+        audit_service.record(
+            db, operator=operator, action="settings.workflow_defaults.change",
+            target_kind="operator" if operator_service.role_of(operator)
+            == operator_service.ROLE_MEMBER else "setting",
+            target_id=(str(operator.id) if operator_service.role_of(operator)
+                       == operator_service.ROLE_MEMBER else "workflow.defaults"),
+            detail={"fields": changed["workflowDefaults"],
+                    "scope": "operator" if operator_service.role_of(operator)
+                    == operator_service.ROLE_MEMBER else "shared"})
+        db.commit()
+    return system_settings(db, operator)
 
 
 @router.get("/price-defaults", summary="站点默认定价（只读，回源妙手）")
@@ -608,7 +648,8 @@ def delete_template(name: str, db: DbSession,
             "templates": templates(db)["templates"]}
 
 
-@router.get("/logs/tail", summary="服务端运行日志尾部（排查用）")
+@router.get("/logs/tail", summary="服务端运行日志尾部（排查用）",
+            dependencies=[require_permission("admin")])
 def logs_tail(limit: str | None = None) -> dict[str, Any]:
     """返回 server.log 最后 N 行。
 
@@ -633,7 +674,8 @@ def logs_tail(limit: str | None = None) -> dict[str, Any]:
         raise errors.AppError(errors.INTERNAL, f"读取日志失败：{exc}", status=500) from None
 
 
-@router.get("/maintenance/backfill", summary="清点仓库行缺失的账号归属")
+@router.get("/maintenance/backfill", summary="清点仓库行缺失的账号归属",
+            dependencies=[require_permission("admin")])
 def backfill_survey(db: DbSession) -> dict[str, Any]:
     """只统计：多少行缺账号、能修多少、哪些店铺对不上。"""
     from services import backfill_service
@@ -673,7 +715,8 @@ def backfill_apply(db: DbSession, operator: OperatorDep,
     return result
 
 
-@router.get("/maintenance/prune", summary="清点可清理的运行时缓存")
+@router.get("/maintenance/prune", summary="清点可清理的运行时缓存",
+            dependencies=[require_permission("admin")])
 def prune_survey(days: float = 7.0) -> dict[str, Any]:
     """只出报告，不删任何文件。"""
     from services import prune_service

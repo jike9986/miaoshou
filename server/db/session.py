@@ -176,6 +176,185 @@ def _ensure_sqlite_account_app_key_index() -> None:
         ))
 
 
+def _ensure_sqlite_schedule_ownership_indexes() -> None:
+    """Create ownership indexes after legacy SQLite tables gain their columns."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    indexes = (
+        ("schedules", "ix_schedules_owner_created",
+         "owner_operator_id, created_at"),
+        ("schedule_logs", "ix_schedule_logs_owner_at",
+         "owner_operator_id, at"),
+    )
+    with engine.begin() as connection:
+        for table, index, columns in indexes:
+            if table not in tables:
+                continue
+            names = {column["name"] for column in inspector.get_columns(table)}
+            expected = {part.strip() for part in columns.split(",")}
+            if expected.issubset(names):
+                connection.execute(text(
+                    f'CREATE INDEX IF NOT EXISTS "{index}" ON "{table}" ({columns})'
+                ))
+
+
+def _ensure_sqlite_publish_log_ownership() -> None:
+    """Replace the legacy account-wide publish key without losing ledger rows.
+
+    Desktop SQLite databases are upgraded at startup and do not run Alembic.
+    The old table-level unique constraint cannot be dropped in place, so rebuild
+    only that table using the current model, copy every modeled column, and then
+    recreate its indexes. Unknown columns abort the upgrade before any change.
+    """
+    from sqlalchemy import inspect, text
+    from sqlalchemy.schema import CreateTable
+
+    inspector = inspect(engine)
+    if "publish_logs" not in inspector.get_table_names():
+        return
+
+    from models.publish_log import PublishLog
+
+    model_table = PublishLog.__table__
+    existing_columns = {column["name"] for column in inspector.get_columns("publish_logs")}
+    model_columns = {column.name for column in model_table.columns}
+    unknown_columns = existing_columns - model_columns
+    if unknown_columns:
+        raise RuntimeError(
+            "无法升级 publish_logs：存在当前版本不认识的列，未修改数据："
+            + ", ".join(sorted(unknown_columns))
+        )
+
+    old_key = {"account_id", "detail_id", "shop_id"}
+    has_legacy_key = any(
+        set(constraint.get("column_names") or []) == old_key
+        for constraint in inspector.get_unique_constraints("publish_logs")
+    )
+    if has_legacy_key:
+        # Keep foreign-key targets available while SQLAlchemy compiles the
+        # temporary table. The temporary metadata is removed immediately after
+        # the rebuild so it cannot affect later model operations.
+        temporary = model_table.to_metadata(
+            Base.metadata, name="publish_logs_owner_upgrade")
+        column_names = [column.name for column in model_table.columns
+                        if column.name in existing_columns]
+        quoted = ", ".join(f'"{name}"' for name in column_names)
+        try:
+            with engine.begin() as connection:
+                connection.execute(CreateTable(temporary))
+                connection.execute(text(
+                    f'INSERT INTO "publish_logs_owner_upgrade" ({quoted}) '
+                    f'SELECT {quoted} FROM "publish_logs"'
+                ))
+                connection.execute(text('DROP TABLE "publish_logs"'))
+                connection.execute(text(
+                    'ALTER TABLE "publish_logs_owner_upgrade" RENAME TO "publish_logs"'
+                ))
+        finally:
+            Base.metadata.remove(temporary)
+
+    with engine.begin() as connection:
+        for index in model_table.indexes:
+            index.create(connection, checkfirst=True)
+
+
+def _assert_sqlite_operator_emails_unique() -> None:
+    """Fail before index creation if legacy mailboxes collide case-insensitively."""
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+    except Exception:  # pragma: no cover - test doubles / unavailable engine
+        return
+    if "operators" not in inspector.get_table_names():
+        return
+    operator_columns = {column["name"] for column in inspector.get_columns("operators")}
+    if "email" not in operator_columns:
+        return
+    with engine.connect() as connection:
+        duplicates = connection.execute(text(
+            "SELECT group_concat(id, ',') FROM operators "
+            "WHERE email IS NOT NULL AND trim(email) <> '' "
+            "GROUP BY lower(trim(email)) HAVING COUNT(*) > 1 ORDER BY MIN(id)"
+        )).scalars().all()
+    if duplicates:
+        ids = "; ".join(
+            f"operators.id=[{','.join(str(int(value)) for value in group.split(','))}]"
+            for group in duplicates
+        )
+        raise RuntimeError(
+            "无法升级：operators 中存在重复的邮箱（忽略大小写与首尾空格后）。"
+            "为避免错误登录或找回密码，应用没有修改数据；请人工核对以下账号 ID 后重试："
+            f" {ids}"
+        )
+
+
+def _ensure_sqlite_operator_email_index() -> None:
+    """Create the normalized-email index missing from pre-existing SQLite tables."""
+    from sqlalchemy import inspect, text
+
+    try:
+        if "operators" not in inspect(engine).get_table_names():
+            return
+    except Exception:  # pragma: no cover - test doubles / unavailable engine
+        return
+    _assert_sqlite_operator_emails_unique()
+    with engine.begin() as connection:
+        connection.execute(text(
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_operators_email_normalized" '
+            'ON "operators" (lower(trim(email))) '
+            'WHERE email IS NOT NULL AND trim(email) <> \'\''
+        ))
+
+
+def _ensure_sqlite_operator_username_index() -> None:
+    """Restore username uniqueness on desktop databases upgraded without Alembic.
+
+    ``_add_missing_columns`` can add ``username`` to a legacy ``operators`` table,
+    but cannot reproduce the unique constraint from the Alembic migration. Fail
+    without changing account rows if duplicates already exist.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if "operators" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("operators")}
+    if "username" not in columns:
+        return
+
+    for index in inspector.get_indexes("operators"):
+        if index.get("unique") and index.get("column_names") == ["username"]:
+            return
+    for constraint in inspector.get_unique_constraints("operators"):
+        if constraint.get("column_names") == ["username"]:
+            return
+
+    with engine.connect() as connection:
+        duplicates = connection.execute(text(
+            "SELECT group_concat(id, ',') FROM operators "
+            "WHERE username IS NOT NULL "
+            "GROUP BY username HAVING COUNT(*) > 1 ORDER BY MIN(id)"
+        )).scalars().all()
+    if duplicates:
+        details = "; ".join(
+            f"operators.id=[{','.join(str(int(value)) for value in ids.split(','))}]"
+            for ids in duplicates
+        )
+        raise RuntimeError(
+            "无法升级：operators 中存在重复用户名，未修改账号数据。"
+            "请人工核对以下账号 ID 后重试： " + details
+        )
+
+    with engine.begin() as connection:
+        connection.execute(text(
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_operators_username" '
+            'ON "operators" ("username")'
+        ))
+
+
 def _backfill_sqlite_account_bindings() -> None:
     """将旧库里的账号负责人迁移为显式的共享账号绑定。
 
@@ -219,6 +398,22 @@ def _backfill_sqlite_account_bindings() -> None:
             ON CONFLICT(operator_id) DO NOTHING
             """
         ))
+        # Keep duplicate legacy credentials and their old owner id intact, but
+        # do not let them re-enter the compatibility fallback after an explicit
+        # binding is removed.
+        connection.execute(text(
+            """
+            UPDATE accounts
+            SET legacy_owner_fallback_disabled = 1
+            WHERE owner_operator_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM account_bindings AS binding
+                  WHERE binding.operator_id = accounts.owner_operator_id
+                    AND binding.account_id <> accounts.id
+              )
+            """
+        ))
 
 
 def init_db() -> None:
@@ -241,8 +436,13 @@ def init_db() -> None:
 
     # 导入 models 包即把所有模型注册到 Base.metadata（避免逐文件 import）
     importlib.import_module("models")
+    _assert_sqlite_operator_emails_unique()
     Base.metadata.create_all(engine)
     _add_missing_columns()
+    _ensure_sqlite_operator_username_index()
+    _ensure_sqlite_operator_email_index()
+    _ensure_sqlite_schedule_ownership_indexes()
+    _ensure_sqlite_publish_log_ownership()
     _backfill_sqlite_account_bindings()
     _ensure_sqlite_account_app_key_index()
     _seed_settings()

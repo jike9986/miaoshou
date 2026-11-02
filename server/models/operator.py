@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import Float, Index, Integer, String
+from sqlalchemy import Boolean, Float, Index, Integer, String, and_, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.utils import now_ts
@@ -29,6 +29,9 @@ class Operator(Base):
     username: Mapped[str | None] = mapped_column(String(64), unique=True)
     # 邮箱用于账号找回；不参与展示，邮件地址本身也不写审计日志。
     email: Mapped[str | None] = mapped_column(String(254))
+    # Only mailboxes verified with a one-time code may be used for recovery.
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False)
     password_hash: Mapped[str | None] = mapped_column(String(256))
     must_change_password: Mapped[bool] = mapped_column(
         default=False, server_default="0", nullable=False)
@@ -50,5 +53,10 @@ class Operator(Base):
     # 一个批量流程能打上百个请求，不节流就是上百次 UPDATE 抢写锁。
     last_seen_at: Mapped[float | None] = mapped_column(Float)
 
-    __table_args__ = (Index("ix_operators_name", "name"),
-                      Index("ix_operators_enabled", "enabled"))
+    __table_args__ = (
+        Index("ix_operators_name", "name"),
+        Index("ix_operators_enabled", "enabled"),
+        Index("uq_operators_email_normalized", func.lower(func.trim(email)), unique=True,
+              sqlite_where=and_(email.is_not(None), func.trim(email) != ""),
+              postgresql_where=and_(email.is_not(None), func.trim(email) != "")),
+    )

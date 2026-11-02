@@ -2,7 +2,7 @@
 // 未连接：全屏引导（AppID / AppSecret，密码框可切换明文，错误就地显示）。
 // 已连接：顶部账号名 + 店铺下拉（AccountSwitcher，挂在标题栏右侧）。
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
@@ -10,9 +10,16 @@ import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
-import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useSoftwareRegister, useChangeSoftwarePassword, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useOperators, useShops, useSoftwareLogin, useSoftwareRegister, useRequestRegistrationCode, useChangeSoftwarePassword, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset, useWorkflowDefaults } from "@/lib/queries";
 import { setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
+import { normalizeEmailForVerification } from "@/features/auth/emailBinding.mjs";
+import {
+  EMAIL_CODE_RESEND_COOLDOWN_SECONDS,
+  retryAfterSecondsFromError,
+  validateSoftwareLogin,
+} from "@/features/auth/authFormHelpers.mjs";
+import { useEmailCodeCooldown } from "@/features/auth/useEmailCodeCooldown";
 import {
   Button,
   Card,
@@ -46,6 +53,12 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
   // 单机模式：本机令牌就能读连接状态，不必先登录软件账号。
   const { data: status } = useAuthStatus(true);
   const connect = useConnectAccount();
+  const identity = useOperatorIdentity();
+  const { data: operatorData } = useOperators({ enabled: Boolean(identity) });
+  const role = operatorData?.current?.role ?? identity?.role;
+  const canBindForStudent = role === "admin" || role === "teacher";
+  const deploymentQuery = useWorkflowDefaults(identity?.id ?? null, canBindForStudent);
+  const sharedTeacherMode = canBindForStudent && deploymentQuery.data?.sharedMode === true;
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const setCurrentShopId = useSessionStore((state) => state.setCurrentShopId);
   const connected = status?.connected ?? false;
@@ -88,9 +101,24 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
           onChange={(accountId) => {
             if (!accountId || accountId === status?.accountId) return;
             const target = (status?.accounts ?? []).find((item) => item.id === accountId);
+            if (canBindForStudent && typeof deploymentQuery.data?.sharedMode !== "boolean") {
+              toast.info(deploymentQuery.isLoading ? "正在读取连接配置，请稍后再试" : "读取连接配置失败，请刷新后重试");
+              return;
+            }
+            if (sharedTeacherMode && !target?.ownerOperatorId) {
+              toast.error("此账号尚未关联学员，请到连接妙手页面选择学员绑定");
+              return;
+            }
             setCurrentShopId(null);
             connect.mutate(
-              { accountId, save: true, autoScan: false },
+              {
+                accountId,
+                save: true,
+                autoScan: false,
+                ...(sharedTeacherMode && target?.ownerOperatorId
+                  ? { studentOperatorId: target.ownerOperatorId }
+                  : {}),
+              },
               {
                 onSuccess: () =>
                   toast.success(`已切换到「${target?.name ?? accountId}」`, {
@@ -151,6 +179,7 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
 interface FormErrors {
   appId?: string;
   appSecret?: string;
+  studentOperatorId?: string;
   form?: string;
 }
 
@@ -165,11 +194,23 @@ export function UnlockPage() {
   // 注意：这里**不**再用 useOperatorIdentity 做门控 —— 未登录也要能看连接状态。
   const { data: status, isLoading, isError, error, refetch, isFetching } = useAuthStatus(true);
   const connect = useConnectAccount();
+  const identity = useOperatorIdentity();
+  const { data: operatorsData } = useOperators({ enabled: Boolean(identity) });
+  const role = operatorsData?.current?.role ?? identity?.role;
+  const canBindForStudent = role === "admin" || role === "teacher";
+  const { data: deploymentSettings } = useWorkflowDefaults(identity?.id ?? null, canBindForStudent);
+  const sharedTeacherMode = canBindForStudent && deploymentSettings?.sharedMode === true;
+  const deploymentModeReady = !canBindForStudent || typeof deploymentSettings?.sharedMode === "boolean";
+  const students = useMemo(
+    () => (operatorsData?.operators ?? []).filter((operator) => operator.role === "member" && operator.enabled),
+    [operatorsData?.operators]
+  );
 
   const [appId, setAppId] = useState("");
   const [appSecret, setAppSecret] = useState("");
   const [showSecret, setShowSecret] = useState(false);
   const [rememberName, setRememberName] = useState("");
+  const [studentOperatorId, setStudentOperatorId] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
 
   const connected = status?.connected ?? false;
@@ -198,6 +239,8 @@ export function UnlockPage() {
     else if (trimmedId.length > 256) next.appId = "AppID 不能超过 256 个字符";
     if (!trimmedSecret) next.appSecret = "请填写 AppSecret";
     else if (trimmedSecret.length > 512) next.appSecret = "AppSecret 不能超过 512 个字符";
+    if (!deploymentModeReady) next.form = "正在确认服务器连接模式，请稍后重试";
+    if (sharedTeacherMode && !studentOperatorId) next.studentOperatorId = "请选择要绑定妙手账号的学员";
     setErrors(next);
     if (Object.keys(next).length > 0) return;
 
@@ -206,6 +249,7 @@ export function UnlockPage() {
       {
         appId: trimmedId,
         appSecret: trimmedSecret,
+        ...(sharedTeacherMode ? { studentOperatorId } : {}),
         name: name ? name : null,
         save: true,
         autoScan: true,
@@ -236,9 +280,17 @@ export function UnlockPage() {
 
   // 已有保存账号时，允许一键用已保存凭据重连
   const reconnect = (accountId: string): void => {
+    if (!deploymentModeReady) {
+      setErrors({ form: "正在确认服务器连接模式，请稍后重试" });
+      return;
+    }
+    if (sharedTeacherMode && !studentOperatorId) {
+      setErrors({ studentOperatorId: "请选择要绑定妙手账号的学员" });
+      return;
+    }
     setErrors({});
     connect.mutate(
-      { accountId },
+      { accountId, ...(sharedTeacherMode ? { studentOperatorId } : {}) },
       {
         onSuccess: (result) => {
           toast.success(`已连接「${result.connectionName ?? accountId}」`);
@@ -300,6 +352,37 @@ export function UnlockPage() {
               <CardTitle>账号凭据</CardTitle>
 
               <div className="mt-4 flex flex-col gap-4">
+                {sharedTeacherMode && (
+                  <Field
+                    label="绑定给学员"
+                    required
+                    htmlFor="miaoshou-student-target"
+                    error={errors.studentOperatorId ?? null}
+                    hint="每位学员只能绑定一个妙手账号；同一个妙手账号可以由多位学员共享。"
+                  >
+                    <DropdownSelect
+                      id="miaoshou-student-target"
+                      value={studentOperatorId || null}
+                      onChange={(value) => {
+                        setStudentOperatorId(value);
+                        if (errors.studentOperatorId) setErrors((current) => ({ ...current, studentOperatorId: undefined }));
+                      }}
+                      options={students.map((student) => ({
+                        value: student.id,
+                        label: student.name,
+                        description: student.miaoshouBinding?.linked
+                          ? `已绑定妙手账号${student.miaoshouBinding.appIdHint ? `（${student.miaoshouBinding.appIdHint}）` : ""}`
+                          : "尚未绑定妙手账号",
+                      }))}
+                      placeholder={students.length > 0 ? "选择学员" : "暂无可绑定的学员"}
+                      searchable
+                      searchPlaceholder="搜索学员姓名"
+                      aria-label="选择妙手账号所属学员"
+                      emptyText="没有匹配的学员"
+                      disabled={students.length === 0}
+                    />
+                  </Field>
+                )}
                 <Field
                   label="AppID"
                   required
@@ -451,15 +534,24 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
   const queryClient = useQueryClient();
   const login = useSoftwareLogin();
   const register = useSoftwareRegister();
+  const requestRegistrationCode = useRequestRegistrationCode();
   const initialize = useInitializeSoftwareCredentials();
   const change = useChangeSoftwarePassword();
   const requestReset = useRequestPasswordReset();
   const confirmReset = useConfirmPasswordReset();
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const identifierInputRef = useRef<HTMLInputElement>(null);
+  const passwordInputRef = useRef<HTMLInputElement>(null);
+  const [loginFieldErrors, setLoginFieldErrors] = useState<{
+    identifier: string | null;
+    password: string | null;
+  }>({ identifier: null, password: null });
   const [registerName, setRegisterName] = useState("");
   const [registerEmail, setRegisterEmail] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
+  const [registerCode, setRegisterCode] = useState("");
+  const [registerCodeSent, setRegisterCodeSent] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [mustChange, setMustChange] = useState(identity?.mustChangePassword ?? false);
@@ -471,12 +563,22 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
   const [resetCode, setResetCode] = useState("");
   const [resetPassword, setResetPassword] = useState("");
   const [resetSent, setResetSent] = useState(false);
+  const registerCooldown = useEmailCodeCooldown();
+  const resetCooldown = useEmailCodeCooldown();
   const [bootstrapUsername, setBootstrapUsername] = useState("");
   const [bootstrapPassword, setBootstrapPassword] = useState("");
   const navigate = useNavigate();
 
   const submitLogin = () => {
+    if (login.isPending) return;
     setError(null);
+    const fieldErrors = validateSoftwareLogin(identifier, password);
+    setLoginFieldErrors(fieldErrors);
+    if (fieldErrors.identifier || fieldErrors.password) {
+      if (fieldErrors.identifier) identifierInputRef.current?.focus();
+      else passwordInputRef.current?.focus();
+      return;
+    }
     login.mutate({ identifier: identifier.trim(), password }, {
       onSuccess: (result) => {
         setOperator({ token: result.token, id: result.operator.id, name: result.operator.name, role: result.operator.role, mustChangePassword: result.mustChangePassword });
@@ -492,14 +594,15 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
     });
   };
 
-  const submitRegister = () => {
+  const submitRegistrationCode = () => {
+    if (requestRegistrationCode.isPending || registerCooldown.remainingSeconds > 0) return;
     setError(null);
-    const email = registerEmail.trim();
+    const email = normalizeEmailForVerification(registerEmail);
     if (!registerName.trim()) {
       setError("请填写姓名");
       return;
     }
-    if (!email || !email.includes("@")) {
+    if (!email) {
       setError("请填写有效的邮箱地址");
       return;
     }
@@ -507,7 +610,42 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
       setError("密码至少需要 8 个字符");
       return;
     }
-    register.mutate({ name: registerName.trim(), email, password: registerPassword }, {
+    requestRegistrationCode.mutate({ email }, {
+      onSuccess: () => {
+        setRegisterCodeSent(true);
+        setRegisterCode("");
+        registerCooldown.startCooldown(EMAIL_CODE_RESEND_COOLDOWN_SECONDS);
+      },
+      onError: (reason) => {
+        const retryAfter = retryAfterSecondsFromError(reason);
+        if (retryAfter > 0) registerCooldown.startCooldown(retryAfter);
+        setError(apiErrorMessage(reason));
+      },
+    });
+  };
+
+  const submitRegister = () => {
+    if (register.isPending) return;
+    setError(null);
+    const email = normalizeEmailForVerification(registerEmail);
+    if (!registerName.trim()) {
+      setError("请填写姓名");
+      return;
+    }
+    if (!email) {
+      setError("请填写有效的邮箱地址");
+      return;
+    }
+    if (registerPassword.length < 8) {
+      setError("密码至少需要 8 个字符");
+      return;
+    }
+    if (!/^\d{6}$/.test(registerCode.trim())) {
+      setError("请输入 6 位邮箱验证码");
+      return;
+    }
+    register.mutate({ name: registerName.trim(), email, password: registerPassword,
+      code: registerCode.trim() }, {
       onSuccess: (result) => {
         setOperator({ token: result.token, id: result.operator.id, name: result.operator.name,
           role: result.operator.role, mustChangePassword: result.mustChangePassword });
@@ -554,19 +692,42 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
 
   const submitResetRequest = () => {
     setError(null);
-    requestReset.mutate({ email: resetEmail.trim() }, {
-      onSuccess: () => setResetSent(true),
-      onError: (reason) => setError(apiErrorMessage(reason)),
+    const email = normalizeEmailForVerification(resetEmail);
+    if (!email) {
+      setError("请填写有效的邮箱地址");
+      return;
+    }
+    if (resetCooldown.remainingSeconds > 0) return;
+    requestReset.mutate({ email }, {
+      onSuccess: () => {
+        setResetSent(true);
+        setResetCode("");
+        resetCooldown.startCooldown(EMAIL_CODE_RESEND_COOLDOWN_SECONDS);
+      },
+      onError: (reason) => {
+        const retryAfter = retryAfterSecondsFromError(reason);
+        if (retryAfter > 0) resetCooldown.startCooldown(retryAfter);
+        setError(apiErrorMessage(reason));
+      },
     });
   };
 
   const submitResetConfirm = () => {
     setError(null);
+    const email = normalizeEmailForVerification(resetEmail);
+    if (!email) {
+      setError("请填写有效的邮箱地址");
+      return;
+    }
     if (resetPassword.length < 8) {
       setError("新密码至少需要 8 个字符");
       return;
     }
-    confirmReset.mutate({ token: resetCode.trim(), newPassword: resetPassword }, {
+    if (!/^\d{6}$/.test(resetCode.trim())) {
+      setError("请输入 6 位邮箱验证码");
+      return;
+    }
+    confirmReset.mutate({ email, code: resetCode.trim(), newPassword: resetPassword }, {
       onSuccess: (result) => {
         setOperator({ token: result.token, id: result.operator.id, name: result.operator.name,
           role: result.operator.role, mustChangePassword: result.mustChangePassword });
@@ -585,11 +746,12 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
       <div className="mt-4 flex flex-col gap-4">
         {resetting ? <>
           <p className="text-[13px] leading-5 text-fg-secondary">通过绑定邮箱接收一次性验证码，验证码 15 分钟内有效。</p>
-          <Field label="绑定邮箱" required htmlFor={usernameId}><Input id={usernameId} type="email" autoComplete="email" value={resetEmail} onChange={(e) => setResetEmail(e.currentTarget.value)} /></Field>
-          {!resetSent ? <Button loading={requestReset.isPending} onClick={submitResetRequest}>发送验证码</Button> : <>
-            <Field label="邮箱验证码" required htmlFor={passwordId}><Input id={passwordId} autoComplete="one-time-code" value={resetCode} onChange={(e) => setResetCode(e.currentTarget.value)} /></Field>
+          <Field label="绑定邮箱" required htmlFor={usernameId}><Input id={usernameId} type="email" autoComplete="email" value={resetEmail} disabled={requestReset.isPending} onChange={(e) => { setResetEmail(e.currentTarget.value); setResetSent(false); setResetCode(""); resetCooldown.startCooldown(0); }} /></Field>
+          {resetSent && <p role="status" className="text-[13px] leading-5 text-fg-secondary">如果该邮箱对应有效账号，系统会尝试发送验证码。请检查收件箱和垃圾邮件；暂未收到时可以重新发送。</p>}
+          {!resetSent ? <Button loading={requestReset.isPending} disabled={resetCooldown.remainingSeconds > 0} onClick={submitResetRequest}>{resetCooldown.remainingSeconds > 0 ? `等待 ${resetCooldown.remainingSeconds} 秒后重发` : "发送验证码"}</Button> : <>
+            <Field label="邮箱验证码" required htmlFor={passwordId}><Input id={passwordId} autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={resetCode} onChange={(e) => setResetCode(e.currentTarget.value.replace(/\D/g, "").slice(0, 6))} /></Field>
             <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={resetPassword} onChange={(e) => setResetPassword(e.currentTarget.value)} /></Field>
-            <Button loading={confirmReset.isPending} onClick={submitResetConfirm}>重置密码并登录</Button>
+            <div className="flex flex-wrap gap-2"><Button loading={confirmReset.isPending} onClick={submitResetConfirm}>重置密码并登录</Button><Button size="sm" variant="ghost" loading={requestReset.isPending} disabled={resetCooldown.remainingSeconds > 0} onClick={submitResetRequest}>{resetCooldown.remainingSeconds > 0 ? `重新发送（${resetCooldown.remainingSeconds} 秒）` : "重新发送验证码"}</Button></div>
           </>}
           <Button variant="ghost" onClick={() => { setResetting(false); setResetSent(false); setError(null); }}>返回登录</Button>
         </> : allowInitialize && initializing ? <>
@@ -603,15 +765,22 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
           <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.currentTarget.value)} /></Field>
           <Button loading={change.isPending} onClick={submitPassword}>保存新密码</Button>
         </> : registering ? <>
-          <p className="text-[13px] leading-5 text-fg-secondary">注册后即可绑定妙手账号并开始使用。</p>
+          <p className="text-[13px] leading-5 text-fg-secondary">验证码 15 分钟内有效。验证邮箱后即可创建账号并绑定妙手账号。</p>
           <Field label="姓名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="name" value={registerName} onChange={(e) => setRegisterName(e.currentTarget.value)} /></Field>
-          <Field label="邮箱" required htmlFor={currentId}><Input id={currentId} type="email" autoComplete="email" value={registerEmail} onChange={(e) => setRegisterEmail(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
+          <Field label="邮箱" required htmlFor={currentId}><Input id={currentId} type="email" autoComplete="email" value={registerEmail} disabled={requestRegistrationCode.isPending || registerCodeSent} onChange={(e) => { setRegisterEmail(e.currentTarget.value); setRegisterCodeSent(false); setRegisterCode(""); registerCooldown.startCooldown(0); }} onKeyDown={(e) => { if (e.key === "Enter" && !registerCodeSent) submitRegistrationCode(); }} /></Field>
+          {registerCodeSent && <Button size="sm" variant="ghost" disabled={register.isPending || requestRegistrationCode.isPending} onClick={() => { setRegisterCodeSent(false); setRegisterCode(""); setError(null); registerCooldown.startCooldown(0); }}>修改邮箱</Button>}
           <Field label="设置密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="new-password" value={registerPassword} onChange={(e) => setRegisterPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
-          <Button block size="lg" loading={register.isPending} onClick={submitRegister}>注册并登录</Button>
+          {registerCodeSent && <>
+            <p role="status" className="text-[13px] leading-5 text-fg-secondary">
+              验证码已发送至 {normalizeEmailForVerification(registerEmail)}，15 分钟内有效。请检查收件箱和垃圾邮件；重新发送会使之前的验证码失效。
+            </p>
+            <Field label="邮箱验证码" required htmlFor={nextId}><Input id={nextId} autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={registerCode} onChange={(e) => setRegisterCode(e.currentTarget.value.replace(/\D/g, "").slice(0, 6))} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
+          </>}
+          {!registerCodeSent ? <Button block size="lg" loading={requestRegistrationCode.isPending} disabled={registerCooldown.remainingSeconds > 0} onClick={submitRegistrationCode}>{registerCooldown.remainingSeconds > 0 ? `等待 ${registerCooldown.remainingSeconds} 秒后重发` : "发送验证码"}</Button> : <div className="flex flex-wrap gap-2"><Button block size="lg" loading={register.isPending} onClick={submitRegister}>完成注册并登录</Button><Button size="sm" variant="ghost" loading={requestRegistrationCode.isPending} disabled={registerCooldown.remainingSeconds > 0} onClick={submitRegistrationCode}>{registerCooldown.remainingSeconds > 0 ? `重新发送（${registerCooldown.remainingSeconds} 秒）` : "重新发送验证码"}</Button></div>}
           <Button size="sm" variant="ghost" onClick={() => { setRegistering(false); setError(null); }}>已有账号，返回登录</Button>
         </> : <>
-          <Field label="邮箱或用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={identifier} onChange={(e) => setIdentifier(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
-          <Field label="密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
+          <Field label="邮箱或用户名" required htmlFor={usernameId} error={loginFieldErrors.identifier}><Input ref={identifierInputRef} id={usernameId} autoComplete="username" value={identifier} invalid={Boolean(loginFieldErrors.identifier)} onChange={(e) => { setIdentifier(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, identifier: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
+          <Field label="密码" required htmlFor={passwordId} error={loginFieldErrors.password}><Input ref={passwordInputRef} id={passwordId} type="password" autoComplete="current-password" value={password} invalid={Boolean(loginFieldErrors.password)} onChange={(e) => { setPassword(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, password: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
           <div className="flex flex-col gap-1">
             <Button block size="lg" loading={login.isPending} iconRight={<ArrowRight className="size-4" />} onClick={submitLogin}>登录</Button>
             {showBack && !allowInitialize && <Button variant="ghost" onClick={onBack}>返回妙手绑定</Button>}

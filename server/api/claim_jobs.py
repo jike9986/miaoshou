@@ -34,15 +34,17 @@ def create_job(payload: PublishRequest, background: BackgroundTasks, db: DbSessi
 
 
 @router.get("")
-def list_jobs(db: DbSession, accountId: str, limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+def list_jobs(db: DbSession, operator: OperatorDep, accountId: str,
+              limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
     account = account_service.require_account(db, accountId)
-    return claim_job_service.list_jobs(db, account.id, limit)
+    return claim_job_service.list_jobs(db, account.id, limit, operator=operator)
 
 
 @router.get("/{batch_id}")
-def job_detail(batch_id: str, db: DbSession, accountId: str) -> dict[str, Any]:
+def job_detail(batch_id: str, db: DbSession, operator: OperatorDep,
+               accountId: str) -> dict[str, Any]:
     account = account_service.require_account(db, accountId)
-    batch = claim_job_service.get(db, batch_id, account.id)
+    batch = claim_job_service.get(db, batch_id, account.id, operator=operator)
     return {"batch": batch_service.serialize(batch),
             "items": [batch_service.serialize_item(row)
                       for row in batch_service.items_of(db, batch.id)]}

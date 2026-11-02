@@ -47,19 +47,25 @@ def logs(
             account = account_service.current_account(db)
             # Never let an unbound member fall back to the global log list.
             accountId = str(account.id) if account is not None else "0"
+        operator_id = operator.id
+    else:
+        operator_id = None
     # 默认不在 GET 里打上游（列表要快）；但带 refresh=1 时必须真回源——
     # 否则用户看到的水远是本地快照，平台侧改判永远不会同步过来。
     platform_total: Any = None
     degraded = False
     refresh_flag = parse_bool(refresh, "refresh", False)
     if refresh_flag:
-        operator_service.require_role(operator, "publish")
+        permission = ("publish_claimed" if operator_service.role_of(operator)
+                      == operator_service.ROLE_MEMBER else "publish")
+        operator_service.require_role(operator, permission)
     if refresh_flag:
         try:
             # 回源沿用本次列表请求的分页与状态筛选：写死 1/20 会把翻到第 3 页
             # 的记录永远留在 processing，状态筛选也被无声丢掉。
             result = _refresh_processing(db, accountId, page_no=page,
-                                         page_size=pageSize, status=status)
+                                         page_size=pageSize, status=status,
+                                         operator_id=operator_id)
             platform_total = result.get("platformTotal")
             degraded = bool(result.get("degraded"))
         except Exception:  # noqa: BLE001 - 回源失败不该让列表报错
@@ -68,7 +74,8 @@ def logs(
     return publish_service.list_logs(
         db, page=page, page_size=pageSize, status=status, account_id=accountId,
         shop_id=shopId, schedule_id=scheduleId, since=since,
-        platform_total=platform_total, degraded=degraded)
+        platform_total=platform_total, degraded=degraded,
+        operator_id=operator_id)
 
 
 @router.get("/settings", summary="发布开关状态")
@@ -138,7 +145,8 @@ def publish(payload: PublishRequest, db: DbSession,
 
 def _refresh_processing(db: DbSession, account_id: str | None = None, *,
                         page_no: int = 1, page_size: int = PUBLISH_RECORDS_PAGE_SIZE,
-                        status: str | None = None) -> dict[str, Any]:
+                        status: str | None = None,
+                        operator_id: int | None = None) -> dict[str, Any]:
     """回源平台，更新 processing 行的状态（best effort，不抛错给调用方）。"""
     account, client = publish_service.account_client_for(db, account_id)
     from services.miaoshou import MiaoshouError
@@ -168,9 +176,12 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
         client.close()
     from models.publish_log import PublishLog
 
-    rows = (db.query(PublishLog)
-            .filter(PublishLog.account_id == account.id,
-                    PublishLog.status == "processing").all())
+    query = db.query(PublishLog).filter(
+        PublishLog.account_id == account.id,
+        PublishLog.status == "processing")
+    if operator_id is not None:
+        query = query.filter(PublishLog.operator_id == operator_id)
+    rows = query.all()
     local_by_detail: dict[str, list[Any]] = {}
     for row in rows:
         local_by_detail.setdefault(str(row.detail_id), []).append(row)
@@ -225,13 +236,22 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
 
 
 @router.post("/logs/refresh", summary="回源平台更新发布状态（best effort）",
-             dependencies=[require_permission("publish")])
+             dependencies=[require_permission("publish_claimed")])
 def refresh_logs(db: DbSession,
+                 operator: OperatorDep,
                  credentials: CredentialsHeader = None,
                  accountId: str | None = None,
                  page: int = Query(default=1, ge=1),
                  pageSize: int = Query(default=PUBLISH_RECORDS_PAGE_SIZE, ge=1, le=100),
                  status: str | None = None) -> dict[str, Any]:
     require_writable(db)
+    operator_id = None
+    if operator_service.role_of(operator) == operator_service.ROLE_MEMBER:
+        if accountId:
+            account_service.require_account(db, accountId)
+        else:
+            account = account_service.current_account(db)
+            accountId = str(account.id) if account is not None else "0"
+        operator_id = operator.id
     return _refresh_processing(db, accountId, page_no=page, page_size=pageSize,
-                               status=status)
+                               status=status, operator_id=operator_id)

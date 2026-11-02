@@ -24,10 +24,16 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
 
-from api.deps import DbSession, OperatorDep, require_permission, require_writable
+from api.deps import (
+    DbSession,
+    OperatorDep,
+    OptionalOperatorDep,
+    require_permission,
+    require_writable,
+)
 from core import errors
 from schemas.common import CamelModel
-from services import audit_service, image_upload, size_chart_service
+from services import audit_service, image_upload, operator_service, size_chart_service
 
 router = APIRouter(prefix="/size-charts", tags=["尺寸表"])
 
@@ -49,8 +55,14 @@ class SizeChartPatch(CamelModel):
 
 # --- 读 -------------------------------------------------------------------
 @router.get("", summary="尺寸表列表（可按站点过滤）")
-def list_size_charts(db: DbSession, site: str | None = None) -> dict[str, Any]:
-    return size_chart_service.list_charts(db, site=site)
+def list_size_charts(db: DbSession, operator: OptionalOperatorDep,
+                     site: str | None = None) -> dict[str, Any]:
+    result = size_chart_service.list_charts(db, site=site)
+    result["defaultUrl"] = size_chart_service.default_url(
+        db, operator_id=(operator.id if operator is not None and
+                         operator_service.role_of(operator) == operator_service.ROLE_MEMBER
+                         else None))
+    return result
 
 
 # --- 上传本地图片 ---------------------------------------------------------
@@ -171,8 +183,12 @@ def _name_from_header(request: Request) -> str:
 
 # 注意：/resolve 必须声明在 /{chart_id} 之前，否则会被当成 id 吃掉
 @router.get("/resolve", summary="取该站点该用的尺寸表地址")
-def resolve_size_chart(db: DbSession, site: str | None = None) -> dict[str, Any]:
-    return size_chart_service.resolve_for_site(db, site)
+def resolve_size_chart(db: DbSession, operator: OptionalOperatorDep,
+                       site: str | None = None) -> dict[str, Any]:
+    return size_chart_service.resolve_for_site(
+        db, site, operator_id=(operator.id if operator is not None and
+                               operator_service.role_of(operator)
+                               == operator_service.ROLE_MEMBER else None))
 
 
 @router.get("/{chart_id}", summary="尺寸表详情")

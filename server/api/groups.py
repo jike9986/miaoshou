@@ -14,8 +14,8 @@ router = APIRouter(prefix="/groups", tags=["分组"],
 
 
 @router.get("", summary="分组列表（含商品计数）")
-def list_groups(db: DbSession) -> dict[str, Any]:
-    return group_service.list_groups(db)
+def list_groups(db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    return group_service.list_groups(db, operator_id=operator.id)
 
 
 @router.post("", status_code=201, summary="新建分组",

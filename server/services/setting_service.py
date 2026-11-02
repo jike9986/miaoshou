@@ -105,17 +105,32 @@ def set_image_limits(db: Session, payload: Any) -> dict[str, Any]:
     return current
 
 
-def workflow_defaults(db: Session) -> dict[str, Any]:
-    value = get(db, WORKFLOW_DEFAULTS_KEY) or {}
-    return value if isinstance(value, dict) else {}
+def _workflow_defaults_key(operator_id: int | None = None) -> str:
+    if operator_id is None:
+        return WORKFLOW_DEFAULTS_KEY
+    return f"{WORKFLOW_DEFAULTS_KEY}.operator.{int(operator_id)}"
 
 
-def save_workflow_defaults(db: Session, cleaned: dict[str, Any]) -> dict[str, Any]:
-    """合并写入工作流默认值（只覆盖传入的键，其余保持原值）。"""
-    current = workflow_defaults(db)
+def workflow_defaults(db: Session, operator_id: int | None = None) -> dict[str, Any]:
+    """Return shared defaults overlaid with an operator's private preferences."""
+    shared = get(db, WORKFLOW_DEFAULTS_KEY) or {}
+    shared = shared if isinstance(shared, dict) else {}
+    if operator_id is None:
+        return shared
+    personal = get(db, _workflow_defaults_key(operator_id)) or {}
+    personal = personal if isinstance(personal, dict) else {}
+    return {**shared, **personal}
+
+
+def save_workflow_defaults(db: Session, cleaned: dict[str, Any],
+                           operator_id: int | None = None) -> dict[str, Any]:
+    """Merge workflow preferences, scoped to one operator when provided."""
+    key = _workflow_defaults_key(operator_id)
+    current = get(db, key) or {}
+    current = current if isinstance(current, dict) else {}
     merged = {**current, **cleaned}
-    put(db, WORKFLOW_DEFAULTS_KEY, merged)
-    return merged
+    put(db, key, merged)
+    return workflow_defaults(db, operator_id)
 
 
 def price_templates(db: Session) -> dict[str, Any]:

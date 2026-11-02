@@ -4,6 +4,7 @@
 import type { ApiErrorCode, ApiErrorPayload } from "@/lib/types";
 import { operatorToken } from "@/lib/operator";
 import { getSavedApiBase } from "@/lib/serverAddress";
+import { withAuthorizationHeader } from "@/lib/requestAuth";
 
 /* ------------------------------------------------------------------ *
  * 运行时配置
@@ -50,8 +51,7 @@ export function resolveApiBase(): string {
 function requestToken(_path?: string): string | null {
   // 个人身份优先：登录过的用户按「谁在操作」走，审计能记到人。
   if (operatorToken()) return operatorToken();
-  // 单机模式（软件账号登录已关闭）：没有个人身份就用本机注入的令牌。
-  // 后端 deps.require_token 也认它，落到内置「本机」记录上。
+  // 未登录软件账号时，业务 API 仍使用 Electron 注入令牌；具体权限由后端校验。
   // 之前这里只在 /auth/initialize-credentials 才回落，导致未登录时每个业务
   // 请求都抛 BOOT_MISSING —— 页面拿不到数据，看上去就是「白屏」。
   return resolveToken();
@@ -171,6 +171,8 @@ export interface RequestOptions {
   /** 查询参数（null/undefined 自动丢弃；布尔转 "true"/"false"） */
   query?: QueryParams;
   headers?: Record<string, string>;
+  /** 显式使用指定身份的 Bearer token，跳过当前身份/本机 token 的自动选择。 */
+  authToken?: string;
   /** 超时毫秒，默认 30s（发布/图片提交可传更长） */
   timeoutMs?: number;
   /** 外部取消信号（组件卸载、轮询停止） */
@@ -274,13 +276,15 @@ async function request<T, B = unknown>(
   const isPublicAuthMutation = method === "POST" && [
     "/auth/login",
     "/auth/register",
+    "/auth/registration-code/request",
     "/auth/password-reset/request",
     "/auth/password-reset/confirm",
   ].includes(path);
   const isPublicCredentialStatus = method === "GET" && path === "/auth/credentials-status";
   const isPublicAuthRequest = isPublicAuthMutation || isPublicCredentialStatus;
-  const token = isPublicAuthRequest ? null : requestToken(path);
-  if (!isPublicAuthRequest && !token) {
+  const defaultToken = isPublicAuthRequest ? null : requestToken(path);
+  const authorizationHeaders = withAuthorizationHeader({}, defaultToken, options.authToken);
+  if (!isPublicAuthRequest && !authorizationHeaders.Authorization) {
     throw new ApiError({
       code: "BOOT_MISSING",
       message: API_ERROR_TEXT.BOOT_MISSING ?? "缺少启动参数",
@@ -305,8 +309,8 @@ async function request<T, B = unknown>(
     "X-Client-Version": resolveClientVersion(),
     "X-Request-Id": requestId,
     ...headers,
+    ...authorizationHeaders,
   };
-  if (token) finalHeaders.Authorization = `Bearer ${token}`;
   if (body !== undefined) finalHeaders["Content-Type"] = "application/json; charset=utf-8";
   if (idempotencyKey) finalHeaders["Idempotency-Key"] = idempotencyKey;
 

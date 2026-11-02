@@ -13,6 +13,7 @@
 // 未登录时不注入个人身份；运行时本机 token 只由 api.ts 用于首次接管接口。
 
 import { useSyncExternalStore } from "react";
+import { advanceOperatorSessionEpoch } from "@/lib/operatorSessionEpoch.mjs";
 
 /* ------------------------------------------------------------------ *
  * 存储键
@@ -88,6 +89,9 @@ function getSnapshot(): OperatorIdentity | null {
 }
 
 function emit(): void {
+  // Make stale mutation callbacks harmless as soon as a login, logout, or
+  // cross-window storage change replaces the active operator.
+  advanceOperatorSessionEpoch();
   cached = readSnapshot();
   for (const listener of listeners) listener();
 }

@@ -10,6 +10,11 @@ import {
 } from "@tanstack/react-query";
 import { api, isApiError, type QueryParams } from "@/lib/api";
 import { queryKeys } from "@/lib/queryKeys";
+import {
+  getOperatorSessionEpoch,
+  runIfOperatorSessionCurrent,
+} from "@/lib/operatorSessionEpoch.mjs";
+import { publishLogsPlaceholderData } from "@/lib/publishLogsPlaceholder.mjs";
 import type {
   AuditLogQuery,
   AuditLogsResponse,
@@ -55,6 +60,10 @@ import type {
   OperatorTokenResponse,
   SoftwareLoginResponse,
   SoftwareRegisterRequest,
+  EmailCodeRequest,
+  EmailCodeConfirmRequest,
+  EmailCodeResponse,
+  EmailVerificationResponse,
   StudentCreateRequest,
   StudentCreateResponse,
   ProcessCollectRequest,
@@ -149,6 +158,41 @@ export function useSoftwareRegister(): UseMutationResult<
   });
 }
 
+export function useRequestRegistrationCode(): UseMutationResult<
+  EmailCodeResponse,
+  Error,
+  EmailCodeRequest
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<EmailCodeResponse, EmailCodeRequest>(
+      "/auth/registration-code/request", body),
+  });
+}
+
+export function useRequestEmailVerificationCode(): UseMutationResult<
+  EmailCodeResponse,
+  Error,
+  EmailCodeRequest
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<EmailCodeResponse, EmailCodeRequest>(
+      "/auth/email-verification/request", body),
+  });
+}
+
+export function useConfirmEmailVerification(): UseMutationResult<
+  EmailVerificationResponse,
+  Error,
+  EmailCodeConfirmRequest
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body) => api.post<EmailVerificationResponse, EmailCodeConfirmRequest>(
+      "/auth/email-verification/confirm", body),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.operators.all }),
+  });
+}
+
 export function useSoftwareCredentialsStatus(enabled = true): UseQueryResult<{ initialized: boolean }> {
   return useQuery({
     queryKey: [...queryKeys.auth.all, "credentials-status"],
@@ -200,7 +244,7 @@ export function useRequestPasswordReset(): UseMutationResult<
 export function useConfirmPasswordReset(): UseMutationResult<
   SoftwareLoginResponse,
   Error,
-  { token: string; newPassword: string }
+  { email: string; code: string; newPassword: string }
 > {
   return useMutation({
     mutationFn: (body) => api.post<SoftwareLoginResponse, typeof body>(
@@ -1391,7 +1435,8 @@ export function usePublishLogs(params: PublishLogParams): UseQueryResult<Publish
           refresh: true,
         }),
       }),
-    placeholderData: (previous) => previous,
+    placeholderData: (previous, previousQuery) =>
+      publishLogsPlaceholderData(previous, previousQuery, accountId),
   });
 }
 
@@ -1696,11 +1741,19 @@ export interface SystemSettingsResponse {
   workflowDefaults?: WorkflowDefaults;
   readOnly?: boolean;
   publishEnabled?: boolean;
+  sharedMode?: boolean;
 }
 
-export function useWorkflowDefaults(enabled = true): UseQueryResult<SystemSettingsResponse> {
+function workflowDefaultsQueryKey(operatorId: string | null) {
+  return ["system", "settings", operatorId ?? "current"] as const;
+}
+
+export function useWorkflowDefaults(
+  operatorId: string | null,
+  enabled = true
+): UseQueryResult<SystemSettingsResponse> {
   return useQuery({
-    queryKey: ["system", "settings"],
+    queryKey: workflowDefaultsQueryKey(operatorId),
     queryFn: () => api.get<SystemSettingsResponse>("/system/settings"),
     enabled,
     staleTime: 60_000,
@@ -1708,7 +1761,7 @@ export function useWorkflowDefaults(enabled = true): UseQueryResult<SystemSettin
 }
 
 /** POST /system/settings 的 workflowDefaults 分支：只覆盖传入的键。 */
-export function useSaveWorkflowDefaults(): UseMutationResult<
+export function useSaveWorkflowDefaults(operatorId: string | null): UseMutationResult<
   SystemSettingsResponse,
   Error,
   WorkflowDefaults
@@ -1721,7 +1774,7 @@ export function useSaveWorkflowDefaults(): UseMutationResult<
         { workflowDefaults: patch }
       ),
     onSuccess: (data) => {
-      client.setQueryData(["system", "settings"], data);
+      client.setQueryData(workflowDefaultsQueryKey(operatorId), data);
     },
   });
 }
@@ -1953,10 +2006,11 @@ export function useCreateBatch(): UseMutationResult<
   return useMutation({
     mutationFn: (body: BatchCreateRequest) =>
       api.post<BatchDetailResponse, BatchCreateRequest>("/batch", body),
-    onSuccess: (result) => {
+    onMutate: () => getOperatorSessionEpoch(),
+    onSuccess: (result, _variables, startedEpoch) => runIfOperatorSessionCurrent(startedEpoch, () => {
       client.setQueryData(queryKeys.batch.detail(result.batch.accountId, result.batch.id), result);
       void client.invalidateQueries({ queryKey: queryKeys.batch.all });
-    },
+    }),
   });
 }
 
@@ -1975,7 +2029,8 @@ export function useBatchStep(): UseMutationResult<BatchStepResponse, Error, stri
         // 单件要拉详情、翻译、定价、入仓，30 秒默认值不够
         timeoutMs: 180_000,
       }),
-    onSuccess: (result) => {
+    onMutate: () => getOperatorSessionEpoch(),
+    onSuccess: (result, _variables, startedEpoch) => runIfOperatorSessionCurrent(startedEpoch, () => {
       // 只修补「已经展开过」的详情缓存：没查过就别造一个 items 为空的假缓存，
       // 否则展开的瞬间会先闪一屏「没有逐件记录」再被真正的数据替换。
       client.setQueryData<BatchDetailResponse>(
@@ -1992,7 +2047,7 @@ export function useBatchStep(): UseMutationResult<BatchStepResponse, Error, stri
       );
       void client.invalidateQueries({ queryKey: queryKeys.batch.all });
       void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
-    },
+    }),
   });
 }
 
@@ -2013,10 +2068,11 @@ export function useBatchControl(): UseMutationResult<
         `/batch/${encodeURIComponent(id)}/control`,
         { action }
       ),
-    onSuccess: (result) => {
+    onMutate: () => getOperatorSessionEpoch(),
+    onSuccess: (result, _variables, startedEpoch) => runIfOperatorSessionCurrent(startedEpoch, () => {
       patchBatchDetail(client, result.batch);
       void client.invalidateQueries({ queryKey: queryKeys.batch.all });
-    },
+    }),
   });
 }
 
@@ -2038,10 +2094,11 @@ export function useBatchRetryFailed(): UseMutationResult<
         `/batch/${encodeURIComponent(id)}/retry-failed`,
         { allowUnknown: Boolean(allowUnknown) }
       ),
-    onSuccess: (result) => {
+    onMutate: () => getOperatorSessionEpoch(),
+    onSuccess: (result, _variables, startedEpoch) => runIfOperatorSessionCurrent(startedEpoch, () => {
       patchBatchDetail(client, result.batch);
       void client.invalidateQueries({ queryKey: queryKeys.batch.all });
-    },
+    }),
   });
 }
 
@@ -2049,9 +2106,10 @@ export function useDeleteBatch(): UseMutationResult<BatchDeleteResult, Error, st
   const client = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.del<BatchDeleteResult>(`/batch/${encodeURIComponent(id)}`),
-    onSuccess: () => {
+    onMutate: () => getOperatorSessionEpoch(),
+    onSuccess: (_result, _id, startedEpoch) => runIfOperatorSessionCurrent(startedEpoch, () => {
       void client.invalidateQueries({ queryKey: queryKeys.batch.all });
-    },
+    }),
   });
 }
 

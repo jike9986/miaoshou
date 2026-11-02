@@ -74,6 +74,7 @@ class ImageReviewGateRequest(CamelModel):
 
 @router.post("/review-gate", summary="主图 OCR 复核闸门（只读：不写库、不删图）")
 def review_gate(payload: ImageReviewGateRequest, db: DbSession,
+                operator: OperatorDep,
                 credentials: CredentialsHeader = None) -> dict[str, Any]:
     """老版 `shoe_workflow.review_main_images` 的判定，只回答不执行。
 
@@ -90,7 +91,8 @@ def review_gate(payload: ImageReviewGateRequest, db: DbSession,
 
     info, identity = gate_service.load_info(
         db, warehouse_id=payload.warehouseId,
-        detail_id=payload.detailId, shop_id=payload.shopId)
+        detail_id=payload.detailId, shop_id=payload.shopId,
+        operator_id=operator.id)
     result = gate_service.main_image_gate(
         info, allow_review=payload.allowReview is True, retry=payload.retry is True)
     # rows 是逐图的 OCR 明细，前端图片页要看；调用方不需要时忽略即可
@@ -208,8 +210,11 @@ def upload_job(job_id: str, db: DbSession,
 
 
 @router.get("/usage", summary="限流与预算状态")
-def usage(db: DbSession) -> dict[str, Any]:
-    return image_service.usage(db)
+def usage(db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    operator_id = (operator.id
+                   if operator_service.role_of(operator) == operator_service.ROLE_MEMBER
+                   else None)
+    return image_service.usage(db, operator_id=operator_id)
 
 
 @router.post("/reconcile", summary="进程重启后对账（绝不重复提交）",
@@ -239,8 +244,14 @@ def reconcile(db: DbSession,
 
 
 @router.get("/limits", summary="图片预算/限流配置")
-def limits(db: DbSession) -> dict[str, Any]:
-    return {"limits": setting_service.image_limits(db), "usage": image_service.usage(db)}
+def limits(db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    operator_id = (operator.id
+                   if operator_service.role_of(operator) == operator_service.ROLE_MEMBER
+                   else None)
+    return {
+        "limits": setting_service.image_limits(db),
+        "usage": image_service.usage(db, operator_id=operator_id),
+    }
 
 
 @router.post("/limits", summary="调整图片限流额度",
@@ -304,7 +315,7 @@ def _missing_key_message(mode: str) -> str:
 
 
 @router.get("/verify", summary="检查图片翻译密钥是否配置（不发起付费请求）")
-def verify_key(db: DbSession) -> dict[str, Any]:
+def verify_key(db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     """只读检查：密钥从哪儿来、当前是直连还是代理、能否被读到。
 
     刻意不调用 image_service._api_key()：它在未配置时抛 503，而这里恰恰需要
@@ -327,10 +338,13 @@ def verify_key(db: DbSession) -> dict[str, Any]:
             "message": _missing_key_message(mode),
         }
     source = str(origin.get("source") or "")
+    key_hint = (_key_hint(key)
+                if operator_service.role_of(operator) != operator_service.ROLE_MEMBER
+                else "")
     return {
         "configured": True,
         "mode": mode,
-        "keyHint": _key_hint(key),
+        "keyHint": key_hint,
         "source": source,
         "path": str(origin.get("path") or ""),
         "endpoint": settings.edits_endpoint(),
