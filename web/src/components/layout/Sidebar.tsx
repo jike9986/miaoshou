@@ -11,8 +11,8 @@ import {
   PackageSearch,
   PanelLeft,
   Play,
-  Settings,
   ShieldBan,
+  ChevronRight,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -464,15 +464,15 @@ export function Sidebar({
             type="button"
             onClick={onAccountClick}
             aria-label="打开账号与设置"
-            title="账号与设置"
+            title={`当前账号：${account.name}`}
             className={cn(
-              "flex h-14 w-full items-center border-t border-border text-left",
+              "flex h-16 w-full items-center border-t border-border bg-sidebar px-3 text-left",
               "transition-colors duration-fast hover:bg-surface-hover",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32",
-              collapsed ? "justify-center px-0" : "gap-2 px-2"
+              collapsed ? "justify-center px-0" : "gap-2.5"
             )}
           >
-            <span className="grid size-6 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-100 text-[11px] font-medium text-brand-800">
+            <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-100 text-[12px] font-semibold text-brand-800 ring-2 ring-brand-50">
               {account.avatarUrl ? (
                 <img src={account.avatarUrl} alt="" className="size-full object-cover" loading="lazy" />
               ) : (
@@ -482,7 +482,8 @@ export function Sidebar({
             {!collapsed && (
               <>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-medium leading-5 text-fg">
+                  <span className="block text-[11px] leading-4 text-fg-muted">当前账号</span>
+                  <span className="block truncate text-[13px] font-semibold leading-5 text-fg">
                     {account.name}
                   </span>
                   {account.detail && (
@@ -490,13 +491,8 @@ export function Sidebar({
                       {account.detail}
                     </span>
                   )}
-                  {account.operator && (
-                    <span className="block truncate text-[11px] leading-4 text-fg-muted">
-                      操作员：{account.operator}
-                    </span>
-                  )}
                 </span>
-                <Settings aria-hidden className="size-4 shrink-0 text-fg-muted" strokeWidth={1.75} />
+                <ChevronRight aria-hidden className="size-4 shrink-0 text-fg-muted" strokeWidth={1.8} />
               </>
             )}
           </button>

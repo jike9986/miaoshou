@@ -5,7 +5,7 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
+import { ArrowRight, Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
@@ -578,8 +578,10 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
   };
 
   return (
-    <Card className="w-full" padding="normal">
-      <CardTitle>{allowInitialize && initializing ? "首次设置老师账号" : mustChange ? "设置新密码" : registering ? "创建软件账号" : "软件账号登录"}</CardTitle>
+    <Card className="w-full rounded-2xl border-border-subtle bg-surface/95 p-6 shadow-3 backdrop-blur-sm sm:p-7" padding="none">
+      <CardTitle className="text-[20px] leading-7">
+        {allowInitialize && initializing ? "首次设置老师账号" : mustChange ? "设置新密码" : registering ? "创建软件账号" : "登录软件账号"}
+      </CardTitle>
       <div className="mt-4 flex flex-col gap-4">
         {resetting ? <>
           <p className="text-[13px] leading-5 text-fg-secondary">通过绑定邮箱接收一次性验证码，验证码 15 分钟内有效。</p>
@@ -605,14 +607,19 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
           <Field label="姓名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="name" value={registerName} onChange={(e) => setRegisterName(e.currentTarget.value)} /></Field>
           <Field label="邮箱" required htmlFor={currentId}><Input id={currentId} type="email" autoComplete="email" value={registerEmail} onChange={(e) => setRegisterEmail(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
           <Field label="设置密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="new-password" value={registerPassword} onChange={(e) => setRegisterPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
-          <Button loading={register.isPending} onClick={submitRegister}>注册并登录</Button>
-          <Button variant="ghost" onClick={() => { setRegistering(false); setError(null); }}>已有账号，返回登录</Button>
+          <Button block size="lg" loading={register.isPending} onClick={submitRegister}>注册并登录</Button>
+          <Button size="sm" variant="ghost" onClick={() => { setRegistering(false); setError(null); }}>已有账号，返回登录</Button>
         </> : <>
           <Field label="邮箱或用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={identifier} onChange={(e) => setIdentifier(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
           <Field label="密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
-          <div className="flex flex-wrap gap-2"><Button loading={login.isPending} onClick={submitLogin}>登录</Button>{showBack && !allowInitialize && <Button variant="ghost" onClick={onBack}>返回妙手绑定</Button>}</div>
-          <Button variant="ghost" onClick={() => { setResetting(true); setError(null); }}>忘记密码</Button>
-          {allowRegister && <Button variant="ghost" onClick={() => { setRegistering(true); setError(null); }}>创建新账号</Button>}
+          <div className="flex flex-col gap-1">
+            <Button block size="lg" loading={login.isPending} iconRight={<ArrowRight className="size-4" />} onClick={submitLogin}>登录</Button>
+            {showBack && !allowInitialize && <Button variant="ghost" onClick={onBack}>返回妙手绑定</Button>}
+          </div>
+          <div className="flex items-center justify-between gap-2 border-t border-border-subtle pt-2">
+            <Button size="sm" variant="ghost" onClick={() => { setResetting(true); setError(null); }}>忘记密码</Button>
+            {allowRegister && <Button size="sm" variant="ghost" onClick={() => { setRegistering(true); setError(null); }}>创建新账号</Button>}
+          </div>
           {allowInitialize && <Button variant="ghost" onClick={() => setInitializing(true)}>首次设置老师账号</Button>}
         </>}
         {error && <InlineError>{error}</InlineError>}
