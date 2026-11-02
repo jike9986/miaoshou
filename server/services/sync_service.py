@@ -322,8 +322,28 @@ def _is_usable(row: Mapping[str, Any]) -> bool:
     return failed < UNUSABLE_FAILED_LIMIT
 
 
+def _source_account_client(db: Session):
+    """取当前账号与它的妙手客户端；没有可用账号时返回 (None, None)。"""
+    from services import account_service
+
+    account = account_service.current_account(db)
+    if account is None:
+        return None, None
+    try:
+        return account_service.client_for(db, account.id)
+    except Exception as exc:  # noqa: BLE001 - 账号没配好就当没有上游
+        logger.warning("取妙手客户端失败，跳过采集箱回收：%s", exc)
+        return None, None
+
+
 def harvest_source_links(db: Session, scope: SourceScope) -> dict[str, Any]:
-    """扫描成品 payload，把 1688 货源链接回收进池子（调用方负责 commit）。"""
+    """把 1688 货源链接回收进池子（调用方负责 commit）。
+
+    照老版 `service_warehouse.sync_source_links` 的两条来源，缺一不可：
+      1. 仓库成品的 payload（`all_source_item_ids` 的等价物）；
+      2. **公共采集箱前 20 行**——刚采集进采集箱的商品还没进仓库，
+         货源链接只在这里，不扫这一步池子永远是空的，载体重建就没料。
+    """
     if scope.scan_all:
         products = _scan_products(db, limit=scope.limit)
     else:
@@ -331,16 +351,32 @@ def harvest_source_links(db: Session, scope: SourceScope) -> dict[str, Any]:
     payloads = [product.payload for product in products
                 if isinstance(product.payload, dict) and product.payload]
     added = carrier_service.harvest_from_payloads(db, payloads)
-    rows = _pool_rows(db)
-    usable = [row for row in rows if _is_usable(row)]
+
+    # 第 2 条来源：公共采集箱。拿不到上游不算失败——仓库那部分已经补进去了。
+    box_rows = 0
+    try:
+        account, client = _source_account_client(db)
+        if client is not None:
+            listing = client.common_box_list(page_no=1, page_size=20)
+            rows = (listing.get("data") or {}).get("detailList") or []
+            box_rows = len(rows)
+            added += carrier_service.harvest_from_common_box(db, rows)
+            client.close()
+    except Exception as exc:  # noqa: BLE001 - 采集箱拿不到不影响仓库已回收的部分
+        logger.warning("从公共采集箱回收货源链接失败：%s", exc)
+
+    rows_all = _pool_rows(db)
+    usable = [row for row in rows_all if _is_usable(row)]
     result = {
         "scanned": len(products),
         "added": added,
-        "total": len(rows),
+        "boxRows": box_rows,
+        "total": len(rows_all),
         "usable": len(usable),
     }
-    logger.info("货源链接回收 scanned=%d payloads=%d added=%d total=%d usable=%d",
-                result["scanned"], len(payloads), added, result["total"], result["usable"])
+    logger.info("货源链接回收 scanned=%d payloads=%d boxRows=%d added=%d total=%d usable=%d",
+                result["scanned"], len(payloads), box_rows, added,
+                result["total"], result["usable"])
     return result
 
 

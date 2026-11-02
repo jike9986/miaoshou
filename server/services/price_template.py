@@ -16,6 +16,15 @@ from typing import Any
 
 FALLBACK_EXCHANGE_RATE = Decimal("1.6393")
 
+# originPrice/price 当汇率使用时必须是「CNY→站点币种」的真实汇率区间。
+# 妙手把 originPrice（CNY 采购价）和 price（同一采购金额的 MYR 表示）成对给出，
+# 比值就是汇率，实测正常商品稳定在 1.2~1.7（如 354=1.63、353=1.63）。
+# 一旦某商品的 price 被写过一次（比如先处理过、或上游异常），比值就会跑到
+# 0.5 以下（售价/采购价级别），继续拿它当汇率会算成天价。
+# 因此把区间收紧到 [1.2, 2.2]：落在区间内才认，越界一律回退实时/内置汇率。
+RATE_MIN = Decimal("1.2")
+RATE_MAX = Decimal("2.2")
+
 DEFAULT_FREIGHT_TABLE = {
     "currency": "MYR",
     "firstWeightGrams": 30,
@@ -216,7 +225,14 @@ def resolve_rate_with_source(product: Mapping[str, Any] | None,
                 continue
             origin_d, price_d = _decimal(origin, "originPrice"), _decimal(price, "price")
             if origin_d > 0 and price_d > 0:
-                rates.append(origin_d / price_d)
+                ratio = origin_d / price_d
+                # 合理性护栏：originPrice/price 只在「price 是目标币种售价」时才有汇率意义。
+                # 有些商品的 price 是异常值（如 63217.19，而 originPrice 才 23），
+                # 比值会变成 0.0003 这种天价汇率，直接算出 10 万块的售价。
+                # CNY→站点币种汇率实际在 0.5~3.0 之间；越界的比值一律丢弃，
+                # 回退到实时汇率 / 内置兜底，绝不用坏比值把整批价算成天文数字。
+                if RATE_MIN <= ratio <= RATE_MAX:
+                    rates.append(ratio)
         if rates:
             return sum(rates) / len(rates), "商品自身采购价与售价之比"
 

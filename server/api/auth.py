@@ -173,10 +173,16 @@ def connect(payload: ConnectRequest, db: DbSession,
         if role not in {operator_service.ROLE_TEACHER, operator_service.ROLE_ADMIN}:
             raise errors.AppError(errors.FORBIDDEN, "无权绑定妙手账号", status=403)
         if payload.studentOperatorId in (None, ""):
-            raise errors.validation("代绑时必须指定学员账号", field="studentOperatorId")
-        owner = operator_service.get(db, payload.studentOperatorId)
-        if operator_service.role_of(owner) != operator_service.ROLE_MEMBER:
-            raise errors.validation("妙手账号只能绑定到学员账号", field="studentOperatorId")
+            # 单机模式（默认，未开共享部署）：这台机器没有「学员/老师」之分，
+            # 操作者本人就是账号所有者，不需要再指定「代绑给哪个学员」。
+            # 共享部署才要求教师代绑时必须指明学员，否则账号会挂到老师名下。
+            if get_settings().shared_mode:
+                raise errors.validation("代绑时必须指定学员账号", field="studentOperatorId")
+            owner = operator
+        else:
+            owner = operator_service.get(db, payload.studentOperatorId)
+            if operator_service.role_of(owner) != operator_service.ROLE_MEMBER:
+                raise errors.validation("妙手账号只能绑定到学员账号", field="studentOperatorId")
     if payload.accountId not in (None, ""):
         existing = account_service.get_account(db, payload.accountId)
         if (existing is not None

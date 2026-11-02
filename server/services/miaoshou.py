@@ -349,6 +349,12 @@ class MiaoshouClient:
         if payload.get("sizeChart") in (None, ""):
             payload.pop("sizeChart", None)
             payload.pop("sizeChartType", None)
+        # 读接口不返回 deliveryOptionSetType，翻译接口也会把它丢掉，
+        # 但 save_shop_collect_item_info 要求它必须存在、且只接受 "default"。
+        # 统一在唯一的保存出口兜底，避免「处理入仓」链路每件都撞
+        # 「shopCollectItemInfo.deliveryOptionSetType 必填」。
+        if not payload.get("deliveryOptionSetType"):
+            payload["deliveryOptionSetType"] = "default"
         return self.post(COLLECT_BOX_BASE + "save_shop_collect_item_info", {
             "ossMd5": oss_md5,
             "detailId": int(detail_id),

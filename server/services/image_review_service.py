@@ -30,7 +30,10 @@ from core.config import get_settings
 OCR_TIMEOUT = 30
 OCR_MAX_BYTES = 15 * 1024 * 1024
 OCR_CONCURRENCY = 3
-OCR_CACHE_VERSION = 2
+# 缓存版本：OCR 脚本从 StorageFile 改为 ReadAllBytes 后识别结果才可靠，
+# 旧的失败缓存（version 2 及以前，全是「本地 OCR 未完成」）必须失效，
+# 否则会一直复用「识别不出字」的错误结论，把含中文的图误判成 keep/review。
+OCR_CACHE_VERSION = 3
 ANALYZE_LIMIT = 20
 
 # 允许识别的图片来源：常见图床 + 阿里 CDN。

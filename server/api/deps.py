@@ -62,12 +62,28 @@ def require_token(
         raise errors.AppError(errors.AUTH_REQUIRED,
                               "缺少访问令牌：请带上 Authorization: Bearer <token>",
                               status=401)
+    settings = get_settings()
+    # 共享部署的「客户端免登录令牌」：软件发给别人用、装上就能用、不出现账号界面。
+    # 部署方通过 AOHUANG_CLIENT_TOKEN 统一配置，客户端内置同一把。
+    # 放在本机 secret 判断之前：它是明确授权的共享凭据，不受 shared_mode 拒绝影响。
+    client_token = (getattr(settings, "client_token", "") or "").strip()
+    if client_token and _same_secret(supplied, client_token):
+        return supplied
+    if _same_secret(supplied, settings.local_secret()):
+        # 本机 secret 视部署模式而定：
+        #  · 单机（默认，绑 127.0.0.1）：它就是这台机器的身份，直接放行，
+        #    用户无需登录软件账号（产品负责人 2026-10-30 明确要求）。
+        #  · 共享部署（多人共用一台服务器）：secret 会人手一份，若也放行等于
+        #    人人管理员；必须拒绝，改用个人令牌。
+        if settings.shared_mode:
+            raise errors.AppError(
+                errors.TOKEN_INVALID,
+                "共享部署不接受本机令牌；请用个人账号登录后携带个人令牌",
+                status=401)
+        return supplied
     operator = operator_service.resolve(db, supplied)
     if operator is not None:
         operator_service.require_enabled(operator)
-        return supplied
-    if _same_secret(supplied, get_settings().local_secret()):
-        # 本机令牌：单机身份，直接放行（内置「本机」记录由 ensure_default 保证存在）
         return supplied
     raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
 
@@ -79,11 +95,23 @@ def _authenticate(db: Session, supplied: str) -> Operator:
     单机模式下本机 secret 也是合法身份：它代表这台机器，落到内置「本机」
     记录上，这样审计留痕仍然是「本机」而不是凭空一个人。
     """
+    settings = get_settings()
+    # 客户端免登录令牌：落到内置「客户端」身份（ensure_client_operator 保证存在）。
+    client_token = (getattr(settings, "client_token", "") or "").strip()
+    if client_token and _same_secret(supplied, client_token):
+        return operator_service.ensure_client(db)
+    if _same_secret(supplied, settings.local_secret()):
+        # 单机模式：本机 secret 代表这台机器，落到内置「本机」记录；
+        # 共享模式：拒绝（secret 不是个人身份）。
+        if settings.shared_mode:
+            raise errors.AppError(
+                errors.TOKEN_INVALID,
+                "共享部署不接受本机令牌；请用个人账号登录",
+                status=401)
+        return operator_service.ensure_default(db)
     operator = operator_service.resolve(db, supplied)
     if operator is not None:
         return operator
-    if _same_secret(supplied, get_settings().local_secret()):
-        return operator_service.ensure_default(db)
     raise errors.AppError(errors.TOKEN_INVALID, "访问令牌不正确", status=401)
 
 

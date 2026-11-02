@@ -75,19 +75,17 @@ def _digits() -> str:
 
 
 # --- 一、身份解析 ---------------------------------------------------------
-def test_secret_key_is_not_an_operator_business_identity(db):
-    """本机 secret 只用于首次接管，不得映射成业务操作员。"""
+def test_secret_key_is_the_single_machine_business_identity(db):
+    """单机模式下：本机 secret 就是这台机器的业务身份（免登录，2026-10-30 起）。"""
     local = operator_service.ensure_default(db)
     db.commit()
 
     assert local.token == operator_service.hash_token(get_settings().local_secret())
-    with pytest.raises(errors.AppError) as denied:
-        deps.require_token(authorization=f"Bearer {get_settings().local_secret()}", db=db)
-    assert denied.value.status == 401
-    with pytest.raises(errors.AppError) as denied:
-        deps.current_operator(db, authorization=f"Bearer {get_settings().local_secret()}")
-    assert denied.value.status == 401
-    assert local.name == operator_service.DEFAULT_OPERATOR_NAME
+    # 单机模式（默认 shared_mode=False）下，本机 secret 可直接过鉴权与身份解析
+    token = deps.require_token(authorization=f"Bearer {get_settings().local_secret()}", db=db)
+    assert token == get_settings().local_secret()
+    operator = deps.current_operator(db, authorization=f"Bearer {get_settings().local_secret()}")
+    assert operator.name == operator_service.DEFAULT_OPERATOR_NAME
 
 
 def test_operator_token_resolves_to_that_person(db):

@@ -64,7 +64,6 @@ export function ProgressPanel({
   const batchPercent = run.total > 0 ? (run.done / run.total) * 100 : 0;
   const imagePercent = run.imagePlanned > 0 ? (run.imageDone / run.imagePlanned) * 100 : 0;
   const textPercent = settings.textEnabled && run.total > 0 ? (run.done / run.total) * 100 : 0;
-  const imageTotal = settings.mainImageCount + settings.skuImageCount + settings.detailImageCount;
 
   const phaseMeta =
     run.phase === "running"
@@ -125,7 +124,7 @@ export function ProgressPanel({
           />
           <p className="num mt-1 h-4 truncate text-2xs leading-4 text-fg-muted">
             {settings.imagesEnabled
-              ? `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张 · 每件 ${imageTotal} 张`
+              ? `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译`
               : "已关闭 · 不处理图片"}
           </p>
         </div>

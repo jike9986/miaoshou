@@ -10,6 +10,7 @@ detailId 只在账号内唯一，所以跨店铺发布不能引用原商品。�
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
@@ -22,7 +23,11 @@ from core import errors
 from services import setting_service
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
+logger = logging.getLogger("aohuang.carrier")
+
 LINK_POOL_KEY = "carrier.links"
+# 妙手对 SKU 货号的硬限制：shopCollectItemInfo.skuMap.*.itemNum ≤ 50 字符。
+SKU_ITEM_NUM_MAX = 50
 # 池子上限（老版 source_links.POOL_SIZE=5）：不设上限会无限堆积，
 # 而且每次写入都要序列化整池，越用越慢。
 POOL_SIZE = 5
@@ -265,7 +270,16 @@ def wait_until_collected(client: MiaoshouClient, common_id: int, *,
     for attempt in range(rounds):
         try:
             detail = client.common_box_detail(common_id)
-        except MiaoshouError:
+        except MiaoshouError as exc:
+            # 「商品已经采集过了」不是失败，是**已经就绪**。妙手对重复查询/已完成的
+            # 采集直接回 fail + 这句提示，之前一律当成「还没好」继续等，白等到超时，
+            # 再把链接标成坏的 —— 结果整个链接池被误判耗尽。
+            message = str(exc)
+            if "已经采集" in message or "already" in message.lower():
+                if progress:
+                    progress({"stage": "collected", "commonId": common_id,
+                              "note": "already collected"})
+                return True
             time.sleep(COLLECT_SETTLE_SECONDS)
             continue
         data = detail.get("data") or {}
@@ -495,7 +509,7 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
         if str(payload.get("notes") or "").strip() else False
     )
     try:
-        return readback_check.readback_issues(
+        issues = readback_check.readback_issues(
             payload, actual, original_map, coverage,
             pricing_enabled=pricing_enabled,
             translate_images=notes_only_images,
@@ -503,6 +517,17 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
     except (ValueError, TypeError, KeyError, AttributeError):
         # 比对器自己不熟这个 shape 时不要造假失败
         return []
+    # 载体写入场景的已知差异，不算失败：
+    #   · categoryCid：cid 是我们按目标站点改成叶子类目的（本地 cid 是父级），
+    #     读回自然是新 cid，与 payload 里改过的值比对口径不同；
+    #   · prices：载体是新建的，价格按目标站点重算，读回与仓库副本的价必然有差。
+    # 这两项若继续判失败，跨店认领永远不可能成功（老版 fill_carriers 也不比对这两项）。
+    ignored = {"categoryCid", "prices"}
+    kept = [item for item in issues if str(item).strip() not in ignored]
+    if len(kept) != len(issues):
+        logger.info("载体读回忽略已知差异 %s（detailId=%s）",
+                    sorted(set(issues) - set(kept)), detail_id)
+    return kept
 
 
 def _priced(original: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
@@ -539,16 +564,96 @@ def target_warehouse_id(client: MiaoshouClient, shop_id: int) -> str:
     raise CarrierError(f"店铺 {shop_id} 没有可用仓库", shopId=str(shop_id))
 
 
+def resolve_leaf_cid(client: MiaoshouClient, cid: Any, site: str = "MY",
+                     name_hint: str = "") -> Any:
+    """把「父级类目 cid」换成可用的叶子类目 cid。
+
+    妙手保存商品只接受叶子类目（isLastLevel=1）。采集回来的商品常常带的是
+    父级类目（如 834568「运动与户外服装」），直接写入会报
+    「站点【MY】类目【834568】不存在，请重新选择类目」。
+    这里查一次类目树：cid 已是叶子就原样返回；是父级就往下找第一个可用的叶子；
+    找不到就按 name_hint（类目中文名）模糊匹配一个可用叶子。
+    """
+    text = str(cid or "").strip()
+    if not text:
+        return cid
+    try:
+        tree = client.category_tree(site)
+    except Exception as exc:  # noqa: BLE001 - 拿不到类目树就别改，让上游自己报
+        logger.warning("查类目树失败，保持原 cid=%s：%s", text, exc)
+        return cid
+
+    flat: list[dict[str, Any]] = []
+
+    def walk(node: Any) -> None:
+        for value in (node or {}).values():
+            if not isinstance(value, dict):
+                continue
+            flat.append(value)
+            walk(value.get("children"))
+
+    walk((tree.get("data") or {}).get("cateTree"))
+    by_cid = {str(item.get("cid")): item for item in flat}
+    node = by_cid.get(text)
+    if node is None:
+        # cid 不属于该站点：按类目名兜一个可用叶子
+        node = None
+    elif str(node.get("isLastLevel")) == "1" and not node.get("disabled"):
+        return node.get("cid")
+
+    def first_leaf(item: dict[str, Any]) -> Any:
+        stack = [item]
+        while stack:
+            current = stack.pop(0)
+            if (str(current.get("isLastLevel")) == "1"
+                    and not current.get("disabled")):
+                return current.get("cid")
+            for child in (current.get("children") or {}).values():
+                if isinstance(child, dict):
+                    stack.append(child)
+        return None
+
+    if node is not None:
+        leaf = first_leaf(node)
+        if leaf is not None:
+            logger.info("类目 %s 是父级，改用其叶子类目 %s", text, leaf)
+            return leaf
+
+    # 按中文名模糊匹配一个可用叶子（如「运动服饰」→ 运动套装）
+    hint = str(name_hint or "").strip()
+    if hint:
+        for item in flat:
+            if str(item.get("isLastLevel")) != "1" or item.get("disabled"):
+                continue
+            names = f"{item.get('name') or ''}{item.get('nameChinese') or ''}"
+            if hint and (hint in names or names.find(hint) >= 0):
+                logger.info("按类目名「%s」匹配到叶子类目 %s", hint, item.get("cid"))
+                return item.get("cid")
+    logger.warning("类目 %s 无法解析成叶子类目，保持原值", text)
+    return cid
+
+
 def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
-                  warehouse_id: str) -> dict[str, Any]:
+                  warehouse_id: str, leaf_cid: Any = None) -> dict[str, Any]:
     """改写 payload 归属：目标 shopId + 目标仓库库存映射，库存数量保留。"""
     body = deepcopy(dict(payload))
     body["shopId"] = int(shop_id)
+    if leaf_cid not in (None, ""):
+        body["cid"] = leaf_cid
     skus = body.get("skuMap") or {}
     if isinstance(skus, dict):
         for sku in skus.values():
             if not isinstance(sku, dict):
                 continue
+            # 妙手限制 skuMap.*.itemNum ≤ 50 字符。采集回来的货号常常是
+            # 「编号-颜色[规格]-尺码 重量 价格」这种拼接串，70+ 字符直接保存失败
+            # （报 shopCollectItemInfo.skuMap.<key>.itemNum 长度不能超过50）。
+            # 超长就截到 50，保证载体能写进去；货号只是辅助标识，截断不影响上架。
+            item_num = sku.get("itemNum")
+            if item_num is not None:
+                text = str(item_num)
+                if len(text) > SKU_ITEM_NUM_MAX:
+                    sku["itemNum"] = text[:SKU_ITEM_NUM_MAX]
             mapping = sku.get("shopIdToWarehouseIdAndStockMap")
             if not isinstance(mapping, dict):
                 stock = str(sku.get("stock") or "0")
@@ -599,15 +704,43 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             oss_md5 = block.get("ossMd5")
             if not oss_md5:
                 raise CarrierError("载体缺少 ossMd5", detailId=str(detail_id))
-            body = adapt_payload(payload, shop_id=shop_id, warehouse_id=warehouse_id)
+            # 每个商品的 cid 可能不同，逐个解析成目标站点可用的叶子类目
+            leaf_cid = resolve_leaf_cid(
+                client, payload.get("cid"),
+                site=str(payload.get("site") or "MY"),
+                name_hint=str(payload.get("categoryNameCn") or payload.get("categoryName") or ""))
+            body = adapt_payload(payload, shop_id=shop_id, warehouse_id=warehouse_id,
+                                 leaf_cid=leaf_cid)
             body["detailId"] = detail_id
-            client.save_shop(detail_id, shop_id, oss_md5, body)
+            try:
+                client.save_shop(detail_id, shop_id, oss_md5, body)
+            except MiaoshouError as exc:
+                # 载体刚采集完，上游的 ossMd5 还在变（编辑器内容变动）。这不是致命错误：
+                # 重新读一次最新 ossMd5 再保存即可。不重试就会一直卡在
+                # 「该编辑器中产品内容发生变动，为避免覆盖…请重新打开编辑器」。
+                text = str(exc)
+                if "变动" in text or "重新打开" in text or "ossMd5" in text.lower():
+                    logger.info("载体版本变动，重读 ossMd5 后重试 detailId=%s", detail_id)
+                    time.sleep(1.0)
+                    fresh = client.shop_detail(detail_id, shop_id)
+                    fresh_md5 = (fresh.get("data") or {}).get("ossMd5")
+                    if not fresh_md5:
+                        raise
+                    client.save_shop(detail_id, shop_id, fresh_md5, body)
+                    snapshot = fresh
+                else:
+                    raise
             # 保存接口返回 200 不等于真的存进去了：平台会静默丢字段
             # （标题截断、详情图被过滤、翻译没生效）。老版靠读回比对确认，
             # 没有这步就是「看着成功、上架才发现是空的」。
             mismatched = _readback_mismatches(
                 client, detail_id, shop_id, body, payload, snapshot.get("data") or {})
             if mismatched:
+                # 读回不一致最常见的原因是「载体还是链接原本的商品」——
+                # 比如用鞋子链接建的载体，覆盖时标题/图片没写进去，读回就还是鞋子。
+                # 日志要把差异字段打出来，否则只看到「认领失败」无从判断。
+                logger.warning("载体覆盖后读回不一致 detailId=%s 目标标题=%r 差异=%s",
+                               detail_id, str(payload.get("title") or "")[:40], mismatched)
                 failures.append(
                     f"{detail_id}: 保存后读回不一致（{', '.join(mismatched)}）")
                 continue

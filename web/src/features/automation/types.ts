@@ -215,6 +215,8 @@ export interface RunState {
   textDone?: number;
   /** 计划处理图片张数（选中件数 × 主图数量，开关关闭时为 0） */
   imagePlanned: number;
+  /** 后台图片翻译失败/结果未知的张数（轮询回填，可选） */
+  imageFailed?: number;
   /** 当前阶段文案 */
   stage: string;
   failedKeys: string[];

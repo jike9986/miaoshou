@@ -1,6 +1,7 @@
 """采集箱路由：分页查询、单件详情、认领。"""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -11,6 +12,8 @@ from core import errors
 from core.utils import product_key
 from schemas.requests import BatchClaimRequest, ClaimRequest, ProcessRequest
 from services import account_service, audit_service, collect_box_service
+
+logger = logging.getLogger("aohuang.api")
 
 router = APIRouter(prefix="/collect-box", tags=["采集箱"])
 
@@ -126,42 +129,28 @@ def process(
     finally:
         client.close()
     image_result: dict[str, Any] | None = None
+    bg_image_job: dict[str, Any] | None = None
     if payload.processImages and payload.save:
-        # 主图、SKU 图、详情图共用同一图片任务管线，分别按用户设置提交前 N 张。
-        # 从刚入库的 payload 取详情/SKU 原图，避免只凭列表封面漏掉另外两类。
+        # 图片翻译整体放后台：文字/价格/入仓几秒就完成，用户应当立刻看到结果；
+        # 图片翻译每张 AI 20-30 秒、十几张要几分钟，绝不能卡在同步请求里让界面
+        # 一直「处理中 0%」。这里只记下商品 id 与各环节上限，交给后台线程跑
+        # 「本地 OCR 筛选 → 去重 → 提交翻译 → 写回译文」。前端随后轮询
+        # /images/jobs?productId 就能看到逐张进度。
         from models import Product
-        from services import product_service
 
         row = db.query(Product).filter(Product.id == int(product["id"])).one()
-        saved_payload = row.payload if isinstance(row.payload, dict) else {}
-        sources = {
-            "main": [str(url) for url in (product.get("images") or [])],
-            "sku": [str(item["url"]) for item in warehouse_service.sku_image_sources(saved_payload)],
-            "detail": product_service.detail_images(saved_payload),
+        bg_image_job = {
+            "productId": int(row.id),
+            "detailId": str(row.detail_id or ""),
+            "operatorId": getattr(operator, "id", None),
+            "limits": {
+                "main": int(payload.mainImageCount or 0),
+                "sku": int(payload.skuImageCount or 0),
+                "detail": int(payload.detailImageCount or 0),
+            },
         }
-        limits = {
-            "main": payload.mainImageCount,
-            "sku": payload.skuImageCount,
-            "detail": payload.detailImageCount,
-        }
-        image_result = {"requested": 0, "submitted": 0, "failed": 0, "jobs": []}
-        for source in ("main", "sku", "detail"):
-            if not limits[source]:
-                continue
-            result = warehouse_service.attach_image_translation(
-                db, product,
-                limit=int(limits[source]),
-                source_images=sources[source],
-                source=source,
-                operator_id=getattr(operator, "id", None),
-            )
-            for field in ("requested", "submitted", "failed"):
-                image_result[field] += int(result.get(field) or 0)
-            image_result["jobs"].extend(result.get("jobs") or [])
-            if result.get("batchId") and not image_result.get("batchId"):
-                image_result["batchId"] = result["batchId"]
-            if result.get("reason") and not image_result.get("reason"):
-                image_result["reason"] = result["reason"]
+        image_result = {"queued": True, "requested": 0, "submitted": 0, "failed": 0, "jobs": []}
+
     if not payload.save:
         db.rollback()
         return {"saved": False, "product": product}
@@ -176,7 +165,81 @@ def process(
                 "images": (image_result or {}).get("submitted") or 0
                 if isinstance(image_result, dict) else 0})
     db.commit()
+    # 文字+价格+入仓已落库，先把结果返回给前端（几秒），图片翻译后台继续。
+    if bg_image_job is not None:
+        _spawn_image_translation(bg_image_job)
     return {"saved": True, "product": product, "images": image_result}
+
+
+def _spawn_image_translation(job: dict[str, Any]) -> None:
+    """后台线程：OCR 选图 → 去重 → 提交图片翻译 → 写回译文到 payload。
+
+    失败逐张记录在 ImageJob 里（ready/failed/unknown），前端轮询可见，不会静默丢。
+    """
+    import threading
+
+    def _run() -> None:
+        from db.session import SessionLocal
+        from copy import deepcopy
+        from models import Product
+        from services import warehouse_service, product_service
+
+        db = SessionLocal()
+        product_id = int(job["productId"])
+        try:
+            row = db.query(Product).filter(Product.id == product_id).one_or_none()
+            if row is None:
+                return
+            saved_payload = row.payload if isinstance(row.payload, dict) else {}
+            limits = job.get("limits") or {}
+            picked = warehouse_service.select_translatable_images(
+                saved_payload,
+                main_limit=limits.get("main") or 1,
+                detail_limit=limits.get("detail") or 1,
+                sku_limit=limits.get("sku") or 1,
+            )
+            product_map = {"id": row.id, "detailId": row.detail_id}
+            for source in ("main", "sku", "detail"):
+                lim = int(limits.get(source) or 0)
+                if not lim:
+                    continue
+                urls = (picked.get(source) or [])[:lim]
+                if not urls:
+                    continue
+                try:
+                    warehouse_service.attach_image_translation(
+                        db, product_map, limit=len(urls), source_images=urls,
+                        source=source, operator_id=job.get("operatorId"),
+                    )
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001
+                    db.rollback()
+                    logger.warning("后台图片翻译提交失败 product=%s source=%s：%s",
+                                   product_id, source, exc)
+            # 全部提交后写回已就绪的译文（重复位按 URL 覆盖）
+            try:
+                row = db.query(Product).filter(Product.id == product_id).one_or_none()
+                if row is not None:
+                    payload = deepcopy(row.payload) if isinstance(row.payload, dict) else {}
+                    applied = warehouse_service.apply_image_results(db, row, payload)
+                    if applied.get("replaced"):
+                        row.payload = payload
+                        imgs = product_service.main_images(payload)
+                        row.images = imgs
+                        row.detail_images = product_service.detail_images(payload)
+                        row.sku_properties = product_service.sku_properties(payload)
+                        if imgs:
+                            row.cover = imgs[0]
+                        db.commit()
+                        logger.info("后台图片译文写回完成 product=%s replaced=%s",
+                                    product_id, applied.get("replaced"))
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                logger.warning("后台图片译文写回失败 product=%s：%s", product_id, exc)
+        finally:
+            db.close()
+
+    threading.Thread(target=_run, name=f"imgtr-{job.get('productId')}", daemon=True).start()
 
 
 class DeleteCollectRequest(BaseModel):

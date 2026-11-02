@@ -1,12 +1,15 @@
 // features/warehouse —— 商品卡（design-system §5.7 商品卡规格）
-// 图片 1:1 懒加载、标题恒 2 行、价格等宽数字、类目/分组标签、右上勾选框。
+// 图片 1:1 懒加载、标题恒 2 行、价格等宽数字。卡片信息按负责人要求精简：
+//   · 左上角只显示「认领状态」（未认领 / 已认领-绿色），不再显示「待上架」；
+//   · 重量显示在图片右下角图片数量之上；
+//   · 类目与 SKU 数移到价格最右侧；
+//   · 去掉「近 30 天销量」与「规格已核验」。
 
-import { Images, Package, PencilLine, ShoppingBag } from "lucide-react";
+import { Images, Package, PencilLine } from "lucide-react";
 import { cn, formatCount, formatPrice, formatTime } from "@/lib/utils";
 import type { Product } from "@/lib/types";
-import { productStatus } from "@/features/shared/status";
 import { RemoteImage } from "@/features/shared/RemoteImage";
-import { Badge, Checkbox, StatusBadge, StatusDot } from "@/components/ui";
+import { Badge, Checkbox } from "@/components/ui";
 
 export interface ProductCardProps {
   product: Product;
@@ -33,17 +36,36 @@ function priceText(product: Product): { symbol: string; amount: string; range: b
   };
 }
 
-const QUALITY_REASON_LABELS: Record<string, string> = {
-  missing_weight: "缺少重量",
-  missing_dimensions: "缺少尺寸",
-  default_dimensions: "尺寸为默认值",
-  unverified: "来源未核验",
-};
+/** 重量文案：payload 里是 kg，显示成「0.6kg」。没有重量就不占位。 */
+function weightText(product: Product): string {
+  const value = typeof product.weight === "number" ? product.weight : Number(product.weight);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return `${value.toFixed(2).replace(/\.?0+$/, "")}kg`;
+}
+
+/**
+ * 标题兜底：上游采集有时只给了占位标题（单个字母 / 纯符号 / 空白），
+ * 或者商品在上游已被删除、拿不到真标题。这种情况下与其显示「Item 123」，
+ * 不如明确告诉运营「这件商品没有标题」，一眼就知道该怎么处理（删掉或重新采集）。
+ * 不写中文——商品语言是马来语/英语时混进中文很难看。
+ */
+function displayTitle(product: Product): string {
+  const raw = (product.title || "").trim();
+  const meaningful = raw.length >= 4 && /[\u4e00-\u9fa5A-Za-z]{2,}/.test(raw);
+  if (meaningful) return raw;
+  return "（无标题，请重新采集）";
+}
+
+/** 标题是否为占位/缺失状态：true 时卡片用弱化样式，不抢正常商品注意力。 */
+function isMissingTitle(product: Product): boolean {
+  const raw = (product.title || "").trim();
+  return !(raw.length >= 4 && /[\u4e00-\u9fa5A-Za-z]{2,}/.test(raw));
+}
 
 export function ProductCard({ product, isMember = false, selected, onToggle, onOpen, index }: ProductCardProps) {
   const price = priceText(product);
-  const statusMeta = productStatus(product.status);
   const groupName = product.group?.trim();
+  const weight = weightText(product);
 
   return (
     <article
@@ -56,18 +78,44 @@ export function ProductCard({ product, isMember = false, selected, onToggle, onO
         selected && "border-brand-600 ring-1 ring-brand-600"
       )}
     >
-      <div className="relative aspect-square w-full overflow-hidden bg-canvas-inset">
-        <RemoteImage
-          src={product.image}
-          eager={index < 8}
-          zoomOnHover
-          className="[&_svg]:size-8"
-        />
+      {/* 图片区：白图 + 白底正文容易糊在一起。用「内嵌槽 + 图片自身投影」区分：
+          外层 canvas-inset 做浅槽，图片本身带 ring + 阴影浮在槽里，
+          这样即使图片是纯白也能看出边界，正文仍是干净的白。 */}
+      <div className="relative aspect-square w-full overflow-hidden bg-canvas-inset p-1.5">
+        <div className="relative h-full w-full overflow-hidden rounded-md ring-1 ring-black/[0.06] shadow-[0_1px_3px_rgba(15,23,42,0.10)]">
+          <RemoteImage
+            src={product.image}
+            eager={index < 8}
+            zoomOnHover
+            className="[&_svg]:size-8"
+          />
+        </div>
 
-        <StatusBadge
-          meta={statusMeta}
-          className="absolute left-2 top-2 bg-white/92 backdrop-blur-[2px]"
-        />
+        {/* 左上角只显示认领状态：未认领（灰）/ 已认领（绿）。
+            不再显示「待上架」——那是发布态，用户在这里关心的是有没有采集过。 */}
+        <span
+          className={cn(
+            "absolute left-2 top-2 inline-flex items-center gap-1 rounded-xs px-1.5 py-0.5 text-[10px] font-medium leading-3 backdrop-blur-[2px]",
+            product.claimed
+              ? "bg-success-600/92 text-white"
+              : "bg-white/92 text-fg-muted"
+          )}
+          title={
+            product.claimed
+              ? (product.claimedShopId
+                ? `已认领到店铺 ${product.claimedShopId} 的采集箱`
+                : "已认领到当前账号的采集箱")
+              : (isMember ? "未认领：尚未采集到你的采集箱" : "未认领：尚未采集到采集箱")
+          }
+        >
+          <span
+            className={cn(
+              "size-1.5 rounded-full",
+              product.claimed ? "bg-white" : "bg-fg-subtle"
+            )}
+          />
+          {product.claimed ? "已认领" : "未认领"}
+        </span>
 
         <div
           className={cn(
@@ -85,65 +133,67 @@ export function ProductCard({ product, isMember = false, selected, onToggle, onO
           />
         </div>
 
-        {product.imageCount > 1 && (
-          <span className="absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-xs bg-inverse/55 px-1.5 py-0.5 text-2xs text-white">
-            <Images className="size-3" strokeWidth={2} />
-            <span className="num">{product.imageCount}</span>
-          </span>
-        )}
+        {/* 右下角：重量在图片数量之上 */}
+        <div className="absolute bottom-2 right-2 flex flex-col items-end gap-1">
+          {weight && (
+            <span
+              className="inline-flex items-center rounded-xs bg-inverse/55 px-1.5 py-0.5 text-2xs text-white"
+              title="包裹重量"
+            >
+              <span className="num">{weight}</span>
+            </span>
+          )}
+          {product.imageCount > 1 && (
+            <span className="inline-flex items-center gap-1 rounded-xs bg-inverse/55 px-1.5 py-0.5 text-2xs text-white">
+              <Images className="size-3" strokeWidth={2} />
+              <span className="num">{product.imageCount}</span>
+            </span>
+          )}
+        </div>
       </div>
 
       <button
         type="button"
         onClick={() => onOpen?.(product)}
-        className="flex flex-1 flex-col gap-2 p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32"
+        className={cn(
+          "flex flex-1 flex-col gap-2 p-3 text-left",
+          // 正文保持白底（灰底视觉上偏脏，负责人否掉）。图片与正文的分界交给
+          // 图片自身的内阴影/边缘 + 卡片描边，而不是给正文上灰。
+          "bg-surface",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32"
+        )}
       >
-        <h3 className="line-clamp-2 min-h-[40px] text-sm font-medium leading-5 text-fg">
-          {product.title || "（无标题）"}
+        <h3
+          className={cn(
+            "line-clamp-2 min-h-[40px] text-sm font-medium leading-5",
+            isMissingTitle(product) ? "text-fg-muted italic" : "text-fg"
+          )}
+          title={product.title || undefined}
+        >
+          {displayTitle(product)}
         </h3>
 
-        {product.qualityReviewStatus && (
-          <div className="flex min-h-4 items-center">
-            <Badge
-              variant={product.qualityReviewStatus === "verified" ? "success" : "warning"}
-              size="sm"
-              title={product.qualityReviewStatus === "verified"
-                ? "重量和包裹尺寸已有人工核验记录"
-                : isMember
-                  ? "重量和包裹尺寸待人工核验"
-                  : (product.qualityReviewReasons ?? [])
-                    .map((reason) => QUALITY_REASON_LABELS[reason] ?? "待人工核验")
-                    .join("、")}
-            >
-              {product.qualityReviewStatus === "verified" ? "规格已核验" : "规格待核验"}
-            </Badge>
-          </div>
-        )}
-
-        {/* 价格 + 分类 + SKU 同一行：价格右侧有空间，分类和 SKU 数挪过去，
-            不再单独占一行（用户说那里空着） */}
-        <div className="flex min-h-[24px] items-baseline gap-1.5">
+        {/* 价格靠左，类目 + SKU 数贴最右：用 justify-between 撑开整行。
+            实测 ml-auto 在这个工程里没生成出 margin-left:auto（算出 0px），
+            所以不能靠 auto margin 靠右。 */}
+        <div className="flex min-h-[24px] w-full items-baseline justify-between gap-2">
           {price ? (
-            <span className="num text-h3 font-semibold text-fg">
+            <span className="num shrink-0 text-h3 font-semibold text-fg">
               <span className="mr-0.5 text-xs font-medium text-fg-secondary">{price.symbol}</span>
               {price.amount}
             </span>
           ) : (
-            <span className="text-sm text-fg-muted">价格未录入</span>
+            <span className="shrink-0 text-sm text-fg-muted">价格未录入</span>
           )}
-          <span className="ml-auto flex items-center gap-2 text-2xs text-fg-muted">
+          <span className="flex shrink-0 items-center gap-2 text-2xs text-fg-muted">
             {product.categoryName && (
               <span className="max-w-[80px] truncate" title={product.categoryName}>
                 {product.categoryName}
               </span>
             )}
-            <span className="flex items-center gap-0.5" title="SKU 数">
+            <span className="flex shrink-0 items-center gap-0.5" title="SKU 数">
               <Package className="size-3" strokeWidth={1.75} />
               <span className="num">{formatCount(product.skuCount)}</span>
-            </span>
-            <span className="flex items-center gap-0.5" title="近 30 天销量">
-              <ShoppingBag className="size-3" strokeWidth={1.75} />
-              <span className="num">{formatCount(product.salesLast30)}</span>
             </span>
           </span>
         </div>
@@ -157,15 +207,7 @@ export function ProductCard({ product, isMember = false, selected, onToggle, onO
           </div>
         )}
 
-        {product.claimed && (
-          <div className="flex items-center gap-1 text-xs text-fg-muted">
-            <StatusDot tone="warning" />
-            <span>{isMember ? "我已认领" : "已认领"}</span>
-          </div>
-        )}
-
-        {/* 谁改的：只有后端真的给了 updatedBy 才显示。
-            没有就不占位（老后端 / 本机未记名时这里不该冒出「未知」）。 */}
+        {/* 谁改的：只有后端真的给了 updatedBy 才显示。 */}
         {product.updatedBy ? (
           <p
             className="flex items-center gap-1 truncate text-2xs leading-4 text-fg-muted"

@@ -163,6 +163,47 @@ def ensure_default(db: Session) -> Operator:
     return row
 
 
+CLIENT_OPERATOR_NAME = "客户端"
+
+
+def ensure_client(db: Session) -> Operator:
+    """共享部署的内置「客户端」身份：客户端内置 AOHUANG_CLIENT_TOKEN 免登录使用。
+
+    与 ensure_default（本机 secret，单机模式）并列：这是**共享部署**下给
+    「发给别人用的客户端」准备的统一身份。它只是业务可用身份，不是管理员，
+    避免所有客户端都拿到管理员权限。
+
+    幂等：已存在则把 token 摘要对齐到当前配置的 client_token。
+    """
+    token = (getattr(get_settings(), "client_token", "") or "").strip()
+    if not token:
+        raise errors.AppError(
+            errors.AUTH_REQUIRED,
+            "共享部署未配置客户端令牌（AOHUANG_CLIENT_TOKEN）", status=401)
+    row = (db.query(Operator)
+           .filter(Operator.name == CLIENT_OPERATOR_NAME).one_or_none())
+    digest = hash_token(token)
+    if row is None:
+        row = Operator(name=CLIENT_OPERATOR_NAME, token=digest,
+                       enabled=True, is_admin=False,
+                       role=ROLE_MEMBER, created_at=now_ts())
+        db.add(row)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            row = (db.query(Operator)
+                   .filter(Operator.name == CLIENT_OPERATOR_NAME).one_or_none())
+            if row is None:
+                raise
+        return row
+    if row.token != digest or not row.enabled:
+        row.token = digest
+        row.enabled = True
+        db.flush()
+    return row
+
+
 def migrate_legacy_tokens(db: Session) -> int:
     """Replace stored bearer tokens with SHA-256 digests while preserving clients."""
     rows = db.query(Operator).all()

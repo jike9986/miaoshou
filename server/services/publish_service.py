@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -38,6 +39,8 @@ from models.automation_run import AutomationRun, AutomationRunItem
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
+
+logger = logging.getLogger("aohuang.publish")
 from services import (
     carrier_service,
     product_service,
@@ -560,7 +563,10 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         raise errors.AppError(errors.CONFIRM_REQUIRED,
                               "发布需要确认：请求体必须包含 \"confirm\": true",
                               status=400)
-    if not setting_service.publish_enabled(db):
+    # 「认领到采集箱」不是发布：它只把商品放进目标店铺的采集箱，不上架。
+    # 发布总开关只管「上架」，不该拦住认领——否则用户没开发布也要能正常认领。
+    _claim_only_request = payload.get("claimOnly") is True
+    if not _claim_only_request and not setting_service.publish_enabled(db):
         raise errors.AppError(errors.PUBLISH_DISABLED,
                               "发布总开关未打开：请先在设置里开启发布",
                               status=403)
@@ -694,31 +700,70 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 db, account=account, entries=entries,
                 target_shop_id=str(target_shop_id))
         if claim_only:
+            # 认领的本质：把「服务器里存着的商品」分发一份到目标账号/店铺的采集箱。
+            # 仓库是本地权威数据源（标题/图片/SKU/价格/重量都在 payload 里），
+            # 因此**不依赖上游公共采集箱里是否还有这件商品**：
+            #   · 先用 claim_to_shop 试一次同店认领（便宜、快，上游还在时最省事）；
+            #   · 上游已经清掉这件商品时（「未找到采集箱商品信息」），自动降级为
+            #     「用本地 payload 新建载体并写入」——这才是「存到服务器、所有账号都能分销」
+            #     的语义。之前同店直接抛错，等于把仓库商品绑死在采集箱上。
             detail_ids = [int(entry["detailId"]) for entry in entries
                           if str(entry["detailId"]).isdigit()]
-            if not detail_ids:
-                raise errors.validation("没有可认领的明细", field="items")
-            try:
-                claim_response = client.claim_to_shop(detail_ids, [int(target_shop_id)])
-            except MiaoshouError as exc:
-                raise map_upstream_error(exc) from None
-            # 解析上游真实回执，部分成功时不虚报。
-            # 注意：不能写 `parsed or detail_ids` —— 上游回执「一件都没认领」时
-            # parsed 是空列表，`or` 会退化成全量，正好把全失败报成全成功（审查 P1-2）。
-            parsed = carrier_service.claimed_detail_ids(claim_response or {})
-            if parsed:
-                claimed_ids = [str(value) for value in parsed]
-            elif isinstance(claim_response, Mapping) and claim_response.get("data"):
-                # 上游给了 data 但里面没有认领成功的 id：如实报 0 件
-                claimed_ids = []
+            need_rebuild = False
+            if detail_ids:
+                try:
+                    claim_response = client.claim_to_shop(detail_ids, [int(target_shop_id)])
+                    parsed = carrier_service.claimed_detail_ids(claim_response or {})
+                    if parsed:
+                        claimed_ids.extend(str(value) for value in parsed)
+                    elif isinstance(claim_response, Mapping) and claim_response.get("data"):
+                        pass
+                    else:
+                        claimed_ids.extend(str(value) for value in detail_ids)
+                    if not parsed and claimed_ids:
+                        unverified = ("妙手认领回执里没有逐条结果，已按请求数量计入；"
+                                      "若前端显示已认领但店铺里看不到，请刷新采集箱复核。")
+                        warning = f"{warning}；{unverified}" if warning else unverified
+                except MiaoshouError as exc:
+                    # 上游采集箱里已没有这件商品（最常见）→ 走本地重建。
+                    logger.info("同店认领失败，改用本地 payload 重建载体：%s", exc)
+                    need_rebuild = True
             else:
-                # 上游回执里根本没有认领字段（老接口可能只返 success 计数），
-                # 这种情况无法判断，按请求量算，并在下方记一条 warning
-                claimed_ids = [str(value) for value in detail_ids]
-            if not parsed and claimed_ids:
-                unverified = ("妙手认领回执里没有逐条结果，已按请求数量计入；"
-                              "若前端显示已认领但店铺里看不到，请刷新采集箱复核。")
-                warning = f"{warning}；{unverified}" if warning else unverified
+                need_rebuild = True
+
+            if need_rebuild or (not claimed_ids and entries):
+                # 用本地 payload 在目标店铺新建载体并写入商品内容。
+                payloads = _load_carrier_payloads(db, entries, account, client)
+                carrier_service.harvest_from_payloads(db, payloads)
+                try:
+                    listing = client.common_box_list(page_no=1, page_size=20)
+                    box_rows_ = (listing.get("data") or {}).get("detailList") or []
+                    if box_rows_:
+                        carrier_service.harvest_from_common_box(db, box_rows_)
+                        db.flush()
+                except Exception as exc:  # noqa: BLE001 - 补不到就让下面报缺料
+                    logger.warning("认领前补链接池失败：%s", exc)
+                try:
+                    carriers = carrier_service.collect_carriers(db, client, count=len(entries))
+                    filled = carrier_service.fill_carriers(
+                        client, carriers, payloads, shop_id=int(target_shop_id))
+                except carrier_service.CarrierError as exc:
+                    raise errors.unprocessable(
+                        f"认领需要新建载体并写入商品，但失败了：{exc}") from None
+                rebuilt = [str(v) for v in (filled.get("saved") or [])]
+                claimed_ids = rebuilt
+                for reason in (filled.get("failures") or []):
+                    failures.append({"stage": "carrier", "reason": str(reason)[:200]})
+                if not rebuilt:
+                    try:
+                        client.delete_collect_box([int(v) for v in carriers])
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("清理失败载体出错（%s）：%s", carriers, exc)
+                    reason = ("用本地商品数据新建载体并写入时失败"
+                              if not failures else "认领失败（临时载体已删除）：" + "；".join(
+                                  str(item.get("reason") or "") for item in failures)[:180])
+                    raise errors.unprocessable(reason)
+
             claimed_set = set(claimed_ids)
             for entry in entries:
                 if str(entry.get("detailId")) not in claimed_set:

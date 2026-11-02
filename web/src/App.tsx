@@ -20,7 +20,6 @@ import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { AppToaster, toast } from "@/components/ui/toast";
 import { EmptyState } from "@/components/ui/empty-state";
 import { UnlockPage } from "@/features/auth/UnlockPage";
-import { useOperatorSession } from "@/features/auth/guard";
 import { WarehousePage } from "@/features/warehouse/WarehousePage";
 import { AutomationPage } from "@/features/automation/AutomationPage";
 import { SchedulesPage } from "@/features/schedules/SchedulesPage";
@@ -28,9 +27,8 @@ import { WordsPage } from "@/features/words/WordsPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { useAuthStatus, useVersion } from "@/lib/queries";
 import { hasRuntimeToken } from "@/lib/bootstrap";
-import { clearOperator, operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
+import { operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
 import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
-import { Skeleton } from "@/components/ui";
 
 /* ------------------------------------------------------------------ *
  * 左侧导航（与路由一一对应）
@@ -123,32 +121,8 @@ function Shell() {
 }
 
 function RequireSoftwareLogin() {
-  const location = useLocation();
-  const identity = useOperatorIdentity();
-  const session = useOperatorSession(identity?.token ?? null);
-
-  useEffect(() => {
-    if (identity && session.isError) clearOperator();
-  }, [identity, session.isError]);
-
-  // 单机模式不再要求软件账号登录：本机令牌（Electron 注入）就是这台机器的身份，
-  // 后端 deps.require_token 也认它。只有两种情况还挡：
-  //   1. 有个人身份但被要求改密码 —— 得先去改；
-  //   2. 有个人身份但令牌已失效 —— 清掉后按游客放行，避免卡在白屏。
-  if (identity?.mustChangePassword) {
-    return <Navigate to="/unlock" replace state={{ from: location.pathname }} />;
-  }
-  if (!identity) {
-    return <Outlet />;
-  }
-  if (session.isLoading) {
-    return <div className="grid min-h-0 flex-1 place-items-center p-8"><Skeleton className="h-24 w-full max-w-[520px]" /></div>;
-  }
-  const current = session.data?.current;
-  if (session.isError || !current || current.id !== identity.id
-    || !["teacher", "admin", "member"].includes(current.role ?? "")) {
-    return <Navigate to="/unlock" replace state={{ from: location.pathname }} />;
-  }
+  // 软件账号登录已彻底移除：直接放行，本机令牌（Electron 注入）就是身份。
+  // 不再校验个人身份、不再跳 /unlock、不再因身份失效卡白屏。
   return <Outlet />;
 }
 

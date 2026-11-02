@@ -284,6 +284,18 @@ def build_product(*, info: Mapping[str, Any], detail_id: Any, shop_id: Any,
     price_min, price_max = purchase_range(info)
     cid = str(info.get("cid") or "").strip()
     resolved_title = first_text(title, info.get("title"))
+    # 上游采集偶尔只给占位标题（单个字母 "A"、纯符号、空白），或者商品在上游
+    # 已被删除、拿不到真标题。这种标题存进库后运营在列表里认不出是哪件，
+    # 所以先退到 oriTitle（原始货源标题）；连它也没有就明确标成「无标题」，
+    # 让运营知道该删掉或重新采集，而不是看到一个看不出含义的占位字符串。
+    if len(resolved_title.strip()) < 4:
+        fallback = first_text(info.get("oriTitle"), info.get("sourceTitle"))
+        if len(fallback.strip()) >= 4:
+            resolved_title = fallback
+        else:
+            lang = str(language or info.get("language") or "").strip().lower()
+            resolved_title = ("(untitled)" if lang in ("en", "ms", "vi", "id", "th")
+                              else "（无标题）")
     return {
         "detail_id": str(detail_id),
         "shop_id": str(shop_id),

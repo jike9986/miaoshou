@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Pencil, Play, RefreshCw, Square, Tag } from "lucide-react";
-import { apiErrorMessage, isApiError } from "@/lib/api";
+import { apiErrorMessage, isApiError, resolveApiBase, resolveToken } from "@/lib/api";
 import { formatCount, cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/queryKeys";
 import { useIsNarrow, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -381,6 +381,34 @@ export function AutomationPage() {
       stage: needsReview ? `${needsReview} 项待核对` : "已恢复上次运行",
       failedKeys: failures.map((failure) => failure.key), failures,
     });
+    // 恢复历史运行时，图片翻译可能是后台异步跑完的：这里按「真实图片任务数」
+    // 对齐一次进度（计划数不是 9+9+9 的上限，而是实际提交翻译的张数）。
+    void (async () => {
+      const apiBase = resolveApiBase();
+      const token = resolveToken();
+      let total = 0, ready = 0, failedJobs = 0;
+      for (const item of saved.items) {
+        if (!item.productId) continue;
+        try {
+          const resp = await fetch(
+            `${apiBase}/api/v1/images/jobs?productId=${encodeURIComponent(item.productId)}`,
+            { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+          );
+          if (resp.ok) {
+            const data = await resp.json();
+            const jobs: Array<{ status?: string }> = data.jobs || data.items || [];
+            total += jobs.length;
+            for (const j of jobs) {
+              if (j.status === "ready") ready += 1;
+              else if (j.status === "failed" || j.status === "unknown") failedJobs += 1;
+            }
+          }
+        } catch { /* 忽略 */ }
+      }
+      if (total > 0) {
+        setRun((prev) => ({ ...prev, imageDone: ready, imagePlanned: total, imageFailed: failedJobs }));
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -653,27 +681,36 @@ export function AutomationPage() {
     }
     let durableRun: AutomationRunRecord | null = null;
     if (persistentRunId.current && savedRun?.id === persistentRunId.current) {
-      const queued = new Set(savedRun.items.filter((item) => item.processStatus === "queued").map((item) => item.key));
       const previous = new Map(savedRun.items.map((item) => [item.key, item]));
+      // 只有「发布侧」不确定才必须拦：发布结果未知时重跑处理会掩盖真实状态。
+      // 处理侧的 needs_review（如客户端超时导致没拿到响应）是可以在核对后重跑的，
+      // 不再一刀切拦住，否则这类商品永远只能新建任务、还会被旧任务反复恢复卡住。
       if (targets.some((target) => {
         const item = previous.get(target.key);
-        return item?.processStatus === "needs_review"
-          || item?.publishStatus === "needs_review"
+        return item?.publishStatus === "needs_review"
           || item?.publishStatus === "running";
       })) {
-        toast.warning("所选商品存在待核对结果，请先核对妙手处理或发布记录");
+        toast.warning("所选商品发布状态待核对，请先核对妙手发布记录");
         return;
       }
-      if (targets.some((target) => previous.get(target.key)?.processStatus === "succeeded"
-        && previous.get(target.key)?.publishStatus !== "queued")) {
+      // 处理已成功且没有待发布动作的，不允许重复处理（避免重复加重量）。
+      if (targets.some((target) => {
+        const item = previous.get(target.key);
+        return item?.processStatus === "succeeded"
+          && pendingAutomationPublishAction(item) === null;
+      })) {
         toast.warning("所选商品已有成功处理记录，请取消已完成商品后再开始新任务");
         return;
       }
-      const resumesSavedRun = targets.length > 0 && targets.every((target) => queued.has(target.key));
+      // 可复用的旧任务条目：queued（还没跑）或 needs_review（跑过但结果不确定，允许重跑）
+      const reusable = new Set(savedRun.items
+        .filter((item) => item.processStatus === "queued" || item.processStatus === "needs_review")
+        .map((item) => item.key));
+      const resumesSavedRun = targets.length > 0 && targets.every((target) => reusable.has(target.key));
       if (resumesSavedRun) {
         durableRun = savedRun;
-      } else if (targets.some((target) => queued.has(target.key))) {
-        toast.warning("请单独选择上次任务的待处理商品，或取消选择后开始新任务");
+      } else if (targets.some((target) => reusable.has(target.key))) {
+        toast.warning("请单独选择上次任务的待处理/待核对商品，或取消选择后开始新任务");
         return;
       }
     }
@@ -744,6 +781,8 @@ export function AutomationPage() {
     const failedKeys: string[] = [];
     const failures: RunFailure[] = [];
     const skippedPublishKeys = new Set<string>();
+    // 后台异步翻译的商品 id：文字/价格已成功，图片在后台跑，结束后轮询进度
+    const queuedImageProducts: string[] = [];
 
     for (const target of targets) {
       if (stopRef.current) {
@@ -788,6 +827,12 @@ export function AutomationPage() {
             mainImageCount: runSettings.mainImageCount,
             skuImageCount: runSettings.skuImageCount,
             detailImageCount: runSettings.detailImageCount,
+            // 批量自动化是无人值守，主图 OCR 的「待复核」不该把整件拦下；
+            // 但 OCR 本身必须照跑 —— 它决定哪些图无中文/是重复图要剔掉、
+            // 哪些图才拿去翻译（老版就是这么做的）。
+            // 用 allowImageReview（放行复核但保留 OCR 删图），
+            // 不能用 skipImageReview（那是连 OCR 都不跑，会把 27 张全提交去翻译）。
+            allowImageReview: true,
           },
         });
         processResponseReceived = true;
@@ -798,7 +843,10 @@ export function AutomationPage() {
         )) {
           throw new Error("商品草稿未通过保存与读回核验，已阻止发布；请检查妙手商品记录后再继续。");
         }
-        const failedImages = runSettings.imagesEnabled && (result.images?.failed ?? 0) > 0;
+        // 图片翻译已改为后台异步：返回里 images.queued=true，表示「已入仓、图片在后台翻」。
+        // 文字/价格此时已成功，先把这件标成功，图片进度另起轮询。
+        const imagesQueued = result.images?.queued === true;
+        const failedImages = !imagesQueued && runSettings.imagesEnabled && (result.images?.failed ?? 0) > 0;
         const imageFailureReason = failedImages
           ? `图片处理失败 ${result.images?.failed} 张，已阻止发布；请先重试失败图片并核对结果。`
           : "";
@@ -815,9 +863,13 @@ export function AutomationPage() {
         });
         // 只有真的提交了翻译任务才算「图片处理完成」。
         // 之前这里加的是商品自带图片数，勾不勾「图片」数字都涨，等于假数据。
-        imageDone += result.images?.submitted ?? 0;
-        if (runSettings.imagesEnabled && result.images && result.images.failed > 0) {
-          imageFailures += result.images.failed;
+        if (imagesQueued && result.product?.id) {
+          queuedImageProducts.push(String(result.product.id));
+        } else {
+          imageDone += result.images?.submitted ?? 0;
+          if (runSettings.imagesEnabled && result.images && result.images.failed > 0) {
+            imageFailures += result.images.failed;
+          }
         }
         setStages((prev) => ({ ...prev, [target.key]: "done" }));
         // 记下这一步到底做成了什么：文字译了没、图片交上去几张、失败几张。
@@ -827,9 +879,11 @@ export function AutomationPage() {
           ...prev,
           [target.key]: {
             textDone: runSettings.textEnabled,
-            imagesDone: runSettings.imagesEnabled
-              ? (result.images?.failed ?? 0) === 0 && (result.images?.submitted ?? 0) > 0
-              : false,
+            imagesDone: imagesQueued
+              ? false
+              : runSettings.imagesEnabled
+                ? (result.images?.failed ?? 0) === 0 && (result.images?.submitted ?? 0) > 0
+                : false,
             imageFailures: result.images?.failed ?? 0,
           },
         }));
@@ -1012,6 +1066,43 @@ export function AutomationPage() {
         failedKeys: [...failedKeys],
         failures: [...failures],
       }));
+    }
+
+    // 后台图片翻译：文字/价格已全部完成，这里轮询图片任务进度，实时更新「图片处理 X/Y」。
+    // 最多等 8 分钟；每 4 秒查一次各商品的图片任务 ready 数。
+    if (queuedImageProducts.length > 0) {
+      const apiBase = resolveApiBase();
+      const token = resolveToken();
+      const deadline = Date.now() + 8 * 60_000;
+      while (Date.now() < deadline) {
+        let ready = 0, total = 0, failedJobs = 0;
+        for (const pid of queuedImageProducts) {
+          try {
+            const resp = await fetch(
+              `${apiBase}/api/v1/images/jobs?productId=${encodeURIComponent(pid)}`,
+              { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+            );
+            if (resp.ok) {
+              const data = await resp.json();
+              const jobs: Array<{ status?: string }> = data.jobs || data.items || [];
+              total += jobs.length;
+              for (const j of jobs) {
+                if (j.status === "ready") ready += 1;
+                else if (j.status === "failed" || j.status === "unknown") failedJobs += 1;
+              }
+            }
+          } catch { /* 单次查询失败忽略，下轮再试 */ }
+        }
+        if (total > 0) {
+
+          imageDone = ready;
+          imageFailures = failedJobs;
+          setRun((prev) => ({ ...prev, imageDone: ready, imagePlanned: total, imageFailed: failedJobs, stage: `图片翻译中 ${ready}/${total}` }));
+        }
+        // 全部到终态（ready + failed/unknown >= total）就结束
+        if (total > 0 && ready + failedJobs >= total) break;
+        await new Promise((r) => setTimeout(r, 4000));
+      }
     }
 
     const succeeded = targets.length - failed;

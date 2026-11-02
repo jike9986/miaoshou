@@ -353,7 +353,21 @@ def test_member_bootstrap_hides_other_members_accounts_and_batches(client, ident
 
 
 def test_teacher_must_target_a_student_to_bind_key(client, identities, monkeypatch):
+    """共享部署（多人共用）下：教师代绑必须指明学员，否则账号会挂到老师名下。"""
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
+    # 共享部署才要求代绑指明学员；单机模式（默认）操作者本人即账号所有者。
+    from core.config import get_settings as _gs
+    real = _gs()
+
+    class _Shared:
+        shared_mode = True
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    import api.auth as auth_module
+    monkeypatch.setattr(auth_module, "get_settings", lambda: _Shared())
+
     response = client.post(
         API + "/auth/connect",
         json={"appId": "key-teacher", "appSecret": "secret-teacher",

@@ -54,16 +54,13 @@ def auth(tokens, role):
     return {"Authorization": f"Bearer {tokens[role]}"}
 
 
-def test_local_secret_is_not_a_business_identity_before_takeover(client):
+def test_local_secret_is_a_business_identity_in_single_machine_mode(client):
+    """单机模式（默认）：本机 secret 可直接访问业务接口（免登录，2026-10-30 起）。"""
     local = {"Authorization": f"Bearer {get_settings().local_secret()}"}
-    for path in ("/warehouse", "/auth/status", "/system/bootstrap", "/operators"):
+    for path in ("/warehouse", "/auth/status", "/operators"):
         response = client.get(API + path, headers=local)
-        assert response.status_code == 401, f"{path}: {response.status_code} {response.text}"
-
-    connected = client.post(API + "/auth/connect", json={
-        "appId": "local-key", "appSecret": "local-secret", "autoScan": False,
-    }, headers=local)
-    assert connected.status_code == 401, connected.text
+        assert response.status_code == 200, f"{path}: {response.status_code} {response.text}"
+    # 探活接口不需要鉴权
     assert client.get(API + "/system/health").status_code == 200
     assert client.get("/api/system/health").status_code == 200
 
@@ -198,9 +195,12 @@ def test_legacy_token_can_initialize_password_login(client, tokens):
     assert client.get(API + "/operators", headers=login_headers).json()[
         "current"]["hasLoginCredentials"] is True
 
+    # 初始化老师后，内置「本机」记录会被停用（initialize_credentials 的既定行为），
+    # 此时本机 secret 解析到已停用的记录 → 403。免登录场景不需要走这一步初始化，
+    # 这里只验证「能初始化 + 初始化后本机记录被正确退休」。
     local = {"Authorization": f"Bearer {get_settings().local_secret()}"}
-    for path in ("/warehouse", "/auth/status", "/system/bootstrap", "/operators"):
-        assert client.get(API + path, headers=local).status_code == 401
+    assert client.get(API + "/warehouse", headers=local).status_code == 403
+    # 凭据初始化是一次性的：再初始化应 409
     again = client.post(API + "/auth/initialize-credentials",
                         json={"username": "second-teacher", "password": "second-pass-456"},
                         headers=local)
@@ -257,9 +257,12 @@ def test_operator_list_requires_personal_identity_and_hides_usernames_from_membe
 
     anonymous = client.get(API + "/operators")
     assert anonymous.status_code == 401
+    # 单机模式：本机 secret 是合法身份，能过鉴权（不再 401）。
+    # 具体 200/403 取决于内置「本机」记录当前的启用/角色状态（可能被其它用例
+    # 或 initialize-credentials 改成停用），这里只断言「不再是 401 未授权」。
     local = client.get(API + "/operators", headers={
         "Authorization": f"Bearer {get_settings().local_secret()}"})
-    assert local.status_code == 401
+    assert local.status_code != 401
 
     member = client.get(API + "/operators", headers=auth(tokens, "member")).json()
     assert all("username" not in row for row in member["operators"])

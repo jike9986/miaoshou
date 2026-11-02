@@ -285,6 +285,12 @@ export interface ProcessCollectRequest {
   skuImageCount?: number;
   /** 每件提交几张详情图去翻译，0 = 跳过 */
   detailImageCount?: number;
+  /** 跳过主图 OCR 复核闸门（批量无人值守入仓用） */
+  skipImageReview?: boolean;
+  /** 放行主图 OCR「待复核」但不跳过 OCR（批量用：仍按 OCR 剔除无中文/重复图） */
+  allowImageReview?: boolean;
+  /** 放行标题复核词但不阻断（批量用） */
+  allowTitleReview?: boolean;
 }
 
 /** 图片翻译提交结果：submitted 才是真的提交了几张，不是商品有几张图 */
@@ -295,6 +301,8 @@ export interface ProcessImagesResult {
   jobs: Array<{ id?: string; status?: string; source?: string }>;
   batchId?: string;
   reason?: string;
+  /** 图片翻译整体转后台异步时为 true（文字/价格已成功，图片在后台翻） */
+  queued?: boolean;
 }
 
 /** POST /collect-box/{detailId}/process 响应（server/api/collect_box.py: process） */
@@ -392,6 +400,8 @@ export interface Product {
   image: string | null;
   imageCount: number;
   skuCount: number;
+  /** 包裹重量 kg（后端从 payload.weight 带出，卡片右下角显示） */
+  weight?: number | null;
   purchasePriceMin: string;
   purchasePriceMax: string;
   purchaseCurrency: string;

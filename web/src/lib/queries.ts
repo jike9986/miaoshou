@@ -746,7 +746,9 @@ export function useProcessCollectItem(): UseMutationResult<
       api.post<ProcessCollectResult, ProcessCollectRequest>(
         `/collect-box/${encodeURIComponent(detailId)}/process`,
         request,
-        { timeoutMs: 120_000 }
+        // 处理含本地 OCR 筛选 + AI 图片翻译，9 张图约 50-60 秒；给足 5 分钟余量，
+        // 避免网络抖动时前端先超时、后端其实还在翻图而被误判成失败。
+        { timeoutMs: 300_000 }
       ),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.collectBox.all });

@@ -203,6 +203,30 @@ const bootInfo: { apiBase: string; token: string; version: string; platform: str
   platform: process.platform,
 };
 
+/**
+ * 服务器端模式（发给别人用的版本）。
+ *
+ * 负责人 2026-11-02 明确：软件发给别人后，**装上就能用、不出现账号登录**，
+ * 所有业务都在服务器处理。所以这一版客户端：
+ *   · 不再启动本地后端（省内存，也避免用户机器上跑一份重复数据）；
+ *   · 直接连线上服务器；
+ *   · 内置一把部署方统一配置的客户端令牌，用户无需输入任何账号。
+ *
+ * 两个值都可以在打包时用环境变量覆盖，方便换环境：
+ *   AOHUANG_REMOTE_API_BASE / AOHUANG_REMOTE_CLIENT_TOKEN
+ */
+const REMOTE_API_BASE =
+  process.env.AOHUANG_REMOTE_API_BASE?.trim() || "https://aohuang888.com/miaoshou-platform";
+const REMOTE_CLIENT_TOKEN = process.env.AOHUANG_REMOTE_CLIENT_TOKEN?.trim() || "";
+
+/** 是否为「连服务器」模式：没显式要求本地后端时默认走服务器。 */
+function useRemoteServer(): boolean {
+  const flag = (process.env.AOHUANG_LOCAL_BACKEND || "").trim();
+  if (flag === "1") return false;      // 显式要求本地后端（开发/单机测试）
+  if (flag === "0") return true;
+  return !isDev;                        // 生产默认连服务器，开发默认本地
+}
+
 async function loadToken(): Promise<string> {
   // 后端首次启动会生成 secret.key；Electron 读出来注入前端
   const fs = await import("node:fs/promises");
@@ -240,6 +264,20 @@ ipcMain.handle("window:close", () => mainWindow?.close());
 ipcMain.handle("window:is-maximized", () => mainWindow?.isMaximized() ?? false);
 
 app.whenReady().then(async () => {
+  if (useRemoteServer()) {
+    // 服务器端模式：不启本地后端，直接连线上；令牌用内置的客户端令牌。
+    bootInfo.apiBase = REMOTE_API_BASE.replace(/\/+$/, "");
+    bootInfo.token = REMOTE_CLIENT_TOKEN;
+    if (!REMOTE_CLIENT_TOKEN) {
+      console.error("未内置客户端令牌（AOHUANG_REMOTE_CLIENT_TOKEN），界面会提示未连接");
+    }
+    createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+    return;
+  }
+
   startServer();
   // 后端可能因端口占用改到 8813+，先探出真正在响应的端口。
   // 健康检查路径必须带 /v1（后端是 /api/v1/system/health），原先漏了 /v1 导致永远超时。

@@ -10,6 +10,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Calculator,
   CheckSquare,
+  ChevronLeft,
+  ChevronRight,
   Inbox,
   Layers,
   ListChecks,
@@ -150,6 +152,8 @@ export function WarehousePage() {
   const items = useMemo(() => data?.items ?? [], [data?.items]);
   const facets = data?.facets;
   const total = data?.total ?? 0;
+  // 总页数：工具栏里的「第 X / Y 页」与翻页按钮的禁用判断都用它。
+  const pageCount = Math.max(1, Math.ceil(total / Math.max(1, query.pageSize)));
   const hasActiveWarehouseFilter = query.claimed !== null || query.status !== null
     || query.qualityStatus !== null || category.kind !== "all";
 
@@ -676,7 +680,17 @@ export function WarehousePage() {
                 />
               )}
 
-              {/* 全选 + 每页条数放同一行右侧：切到每页 100 条时不用滑到列表底部才改得动 */}
+              {!listQuery.isLoading && !listQuery.isError && items.length > 0 && (
+                <span className="num ml-1 flex shrink-0 items-center gap-1.5 text-xs text-fg-muted">
+                  本页 {formatCount(items.length)} 件
+                  {listQuery.isFetching && (
+                    <RefreshCw className="size-3 animate-spin" aria-label="正在刷新" />
+                  )}
+                </span>
+              )}
+
+              {/* 每页条数 + 翻页 + 全选全部并到这一行：底部不再重复一套分页器，
+                  用户不用滑到列表底部才能翻页。 */}
               <div className="ml-auto flex items-center gap-2">
                 <Select
                   size="md"
@@ -689,6 +703,40 @@ export function WarehousePage() {
                     label: String(size),
                   }))}
                 />
+
+                <div className="flex shrink-0 items-center gap-1">
+                  <span className="num px-1 text-xs text-fg-muted">
+                    第 {query.page} / {pageCount} 页
+                  </span>
+                  <Button
+                    variant="secondary"
+                    size="md"
+                    className="size-9 shrink-0 p-0"
+                    disabled={query.page <= 1 || listQuery.isFetching}
+                    aria-label="上一页"
+                    title="上一页"
+                    onClick={() => {
+                      if (isMember) clearWarehouseSelection();
+                      query.setPage(Math.max(1, query.page - 1));
+                    }}
+                  >
+                    <ChevronLeft className="size-4" />
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="md"
+                    className="size-9 shrink-0 p-0"
+                    disabled={query.page >= pageCount || listQuery.isFetching}
+                    aria-label="下一页"
+                    title="下一页"
+                    onClick={() => {
+                      if (isMember) clearWarehouseSelection();
+                      query.setPage(Math.min(pageCount, query.page + 1));
+                    }}
+                  >
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </div>
 
                 <Button
                   variant="secondary"
@@ -766,16 +814,6 @@ export function WarehousePage() {
 
             {!listQuery.isLoading && !listQuery.isError && items.length > 0 && (
               <>
-                <div className="flex items-center gap-2 text-xs text-fg-muted">
-                  <span className="num">本页 {formatCount(items.length)} 件</span>
-                  {listQuery.isFetching && (
-                    <span className="flex items-center gap-1 text-fg-muted">
-                      <RefreshCw className="size-3 animate-spin" />
-                      正在刷新
-                    </span>
-                  )}
-                </div>
-
                 <motion.div
                   initial={reduced ? undefined : "hidden"}
                   animate={reduced ? undefined : "show"}
@@ -808,22 +846,8 @@ export function WarehousePage() {
               </>
             )}
 
-            <Pagination
-              page={query.page}
-              pageSize={query.pageSize}
-              total={total}
-              hasMore={data?.hasMore}
-              // 页头统计卡已经显示了「共 355 件」，分页器再写一遍「共 N 条」
-              // 就是同一数字出现两次，用户明确要求去掉。
-              showTotal={false}
-              pageSizeOptions={PAGE_SIZE_OPTIONS.map((size) => ({ value: size, label: String(size) }))}
-              onPageChange={(page) => {
-                if (isMember) clearWarehouseSelection();
-                query.setPage(page);
-              }}
-              onPageSizeChange={query.setPageSize}
-              disabled={listQuery.isFetching}
-            />
+            {/* 分页器已并入上方工具栏（每页条数 + 页码 + 翻页 + 全选同排），
+                这里不再重复一套，列表底部保持干净。 */}
           </div>
         )}
       </PageContent>
@@ -863,8 +887,9 @@ export function WarehousePage() {
           }] : []),
         ] : [
           {
-            label: "认领到采集箱",
+            label: claimOnly.isPending ? "正在认领…" : "认领到采集箱",
             icon: <Inbox className="size-3.5" />,
+            disabled: claimOnly.isPending,
             onClick: () => {
               if (!connected) {
                 toast.warning("认领需要先连接妙手账号");
@@ -875,6 +900,12 @@ export function WarehousePage() {
                 toast.warning("请先选择要认领到的店铺");
                 return;
               }
+              if (claimOnly.isPending) return;
+              // 跨店认领要「采集货源 → 复制 N 份载体 → 写入商品」，几十秒到几分钟都正常，
+              // 不给提示用户会以为没点上。先立刻给一条进行中的 toast。
+              toast.info(`正在认领 ${selectedIds.length} 件到采集箱…`, {
+                description: "跨店商品需要先采集货源并复制载体，请稍等（不会立即完成）",
+              });
               // 老版行为：原地调接口把这批商品放进店铺采集箱，不跳页、不发布。
               // 跨店商品由后端自动建载体（publish_service 的 claimOnly 分支）。
               claimOnly.mutate(

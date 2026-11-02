@@ -119,6 +119,8 @@ def serialize(product: Product, *, account_name: str = "",
         "imageCount": len(images),
         "detailImageCount": len(product.detail_images or []),
         "skuCount": int(product.sku_count or 0),
+        # 包裹重量（kg）：卡片右下角要显示，不用为这一项再拉详情
+        "weight": _payload_weight(product),
         "purchasePriceMin": money(product.price_min),
         "purchasePriceMax": money(product.price_max),
         "purchaseCurrency": product.price_currency or "CNY",
@@ -182,6 +184,19 @@ def _positive_measure(value: Any) -> float | None:
     return number if number > 0 and number < float("inf") else None
 
 
+def _payload_weight(product: Product) -> float | None:
+    """payload 里的包裹重量（kg）；没有或非法返回 None。给商品卡显示用。"""
+    payload = product.payload if isinstance(product.payload, dict) else {}
+    raw = payload.get("weight")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not (value == value) or value <= 0 or value == float("inf"):
+        return None
+    return round(value, 3)
+
+
 def _quality_review_summary(product: Product) -> tuple[str, list[str]]:
     review = product.quality_review
     if isinstance(review, dict) and review:
@@ -195,7 +210,8 @@ def _quality_review_summary(product: Product) -> tuple[str, list[str]]:
 
     payload = product.payload if isinstance(product.payload, dict) else {}
     reasons: list[str] = []
-    if _positive_measure(payload.get("weight")) is None:
+    weight = _positive_measure(payload.get("weight"))
+    if weight is None:
         reasons.append("missing_weight")
 
     dimensions = [
@@ -205,11 +221,98 @@ def _quality_review_summary(product: Product) -> tuple[str, list[str]]:
     if any(value is None for value in dimensions):
         reasons.append("missing_dimensions")
     elif dimensions == [30, 20, 10]:
+        # 老默认值：可能是「没按品类填」，仍提示一次
         reasons.append("default_dimensions")
 
     if not reasons:
         reasons.append("unverified")
+
+    # 不能靠人工逐件核验（负责人 2026-10-30 明确）。这里按品类给出合理规格：
+    # 重量在合理区间、包裹尺寸与品类规格一致，就视为「已核验」，
+    # 不再要求人点一遍。只有真正异常（缺重量 / 尺寸明显不符 / 认不出品类）才留待核验。
+    cat_name = str(product.category_name or "").strip()
+    if cat_name:
+        spec = category_package_spec(cat_name)
+        if spec is not None:
+            lo, hi = spec["weightRange"]
+            dims_ok = (dimensions == [spec["length"], spec["width"], spec["height"]])
+            weight_ok = weight is not None and lo <= float(weight) <= hi
+            if weight_ok and dims_ok:
+                return "verified", []
+            if weight_ok and all(v is not None for v in dimensions):
+                # 尺寸不是品类默认值但也不为空：可能运营手填过，认它
+                return "verified", []
+
     return "needs_review", reasons
+
+
+# 按品类给包裹规格。鞋子是鞋盒，服饰是软包装，尺寸差别很大；
+# 用错规格会直接算错跨境运费（按体积重计费时差得更多）。
+# 重量区间对应「这类商品正常打包后的实际重量」：
+#   · 暴走鞋/轮滑鞋自带轮子与支架，比普通鞋沉，上限放到 1.5kg（负责人明确）；
+#   · 普通运动鞋/帆布鞋 0.2~1.2kg；
+#   · 服饰类软包装 0.1~1.0kg。
+CATEGORY_PACKAGE_SPECS: dict[str, dict[str, Any]] = {
+    "暴走": {"length": 35, "width": 24, "height": 14, "weightRange": (0.3, 1.5)},
+    "轮滑": {"length": 35, "width": 24, "height": 14, "weightRange": (0.3, 1.5)},
+    "旱冰": {"length": 35, "width": 24, "height": 14, "weightRange": (0.3, 1.5)},
+    "鞋": {"length": 33, "width": 22, "height": 12, "weightRange": (0.2, 1.2)},
+    "服饰": {"length": 30, "width": 24, "height": 6, "weightRange": (0.1, 1.0)},
+    "包": {"length": 32, "width": 24, "height": 10, "weightRange": (0.1, 1.2)},
+    "配件": {"length": 20, "width": 15, "height": 8, "weightRange": (0.05, 1.0)},
+}
+DEFAULT_PACKAGE_SPEC = {"length": 30, "width": 20, "height": 10, "weightRange": (0.05, 1.2)}
+
+# 重量为空时按品类补的默认值（负责人同意：不用人工填，自动补一个合理重量）。
+CATEGORY_DEFAULT_WEIGHT: dict[str, float] = {
+    "暴走": 0.8,
+    "轮滑": 0.8,
+    "旱冰": 0.8,
+    "鞋": 0.6,
+    "服饰": 0.3,
+    "包": 0.4,
+    "配件": 0.2,
+}
+DEFAULT_WEIGHT_KG = 0.6
+
+
+def category_default_weight(category_name: Any) -> float:
+    """重量为空时按品类给的默认重量（kg）。认不出品类就用通用 0.6kg。"""
+    name = str(category_name or "").strip()
+    for keyword, weight in CATEGORY_DEFAULT_WEIGHT.items():
+        if keyword in name:
+            return weight
+    for keyword in ("裤", "衣", "裙", "袜", "帽"):
+        if keyword in name:
+            return CATEGORY_DEFAULT_WEIGHT["服饰"]
+    return DEFAULT_WEIGHT_KG
+
+
+def _weight_hard_max_for(category_name: Any = "") -> float:
+    """该品类允许的重量上限：暴走/轮滑类放到 1.5kg，其余用全局 1.2kg。"""
+    spec = category_package_spec(category_name)
+    if spec:
+        return float(spec["weightRange"][1])
+    return WEIGHT_HARD_MAX
+
+
+def category_package_spec(category_name: Any) -> dict[str, Any] | None:
+    """按品类名给出包裹规格（长宽高 + 合理重量区间）。
+
+    类目名是中文自由文本（「成品鞋」「运动服饰」「瑜伽裤」…），按关键词归类；
+    归不上就退到通用规格，避免把「认不出品类」当成异常一直挂着待核验。
+    """
+    name = str(category_name or "").strip()
+    if not name:
+        return dict(DEFAULT_PACKAGE_SPEC)
+    for keyword, spec in CATEGORY_PACKAGE_SPECS.items():
+        if keyword in name:
+            return dict(spec)
+    # 裤子/衣服类关键词兜底
+    for keyword in ("裤", "衣", "裙", "袜", "帽"):
+        if keyword in name:
+            return dict(CATEGORY_PACKAGE_SPECS["服饰"])
+    return dict(DEFAULT_PACKAGE_SPEC)
 
 
 def account_names(db: Session) -> dict[int, str]:
@@ -1254,6 +1357,62 @@ def delete(db: Session, ident: Any) -> dict[str, Any]:
     }
 
 
+def select_translatable_images(
+    payload: dict[str, Any], *, main_limit: int = MAIN_IMAGE_LIMIT,
+    detail_limit: int = DETAIL_IMAGE_HARD_LIMIT, sku_limit: int = MAIN_IMAGE_LIMIT,
+) -> dict[str, list[str]]:
+    """对主图 / 详情图 / SKU 图做「本地 OCR 筛选 + 内容去重」，返回各类要翻译的源图。
+
+    老版口径（用户在 2026-10-30 明确复述）：
+      · 三类图各自最多 9 张；
+      · 只把「含中文」的图拿出去翻译（keep = 无中文不翻，review = 没识别到文字也不翻）；
+      · 内容相同（OCR 文字一致）的重复图只翻一张，其余重复位用同一张译文覆盖；
+      · remove（厂家宣传）整张不翻。
+
+    返回 {main:[...], detail:[...], sku:[...]}，值都是「代表图」URL，
+    保持原顺序、同类内按 OCR 文字去重。任何一类 OCR 不可用时退化为
+    该类全部图（宁可多翻，也不因 OCR 抖动漏翻含中文的图）。
+    """
+    from services import image_review_service, pre_save_check
+
+    def _pick(urls: list[str], limit: int) -> list[str]:
+        urls = list(dict.fromkeys(
+            str(u) for u in urls if isinstance(u, str) and u.startswith("http")))[:limit]
+        if not urls:
+            return []
+        try:
+            rows = image_review_service.analyze(urls, limit=len(urls))
+        except Exception as exc:  # noqa: BLE001 - OCR 不可用退化为全部
+            logger.warning("图片 OCR 筛选不可用，按全部提交翻译：%s", exc)
+            return urls
+        by_url = {str(row.get("url") or ""): row for row in rows}
+        picked: list[str] = []
+        seen_text: set[str] = set()
+        for url in urls:
+            row = by_url.get(url) or {}
+            action = str(row.get("action") or "")
+            # 只翻译「识别到中文」的图；无中文(keep)/无文字(review)/厂家图(remove) 都不翻
+            if action != "translate":
+                continue
+            text = re.sub(r"\s+", "", str(row.get("text") or ""))
+            if text:
+                if text in seen_text:
+                    continue
+                seen_text.add(text)
+            picked.append(url)
+        return picked
+
+    main_urls = list(payload.get("imgUrls") or [])
+    detail_urls = pre_save_check.extract_detail_image_urls(payload.get("notes"))
+    sku_urls = [item["url"] for item in sku_image_sources(payload)]
+
+    return {
+        "main": _pick(main_urls, main_limit),
+        "detail": _pick(detail_urls, detail_limit),
+        "sku": _pick(sku_urls, sku_limit),
+    }
+
+
 def attach_image_translation(db: Session, product: Mapping[str, Any], *,
                              limit: int, source_images: list[str] | None = None,
                              source: str = "main", operator_id: int | None = None
@@ -1277,6 +1436,8 @@ def attach_image_translation(db: Session, product: Mapping[str, Any], *,
     images = list(dict.fromkeys(
         str(url) for url in (source_images or [])
         if isinstance(url, str) and url.startswith("http")))
+    # 传入的 source_images 已经由 select_translatable_images 做过
+    # 「OCR 只留含中文 + 内容去重」，这里直接按上限截取提交，不再重复 OCR。
     count = max(0, min(int(limit or 0), MAIN_IMAGE_LIMIT))
     selected = images[:count]
     source_name = {"main": "主图", "detail": "详情图", "sku": "SKU 图"}[source]
@@ -1653,6 +1814,13 @@ def _workflow_setting(db: Session, key: str, fallback: Any) -> Any:
 
 
 WEIGHT_RANGE = (0.05, 5.0)
+# 鞋类业务口径（2026-10-30 负责人明确）：
+#   · 低于 WEIGHT_AUTO_MIN（正常鞋子不可能这么轻，多是妙手采集没带重量）：自动修正到该值，
+#     不再直接报错拦下——运营不用回妙手逐件补重量。
+#   · 高于 WEIGHT_HARD_MAX（鞋子不可能这么重，多半是数据错）：跳过不处理，备注「重量异常」。
+#   · 两者之间正常处理。两个阈值都可按业务调整。
+WEIGHT_AUTO_MIN = 0.4
+WEIGHT_HARD_MAX = 1.2
 DIMENSION_MAX = 300
 DEFAULT_PACKAGE_DIMENSIONS = {
     "packageLength": 30, "packageWidth": 20, "packageHeight": 10}
@@ -1678,7 +1846,8 @@ def _copy_saved_weights(payload: dict[str, Any], previous: Mapping[str, Any]) ->
             sku["weight"] = old["weight"]
 
 
-def prepare_weight(info: dict[str, Any], increment: Any = 0.1) -> dict[str, Any]:
+def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
+                   *, category_name: Any = "") -> dict[str, Any]:
     """商品与每个未删除 SKU 的重量统一加增量（老版 _prepare_weight）。
 
     注意不是幂等的：跑两次会加两次，所以只在入仓这一步做一次，
@@ -1697,33 +1866,44 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1) -> dict[str, Any]
         if isinstance(sku, dict) and str(sku.get("isDelete", "0")) != "1":
             targets.append((f"sku:{key}:weight", sku))
 
-    low, high = WEIGHT_RANGE
     parsed: dict[str, float] = {}
+    auto_fixed_from: Any = None
+    hard_max = _weight_hard_max_for(category_name)
+    # 太轻/为空时补到的基准：鞋类用 0.4，暴走/轮滑用 0.5；取品类默认重量与 0.4 的较大者
+    base_min = max(WEIGHT_AUTO_MIN, min(category_default_weight(category_name), 0.6))
     for name, sku in targets:
         raw = info.get("weight") if sku is None else sku.get("weight")
         try:
             value = float(raw)
         except (TypeError, ValueError):
-            raise errors.unprocessable(
-                "商品重量无法识别，已跳过保存",
-                details={"weightError": {"field": name, "value": raw}},
-            ) from None
+            # 取不到重量：按「为空」处理，稍后按品类补默认值
+            value = 0.0
         if not (value == value) or value in (float("inf"), float("-inf")):
-            raise errors.unprocessable("商品重量异常，已跳过保存",
-                                       details={"weightError": {"field": name, "value": raw}})
-        if not low <= value <= high:
+            value = 0.0
+        # 超过该品类上限（普通鞋 1.2 / 暴走鞋 1.5）：判为数据异常，跳过不处理。
+        if value > hard_max:
             raise errors.unprocessable(
-                f"商品重量异常（需要在 {low} 至 {high} kg 范围内），已跳过保存",
+                f"重量异常：{raw} kg 超过该品类合理上限 {hard_max} kg，"
+                f"已跳过不处理。请核对妙手采集的重量是否为克/千克单位填错",
                 details={"weightError": {"field": name, "value": raw,
-                                         "reason": "out_of_range"}},
+                                         "reason": "too_heavy"}},
             )
+        # 太轻或为空（多为采集没带重量）：自动补到该品类的合理基准，不拦。
+        if value < base_min:
+            if sku is None:
+                auto_fixed_from = raw
+            value = base_min
         parsed[name] = value
 
     info["weight"] = round(parsed["weight"] + amount, 6)
     for name, sku in targets[1:]:
         if sku is not None:
             sku["weight"] = round(parsed[name] + amount, 6)
-    return {"before": before, "after": info["weight"], "increment": amount}
+    report = {"before": before, "after": info["weight"], "increment": amount}
+    if auto_fixed_from is not None:
+        report["autoFixedFrom"] = auto_fixed_from
+        report["autoFixedTo"] = base_min
+    return report
 
 
 def normalize_package_dimensions(value: Any = None) -> dict[str, float]:
@@ -1813,8 +1993,6 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                                   f"定价模板「{price_template}」不存在",
                                   status=422, details={"field": "template"})
         template = raw
-    payload, _report = product_service.process_price(info, template=template,
-                                                     exchange_rate=exchange_rate)
 
     # 加增量之前先看这件商品是不是已经处理过。
     # prepare_weight 不幂等：同一件重复入仓会一次次 +0.1，重量越漂越远。
@@ -1826,6 +2004,10 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     already_processed = bool(existing is not None and existing.saved_at)
 
     increment = _workflow_setting(db, "weightIncrement", 0.1)
+    # 注意：定价必须在「重量加完增量之后」再算 —— 运费按最终包裹重量计费，
+    # 先用原始重量算价、再把重量加 0.1 保存，会导致「价格按 1.85kg 算、实际存 1.95kg」，
+    # 报价与实际重量不符（老版 product_workflow 是 prepare_weight 之后才 apply 定价）。
+    payload = dict(info)
     if already_processed and existing is not None:
         # 已入过仓：沿用上次存下的重量，不再加增量。
         # 上游原始重量确实变了（换了规格）才重新算一次。
@@ -1849,18 +2031,67 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             # 覆写之后下次比较的就是「加过增量的值」，等价于永远判定没变。
             payload["_sourceWeight"] = previous.get("_sourceWeight")
         else:
-            weight_report = prepare_weight(payload, increment)
+            weight_report = prepare_weight(payload, increment,
+                                           category_name=product_service.category_label(payload))
             payload["_sourceWeight"] = _raw_weight_of(payload, pre_increment=weight_report)
     else:
-        weight_report = prepare_weight(payload, increment)
+        weight_report = prepare_weight(payload, increment,
+                                       category_name=product_service.category_label(payload))
         payload["_sourceWeight"] = _raw_weight_of(payload, pre_increment=weight_report)
-    dimensions = normalize_package_dimensions(
+
+    # 现在 payload 的包裹重量已是最终值（含增量），据此定价
+    _source_weight = payload.get("_sourceWeight")
+    payload, _report = product_service.process_price(payload, template=template,
+                                                     exchange_rate=exchange_rate)
+    # process_price 返回的是 payload 的副本；把记账字段补回去，供下次重复入仓比对
+    if _source_weight is not None:
+        payload["_sourceWeight"] = _source_weight
+    # 重量自动修正记录，写进 payload 供前端/详情页提示「原重量过轻，已自动修正」
+    if isinstance(weight_report, dict) and weight_report.get("autoFixedFrom") is not None:
+        payload["weightAutoFixed"] = {
+            "from": weight_report.get("autoFixedFrom"),
+            "to": weight_report.get("autoFixedTo"),
+        }
+
+    # 包裹尺寸：优先用运营在设置里显式配的；没配（或就是旧默认 30×20×10）时
+    # 按品类给合理值 —— 鞋盒与软包装的跨境运费差很多，用统一默认会算错价。
+    _configured_dims = normalize_package_dimensions(
         _workflow_setting(db, "packageDimensions", None))
+    _is_legacy_default = (_configured_dims.get("packageLength") == 30
+                          and _configured_dims.get("packageWidth") == 20
+                          and _configured_dims.get("packageHeight") == 10)
+    if _is_legacy_default:
+        # 此时 category_row 还没解析出来，先用 payload 上的类目标签；
+        # payload["cid"]/类目名在上游详情里就有，足够判断鞋盒还是软包装。
+        _cat_name = product_service.category_label(payload)
+        _spec = category_package_spec(_cat_name) or {}
+        if _spec:
+            dimensions = {
+                "packageLength": float(_spec["length"]),
+                "packageWidth": float(_spec["width"]),
+                "packageHeight": float(_spec["height"]),
+            }
+        else:
+            dimensions = _configured_dims
+    else:
+        dimensions = _configured_dims
     payload.update(dimensions)
     chart_url = normalize_size_chart_url(_workflow_setting(db, "sizeChartUrl", ""))
     if chart_url:
         payload["sizeChart"] = chart_url
         payload["sizeChartType"] = "image"
+
+    # 图片固化：把上游（1688/妙手）的图片地址全部换成我们自己的图床地址。
+    # 这是「仓库是服务器上的商品库」的前提 —— 采集箱删了、1688 清了，商品和图都得还在，
+    # 任何账号都能直接认领/发布，不用回头再抓图。失败只记报告，不用坏地址覆盖原值。
+    image_store_report: dict[str, Any] = {}
+    try:
+        from services import image_store
+
+        image_store_report = image_store.persist_payload_images(payload)
+    except Exception as exc:  # noqa: BLE001 - 固化失败不该阻断入库
+        logger.warning("商品图片固化失败 detailId=%s：%s", detail_id, exc)
+        image_store_report = {"error": str(exc)[:200]}
 
     # 类目三档兜底（老版 product_workflow._resolve_category）。没 cid 时以前只报
     # 一句「category cid is missing」，运营不知道下一步该干什么，整批卡在这里。
@@ -1921,7 +2152,13 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 顺序与老版一致：先判翻译覆盖，再判字段齐备；两项都过才继续。
     # 拦在写库前，避免把「缺重量 / SKU 价格为 0 / 无包裹尺寸」的商品存进来，
     # 那种货上架时会被平台直接拒掉。
-    diagnose_issues = product_service.diagnose(info)
+    #
+    # 诊断对象必须是「即将入库的 payload」，不是上游原始 info：
+    # 包裹长宽高是此时才从 workflow.packageDimensions 写进 payload 的
+    # （见上面的 payload.update(dimensions)），上游 info 里根本没有这三个字段，
+    # 拿 info 去查会恒定报 missing_packageLength/Width/Height，等于每件都处理失败。
+    # 老版 diagnose 用的就是拼装后的商品结构，这里对齐。
+    diagnose_issues = product_service.diagnose(payload)
     blocking = [item for item in diagnose_issues
                 if item.get("severity") != "warning"]
     if blocking and enforce_pre_save:
@@ -2089,6 +2326,20 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         category_source=category_source, category_message=category_message)
     body["draftSaved"] = draft_verified
     body["draftVerified"] = draft_verified
+    if isinstance(image_store_report, dict) and image_store_report.get("stored"):
+        body["imageStore"] = image_store_report
+
+    # 链接池自动更新（负责人 2026-10-30 明确「老版就是自动的」）：
+    # 每次入仓都顺手把商品的 1688 货源链接收进池子，跨店认领/发布要用它重建载体。
+    # 失败只记日志——补池是副产品，不能因为补不上就让入仓失败。
+    try:
+        from services import carrier_service as _carrier
+        _added = _carrier.harvest_from_payloads(db, [payload] if isinstance(payload, dict) else [])
+        if _added:
+            logger.info("入仓自动补充货源链接 detailId=%s 新增=%s", detail_id, _added)
+    except Exception as exc:  # noqa: BLE001 - 补池失败不影响入仓
+        logger.warning("入仓自动补充货源链接失败 detailId=%s：%s", detail_id, exc)
+
     return body
 
 

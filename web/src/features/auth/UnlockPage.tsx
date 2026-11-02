@@ -262,7 +262,7 @@ export function UnlockPage() {
         <PageHeader title="连接妙手" />
         <PageContent width="form">
           <ServerAddressControl />
-          <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />
+          {SHOW_ACCOUNT_UI && <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />}
           <div className="mt-4 space-y-3">
             <Skeleton className="h-6 w-40" />
             <Skeleton className="h-44 w-full" rounded="rounded-lg" />
