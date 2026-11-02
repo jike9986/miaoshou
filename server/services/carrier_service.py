@@ -447,7 +447,7 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                     progress({"stage": "collect_failed", "link": url})
                 continue
 
-        copies = 1
+        copies = min(count - len(details), 100)
         if progress:
             progress({"stage": "claim", "commonId": common_id, "copies": copies})
         try:
@@ -457,10 +457,14 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                                available=len(details), required=count) from exc
         if url:
             mark(db, url, ok=True)
-        new_ids = claimed_detail_ids(claimed)
+        new_ids = list(dict.fromkeys(claimed_detail_ids(claimed)))
         if not new_ids:
             raise CarrierError("复制请求已提交但未返回新商品 ID，请先检查采集箱，勿重复操作",
                                commonId=common_id, required=count)
+        if len(set(new_ids)) != copies or any(detail_id in details for detail_id in new_ids):
+            raise CarrierError("复制回执数量不完整，请先检查采集箱，勿重复操作",
+                               commonId=common_id, requested=copies, returned=len(set(new_ids)),
+                               available=len(details), required=count)
         before = len(details)
         for detail_id in new_ids:
             if len(details) >= count:

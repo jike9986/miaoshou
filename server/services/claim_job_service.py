@@ -16,6 +16,7 @@ from services import batch_service, publish_service
 logger = logging.getLogger(__name__)
 KIND = "warehouse_claim"
 MAX_ITEMS = 5000
+COPY_BATCH_SIZE = 100
 
 
 def create(db: Session, body: dict[str, Any], account_id: int, operator_id: int | None) -> Batch:
@@ -93,35 +94,43 @@ def run(batch_id: str) -> None:
         item_ids = [item.id for item in batch_service.items_of(db, batch_id)]
         batch.status = "running"
         db.commit()
-        for index, raw in enumerate(source_items):
-            item = db.get(BatchItem, item_ids[index])
-            item.status = "running"
-            item.attempt += 1
+        for start in range(0, len(source_items), COPY_BATCH_SIZE):
+            chunk = source_items[start:start + COPY_BATCH_SIZE]
+            chunk_ids = item_ids[start:start + len(chunk)]
+            for item_id in chunk_ids:
+                item = db.get(BatchItem, item_id)
+                item.status = "running"
+                item.attempt += 1
             db.commit()
-            body["items"] = [raw]
+            body["items"] = chunk
             body["accountId"] = str(batch.account_id)
             body["batchId"] = batch.id
+            body["forceRebuild"] = True
             try:
                 result = publish_service.publish(db, body, operator_id=batch.operator_id)
                 failures = result.get("failures") or []
-                ok = bool(result.get("claimed")) and not failures
-                message = "认领成功" if ok else str(failures or "未收到认领成功回执")[:500]
+                expected = {str(raw["warehouseId"]) for raw in chunk}
+                succeeded = set(result.get("claimedWarehouseIds") or []) & expected
+                message = str(failures or "未收到认领成功回执")[:500]
                 db.commit()
             except Exception as exc:  # upstream outcome can be unknown; never retry automatically
                 db.rollback()
-                ok = False
+                succeeded = set()
                 message = f"处理失败或结果未知，请先在采集箱核对：{exc}"[:500]
-                logger.warning("Claim job %s item %s failed", batch_id, index, exc_info=True)
+                logger.warning("Claim job %s batch at %s failed", batch_id, start, exc_info=True)
             batch = batch_service.get(db, batch_id)
-            item = db.get(BatchItem, item_ids[index])
-            item.status = "ok" if ok else "failed"
-            item.message = message
-            batch.current_index = index + 1
-            batch.results = [*(batch.results or []), {"detailId": item.detail_id,
-                             "status": item.status, "message": message, "at": now_ts()}]
+            rows = list(batch.results or [])
+            for item_id in chunk_ids:
+                item = db.get(BatchItem, item_id)
+                item.status = "ok" if item.detail_id in succeeded else "failed"
+                item.message = "认领成功" if item.status == "ok" else message
+                rows.append({"detailId": item.detail_id, "status": item.status,
+                             "message": item.message, "at": now_ts()})
+            batch.current_index = start + len(chunk)
+            batch.results = rows
             batch.updated_at = now_ts()
             db.commit()
-            if not ok:
+            if len(succeeded) != len(chunk):
                 break
         batch.status = "failed" if any(row.status == "failed" for row in batch_service.items_of(db, batch_id)) else "done"
         batch.finished_at = now_ts()

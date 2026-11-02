@@ -123,10 +123,11 @@ def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db
                             "saved": [91, 93], "savedSources": [0, 2],
                             "failures": ["92 failed"],
                         })
-    publish_service.publish(db, {"confirm": True, "claimOnly": True, "shopId": "123",
-                                 "items": [{"warehouseId": str(p.id)}
-                                           for p in (first, second, third)]},
-                            operator_id=operator.id)
+    result = publish_service.publish(db, {"confirm": True, "claimOnly": True, "shopId": "123",
+                                          "items": [{"warehouseId": str(p.id)}
+                                                    for p in (first, second, third)]},
+                                     operator_id=operator.id)
+    assert result["claimedWarehouseIds"] == [str(first.id), str(third.id)]
     key = f"account:{first_account.id}"
     assert first.collected[key]["detailId"] == "91"
     assert key not in second.collected

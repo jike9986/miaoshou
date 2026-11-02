@@ -712,8 +712,8 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             #     的语义。之前同店直接抛错，等于把仓库商品绑死在采集箱上。
             detail_ids = [int(entry["detailId"]) for entry in entries
                           if str(entry["detailId"]).isdigit()]
-            need_rebuild = False
-            if detail_ids:
+            need_rebuild = payload.get("forceRebuild") is True
+            if detail_ids and not need_rebuild:
                 try:
                     claim_response = client.claim_to_shop(detail_ids, [int(target_shop_id)])
                     parsed = carrier_service.claimed_detail_ids(claim_response or {})
@@ -730,7 +730,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                     # 上游采集箱里已没有这件商品（最常见）→ 走本地重建。
                     logger.info("同店认领失败，改用本地 payload 重建载体：%s", exc)
                     need_rebuild = True
-            else:
+            elif not detail_ids:
                 need_rebuild = True
 
             if need_rebuild or (not claimed_ids and entries):
@@ -881,6 +881,10 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         "targetShopName": str(target_shop.get("name") or ""),
         "published": published,
         "claimed": claimed_ids,
+        "claimedWarehouseIds": [str(entry["product"].id) for entry, _ in
+                                _pair_entries(entries, [], claimed_ids,
+                                              saved_sources=filled_sources)
+                                if isinstance(entry.get("product"), Product)],
         "failures": failures,
         "warning": warning,
         "repriced": repriced,

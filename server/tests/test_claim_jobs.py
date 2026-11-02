@@ -27,20 +27,21 @@ def test_large_job_is_scoped_and_stops_on_unknown(monkeypatch):
         calls = []
 
         def publish(_db, payload, **_kwargs):
-            calls.append(payload["items"][0]["warehouseId"])
+            calls.append([item["warehouseId"] for item in payload["items"]])
+            assert payload["forceRebuild"] is True
             if len(calls) == 2:
                 raise RuntimeError("timeout")
-            return {"claimed": ["99"], "failures": []}
+            return {"claimedWarehouseIds": calls[-1], "failures": []}
 
         monkeypatch.setattr(claim_job_service.publish_service, "publish", publish)
         claim_job_service.run(batch.id)
         db.expire_all()
         batch = claim_job_service.get(db, batch.id, account.id)
         items = batch_service.items_of(db, batch.id)
-        assert calls == ["1", "2"]
+        assert [len(call) for call in calls] == [100, 100]
         assert batch.status == "failed"
-        assert [item.status for item in items[:3]] == ["ok", "failed", "pending"]
-        assert batch.current_index == 2
+        assert [item.status for item in items] == ["ok"] * 100 + ["failed"] * 100 + ["pending"] * 154
+        assert batch.current_index == 200
         assert batch_service.list_batches(db, account.id)["total"] == 0
     finally:
         db.close()
