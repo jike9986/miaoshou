@@ -228,10 +228,14 @@ function readBundledToken(): string {
   if (REMOTE_CLIENT_TOKEN) return REMOTE_CLIENT_TOKEN;
   try {
     // 打包后位于 resources/client-token.json；开发时在 app/build 下
-    const candidates = [
-      path.join(process.resourcesPath || "", "client-token.json"),
-      path.join(__dirname, "..", "build", "client-token.json"),
-    ];
+    // 开发态使用仓库里的 token 文件；打包态使用 extraResources。
+    // 避免开发机器的 Electron 安装目录里有旧文件时抢先读到旧令牌。
+    const candidates = app.isPackaged
+      ? [path.join(process.resourcesPath, "client-token.json")]
+      : [
+          path.join(app.getAppPath(), "build", "client-token.json"),
+          path.join(__dirname, "..", "build", "client-token.json"),
+        ];
     for (const file of candidates) {
       if (!file) continue;
       if (!fs.existsSync(file)) continue;

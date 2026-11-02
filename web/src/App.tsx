@@ -20,6 +20,7 @@ import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { AppToaster, toast } from "@/components/ui/toast";
 import { EmptyState } from "@/components/ui/empty-state";
 import { UnlockPage } from "@/features/auth/UnlockPage";
+import { LoginPage } from "@/features/auth/LoginPage";
 import { WarehousePage } from "@/features/warehouse/WarehousePage";
 import { AutomationPage } from "@/features/automation/AutomationPage";
 import { SchedulesPage } from "@/features/schedules/SchedulesPage";
@@ -85,8 +86,8 @@ function Shell() {
   }, [versionQuery.data, navigate]);
 
   useEffect(() => {
-    if (operatorIdentity?.mustChangePassword && location.pathname !== "/unlock") {
-      navigate("/unlock", { replace: true, state: { from: location.pathname } });
+    if (operatorIdentity?.mustChangePassword && location.pathname !== "/login") {
+      navigate("/login", { replace: true, state: { from: location.pathname } });
     }
   }, [operatorIdentity?.mustChangePassword, location.pathname, navigate]);
 
@@ -124,7 +125,7 @@ function RequireSoftwareLogin() {
   const identity = useOperatorIdentity();
   const location = useLocation();
   if (!SHOW_ACCOUNT_UI || identity) return <Outlet />;
-  return <Navigate to="/unlock" replace state={{ from: location.pathname }} />;
+  return <Navigate to="/login" replace state={{ from: location.pathname }} />;
 }
 
 /* ------------------------------------------------------------------ *
@@ -165,10 +166,11 @@ export default function App() {
           这一层管 Shell/Sidebar 之类的外壳。 */}
       <ErrorBoundary title="界面没能启动">
         <Routes>
+          <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<Shell />}>
             <Route index element={<Navigate to="/automation" replace />} />
-            <Route path="unlock" element={<UnlockPage />} />
             <Route element={<RequireSoftwareLogin />}>
+              <Route path="unlock" element={<UnlockPage />} />
               <Route path="automation" element={<AutomationPage />} />
               <Route path="warehouse" element={<WarehousePage />} />
               <Route path="schedules" element={<SchedulesPage />} />

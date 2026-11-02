@@ -1362,6 +1362,12 @@ export interface SoftwareLoginResponse {
   mustChangePassword: boolean;
 }
 
+export interface SoftwareRegisterRequest {
+  name: string;
+  email: string;
+  password: string;
+}
+
 export interface StudentCreateRequest {
   name: string;
   username: string;

@@ -110,6 +110,58 @@ def test_teacher_creates_student_and_student_changes_password(client, tokens):
                              "password": "new-pass-456"}).json()["mustChangePassword"] is False
 
 
+def test_email_registration_and_email_login_keep_username_compatibility(client):
+    suffix = uuid.uuid4().hex[:8]
+    email = f"Signup-{suffix}@Example.com"
+    registered = client.post(API + "/auth/register", json={
+        "name": f"Email Student {suffix}",
+        "email": f"  {email}  ",
+        "password": "signup-pass-456",
+    })
+    assert registered.status_code == 201, registered.text
+    body = registered.json()
+    assert body["operator"]["role"] == operator_service.ROLE_MEMBER
+    assert body["mustChangePassword"] is False
+    assert body["token"]
+
+    for credentials in (
+        {"identifier": email.upper(), "password": "signup-pass-456"},
+        {"email": email.lower(), "password": "signup-pass-456"},
+    ):
+        login = client.post(API + "/auth/login", json=credentials)
+        assert login.status_code == 200, login.text
+        assert login.json()["operator"]["id"] == body["operator"]["id"]
+
+    duplicate = client.post(API + "/auth/register", json={
+        "name": f"Duplicate {suffix}",
+        "email": email.lower(),
+        "password": "another-pass-456",
+    })
+    assert duplicate.status_code == 409, duplicate.text
+
+
+def test_login_accepts_email_in_legacy_username_field(client):
+    suffix = uuid.uuid4().hex[:8]
+    db = SessionLocal()
+    try:
+        row, _token = operator_service.create(
+            db, f"Email Login {suffix}", role=operator_service.ROLE_MEMBER,
+            email=f"legacy-{suffix}@example.com")
+        operator_service.set_password(
+            db, row, "legacy-email-pass-456", must_change=False)
+        db.commit()
+        operator_id = str(row.id)
+    finally:
+        db.close()
+
+    login = client.post(API + "/auth/login", json={
+        "username": f"LEGACY-{suffix}@EXAMPLE.COM",
+        "password": "legacy-email-pass-456",
+    })
+    assert login.status_code == 200, login.text
+    assert login.json()["operator"]["id"] == operator_id
+
+
 def test_reset_only_targets_students_and_revokes_old_token(client, tokens):
     suffix = uuid.uuid4().hex[:8]
     created = client.post(

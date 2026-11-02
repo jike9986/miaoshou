@@ -16,7 +16,7 @@ import logging
 import secrets
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -57,7 +57,8 @@ VALID_ROLES = {ROLE_ADMIN, ROLE_TEACHER, ROLE_MEMBER}
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     ROLE_ADMIN: {"*"},
     ROLE_TEACHER: {"*"},
-    ROLE_MEMBER: {"warehouse", "words", "product_claim", "publish_claimed", "account.bind", "schedule"},
+    ROLE_MEMBER: {"warehouse", "words", "product_claim", "publish_claimed",
+                  "account.bind", "schedule"},
 }
 
 
@@ -80,6 +81,14 @@ def normalize_email(value: Any, *, required: bool = True) -> str | None:
             or not domain or any(ch.isspace() for ch in text)):
         raise errors.validation("邮箱格式不正确", field="email")
     return text
+
+
+def normalize_login_identifier(value: Any) -> str:
+    """Normalize an existing username or an email address used for sign-in."""
+    text = str(value or "").strip()
+    if "@" in text:
+        return normalize_email(text) or ""
+    return normalize_username(text)
 
 
 def mask_email(value: str | None) -> str | None:
@@ -310,6 +319,27 @@ def _clean_name(name: Any) -> str:
     return text
 
 
+def _email_exists(db: Session, email: str, *, exclude_id: int | None = None) -> bool:
+    query = db.query(Operator.id).filter(func.lower(Operator.email) == email)
+    if exclude_id is not None:
+        query = query.filter(Operator.id != exclude_id)
+    return query.first() is not None
+
+
+def _unique_registration_name(db: Session, name: Any) -> str:
+    """Keep public sign-up from failing when multiple people share a display name."""
+    base = _clean_name(name)
+    if db.query(Operator.id).filter(Operator.name == base).first() is None:
+        return base
+    suffix = 2
+    while True:
+        marker = f" ({suffix})"
+        candidate = f"{base[:NAME_MAX_LENGTH - len(marker)].rstrip()}{marker}"
+        if db.query(Operator.id).filter(Operator.name == candidate).first() is None:
+            return candidate
+        suffix += 1
+
+
 def create(db: Session, name: Any, *, is_admin: bool = False,
            role: str | None = None, email: Any = None) -> tuple[Operator, str]:
     """新建操作员，返回 (操作员, 明文 token)。
@@ -324,30 +354,23 @@ def create(db: Session, name: Any, *, is_admin: bool = False,
         raise errors.duplicate_name(f"操作员「{text}」已存在", name=text)
     # 角色优先于 is_admin：传了角色就按角色来，没传就按 is_admin 推
     resolved_role = role if role in VALID_ROLES else (ROLE_ADMIN if is_admin else ROLE_MEMBER)
+    normalized_email = normalize_email(email, required=False)
+    if normalized_email is not None and _email_exists(db, normalized_email):
+        raise errors.validation("邮箱已绑定其他账号", field="email")
     token = secrets.token_urlsafe(32)
     row = Operator(name=text, token=hash_token(token), enabled=True,
-                   email=normalize_email(email, required=False),
+                   email=normalized_email,
                    is_admin=(resolved_role == ROLE_ADMIN),
                    role=resolved_role, created_at=now_ts())
     db.add(row)
-    if row.email is not None:
-        clash = (db.query(Operator)
-                 .filter(Operator.email == row.email, Operator.id != row.id)
-                 .one_or_none())
-        if clash is not None:
-            raise errors.validation("邮箱已绑定其他账号", field="email")
     db.flush()
     return row, token
 
 
 def _set_email(db: Session, row: Operator, value: Any) -> None:
     normalized = normalize_email(value, required=False)
-    if normalized is not None:
-        clash = (db.query(Operator)
-                 .filter(Operator.email == normalized, Operator.id != row.id)
-                 .one_or_none())
-        if clash is not None:
-            raise errors.validation("邮箱已绑定其他账号", field="email")
+    if normalized is not None and _email_exists(db, normalized, exclude_id=row.id):
+        raise errors.validation("邮箱已绑定其他账号", field="email")
     row.email = normalized
 
 
@@ -356,31 +379,50 @@ def create_student(db: Session, name: Any, username: Any, password: str,
     clean_username = normalize_username(username)
     if db.query(Operator).filter(Operator.username == clean_username).one_or_none():
         raise errors.validation("用户名已存在", field="username")
+    normalized_email = normalize_email(email, required=False)
+    if normalized_email is not None and _email_exists(db, normalized_email):
+        raise errors.validation("邮箱已绑定其他账号", field="email")
     row = Operator(
         name=_clean_name(name), username=clean_username,
-        email=normalize_email(email, required=False),
+        email=normalized_email,
         password_hash=hash_password(password),
         token=hash_token(secrets.token_urlsafe(32)),
         enabled=True, is_admin=False, role=ROLE_MEMBER,
         must_change_password=True, created_at=now_ts(),
     )
     db.add(row)
-    if row.email is not None:
-        clash = (db.query(Operator)
-                 .filter(Operator.email == row.email, Operator.id != row.id)
-                 .one_or_none())
-        if clash is not None:
-            raise errors.validation("邮箱已绑定其他账号", field="email")
     db.flush()
     return row
 
 
+def register_email_account(db: Session, name: Any, email: Any,
+                           password: str) -> tuple[Operator, str]:
+    """Create a self-registered student account and return its first bearer token."""
+    normalized_email = normalize_email(email)
+    if _email_exists(db, normalized_email):
+        raise errors.AppError("CONFLICT", "该邮箱已注册", status=409)
+    display_name = _unique_registration_name(db, name)
+    row, token = create(db, display_name, role=ROLE_MEMBER, email=normalized_email)
+    row.password_hash = hash_password(password)
+    row.must_change_password = False
+    db.flush()
+    return row, token
+
+
 def authenticate_password(db: Session, username: Any, password: str) -> tuple[Operator, str] | None:
     try:
-        clean_username = normalize_username(username)
+        identifier = normalize_login_identifier(username)
     except Exception:
         return None
-    row = db.query(Operator).filter(Operator.username == clean_username).one_or_none()
+    if "@" in identifier:
+        row = (db.query(Operator)
+               .filter(func.lower(Operator.email) == identifier)
+               .one_or_none())
+        if row is None:
+            # Preserve legacy accounts whose usernames happen to contain '@'.
+            row = db.query(Operator).filter(Operator.username == identifier).one_or_none()
+    else:
+        row = db.query(Operator).filter(Operator.username == identifier).one_or_none()
     if row is None or not row.enabled or not verify_password(password, row.password_hash):
         return None
     token = secrets.token_urlsafe(32)
@@ -433,7 +475,7 @@ def serialize(row: Operator) -> dict[str, Any]:
         "username": row.username,
         "email": mask_email(row.email),
         "hasEmail": bool(row.email),
-        "hasLoginCredentials": bool(row.username and row.password_hash),
+        "hasLoginCredentials": bool((row.username or row.email) and row.password_hash),
         "enabled": bool(row.enabled),
         "admin": bool(row.is_admin),
         "isAdmin": bool(row.is_admin),

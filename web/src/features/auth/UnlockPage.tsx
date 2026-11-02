@@ -10,9 +10,8 @@ import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
-import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword, useInitializeSoftwareCredentials, useSoftwareCredentialsStatus, useRequestPasswordReset, useConfirmPasswordReset } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useSoftwareRegister, useChangeSoftwarePassword, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset } from "@/lib/queries";
 import { setOperator, useOperatorIdentity } from "@/lib/operator";
-import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 import { useSessionStore } from "@/features/stores";
 import {
   Button,
@@ -190,8 +189,6 @@ export function UnlockPage() {
     }
   }, [connected, navigate, redirectTo, location.state]);
 
-  const identity = useOperatorIdentity();
-  const credentialsStatus = useSoftwareCredentialsStatus(SHOW_ACCOUNT_UI);
 
   const submit = (): void => {
     const next: FormErrors = {};
@@ -259,7 +256,6 @@ export function UnlockPage() {
       <>
         <PageHeader title="连接妙手" />
         <PageContent width="form">
-          {SHOW_ACCOUNT_UI && <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />}
           <div className="mt-4 space-y-3">
             <Skeleton className="h-6 w-40" />
             <Skeleton className="h-44 w-full" rounded="rounded-lg" />
@@ -283,25 +279,8 @@ export function UnlockPage() {
               minHeight={160}
             />
           </Card>
-          {/* 账号登录已关闭；保留引用以便日后打开 SHOW_ACCOUNT_UI 时直接可用 */}
-          {SHOW_ACCOUNT_UI && <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />}
         </div>
       </div>
-    );
-  }
-
-  if (SHOW_ACCOUNT_UI && !identity) {
-    return (
-      <>
-        <PageHeader title="登录" />
-        <PageContent width="form">
-          <SoftwareAccountPanel
-            redirectTo={redirectTo}
-            onBack={() => undefined}
-            allowInitialize={!credentialsStatus.data?.initialized}
-          />
-        </PageContent>
-      </>
     );
   }
 
@@ -457,10 +436,12 @@ export function UnlockPage() {
   );
 }
 
-function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
+export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false, allowRegister = false, showBack = true }: {
   redirectTo: string;
   onBack: () => void;
   allowInitialize?: boolean;
+  allowRegister?: boolean;
+  showBack?: boolean;
 }) {
   const usernameId = useId();
   const passwordId = useId();
@@ -469,17 +450,22 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
   const identity = useOperatorIdentity();
   const queryClient = useQueryClient();
   const login = useSoftwareLogin();
+  const register = useSoftwareRegister();
   const initialize = useInitializeSoftwareCredentials();
   const change = useChangeSoftwarePassword();
   const requestReset = useRequestPasswordReset();
   const confirmReset = useConfirmPasswordReset();
-  const [username, setUsername] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [registerName, setRegisterName] = useState("");
+  const [registerEmail, setRegisterEmail] = useState("");
+  const [registerPassword, setRegisterPassword] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [mustChange, setMustChange] = useState(identity?.mustChangePassword ?? false);
   const [error, setError] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
+  const [registering, setRegistering] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
   const [resetCode, setResetCode] = useState("");
@@ -491,7 +477,7 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
 
   const submitLogin = () => {
     setError(null);
-    login.mutate({ username: username.trim(), password }, {
+    login.mutate({ identifier: identifier.trim(), password }, {
       onSuccess: (result) => {
         setOperator({ token: result.token, id: result.operator.id, name: result.operator.name, role: result.operator.role, mustChangePassword: result.mustChangePassword });
         setMustChange(result.mustChangePassword);
@@ -501,6 +487,32 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
           void queryClient.invalidateQueries();
           navigate(redirectTo, { replace: true });
         }
+      },
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
+  const submitRegister = () => {
+    setError(null);
+    const email = registerEmail.trim();
+    if (!registerName.trim()) {
+      setError("请填写姓名");
+      return;
+    }
+    if (!email || !email.includes("@")) {
+      setError("请填写有效的邮箱地址");
+      return;
+    }
+    if (registerPassword.length < 8) {
+      setError("密码至少需要 8 个字符");
+      return;
+    }
+    register.mutate({ name: registerName.trim(), email, password: registerPassword }, {
+      onSuccess: (result) => {
+        setOperator({ token: result.token, id: result.operator.id, name: result.operator.name,
+          role: result.operator.role, mustChangePassword: result.mustChangePassword });
+        void queryClient.invalidateQueries();
+        navigate(redirectTo, { replace: true });
       },
       onError: (reason) => setError(apiErrorMessage(reason)),
     });
@@ -567,7 +579,7 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
 
   return (
     <Card className="w-full" padding="normal">
-      <CardTitle>{allowInitialize && initializing ? "首次设置老师账号" : mustChange ? "设置新密码" : "软件账号登录"}</CardTitle>
+      <CardTitle>{allowInitialize && initializing ? "首次设置老师账号" : mustChange ? "设置新密码" : registering ? "创建软件账号" : "软件账号登录"}</CardTitle>
       <div className="mt-4 flex flex-col gap-4">
         {resetting ? <>
           <p className="text-[13px] leading-5 text-fg-secondary">通过绑定邮箱接收一次性验证码，验证码 15 分钟内有效。</p>
@@ -588,11 +600,19 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
           <Field label="当前密码" required htmlFor={currentId}><Input id={currentId} type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.currentTarget.value)} /></Field>
           <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.currentTarget.value)} /></Field>
           <Button loading={change.isPending} onClick={submitPassword}>保存新密码</Button>
+        </> : registering ? <>
+          <p className="text-[13px] leading-5 text-fg-secondary">注册后即可绑定妙手账号并开始使用。</p>
+          <Field label="姓名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="name" value={registerName} onChange={(e) => setRegisterName(e.currentTarget.value)} /></Field>
+          <Field label="邮箱" required htmlFor={currentId}><Input id={currentId} type="email" autoComplete="email" value={registerEmail} onChange={(e) => setRegisterEmail(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
+          <Field label="设置密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="new-password" value={registerPassword} onChange={(e) => setRegisterPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
+          <Button loading={register.isPending} onClick={submitRegister}>注册并登录</Button>
+          <Button variant="ghost" onClick={() => { setRegistering(false); setError(null); }}>已有账号，返回登录</Button>
         </> : <>
-          <Field label="用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={username} onChange={(e) => setUsername(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
+          <Field label="邮箱或用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={identifier} onChange={(e) => setIdentifier(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
           <Field label="密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
-          <div className="flex flex-wrap gap-2"><Button loading={login.isPending} onClick={submitLogin}>登录</Button>{!allowInitialize && <Button variant="ghost" onClick={onBack}>返回妙手绑定</Button>}</div>
+          <div className="flex flex-wrap gap-2"><Button loading={login.isPending} onClick={submitLogin}>登录</Button>{showBack && !allowInitialize && <Button variant="ghost" onClick={onBack}>返回妙手绑定</Button>}</div>
           <Button variant="ghost" onClick={() => { setResetting(true); setError(null); }}>忘记密码</Button>
+          {allowRegister && <Button variant="ghost" onClick={() => { setRegistering(true); setError(null); }}>创建新账号</Button>}
           {allowInitialize && <Button variant="ghost" onClick={() => setInitializing(true)}>首次设置老师账号</Button>}
         </>}
         {error && <InlineError>{error}</InlineError>}

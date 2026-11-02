@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Header, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from api.deps import (
     AdminDep,
@@ -42,8 +42,32 @@ PASSWORD_RESET_TTL_SECONDS = 15 * 60
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(max_length=64)
+    # `username` is the original client field. `identifier` is the current UI
+    # contract; `email` is also accepted for conventional API clients.
+    username: str | None = Field(default=None, max_length=254)
+    identifier: str | None = Field(default=None, max_length=254)
+    email: str | None = Field(default=None, max_length=254)
     password: str = Field(max_length=128)
+
+    @model_validator(mode="after")
+    def validate_identifier(self) -> LoginRequest:
+        values = [value.strip() for value in (self.identifier, self.email, self.username)
+                  if value and value.strip()]
+        if not values:
+            raise ValueError("请输入用户名或邮箱")
+        if len({value.casefold() for value in values}) > 1:
+            raise ValueError("用户名、邮箱和登录标识不能填写不同的值")
+        return self
+
+    @property
+    def login_identifier(self) -> str:
+        return self.identifier or self.email or self.username or ""
+
+
+class RegisterRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class ChangePasswordRequest(BaseModel):
@@ -71,19 +95,20 @@ def login(payload: LoginRequest, request: Request, db: DbSession) -> dict[str, A
     from services import login_rate_limit_service
 
     try:
-        username = operator_service.normalize_username(payload.username)
+        username = operator_service.normalize_login_identifier(payload.login_identifier)
     except Exception:
-        username = payload.username.strip().casefold()
+        username = payload.login_identifier.strip().casefold()
     ip = request.client.host if request.client else "unknown"
     retry_after = login_rate_limit_service.blocked_retry_after(ip, username)
     if retry_after:
         raise AppError(RATE_LIMITED, "登录失败次数过多，请稍后重试", status=429,
                        details={"retryAfterSeconds": retry_after})
 
-    result = operator_service.authenticate_password(db, payload.username, payload.password)
+    result = operator_service.authenticate_password(
+        db, payload.login_identifier, payload.password)
     if result is None:
         login_rate_limit_service.record_failure(ip, username)
-        raise AppError("AUTH_FAILED", "用户名或密码错误", status=401)
+        raise AppError("AUTH_FAILED", "邮箱、用户名或密码错误", status=401)
     operator, token = result
     login_rate_limit_service.clear_username(username)
     db.commit()
@@ -91,6 +116,31 @@ def login(payload: LoginRequest, request: Request, db: DbSession) -> dict[str, A
                           "name": operator_service.serialize(operator)["name"],
                           "role": operator_service.role_of(operator)},
             "token": token, "mustChangePassword": operator.must_change_password}
+
+
+@login_router.post("/register", status_code=201)
+def register(payload: RegisterRequest, request: Request,
+             db: DbSession) -> dict[str, Any]:
+    """Public email registration creates a least-privileged student account."""
+    from core.errors import RATE_LIMITED, AppError
+    from services import login_rate_limit_service
+
+    email = operator_service.normalize_email(payload.email)
+    ip = request.client.host if request.client else "unknown"
+    bucket = f"registration:{email}"
+    retry_after = login_rate_limit_service.blocked_retry_after(ip, bucket)
+    if retry_after:
+        raise AppError(RATE_LIMITED, "注册请求过于频繁，请稍后重试", status=429,
+                       details={"retryAfterSeconds": retry_after})
+    # Limit repeated sign-ups from one source as well as attempts against one address.
+    login_rate_limit_service.record_failure(ip, bucket)
+    operator, token = operator_service.register_email_account(
+        db, payload.name, email, payload.password)
+    db.commit()
+    return {"operator": {"id": str(operator.id),
+                          "name": operator_service.serialize(operator)["name"],
+                          "role": operator_service.role_of(operator)},
+            "token": token, "mustChangePassword": False}
 
 
 @login_router.post("/password-reset/request", status_code=202)

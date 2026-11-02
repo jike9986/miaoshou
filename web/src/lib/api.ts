@@ -271,9 +271,14 @@ async function request<T, B = unknown>(
 ): Promise<T> {
   const { query, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal, idempotencyKey } = options;
 
-  const isSoftwareLogin = method === "POST" && path === "/auth/login";
+  const isPublicAuthMutation = method === "POST" && [
+    "/auth/login",
+    "/auth/register",
+    "/auth/password-reset/request",
+    "/auth/password-reset/confirm",
+  ].includes(path);
   const isPublicCredentialStatus = method === "GET" && path === "/auth/credentials-status";
-  const isPublicAuthRequest = isSoftwareLogin || isPublicCredentialStatus;
+  const isPublicAuthRequest = isPublicAuthMutation || isPublicCredentialStatus;
   const token = isPublicAuthRequest ? null : requestToken(path);
   if (!isPublicAuthRequest && !token) {
     throw new ApiError({

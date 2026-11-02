@@ -54,6 +54,7 @@ import type {
   OperatorsResponse,
   OperatorTokenResponse,
   SoftwareLoginResponse,
+  SoftwareRegisterRequest,
   StudentCreateRequest,
   StudentCreateResponse,
   ProcessCollectRequest,
@@ -129,10 +130,22 @@ export function useAuthStatus(enabled = true): UseQueryResult<AuthStatus> {
 export function useSoftwareLogin(): UseMutationResult<
   SoftwareLoginResponse,
   Error,
-  { username: string; password: string }
+  { identifier: string; password: string }
 > {
   return useMutation({
     mutationFn: (body) => api.post<SoftwareLoginResponse, typeof body>("/auth/login", body),
+  });
+}
+
+export function useSoftwareRegister(): UseMutationResult<
+  SoftwareLoginResponse,
+  Error,
+  SoftwareRegisterRequest
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body) => api.post<SoftwareLoginResponse, SoftwareRegisterRequest>("/auth/register", body),
+    onSuccess: () => void client.invalidateQueries({ queryKey: queryKeys.operators.all }),
   });
 }
 
