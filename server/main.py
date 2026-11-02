@@ -226,6 +226,9 @@ async def lifespan(_app: FastAPI):
     settings = get_settings()
     settings.ensure_dirs()
     init_db()
+    from services.claim_job_service import recover_interrupted_on_startup
+
+    recover_interrupted_on_startup()
     from db.session import SessionLocal
     from services.operator_service import migrate_legacy_tokens
 

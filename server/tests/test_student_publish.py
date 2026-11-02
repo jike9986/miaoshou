@@ -9,6 +9,7 @@ from db.session import SessionLocal, init_db
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.image_job import ImageJob
+from models.operator import Operator
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
@@ -83,6 +84,63 @@ def _publish_payload(product: Product, account: Account, **overrides):
         "items": [{"warehouseId": str(product.id)}],
         **overrides,
     }
+
+
+def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator = Operator(name=operator_service.CLIENT_OPERATOR_NAME, token=f"test-{suffix}",
+                        role=operator_service.ROLE_MEMBER, enabled=True, is_admin=False)
+    db.add(operator)
+    db.flush()
+    _, first_account = _identity(db, suffix + "a")
+    _, second_account = _identity(db, suffix + "b")
+    first = _product(db, suffix + "1", first_account, detail_id="10001")
+    second = _product(db, suffix + "2", first_account, detail_id="10002")
+    third = _product(db, suffix + "3", first_account, detail_id="10003")
+
+    class FakeClient:
+        def claim_to_shop(self, *_args):
+            from services.miaoshou import MiaoshouError
+            raise MiaoshouError("missing")
+
+        def common_box_list(self, **_kwargs):
+            return {"data": {"detailList": []}}
+
+    monkeypatch.setattr(publish_service, "account_client_for",
+                        lambda *_args: (first_account, FakeClient()))
+    monkeypatch.setattr(publish_service, "require_shop",
+                        lambda *_args: {"name": "shop", "site": "MY"})
+    monkeypatch.setattr(publish_service, "hold_for_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(publish_service, "_in_flight_blocker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(publish_service, "_load_carrier_payloads", lambda *_args: [{}, {}, {}])
+    monkeypatch.setattr(publish_service.carrier_service, "harvest_from_payloads",
+                        lambda *_args: None)
+    monkeypatch.setattr(publish_service.carrier_service, "collect_carriers",
+                        lambda *_args, **_kwargs: [91, 92, 93])
+    monkeypatch.setattr(publish_service.carrier_service, "fill_carriers",
+                        lambda *_args, **_kwargs: {
+                            "saved": [91, 93], "savedSources": [0, 2],
+                            "failures": ["92 failed"],
+                        })
+    publish_service.publish(db, {"confirm": True, "claimOnly": True, "shopId": "123",
+                                 "items": [{"warehouseId": str(p.id)}
+                                           for p in (first, second, third)]},
+                            operator_id=operator.id)
+    key = f"account:{first_account.id}"
+    assert first.collected[key]["detailId"] == "91"
+    assert key not in second.collected
+    assert third.collected[key]["detailId"] == "93"
+    for account, expected in ((first_account, {str(first.id), str(third.id)}),
+                              (second_account, set())):
+        result = warehouse_service.list_products(db, operator_id=operator.id,
+                                                  claim_account_id=account.id)
+        visible = {item["id"] for item in result["items"] if item["claimed"]}
+        assert visible == expected
+        filtered = warehouse_service.list_products(db, operator_id=operator.id,
+                                                    claim_account_id=account.id, claimed=True)
+        assert {item["id"] for item in filtered["items"]} == expected
+        assert result["stats"]["totalClaimed"] == len(expected)
 
 
 def test_member_must_explicitly_acknowledge_unverified_specifications(

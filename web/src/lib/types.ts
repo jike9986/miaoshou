@@ -523,6 +523,7 @@ export interface AutomationResultsImportResponse {
 export type ProductSort = "savedDesc" | "savedAsc" | "priceAsc" | "priceDesc" | "titleAsc";
 
 export interface WarehouseQuery {
+  claimAccountId?: string | null;
   page?: number;
   pageSize?: number;
   categoryId?: string | null;

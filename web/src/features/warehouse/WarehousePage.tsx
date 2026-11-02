@@ -39,7 +39,6 @@ import {
   useAutomationResults,
   useImportAutomationResults,
   useOperators,
-  usePublish,
   useWarehouseList,
 } from "@/lib/queries";
 import type { GroupFacet, Product } from "@/lib/types";
@@ -79,10 +78,10 @@ import { PublishDialog } from "@/features/publish/PublishDialog";
 import {
   partitionMemberSelection,
   selectedQualityReviews,
-  warehouseIdsForClaimedDetails,
   type QualityReviewSnapshot,
 } from "@/features/warehouse/warehouseSelection";
 import { BatchPanel } from "@/features/batch/BatchPanel";
+import { ClaimJobsPanel } from "@/features/warehouse/ClaimJobsPanel";
 
 const PAGE_SIZE_OPTIONS = [24, 48, 72, 100];
 
@@ -139,6 +138,7 @@ export function WarehousePage() {
     page: query.page,
     pageSize: query.pageSize,
     q: null,
+    claimAccountId: auth?.accountId ?? null,
     claimed: query.claimed,
     status: query.status,
     qualityStatus: isTeacher ? query.qualityStatus : null,
@@ -181,7 +181,7 @@ export function WarehousePage() {
   // 学员的认领/发布动作跨页时也需要知道所选商品当前的认领状态。
   const [selectedClaimed, setSelectedClaimed] = useState<Record<string, boolean>>({});
   const [selectedPublishedShopIds, setSelectedPublishedShopIds] = useState<Record<string, string[]>>({});
-  const [selectedDetailIds, setSelectedDetailIds] = useState<Record<string, string>>({});
+  const [, setSelectedDetailIds] = useState<Record<string, string>>({});
   const [selectedQualityReviewById, setSelectedQualityReviewById] =
     useState<Record<string, QualityReviewSnapshot>>({});
 
@@ -204,8 +204,10 @@ export function WarehousePage() {
       void queryClient.invalidateQueries({ queryKey: ["warehouse"] });
     },
   });
-  // 认领到采集箱走 POST /publish + claimOnly=true（老版同样行为：只认领不发布）
-  const claimOnly = usePublish();
+  const claimOnly = useMutation({
+    mutationFn: (body: { items: ReturnType<typeof toPublishItems>; shopId: string; accountId: string; claimOnly: boolean; confirm: boolean }) =>
+      api.post("/claim-jobs", body),
+  });
   const selectedIds = query.selected;
   const selectedCount = selectedIds.length;
   const pageIds = items.map((item) => item.id);
@@ -233,6 +235,10 @@ export function WarehousePage() {
     setSelectedDetailIds({});
     setSelectedQualityReviewById({});
   }, [clearSelected]);
+
+  useEffect(() => {
+    clearWarehouseSelection();
+  }, [auth?.accountId, clearWarehouseSelection]);
 
   const toggleWarehouseSelection = useCallback((id: string) => {
     const item = items.find((candidate) => candidate.id === id);
@@ -547,6 +553,7 @@ export function WarehousePage() {
             id={tabPanelId("warehouse", "batch")}
             aria-labelledby={tabId("warehouse", "batch")}
           >
+            <ClaimJobsPanel accountId={auth?.accountId ?? null} />
             <BatchPanel
               accountId={auth?.accountId ?? null}
               onGoToProducts={() => setTab("products")}
@@ -896,45 +903,25 @@ export function WarehousePage() {
                 navigate("/unlock", { state: { from: "/warehouse" } });
                 return;
               }
-              if (!currentShopId) {
+              if (!currentShopId || !auth?.accountId) {
                 toast.warning("请先选择要认领到的店铺");
                 return;
               }
               if (claimOnly.isPending) return;
-              // 跨店认领要「采集货源 → 复制 N 份载体 → 写入商品」，几十秒到几分钟都正常，
-              // 不给提示用户会以为没点上。先立刻给一条进行中的 toast。
-              toast.info(`正在认领 ${selectedIds.length} 件到采集箱…`, {
-                description: "跨店商品需要先采集货源并复制载体，请稍等（不会立即完成）",
-              });
-              // 老版行为：原地调接口把这批商品放进店铺采集箱，不跳页、不发布。
-              // 跨店商品由后端自动建载体（publish_service 的 claimOnly 分支）。
               claimOnly.mutate(
                 {
                   items: toPublishItems(selectedIds.map((id) => ({ warehouseId: id }))),
                   shopId: currentShopId,
+                  accountId: auth.accountId,
                   claimOnly: true,
                   confirm: true,
                 },
                 {
-                  onSuccess: (result) => {
-                    const claimedWarehouseIds = warehouseIdsForClaimedDetails(
-                      selectedIds,
-                      selectedDetailIds,
-                      result.claimed ?? [],
-                    );
-                    const done = claimedWarehouseIds.length;
-                    const unconfirmed = selectedIds.length - done;
-                    if (done > 0) deselectMany(claimedWarehouseIds);
-                    if (unconfirmed > 0) {
-                      toast.warning(
-                        `已认领 ${done} 件，${unconfirmed} 件未确认`,
-                        result.failures?.[0]?.reason
-                          ? { description: result.failures[0].reason }
-                          : undefined
-                      );
-                    } else {
-                      toast.success(`已认领 ${done} 件到采集箱（未发布）`);
-                    }
+                  onSuccess: () => {
+                    clearSelected();
+                    void queryClient.invalidateQueries({ queryKey: ["claim-jobs"] });
+                    toast.success("采集任务已创建，可在批次中查看进度");
+                    setTab("batch");
                   },
                   onError: (error) => toast.error(apiErrorMessage(error)),
                 }

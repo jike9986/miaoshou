@@ -113,6 +113,7 @@ def list_warehouse(
     group: str | None = None,
     q: str | None = None,
     accountId: str | None = None,
+    claimAccountId: str | None = None,
     status: str | None = None,
     claimed: str | None = None,
     qualityStatus: str | None = Query(default=None, pattern="^(verified|needs_review)$"),
@@ -123,7 +124,7 @@ def list_warehouse(
         db, page=page, page_size=pageSize, category_id=categoryId, cid=cid,
         group_id=groupId, group=group, q=q, account_id=accountId, status=status,
         quality_status=qualityStatus, claimed=claimed_flag, sort=sort,
-        operator_id=operator.id)
+        operator_id=operator.id, claim_account_id=claimAccountId)
 
 
 @router.get("/automation-results", summary="自动化处理成功记录",

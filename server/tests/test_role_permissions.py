@@ -741,6 +741,7 @@ DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/warehouse/{ident}/claim"),
     # Member publishing is allowed only after publish_service verifies every claim.
     ("POST", "/api/v1/publish"),
+    ("POST", "/api/v1/claim-jobs"),
     # 登录是唯一公开的写入路由，认证失败统一返回 401。
     ("POST", "/api/v1/auth/login"),
 }

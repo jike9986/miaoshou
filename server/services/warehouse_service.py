@@ -99,10 +99,16 @@ def serialize(product: Product, *, account_name: str = "",
               claim: ProductClaim | None = None,
               operator_id: int | None = None,
               member_view: bool = False,
+              account_claim: dict[str, Any] | None = None,
               publish_log: PublishLog | None = None,
               published_shop_ids: list[str] | None = None) -> dict[str, Any]:
     images = product.images if isinstance(product.images, list) else []
     quality_review_status, quality_review_reasons = _quality_review_summary(product)
+    is_claimed = (bool(account_claim) if account_claim is not None else
+                  (bool(claim) if operator_id is not None else bool(product.claimed)))
+    claimed_at = (account_claim.get("at") if account_claim is not None else
+                  (claim.claimed_at if claim else
+                   (product.claimed_at if operator_id is None else None)))
     body: dict[str, Any] = {
         "id": str(product.id),
         "key": product.warehouse_key,
@@ -140,11 +146,12 @@ def serialize(product: Product, *, account_name: str = "",
         # 乐观锁版本号。前端改完要把它原样带回来（PATCH 的 expectedRevision），
         # 服务端比对不上就 409 —— 这就是「两个人同时改同一件商品」的拦截点。
         "revision": int(product.revision or 0),
-        "claimed": bool(claim) if operator_id is not None else bool(product.claimed),
-        "claimedAt": claim.claimed_at if claim else (
-            product.claimed_at if operator_id is None else None),
-        "claimedShopId": product.claimed_shop_id if operator_id is None else None,
-        "claimStatus": claim.status if claim else None,
+        "claimed": is_claimed,
+        "claimedAt": claimed_at,
+        "claimedShopId": (account_claim.get("shopId") if account_claim is not None else
+                          (product.claimed_shop_id if operator_id is None else None)),
+        "claimStatus": ("claimed" if account_claim else None) if account_claim is not None else (
+            claim.status if claim else None),
         "legacyClaimed": bool(product.claimed),
         "collected": product.collected if isinstance(product.collected, dict) else {},
         "salesLast30": int(product.sales_last_30 or 0),
@@ -153,7 +160,7 @@ def serialize(product: Product, *, account_name: str = "",
             "published" if member_view and publish_log is not None
             and publish_log.status == "success" else
             ("archived" if member_view and product.status == "archived" else
-             ("claimed" if member_view and claim is not None else
+             ("claimed" if member_view and is_claimed else
               ("ready" if member_view else (product.status or "ready"))))
         ),
         "publishStatus": publish_log.status if member_view and publish_log else None,
@@ -449,7 +456,8 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                   account_id: Any = None, status: str | None = None,
                   quality_status: str | None = None,
                   claimed: bool | None = None, sort: str = "savedDesc",
-                  operator_id: int | None = None
+                  operator_id: int | None = None,
+                  claim_account_id: Any = None,
                   ) -> dict[str, Any]:
     if page < 1:
         raise errors.validation("页码必须不小于 1", field="page", value=page)
@@ -474,6 +482,24 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                                  reviewed_revision.is_(None),
                                  reviewed_revision != Product.revision))
     member_view = _is_member(db, operator_id)
+    account_claim_keys: list[str] | None = None
+    if claim_account_id not in (None, "") and operator_id is not None:
+        from services import operator_service
+        operator = operator_service.get(db, operator_id)
+        if operator.name == operator_service.CLIENT_OPERATOR_NAME:
+            text = str(claim_account_id)
+            if not text.isdigit():
+                raise errors.validation("claimAccountId 须为数字", field="claimAccountId")
+            account = db.query(Account).filter(Account.id == int(text)).one_or_none()
+            if account is None:
+                raise errors.not_found("妙手账号不存在", accountId=text)
+            account_claim_keys = [f"account:{account.id}"]
+            if (account.name and
+                    db.query(Account.id).filter(Account.name == account.name).count() == 1):
+                account_claim_keys.append(account.name)
+    account_claim_expr = (or_(*(Product.collected[key].as_string().is_not(None)
+                                for key in account_claim_keys))
+                          if account_claim_keys else None)
     if member_view and account_id not in (None, ""):
         text = str(account_id)
         if not text.isdigit():
@@ -509,6 +535,10 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                 PublishLog.status == "success",
             ).exists()
             query = query.filter(own_success)
+        elif account_claim_expr is not None and status == "claimed":
+            query = query.filter(account_claim_expr)
+        elif account_claim_expr is not None and status == "ready":
+            query = query.filter(~account_claim_expr, Product.status != "archived")
         elif member_view and status == "claimed":
             own_claim = db.query(ProductClaim.id).filter(
                 ProductClaim.product_id == Product.id,
@@ -537,7 +567,9 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         else:
             query = query.filter(Product.status == status)
     if claimed is not None:
-        if operator_id is None:
+        if account_claim_expr is not None:
+            query = query.filter(account_claim_expr if claimed else ~account_claim_expr)
+        elif operator_id is None:
             query = query.filter(Product.claimed.is_(bool(claimed)))
         else:
             owned_claim = db.query(ProductClaim.id).filter(
@@ -571,6 +603,10 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                        operator_name=operators.get(row.operator_id or 0, ""),
                        claim=claims.get(row.id), operator_id=operator_id,
                        member_view=member_view, publish_log=publish_logs.get(row.id),
+                       account_claim=(next((row.collected.get(key) for key in account_claim_keys
+                                            if isinstance(row.collected, dict)
+                                            and row.collected.get(key)), {})
+                                      if account_claim_keys is not None else None),
                        published_shop_ids=successful_publish_shops.get(row.id, []))
              for row in rows]
     # stats 按当前列表的 account_id 过滤：多账号共用时，
@@ -588,7 +624,8 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         "total": total,
         "hasMore": page * page_size < total,
         "facets": facets(db, operator_id=operator_id),
-        "stats": stats(db, account_id=stats_account_id, operator_id=operator_id),
+        "stats": stats(db, account_id=stats_account_id, operator_id=operator_id,
+                       account_claim_expr=account_claim_expr),
     }
 
 
@@ -822,7 +859,7 @@ def facets(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
 
 
 def stats(db: Session, *, account_id: int | None = None,
-          operator_id: int | None = None) -> dict[str, Any]:
+          operator_id: int | None = None, account_claim_expr: Any = None) -> dict[str, Any]:
     """仓库统计。传 account_id 时只数当前账号的商品——
     多账号共用一台机器时，「已认领 355 件」是全账号加总，用户分不清哪些是自己的。"""
     base = active_query(db).filter(Product.automation_result.is_(False))
@@ -839,6 +876,7 @@ def stats(db: Session, *, account_id: int | None = None,
     return {
         "totalProducts": total,
         "totalClaimed": (
+            base.filter(account_claim_expr).count() if account_claim_expr is not None else
             base.filter(Product.claimed.is_(True)).count() if operator_id is None else
             base.filter(db.query(ProductClaim.id).filter(
                 ProductClaim.product_id == Product.id,

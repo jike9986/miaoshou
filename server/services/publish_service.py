@@ -585,11 +585,14 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     from services import operator_service
 
     operator = operator_service.get(db, operator_id) if operator_id is not None else None
-    member_publish = (operator is not None and operator_service.role_of(operator) ==
-                      operator_service.ROLE_MEMBER)
-    if member_publish and account.owner_operator_id != operator.id:
-        raise errors.AppError(errors.FORBIDDEN,
-                              "无权使用其他学员的妙手账号发布", status=403)
+    member_publish = (operator is not None
+                      and operator_service.role_of(operator) == operator_service.ROLE_MEMBER
+                      # 内置「客户端」身份不是培训学员：它代表「装了这个软件的人」，
+                      # 不该受「只能发布已认领商品」等学员规则限制（否则发给别人的
+                      # 客户端连认领都做不了）。负责人 2026-11-02 明确。
+                      and operator.name != operator_service.CLIENT_OPERATOR_NAME)
+    # 妙手账号是团队共享资源（负责人 2026-11-02 明确：一个账号可以多人绑定），
+    # 因此不再按 owner_operator_id 拦「其他学员的账号」。
     # 台账返回里要显示「谁发的」，先取一次名字（一次查询，不逐行查）
     operator_name = ""
     if operator_id is not None:
@@ -716,15 +719,14 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                     parsed = carrier_service.claimed_detail_ids(claim_response or {})
                     if parsed:
                         claimed_ids.extend(str(value) for value in parsed)
-                    elif isinstance(claim_response, Mapping) and claim_response.get("data"):
-                        pass
                     else:
-                        claimed_ids.extend(str(value) for value in detail_ids)
-                    if not parsed and claimed_ids:
-                        unverified = ("妙手认领回执里没有逐条结果，已按请求数量计入；"
-                                      "若前端显示已认领但店铺里看不到，请刷新采集箱复核。")
-                        warning = f"{warning}；{unverified}" if warning else unverified
+                        raise errors.unprocessable(
+                            "认领请求已提交但未返回商品 ID，请先检查采集箱，勿重复操作")
                 except MiaoshouError as exc:
+                    message = str(exc).lower()
+                    if not any(text in message for text in ("未找到采集箱商品", "missing")):
+                        raise errors.unprocessable(
+                            "认领结果未确认，请先检查采集箱，勿重复操作") from exc
                     # 上游采集箱里已没有这件商品（最常见）→ 走本地重建。
                     logger.info("同店认领失败，改用本地 payload 重建载体：%s", exc)
                     need_rebuild = True
@@ -752,6 +754,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                         f"认领需要新建载体并写入商品，但失败了：{exc}") from None
                 rebuilt = [str(v) for v in (filled.get("saved") or [])]
                 claimed_ids = rebuilt
+                filled_sources = filled.get("savedSources") or []
                 for reason in (filled.get("failures") or []):
                     failures.append({"stage": "carrier", "reason": str(reason)[:200]})
                 if not rebuilt:
@@ -764,14 +767,15 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                                   str(item.get("reason") or "") for item in failures)[:180])
                     raise errors.unprocessable(reason)
 
-            claimed_set = set(claimed_ids)
-            for entry in entries:
-                if str(entry.get("detailId")) not in claimed_set:
-                    continue
+            for entry, claimed_detail_id in _pair_entries(
+                    entries, [], claimed_ids, saved_sources=filled_sources):
                 product = entry.get("product")
                 if product is not None and isinstance(product, Product):
                     state = dict(product.collected or {})
-                    state[account.name] = {"at": now_ts(), "detailId": entry["detailId"]}
+                    state[f"account:{account.id}"] = {
+                        "at": now_ts(), "detailId": claimed_detail_id,
+                        "shopId": str(target_shop_id),
+                    }
                     product.collected = state
                     product.claimed = True
                     product.claimed_at = now_ts()

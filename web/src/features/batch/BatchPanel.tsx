@@ -139,8 +139,10 @@ export function BatchPanel({ limit = 50, accountId = null, onGoToProducts, class
   /** RETRY_UNSAFE 的二次确认：结果未知的件必须人工核对后才允许重跑 */
   const [unsafeTarget, setUnsafeTarget] = useState<{ batch: Batch; message: string } | null>(null);
 
-  const items = useMemo(() => listQuery.data?.items ?? [], [listQuery.data?.items]);
-  const total = listQuery.data?.total ?? 0;
+  const items = useMemo(() => (listQuery.data?.items ?? []).filter(
+    (batch) => (batch.settings as Record<string, unknown> | undefined)?.kind !== "warehouse_claim"
+  ), [listQuery.data?.items]);
+  const total = items.length;
 
   /* ------------------------------------------------------------------ *
    * 自动推进

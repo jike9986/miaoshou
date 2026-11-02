@@ -231,6 +231,7 @@ export function useConnectAccount(): UseMutationResult<AuthConnectResult, Error,
  * ================================================================== */
 
 export interface WarehouseListParams extends PageParams {
+  claimAccountId?: string | null;
   categoryId?: string | null;
   cid?: string | null;
   groupId?: string | null;
@@ -251,6 +252,7 @@ export function warehouseQueryKey(params: WarehouseListParams): readonly unknown
     groupId: params.groupId ?? null,
     q: params.q ?? null,
     accountId: params.accountId ?? null,
+    claimAccountId: params.claimAccountId ?? null,
     status: params.status ?? null,
     qualityStatus: params.qualityStatus ?? null,
     claimed: params.claimed ?? null,
@@ -271,14 +273,18 @@ export function useWarehouseList(params: WarehouseListParams): UseQueryResult<Wa
           groupId: params.groupId,
           q: params.q,
           accountId: params.accountId,
+          claimAccountId: params.claimAccountId,
           status: params.status,
           qualityStatus: params.qualityStatus,
           claimed: params.claimed,
           sort: params.sort,
         }),
       }),
-    // 保持上一页数据，翻页时列表不闪成骨架
-    placeholderData: (previous) => previous,
+    // 切换账号时不能展示上一个账号的认领状态。
+    placeholderData: (previous, previousQuery) => {
+      const previousParams = previousQuery?.queryKey[1] as WarehouseListParams | undefined;
+      return previousParams?.claimAccountId === (params.claimAccountId ?? null) ? previous : undefined;
+    },
   });
 }
 

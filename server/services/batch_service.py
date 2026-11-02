@@ -177,9 +177,11 @@ def list_batches(db: Session, account_id: Any = None, limit: int = 50,
         query = query.filter(Batch.account_id == int(text))
     if operator_id is not None:
         query = query.filter(Batch.operator_id == operator_id)
-    total = query.count()
     count = max(1, min(int(limit or 50), 200))
-    rows = query.order_by(Batch.created_at.desc(), Batch.id.desc()).limit(count).all()
+    all_rows = query.order_by(Batch.created_at.desc(), Batch.id.desc()).all()
+    visible = [row for row in all_rows if (row.settings or {}).get("kind") != "warehouse_claim"]
+    total = len(visible)
+    rows = visible[:count]
     operators = operator_names(db)
     return {"items": [serialize(row, operator_name=operators.get(row.operator_id or 0, ""))
                       for row in rows],
