@@ -249,6 +249,85 @@ def test_last_global_manager_cannot_be_disabled(db):
         db.commit()
 
 
+@pytest.mark.parametrize("action", ["disable", "demote"])
+def test_concurrent_manager_removal_keeps_one_enabled_manager(db, action):
+    """Concurrent changes must not both pass the last-manager check."""
+    suffix = _suffix()
+    first, _ = operator_service.create(db, f"manager-a-{suffix}",
+                                       role=operator_service.ROLE_ADMIN)
+    second, _ = operator_service.create(db, f"manager-b-{suffix}",
+                                        role=operator_service.ROLE_ADMIN)
+    db.commit()
+
+    # Isolate the invariant from managers created by other tests, then restore
+    # their state after the race. Existing teachers do not count once an
+    # explicit admin exists, matching the service's legacy fallback behavior.
+    previous = [(row.id, row.role, row.is_admin, row.enabled)
+                for row in db.query(Operator).all()
+                if row.id not in {first.id, second.id}
+                and operator_service.role_of(row) == operator_service.ROLE_ADMIN]
+    for ident, _role, _is_admin, _enabled in previous:
+        row = db.query(Operator).filter(Operator.id == ident).one()
+        row.role = operator_service.ROLE_MEMBER
+        row.is_admin = False
+    db.commit()
+
+    barrier = threading.Barrier(2)
+
+    def remove_manager(operator_id):
+        session = SessionLocal()
+        try:
+            barrier.wait(timeout=5)
+            try:
+                if action == "disable":
+                    operator_service.disable(session, operator_id,
+                                             is_admin_operator=True)
+                else:
+                    operator_service.set_role(
+                        session, operator_id, operator_service.ROLE_MEMBER,
+                        is_admin_operator=True)
+                session.commit()
+                return "changed"
+            except errors.AppError as exc:
+                session.rollback()
+                if exc.details.get("reason") == "last_admin":
+                    return "blocked"
+                raise
+        finally:
+            session.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(remove_manager, (first.id, second.id)))
+        assert sorted(outcomes) == ["blocked", "changed"]
+
+        remaining = db.query(Operator).filter(
+            Operator.id.in_((first.id, second.id)),
+            Operator.enabled.is_(True),
+            Operator.is_admin.is_(True),
+        ).count()
+        if action == "demote":
+            remaining = db.query(Operator).filter(
+                Operator.id.in_((first.id, second.id)),
+                Operator.enabled.is_(True),
+                Operator.role == operator_service.ROLE_ADMIN,
+            ).count()
+        assert remaining == 1
+    finally:
+        for ident, role, is_admin, enabled in previous:
+            row = db.query(Operator).filter(Operator.id == ident).one_or_none()
+            if row is not None:
+                row.role = role
+                row.is_admin = is_admin
+                row.enabled = enabled
+        for ident in (first.id, second.id):
+            row = db.query(Operator).filter(Operator.id == ident).one()
+            row.role = operator_service.ROLE_MEMBER
+            row.is_admin = False
+            row.enabled = False
+        db.commit()
+
+
 def test_non_admin_cannot_disable(db):
     """非管理员停用别人 → 403 reason=not_admin。"""
     row, _token = operator_service.create(db, f"普通操作员-{_suffix()}")

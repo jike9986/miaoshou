@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 
 import pytest
 
@@ -114,3 +115,49 @@ def test_member_cannot_schedule_claim_only_jobs(shared_account_products):
             operator_id=first.id)
 
     assert getattr(caught.value, "status", None) == 403
+
+
+def test_member_cannot_create_or_update_claim_only_schedule(shared_account_products):
+    db, account, first, _second, _products, task = shared_account_products
+    payload = {
+        "name": "Claim schedule",
+        "accountId": str(account.id),
+        "shopId": "7",
+        "template": "template",
+        "frequency": "daily",
+        "time": "09:00",
+        "perRun": 1,
+        "claimOnly": True,
+    }
+
+    with pytest.raises(errors.AppError) as create_error:
+        schedule_service.create(db, payload, operator=first)
+    assert create_error.value.status == 403
+
+    with pytest.raises(errors.AppError) as update_error:
+        schedule_service.update(db, task.id, {"claimOnly": True}, operator=first)
+    assert update_error.value.status == 403
+    assert task.claim_only is False
+
+
+def test_disabled_member_schedule_is_skipped_by_background_runner(
+        shared_account_products, monkeypatch):
+    db, _account, first, _second, _products, task = shared_account_products
+    first.enabled = False
+    calls = []
+
+    monkeypatch.setattr(schedule_service, "due_tasks", lambda _db, _now: [task])
+    monkeypatch.setattr("services.setting_service.is_read_only", lambda _db: False)
+
+    def publish(*_args, **_kwargs):
+        calls.append(True)
+        return {"published": [], "failures": []}
+
+    monkeypatch.setattr("services.publish_service.publish", publish)
+
+    result = schedule_service.run_due(db, now=datetime(2026, 11, 3, 10, 0))
+
+    assert calls == []
+    assert len(result) == 1
+    assert result[0]["status"] == schedule_service.RUN_FAILED
+    assert "已停用" in result[0]["reason"]

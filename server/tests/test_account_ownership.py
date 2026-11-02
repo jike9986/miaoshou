@@ -386,7 +386,9 @@ def test_member_bootstrap_hides_other_members_accounts_and_batches(client, ident
             role=operator_service.ROLE_MEMBER)
         own_account = Account(
             name="bootstrap own", app_key="bootstrap-own", app_secret_enc="",
-            owner_operator_id=own_operator.id, shops="[]", is_default=False,
+            # The account belongs to the teacher and is explicitly shared with
+            # this member, so removing the binding must revoke batch visibility.
+            owner_operator_id=identities["teacher_id"], shops="[]", is_default=False,
         )
         foreign_account = Account(
             name="bootstrap foreign", app_key="bootstrap-foreign", app_secret_enc="",
@@ -441,6 +443,24 @@ def test_member_bootstrap_hides_other_members_accounts_and_batches(client, ident
         assert foreign_batch_id not in visible_batches
         assert body["templates"]["selected"].get(own_account_id) == "own template"
         assert foreign_account_id not in body["templates"]["selected"]
+
+        db = SessionLocal()
+        try:
+            db.query(AccountBinding).filter(
+                AccountBinding.account_id == int(own_account_id),
+                AccountBinding.operator_id == own_operator.id,
+            ).delete(synchronize_session=False)
+            db.commit()
+        finally:
+            db.close()
+
+        unbound_response = client.get(API + "/system/bootstrap",
+                                      headers=_headers(own_token))
+        assert unbound_response.status_code == 200, unbound_response.text
+        unbound_batches = {
+            row["id"] for row in unbound_response.json()["batches"]["items"]
+        }
+        assert own_batch_id not in unbound_batches
 
         teacher_response = client.get(
             API + "/system/bootstrap",

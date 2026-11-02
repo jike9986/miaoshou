@@ -324,6 +324,11 @@ def upsert_product(db: Session, account_id: int | None, fields: dict[str, Any], 
                    warehouse_key: str) -> Product:
     """按 (account_id, detailId, shopId) upsert；重复保存保留认领状态与分组。"""
     query = db.query(Product).filter(Product.warehouse_key == warehouse_key)
+    # warehouse_key is a legacy display key, not a global identity. Once two
+    # Miaoshou accounts expose the same detail/shop pair, matching globally
+    # would update another account's row (or raise MultipleResultsFound).
+    if account_id is not None:
+        query = query.filter(Product.account_id == account_id)
     product = query.one_or_none()
     if product is None:
         product = Product(warehouse_key=warehouse_key)

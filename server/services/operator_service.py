@@ -16,7 +16,7 @@ import logging
 import secrets
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -586,6 +586,27 @@ def _require_admin(is_admin_operator: bool, action: str) -> None:
             details={"reason": "not_admin"})
 
 
+def acquire_manager_mutation_lock(db: Session) -> None:
+    """Serialize role/status changes against the last-manager invariant."""
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"),
+                   {"key": 684_210_772})
+    elif dialect == "sqlite":
+        # Requests have usually queried their identity before reaching here.
+        # SQLite's legacy driver does not begin a transaction for SELECT, so
+        # this first write upgrades the logical SQLAlchemy transaction and
+        # obtains SQLite's single-writer lock before the following checks.
+        if db.in_transaction():
+            db.execute(text(
+                "UPDATE operators SET enabled = enabled "
+                "WHERE id = (SELECT MIN(id) FROM operators)"))
+        else:
+            db.execute(text("BEGIN IMMEDIATE"))
+    else:
+        raise RuntimeError(f"Unsupported database for manager mutation: {dialect}")
+
+
 def _check_last_admin(db: Session, row: Operator, *, action: str) -> None:
     """不能停用/降级最后一个启用中的全局管理账号。"""
     has_admin = (db.query(Operator.id)
@@ -614,6 +635,7 @@ def disable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[s
         否则没人能再停用/启用任何人，也没人能改共享设置。
     """
     _require_admin(is_admin_operator, "停用操作员")
+    acquire_manager_mutation_lock(db)
     row = get(db, operator_id)
     if row.enabled and role_of(row) in {ROLE_ADMIN, ROLE_TEACHER}:
         _check_last_admin(db, row, action="停用")
@@ -625,6 +647,7 @@ def disable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[s
 def enable(db: Session, operator_id: Any, *, is_admin_operator: bool) -> dict[str, Any]:
     """重新启用（停用的反操作，同一条路由的两个方向）。"""
     _require_admin(is_admin_operator, "启用操作员")
+    acquire_manager_mutation_lock(db)
     row = get(db, operator_id)
     row.enabled = True
     db.flush()
@@ -635,6 +658,7 @@ def set_role(db: Session, operator_id: Any, role: str, *,
              is_admin_operator: bool) -> dict[str, Any]:
     """改角色。老师与历史管理员均可管理，且不能移除最后一个全局管理账号。"""
     _require_admin(is_admin_operator, "改角色")
+    acquire_manager_mutation_lock(db)
     if role not in VALID_ROLES:
         raise errors.validation(f"角色无效：{role}，可选 admin/teacher/member",
                                 field="role", value=role)

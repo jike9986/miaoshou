@@ -226,7 +226,7 @@ def system_bootstrap(db: DbSession, operator: OperatorDep,
         ("stats", lambda: warehouse_service.stats(db, operator_id=operator.id)),
         ("batches", lambda: batch_service.list_batches(
             db, limit=5, operator_id=operator.id if operator_service.role_of(operator)
-            == operator_service.ROLE_MEMBER else None)),
+            == operator_service.ROLE_MEMBER else None, operator=operator)),
     ):
         try:
             view[key] = loader()

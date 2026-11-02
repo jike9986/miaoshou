@@ -371,9 +371,17 @@ def _owned_account_ids(db: Session, operator_id: int):
 
 
 def _source_owned_product_ids(db: Session, operator_id: int):
+    # A run's original owner is not sufficient authorization after its Miaoshou
+    # account binding has been revoked. Keep only results from accounts this
+    # member can access now.
+    from services import account_service
+
+    account_ids = [account_id for (account_id,) in db.query(Account.id).all()
+                   if account_service.has_account_access(db, account_id, operator_id)]
     return (db.query(AutomationRunItem.product_id)
             .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
             .filter(AutomationRun.owner_operator_id == operator_id,
+                    AutomationRun.account_id.in_(account_ids),
                     AutomationRunItem.product_id.is_not(None)))
 
 
@@ -381,6 +389,13 @@ def _assert_member_product_access(db: Session, product: Product,
                                   operator_id: int | None) -> None:
     if not _is_member(db, operator_id) or not product.automation_result:
         return
+    from services import account_service
+
+    if (product.account_id is None
+            or not account_service.has_account_access(
+                db, product.account_id, int(operator_id))):
+        raise errors.AppError(errors.FORBIDDEN,
+                              "无权访问其他学员的自动化处理结果", status=403)
     source_run = (db.query(AutomationRunItem.id)
                   .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
                   .filter(AutomationRunItem.product_id == product.id,
@@ -443,8 +458,14 @@ def active_query(db: Session):
     return db.query(Product).filter(Product.deleted_at.is_(None))
 
 
-def resolve_product(db: Session, ident: Any) -> Product:
-    """按数字 id 或 `{detailId}:{shopId}` 取商品；软删除视为不存在。"""
+def resolve_product(db: Session, ident: Any, *, account_id: int | None = None) -> Product:
+    """按数字 id 或 `{detailId}:{shopId}` 取商品；软删除视为不存在。
+
+    Numeric warehouse ids are globally unique. A legacy ``detailId:shopId``
+    key can now occur in multiple Miaoshou accounts, so callers with account
+    context should pass ``account_id``. Older key-only callers receive a clear
+    409 instead of an ORM ``MultipleResultsFound`` 500.
+    """
     text = str(ident or "").strip()
     if not text:
         raise errors.validation("商品标识不能为空", field="id")
@@ -452,7 +473,19 @@ def resolve_product(db: Session, ident: Any) -> Product:
     if text.isdigit():
         product = query.filter(Product.id == int(text)).one_or_none()
     else:
-        product = query.filter(Product.warehouse_key == text).one_or_none()
+        key_query = query.filter(Product.warehouse_key == text)
+        if account_id is not None:
+            product = key_query.filter(Product.account_id == account_id).one_or_none()
+        else:
+            matches = key_query.limit(2).all()
+            if len(matches) > 1:
+                raise errors.AppError(
+                    errors.AMBIGUOUS_PRODUCT,
+                    "商品键在多个妙手账号下重复，请使用仓库商品 ID",
+                    status=409,
+                    details={"warehouseKey": text, "hint": "useWarehouseId"},
+                )
+            product = matches[0] if matches else None
     if product is None:
         raise errors.not_found(f"仓库里没有商品 {text}", id=text)
     return product
@@ -2060,7 +2093,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 老版靠 run_records 比对上次保存结果来拦（「已处理商品与上次保存结果
     # 不一致，请在妙手核对，避免重复增加重量」），这里用现成的仓库行做同等检查。
     existing = (db.query(Product)
-                .filter(Product.warehouse_key == product_key(detail_id, shop_id))
+                .filter(Product.account_id == account.id,
+                        Product.warehouse_key == product_key(detail_id, shop_id))
                 .one_or_none())
     already_processed = bool(existing is not None and existing.saved_at)
 
@@ -2303,7 +2337,10 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         product_service.category_label(payload),
         site=str(info.get("site") or account.site or ""),
     )
-    existing = (db.query(Product).filter(Product.warehouse_key == key).one_or_none())
+    existing = (db.query(Product)
+                .filter(Product.account_id == account.id,
+                        Product.warehouse_key == key)
+                .one_or_none())
 
     fields.setdefault("payload", {})
     if isinstance(fields["payload"], dict):

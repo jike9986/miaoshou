@@ -205,6 +205,8 @@ def test_sqlite_init_keeps_create_patch_and_seed_path(monkeypatch) -> None:
                         lambda: calls.append("email_index"))
     monkeypatch.setattr(session_module, "_ensure_sqlite_schedule_ownership_indexes",
                         lambda: calls.append("schedule_indexes"))
+    monkeypatch.setattr(session_module, "_ensure_sqlite_product_key_scope",
+                        lambda: calls.append("product_key_scope"))
     monkeypatch.setattr(session_module, "_ensure_sqlite_publish_log_ownership",
                         lambda: calls.append("publish_log_ownership"))
     monkeypatch.setattr(session_module, "_backfill_sqlite_account_bindings",
@@ -216,6 +218,7 @@ def test_sqlite_init_keeps_create_patch_and_seed_path(monkeypatch) -> None:
     session_module.init_db()
 
     assert calls == ["create", "patch", "username_index", "email_index", "schedule_indexes",
+                     "product_key_scope",
                      "publish_log_ownership",
                      "backfill", "index", "seed"]
 

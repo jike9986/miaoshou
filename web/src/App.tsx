@@ -4,7 +4,7 @@
 // 未连接妙手时自动跳 /unlock（features/auth/guard），用户选择「稍后连接」后不再强跳。
 
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import {
   CalendarClock,
   KeyRound,
@@ -27,11 +27,13 @@ import { SchedulesPage } from "@/features/schedules/SchedulesPage";
 import { WordsPage } from "@/features/words/WordsPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { useAuthStatus, useVersion } from "@/lib/queries";
+import { useOperatorSession } from "@/features/auth/guard";
 import { hasRuntimeToken } from "@/lib/bootstrap";
 import { clearOperator, operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
 import { clearOperatorQueryClients } from "@/lib/operatorQueryClientRegistry.mjs";
 import { resetOperatorSessionUiState } from "@/features/stores";
 import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
+import { Button } from "@/components/ui/button";
 
 /* ------------------------------------------------------------------ *
  * 左侧导航（与路由一一对应）
@@ -138,6 +140,38 @@ function RequireSoftwareLogin() {
   return <Navigate to="/login" replace state={{ from: location.pathname }} />;
 }
 
+/** Validate the persisted token before rendering routes that can issue business requests. */
+function OperatorSessionGate({ children }: { children: ReactNode }) {
+  const identity = useOperatorIdentity();
+  const session = useOperatorSession(identity?.token ?? null);
+  const navigate = useNavigate();
+
+  if (!identity) return <>{children}</>;
+  if (session.isPending) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-canvas px-6 text-fg">
+        <p role="status" className="text-[14px] text-fg-secondary">正在验证登录状态…</p>
+      </main>
+    );
+  }
+  if (session.isError) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-canvas px-6 text-fg">
+        <section className="flex max-w-sm flex-col items-center gap-3 text-center" role="alert">
+          <p className="text-[15px] font-semibold">暂时无法验证登录状态</p>
+          <p className="text-[13px] leading-5 text-fg-secondary">请检查网络连接后重试。</p>
+          <Button loading={session.isFetching} onClick={() => void session.refetch()}>重新验证</Button>
+          <Button variant="ghost" onClick={() => {
+            clearOperator();
+            navigate("/login", { replace: true });
+          }}>退出当前账号并返回登录</Button>
+        </section>
+      </main>
+    );
+  }
+  return <>{children}</>;
+}
+
 /* ------------------------------------------------------------------ *
  * 404 / 令牌缺失
  * ------------------------------------------------------------------ */
@@ -175,27 +209,29 @@ export default function App() {
       {/* 顶层兜底：连路由骨架本身抛错也不许白屏。页面级兜底在 AppShell 里，
           这一层管 Shell/Sidebar 之类的外壳。 */}
       <ErrorBoundary title="界面没能启动">
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/" element={<Shell />}>
-            <Route index element={<Navigate to="/automation" replace />} />
-            <Route element={<RequireSoftwareLogin />}>
-              <Route path="unlock" element={<UnlockPage />} />
-              <Route path="automation" element={<AutomationPage />} />
-              <Route path="warehouse" element={<WarehousePage />} />
-              <Route path="schedules" element={<SchedulesPage />} />
-              <Route path="words" element={<WordsPage />} />
-              <Route path="words/*" element={<WordsPage />} />
-              <Route path="settings" element={<SettingsPage />} />
-              <Route path="collect" element={<Navigate to="/automation" replace />} />
-              <Route path="collect-box" element={<Navigate to="/automation" replace />} />
-              <Route path="images" element={<Navigate to="/automation" replace />} />
-              <Route path="carrier" element={<Navigate to="/warehouse" replace />} />
-              <Route path="publish" element={<Navigate to="/schedules" replace />} />
+        <OperatorSessionGate>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/" element={<Shell />}>
+              <Route index element={<Navigate to="/automation" replace />} />
+              <Route element={<RequireSoftwareLogin />}>
+                <Route path="unlock" element={<UnlockPage />} />
+                <Route path="automation" element={<AutomationPage />} />
+                <Route path="warehouse" element={<WarehousePage />} />
+                <Route path="schedules" element={<SchedulesPage />} />
+                <Route path="words" element={<WordsPage />} />
+                <Route path="words/*" element={<WordsPage />} />
+                <Route path="settings" element={<SettingsPage />} />
+                <Route path="collect" element={<Navigate to="/automation" replace />} />
+                <Route path="collect-box" element={<Navigate to="/automation" replace />} />
+                <Route path="images" element={<Navigate to="/automation" replace />} />
+                <Route path="carrier" element={<Navigate to="/warehouse" replace />} />
+                <Route path="publish" element={<Navigate to="/schedules" replace />} />
+              </Route>
+              <Route path="*" element={<NotFoundPage />} />
             </Route>
-            <Route path="*" element={<NotFoundPage />} />
-          </Route>
-        </Routes>
+          </Routes>
+        </OperatorSessionGate>
       </ErrorBoundary>
       <AppToaster position="bottom-right" />
     </>

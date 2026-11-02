@@ -260,6 +260,127 @@ def _ensure_sqlite_publish_log_ownership() -> None:
             index.create(connection, checkfirst=True)
 
 
+def _ensure_sqlite_product_key_scope() -> None:
+    """Remove the legacy global ``products.warehouse_key`` uniqueness.
+
+    Older desktop databases were created from a model where ``warehouse_key``
+    was globally unique.  The key is only stable inside one Miaoshou account,
+    so keeping that constraint prevents two accounts from storing the same
+    detail/shop pair.  SQLite cannot drop an inline UNIQUE constraint; rebuild
+    the table from the current model while preserving every modeled column,
+    index and foreign key.  Unknown columns abort before any DDL is issued.
+    """
+    from sqlalchemy import inspect, text
+    from sqlalchemy.schema import CreateTable
+
+    inspector = inspect(engine)
+    if "products" not in inspector.get_table_names():
+        return
+
+    from models.product import Product
+
+    model_table = Product.__table__
+    existing_columns = {column["name"] for column in inspector.get_columns("products")}
+    model_columns = {column.name for column in model_table.columns}
+    unknown_columns = existing_columns - model_columns
+    if unknown_columns:
+        raise RuntimeError(
+            "无法升级 products：存在当前版本不认识的列，未修改数据："
+            + ", ".join(sorted(unknown_columns))
+        )
+
+    global_key_constraint = any(
+        set(constraint.get("column_names") or []) == {"warehouse_key"}
+        for constraint in inspector.get_unique_constraints("products")
+    )
+    global_key_index = any(
+        index.get("unique")
+        and set(index.get("column_names") or []) == {"warehouse_key"}
+        for index in inspector.get_indexes("products")
+    )
+    if not global_key_constraint and not global_key_index:
+        return
+
+    with engine.connect() as connection:
+        # SQL-backed indexes are not represented by table constraints. Preserve
+        # all of them except a standalone global unique index on warehouse_key;
+        # SQLite's anonymous autoindexes are recreated from the model table.
+        unique_index_names = {
+            str(row[1])
+            for row in connection.exec_driver_sql(
+                'PRAGMA index_list("products")').all()
+            if bool(row[2])
+        }
+        preserved_indexes: list[str] = []
+        preserved_index_names: set[str] = set()
+        for name, ddl in connection.execute(text(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='products' AND sql IS NOT NULL"
+        )).all():
+            index_name = str(name)
+            if index_name in unique_index_names:
+                escaped = index_name.replace('"', '""')
+                columns = [row[2] for row in connection.exec_driver_sql(
+                    f'PRAGMA index_info("{escaped}")').all()]
+                if columns == ["warehouse_key"]:
+                    continue
+            if ddl:
+                preserved_indexes.append(str(ddl))
+                preserved_index_names.add(index_name)
+
+        preserved_triggers = [
+            str(row[0]) for row in connection.execute(text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='trigger' AND tbl_name='products' AND sql IS NOT NULL"
+            )).all() if row[0]
+        ]
+        foreign_keys_before = connection.exec_driver_sql(
+            'PRAGMA foreign_key_check').all()
+
+    # Foreign-key tables reference products.id.  SQLite cannot drop a
+    # referenced table while enforcement is on; toggle it outside the DDL
+    # transaction, then restore it in a finally block.  The table rebuild and
+    # rename themselves remain atomic and roll back together on any failure.
+    temporary = model_table.to_metadata(
+        Base.metadata, name="products_key_scope_upgrade")
+    column_names = [column.name for column in model_table.columns
+                    if column.name in existing_columns]
+    quoted = ", ".join(f'"{name}"' for name in column_names)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
+            try:
+                with connection.begin():
+                    connection.execute(CreateTable(temporary))
+                    connection.execute(text(
+                        f'INSERT INTO "products_key_scope_upgrade" ({quoted}) '
+                        f'SELECT {quoted} FROM "products"'
+                    ))
+                    connection.execute(text('DROP TABLE "products"'))
+                    connection.execute(text(
+                        'ALTER TABLE "products_key_scope_upgrade" RENAME TO "products"'
+                    ))
+                    for ddl in preserved_indexes:
+                        connection.exec_driver_sql(ddl)
+                    for ddl in preserved_triggers:
+                        connection.exec_driver_sql(ddl)
+                    for index in model_table.indexes:
+                        if index.name not in preserved_index_names:
+                            index.create(connection, checkfirst=True)
+                    foreign_keys_after = connection.exec_driver_sql(
+                        'PRAGMA foreign_key_check').all()
+                    if foreign_keys_after != foreign_keys_before:
+                        raise RuntimeError(
+                            "无法升级 products：重建会改变现有外键关系，已回滚"
+                        )
+            finally:
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                connection.commit()
+    finally:
+        Base.metadata.remove(temporary)
+
+
 def _assert_sqlite_operator_emails_unique() -> None:
     """Fail before index creation if legacy mailboxes collide case-insensitively."""
     from sqlalchemy import inspect, text
@@ -442,6 +563,7 @@ def init_db() -> None:
     _ensure_sqlite_operator_username_index()
     _ensure_sqlite_operator_email_index()
     _ensure_sqlite_schedule_ownership_indexes()
+    _ensure_sqlite_product_key_scope()
     _ensure_sqlite_publish_log_ownership()
     _backfill_sqlite_account_bindings()
     _ensure_sqlite_account_app_key_index()

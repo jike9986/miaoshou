@@ -150,8 +150,13 @@ def get(db: Session, run_id: str, operator: Operator) -> AutomationRun:
     run = db.query(AutomationRun).filter(AutomationRun.id == str(run_id)).one_or_none()
     if run is None:
         raise errors.not_found(f"自动化运行 {run_id} 不存在", runId=str(run_id))
-    if not _teacher_or_admin(operator) and run.owner_operator_id != operator.id:
-        raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的自动化运行", status=403)
+    if not _teacher_or_admin(operator):
+        if run.owner_operator_id != operator.id:
+            raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的自动化运行", status=403)
+        if not account_service.has_account_access(db, run.account_id, operator.id):
+            # Treat a revoked run like a missing one so the old owner cannot
+            # use its identifier to confirm that another user's history exists.
+            raise errors.not_found(f"自动化运行 {run_id} 不存在", runId=str(run_id))
     return run
 
 

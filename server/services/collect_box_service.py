@@ -85,14 +85,28 @@ def invalidate_account(account: Account) -> int:
 CLAIM_RECENT_SECONDS = 300.0
 
 
-def _recent_claim_blocker(db: Session, key: str) -> None:
+def _account_claim_key(account: Account) -> str:
+    """Return the stable key used for this account's local claim ledger.
+
+    Account names are editable display labels and were used by an older build
+    as the JSON key.  Using the numeric account id keeps the ledger stable when
+    a name changes and, more importantly, prevents two accounts with the same
+    label from sharing claim state.  Readers still accept the legacy name key
+    while old rows are being migrated naturally.
+    """
+    return f"account:{int(account.id)}"
+
+
+def _recent_claim_blocker(db: Session, account: Account, key: str) -> None:
     """同一件商品刚被认领过就拒绝（锁管不到跨进程/重启，这里补上）。
 
     只看本地库：上游没有「查这件在不在采集箱」的廉价接口，真去查一次
     等于把认领的耗时翻倍，而本地 claimed_at 已经足够回答「刚刚有人点过」。
     """
     product = (db.query(Product)
-               .filter(Product.warehouse_key == key, Product.deleted_at.is_(None))
+               .filter(Product.account_id == account.id,
+                       Product.warehouse_key == key,
+                       Product.deleted_at.is_(None))
                .one_or_none())
     if product is None or not product.claimed:
         return
@@ -279,7 +293,7 @@ def list_items(db: Session, account: Account, *, page: int = 1, page_size: int =
     scanned = int(snapshot.get("scanned") or 0)
 
     # 仓库标注查的是本地库，必须每次按当前库状态重算，不能跟着缓存走
-    _annotate_warehouse(db, items)
+    _annotate_warehouse(db, account, items)
     if sort == "savedDesc":
         items.sort(key=lambda row: row.get("inWarehouse", False), reverse=True)
     return {
@@ -305,13 +319,16 @@ def _matches_keyword(row: Mapping[str, Any], keyword: str) -> bool:
     return needle in haystack.casefold()
 
 
-def _annotate_warehouse(db: Session, items: list[dict[str, Any]]) -> None:
+def _annotate_warehouse(db: Session, account: Account,
+                        items: list[dict[str, Any]]) -> None:
     """标记是否已在仓库、已采集进哪些账号（列表页要显示这两列）。"""
     if not items:
         return
     keys = [row["key"] for row in items]
     rows = (db.query(Product)
-            .filter(Product.warehouse_key.in_(keys), Product.deleted_at.is_(None)).all())
+            .filter(Product.account_id == account.id,
+                    Product.warehouse_key.in_(keys),
+                    Product.deleted_at.is_(None)).all())
     by_key = {row.warehouse_key: row for row in rows}
     for item in items:
         product = by_key.get(item["key"])
@@ -351,7 +368,9 @@ def detail(db: Session, account: Account, *, detail_id: str, shop_id: str,
                                              mode=mode, category_path=category_path)
     key = product_key(detail_id, shop_id)
     product = (db.query(Product)
-               .filter(Product.warehouse_key == key, Product.deleted_at.is_(None))
+               .filter(Product.account_id == account.id,
+                       Product.warehouse_key == key,
+                       Product.deleted_at.is_(None))
                .one_or_none())
     summary["inWarehouse"] = product is not None
     summary["warehouseId"] = str(product.id) if product else None
@@ -389,7 +408,7 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
         busy_details={"detailId": str(detail_id), "shopId": str(shop_id)},
     ):
         # 锁内再查一次本地认领状态：跨进程/重启时锁是空的，这个窗口是唯一的兜底
-        _recent_claim_blocker(db, lock_key)
+        _recent_claim_blocker(db, account, lock_key)
 
         target_shop = require_shop(db, account, target_shop_id)
         source_shop = require_shop(db, account, shop_id)
@@ -421,7 +440,8 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
                 # 新店铺里的商品变成没加重量、没尺寸的原始态。
                 # 老版认领走的是仓库里的 payload，这里对齐。
                 stored = (db.query(Product)
-                          .filter(Product.warehouse_key == product_key(detail_id, shop_id),
+                          .filter(Product.account_id == account.id,
+                                  Product.warehouse_key == product_key(detail_id, shop_id),
                                   Product.deleted_at.is_(None))
                           .one_or_none())
                 if stored is not None and isinstance(stored.payload, dict) and stored.payload:
@@ -444,12 +464,16 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
         if mark_collected:
             key = product_key(detail_id, shop_id)
             product = (db.query(Product)
-                       .filter(Product.warehouse_key == key, Product.deleted_at.is_(None))
+                       .filter(Product.account_id == account.id,
+                               Product.warehouse_key == key,
+                               Product.deleted_at.is_(None))
                        .one_or_none())
             if product is not None:
                 state = dict(product.collected or {}) if isinstance(product.collected, dict) else {}
-                state[account.name] = {"at": now_ts(),
-                                       "detailId": detail_ids[0] if detail_ids else str(detail_id)}
+                state[_account_claim_key(account)] = {
+                    "at": now_ts(),
+                    "detailId": detail_ids[0] if detail_ids else str(detail_id),
+                }
                 product.collected = state
                 product.claimed = True
                 product.claimed_at = now_ts()
@@ -488,14 +512,22 @@ def release(db: Session, account: Account, *, detail_id: str, shop_id: str,
     """
     key = product_key(detail_id, shop_id)
     product = (db.query(Product)
-               .filter(Product.warehouse_key == key, Product.deleted_at.is_(None))
+               .filter(Product.account_id == account.id,
+                       Product.warehouse_key == key,
+                       Product.deleted_at.is_(None))
                .one_or_none())
     if product is None:
         raise errors.not_found(f"仓库里没有这件商品：{key}", key=key)
     state = dict(product.collected or {}) if isinstance(product.collected, dict) else {}
     # 只退本账号那一条：跨店认领时 collected 是按账号名分键的，
     # 整份清空会把别的账号的认领记录也抹掉。
-    removed = state.pop(account.name, None)
+    # New writes use the immutable account id.  Also remove the old display
+    # name key so accounts created by older builds can still be released after
+    # upgrading (and so a renamed account does not leave a stale claim behind).
+    removed = state.pop(_account_claim_key(account), None)
+    legacy_removed = state.pop(account.name, None) if account.name else None
+    if removed is None:
+        removed = legacy_removed
     product.collected = state
     # 还有别的账号认领记录就保持已认领，否则才真的退回未认领
     still_claimed = bool(state)

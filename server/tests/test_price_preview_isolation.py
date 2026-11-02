@@ -9,6 +9,7 @@ import api.warehouse as warehouse_api
 from db.session import SessionLocal, init_db
 from main import app
 from models.account import Account
+from models.account_binding import AccountBinding
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.group import Group
 from models.product import Product
@@ -44,6 +45,10 @@ def test_member_price_preview_cannot_read_another_members_automation_result(
                           shops="[]", is_default=False)
         db.add(account)
         db.flush()
+        db.add_all([
+            AccountBinding(account_id=account.id, operator_id=first.id),
+            AccountBinding(account_id=account.id, operator_id=second.id),
+        ])
 
         products: dict[str, Product] = {}
         for label, owner in (("own", first), ("foreign", second)):
@@ -121,6 +126,10 @@ def test_gate_endpoints_cannot_read_another_members_automation_result(
                           shops="[]", is_default=False)
         db.add(account)
         db.flush()
+        db.add_all([
+            AccountBinding(account_id=account.id, operator_id=owner.id),
+            AccountBinding(account_id=account.id, operator_id=other.id),
+        ])
 
         product = Product(
             warehouse_key=f"gate-product-{suffix}",
@@ -178,6 +187,10 @@ def test_member_title_preview_cannot_read_foreign_automation_result(client):
                           shops="[]", is_default=False)
         db.add(account)
         db.flush()
+        db.add_all([
+            AccountBinding(account_id=account.id, operator_id=owner.id),
+            AccountBinding(account_id=account.id, operator_id=other.id),
+        ])
 
         products: dict[str, Product] = {}
         for label, product_owner in (("own", owner), ("foreign", other)):
@@ -243,6 +256,10 @@ def test_member_group_counts_exclude_foreign_automation_results(client):
         group = Group(name=f"group-{suffix}")
         db.add_all([account, group])
         db.flush()
+        db.add_all([
+            AccountBinding(account_id=account.id, operator_id=owner.id),
+            AccountBinding(account_id=account.id, operator_id=other.id),
+        ])
 
         def add_product(label: str, *, automation_result: bool,
                         product_owner=None):

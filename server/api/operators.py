@@ -233,6 +233,8 @@ def patch_operator(operator_id: str, payload: OperatorPatchRequest,
     if payload.name is None and payload.enabled is None and payload.role is None:
         raise errors.validation("至少提供一个要修改的字段（name / enabled / role）",
                                 field="name")
+    if payload.enabled is not None or payload.role is not None:
+        operator_service.acquire_manager_mutation_lock(db)
     target = _require_superadmin_target(db, operator_id, operator)
     result: dict[str, Any] = {}
     if payload.role is not None:
@@ -291,6 +293,7 @@ def _disable(db: DbSession, operator_id: str, operator: Any) -> dict[str, Any]:
     if is_self:
         # 停自己 = 立刻把自己锁在门外，而界面上没有任何补救入口。挡的是手滑。
         raise errors.forbidden("不能停用自己的账号", reason="self")
+    operator_service.acquire_manager_mutation_lock(db)
     _require_superadmin_target(db, operator_id, operator)
     result = operator_service.disable(
         db, operator_id,
@@ -314,6 +317,7 @@ def disable_operator(operator_id: str, db: DbSession,
 def enable_operator(operator_id: str, db: DbSession,
                     operator: AdminDep) -> dict[str, Any]:
     require_writable(db)
+    operator_service.acquire_manager_mutation_lock(db)
     _require_superadmin_target(db, operator_id, operator)
     result = operator_service.enable(
         db, operator_id, is_admin_operator=operator_service.can(operator, "admin"))

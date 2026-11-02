@@ -38,7 +38,7 @@ export function LoginPage() {
   }, [identity, navigate, redirectTo]);
 
   return (
-    <div className="flex h-screen min-h-[720px] flex-col overflow-hidden bg-canvas">
+    <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-canvas">
       <TitleBar />
       <main className="relative min-h-0 flex-1 overflow-auto bg-canvas px-5 py-8 text-fg sm:px-8 sm:py-12">
       <div aria-hidden className="pointer-events-none absolute -left-28 -top-32 size-[420px] rounded-full bg-brand-100/55 blur-3xl" />

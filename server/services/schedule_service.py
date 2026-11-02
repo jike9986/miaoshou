@@ -462,6 +462,15 @@ def _assert_operator_account_access(db: Session, account_id: Any,
         raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的定时任务", status=403)
 
 
+def _assert_member_schedule_mode(operator: Operator | None,
+                                 claim_only: bool) -> None:
+    """Members may schedule publication of claimed products, not claim jobs."""
+    if (operator is not None
+            and operator_service.role_of(operator) == operator_service.ROLE_MEMBER
+            and claim_only):
+        raise errors.forbidden("学员定时任务不能使用认领模式，请关闭 claimOnly")
+
+
 def _assert_schedule_owner(row: Schedule, operator: Operator | None) -> None:
     """Keep tasks private within a shared Miaoshou account."""
     if _is_global_operator(operator):
@@ -577,6 +586,7 @@ def create(db: Session, payload: Mapping[str, Any],
            operator: Operator | None = None) -> dict[str, Any]:
     fields = normalize(db, payload)
     _assert_operator_account_access(db, fields["account_id"], operator)
+    _assert_member_schedule_mode(operator, fields["claim_only"])
     _verify_template(db, fields["template_name"], required=True)
     _verify_shop(db, fields["account_id"], fields["shop_id"])
     row = Schedule(id=f"task-{uuid.uuid4().hex[:12]}", created_at=now_ts(),
@@ -602,6 +612,7 @@ def update(db: Session, task_id: str, payload: Mapping[str, Any],
     row = get_schedule(db, task_id, operator=operator)
     fields = normalize(db, payload, partial=True, existing=row)
     _assert_operator_account_access(db, fields["account_id"], operator)
+    _assert_member_schedule_mode(operator, fields["claim_only"])
     _verify_template(db, fields["template_name"])
     _verify_shop(db, fields["account_id"], fields["shop_id"])
     for key, value in fields.items():
@@ -933,6 +944,7 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
 
     requested = int(task.per_run or 10)
     selected = 0
+    member_owner = False
     try:
         # 先把店铺核一遍：店铺在妙手里被删/换绑后，shopId 会失效，
         # 不校验就会在批次中途失败（前几件已发出、后几件全错），
@@ -946,9 +958,13 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
                 account_service.require_shop(db, account, task.shop_id)
         if task.owner_operator_id is not None:
             owner = operator_service.get(db, task.owner_operator_id)
-            if (operator_service.role_of(owner) == operator_service.ROLE_MEMBER
-                    and not account_service.has_account_access(
-                        db, task.account_id, owner.id)):
+            member_owner = (
+                operator_service.role_of(owner) == operator_service.ROLE_MEMBER)
+            if member_owner and not owner.enabled:
+                raise errors.forbidden(
+                    "定时任务创建者已停用，后台定时发布已暂停")
+            if (member_owner and not account_service.has_account_access(
+                    db, task.account_id, owner.id)):
                 raise errors.AppError(errors.FORBIDDEN,
                                       "定时任务创建者已无法访问所选妙手账号",
                                       status=403)
@@ -960,22 +976,31 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
         selected = len(items)
         if not items:
             # 判断到底是「都发完了」还是「账号/仓库选错了」
-            from models.product import Product
+            if member_owner:
+                # Shared-account products and other students' claims are outside
+                # this task owner's view. Avoid deriving the empty-state reason
+                # from global or account-wide product existence.
+                empty_summary = summarize(
+                    task_id=str(task.id), requested=requested, selected=0,
+                    published=0, reason="这个账号没有已认领且可发布的新商品")
+            else:
+                from models.product import Product
 
-            warehouse_empty = (db.query(Product.id)
-                               .filter(Product.deleted_at.is_(None))
-                               .first() is None)
-            account_has = None
-            if not warehouse_empty:
-                account_has = task.account_id is not None and (
-                    db.query(Product.id)
-                    .filter(Product.deleted_at.is_(None),
-                            Product.account_id == task.account_id)
-                    .first() is not None)
-            return _store(db, task, summarize(
-                task_id=str(task.id), requested=requested, selected=0, published=0,
-                account_has_products=account_has, warehouse_empty=warehouse_empty),
-                moment=moment)
+                warehouse_empty = (db.query(Product.id)
+                                   .filter(Product.deleted_at.is_(None))
+                                   .first() is None)
+                account_has = None
+                if not warehouse_empty:
+                    account_has = task.account_id is not None and (
+                        db.query(Product.id)
+                        .filter(Product.deleted_at.is_(None),
+                                Product.account_id == task.account_id)
+                        .first() is not None)
+                empty_summary = summarize(
+                    task_id=str(task.id), requested=requested, selected=0,
+                    published=0, account_has_products=account_has,
+                    warehouse_empty=warehouse_empty)
+            return _store(db, task, empty_summary, moment=moment)
         # publish_service.publish 的入参是请求体形状，不是散装参数
         outcome = publish_service.publish(db, {
             "confirm": True,

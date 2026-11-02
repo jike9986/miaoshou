@@ -408,3 +408,52 @@ def test_schedule_product_deduplication_is_scoped_to_schedule_owner(
         products[str(first.id)].id, products["legacy"].id}
     assert {row["id"] for row in legacy_items} == {
         products[str(first.id)].id, products[str(second.id)].id}
+
+
+def test_member_empty_schedule_does_not_leak_global_warehouse_state(
+        shared_account_operators, monkeypatch):
+    db, shared_account, first, _second, _teacher = shared_account_operators
+    suffix = uuid.uuid4().hex[:8]
+    unclaimed_member, _ = operator_service.create(
+        db, f"shared-unclaimed-{suffix}", role=operator_service.ROLE_MEMBER)
+    db.add(AccountBinding(account_id=shared_account.id,
+                          operator_id=unclaimed_member.id,
+                          bound_by_operator_id=first.id, bound_at=now_ts()))
+    task = _schedule(f"member-empty-{suffix}", shared_account.id,
+                     unclaimed_member.id)
+    db.add(task)
+    db.commit()
+
+    monkeypatch.setattr("services.setting_service.is_read_only", lambda _db: False)
+    result = schedule_service.execute(db, task)
+
+    assert result["status"] == schedule_service.RUN_EMPTY
+    assert result["reason"] == "这个账号没有已认领且可发布的新商品"
+    # Other members have claims in the same account, but that fact must not change
+    # this member's empty-state result.
+
+
+def test_teacher_empty_schedule_keeps_global_warehouse_diagnostic(
+        shared_account_operators, monkeypatch):
+    db, _shared_account, _first, _second, teacher = shared_account_operators
+    suffix = uuid.uuid4().hex[:8]
+    empty_account = Account(
+        name=f"teacher-empty-account-{suffix}",
+        app_key=f"teacher-empty-key-{suffix}",
+        owner_operator_id=teacher.id, status="active", is_default=False,
+        shops=json.dumps([{"shopId": "9", "name": "Empty shop", "site": "MY"}]),
+    )
+    db.add(empty_account)
+    db.flush()
+    task = _schedule(f"teacher-empty-{suffix}", empty_account.id, teacher.id)
+    task.shop_id = "9"
+    db.add(task)
+    db.commit()
+
+    monkeypatch.setattr("services.setting_service.is_read_only", lambda _db: False)
+    result = schedule_service.execute(db, task)
+
+    assert result["status"] == schedule_service.RUN_EMPTY
+    # Products from the shared account make the global warehouse non-empty, while
+    # the selected account itself has no products.
+    assert result["reason"] == "仓库里没有属于这个账号的商品，检查任务的账号设置"

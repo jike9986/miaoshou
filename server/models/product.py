@@ -28,7 +28,10 @@ class Product(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     # 兼容旧键：{detail_id}:{shop_id}
-    warehouse_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # A product key is stable only within one Miaoshou account. Different accounts
+    # may expose the same detailId/shopId pair, so enforce identity with the
+    # account-scoped constraint below rather than a global key constraint.
+    warehouse_key: Mapped[str] = mapped_column(String(64), nullable=False)
     # detailId 只在账号内唯一
     account_id: Mapped[int | None] = mapped_column(
         ForeignKey("accounts.id", ondelete="SET NULL")

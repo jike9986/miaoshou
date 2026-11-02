@@ -43,6 +43,8 @@ from core.locks import session_lock
 from core.utils import new_batch_id, now_ts, sha256_hex
 from models.account import Account
 from models.batch import Batch, BatchItem
+from models.operator import Operator
+from services import account_service, operator_service
 
 logger = logging.getLogger(__name__)
 
@@ -145,13 +147,34 @@ def _remaining(batch: Batch) -> int:
 
 
 # --- 查询 -----------------------------------------------------------------
-def get(db: Session, batch_id: str) -> Batch:
+def _is_global_operator(operator: Operator | None) -> bool:
+    return operator is None or operator_service.role_of(operator) in {
+        operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER,
+    }
+
+
+def _assert_access(db: Session, batch: Batch,
+                   operator: Operator | None) -> None:
+    """Keep batch state private to its creator and bound Miaoshou account."""
+    if _is_global_operator(operator):
+        return
+    if operator is None or batch.operator_id != operator.id:
+        # Do not reveal whether another student's batch id exists.
+        raise errors.not_found(f"批次 {batch.id} 不存在", batchId=batch.id)
+    if batch.account_id is None or not account_service.has_account_access(
+            db, batch.account_id, operator.id):
+        raise errors.not_found(f"批次 {batch.id} 不存在", batchId=batch.id)
+
+
+def get(db: Session, batch_id: str,
+        operator: Operator | None = None) -> Batch:
     text = str(batch_id or "").strip()
     if not text:
         raise errors.validation("批次 id 不能为空", field="batchId")
     batch = db.query(Batch).filter(Batch.id == text).one_or_none()
     if batch is None:
         raise errors.not_found(f"批次 {text} 不存在", batchId=text)
+    _assert_access(db, batch, operator)
     return batch
 
 
@@ -168,18 +191,33 @@ def items_of(db: Session, batch_id: str) -> list[BatchItem]:
 
 
 def list_batches(db: Session, account_id: Any = None, limit: int = 50,
-                 operator_id: int | None = None) -> dict[str, Any]:
+                 operator_id: int | None = None,
+                 operator: Operator | None = None) -> dict[str, Any]:
     query = db.query(Batch)
     if account_id not in (None, ""):
         text = str(account_id)
         if not text.isdigit():
             raise errors.validation("accountId 必须是数字", field="accountId", value=account_id)
+        if (operator is not None and not _is_global_operator(operator)
+                and not account_service.has_account_access(
+                    db, int(text), operator.id)):
+            raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的妙手账号", status=403)
         query = query.filter(Batch.account_id == int(text))
     if operator_id is not None:
         query = query.filter(Batch.operator_id == operator_id)
+    if operator is not None and not _is_global_operator(operator):
+        # A student sees only batches they created, and only while the account
+        # binding remains valid.  Filter bindings in Python because legacy
+        # owner fallback is intentionally centralized in account_service.
+        query = query.filter(Batch.operator_id == operator.id)
     count = max(1, min(int(limit or 50), 200))
     all_rows = query.order_by(Batch.created_at.desc(), Batch.id.desc()).all()
-    visible = [row for row in all_rows if (row.settings or {}).get("kind") != "warehouse_claim"]
+    visible = [row for row in all_rows
+               if (row.settings or {}).get("kind") != "warehouse_claim"
+               and (operator is None or _is_global_operator(operator)
+                    or (row.account_id is not None
+                        and account_service.has_account_access(
+                            db, row.account_id, operator.id)))]
     total = len(visible)
     rows = visible[:count]
     operators = operator_names(db)
@@ -225,7 +263,8 @@ def active_batch(db: Session, *, account_id: Any, shop_id: Any) -> Batch | None:
 
 def create(db: Session, *, account_id: Any, shop_id: Any,
            detail_ids: Iterable[Any], settings: Mapping[str, Any] | None = None,
-           operator_id: int | None = None) -> Batch:
+           operator_id: int | None = None,
+           operator: Operator | None = None) -> Batch:
     ids = _clean_detail_ids(detail_ids)
     if not ids:
         raise errors.validation("请至少选择一件商品", field="detailIds")
@@ -249,6 +288,15 @@ def create(db: Session, *, account_id: Any, shop_id: Any,
         # 会在 commit 时抛 IntegrityError（500），而这是明确的参数错误。
         if db.query(Account).filter(Account.id == account_pk).one_or_none() is None:
             raise errors.not_found(f"账号 {account_pk} 不存在", accountId=account_pk)
+        if (operator is not None and not _is_global_operator(operator)
+                and not account_service.has_account_access(
+                    db, account_pk, operator.id)):
+            raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的妙手账号", status=403)
+
+    if operator is not None:
+        if operator_id is not None and int(operator_id) != int(operator.id):
+            raise errors.AppError(errors.FORBIDDEN, "批次创建人身份不匹配", status=403)
+        operator_id = operator.id
 
     # 从「查有没有未完成批次」到「插入这一行」必须原子，否则两人同时建批次
     # 会各自查到「没有」然后各插一条 —— 两条 pending 覆盖同一批商品，
@@ -477,13 +525,14 @@ def run_once(db: Session, batch_id: str, *,
              loader: Callable[..., dict[str, Any]] | None = None,
              processor: Callable[..., dict[str, Any]] | None = None,
              account: Account | None = None,
-             client: Any = None) -> dict[str, Any]:
+             client: Any = None,
+             operator: Operator | None = None) -> dict[str, Any]:
     """执行 current_index 指向的那一件，返回这一件的结果。
 
     `loader` / `processor` 可注入是为了让验证脚本不联网、不碰上游；
     生产路径用默认实现（shop_detail + save_from_collect_box）。
     """
-    batch = get(db, batch_id)
+    batch = get(db, batch_id, operator=operator)
     rows = items_of(db, batch.id)
     if not rows:
         raise errors.not_found(f"批次 {batch.id} 没有子项", batchId=batch.id)
@@ -680,13 +729,14 @@ def _message_of(exc: BaseException) -> str:
 
 
 # --- 控制 -----------------------------------------------------------------
-def control(db: Session, batch_id: str, action: Any) -> dict[str, Any]:
+def control(db: Session, batch_id: str, action: Any,
+            operator: Operator | None = None) -> dict[str, Any]:
     """pause / resume / stop。"""
     command = str(action or "").strip().lower()
     if command not in ("pause", "resume", "stop"):
         raise errors.validation("action 只能是 pause / resume / stop", field="action",
                                 value=action)
-    batch = get(db, batch_id)
+    batch = get(db, batch_id, operator=operator)
     rows = items_of(db, batch.id)
 
     if command == "pause":
@@ -724,9 +774,10 @@ def control(db: Session, batch_id: str, action: Any) -> dict[str, Any]:
                 batch.operator_id or 0, "")), "message": message}
 
 
-def retry_failed(db: Session, batch_id: str, *, allow_unknown: bool = False) -> dict[str, Any]:
+def retry_failed(db: Session, batch_id: str, *, allow_unknown: bool = False,
+                 operator: Operator | None = None) -> dict[str, Any]:
     """把 failed 改回 pending，并把 current_index 拨回第一个 pending 的位置。"""
-    batch = get(db, batch_id)
+    batch = get(db, batch_id, operator=operator)
     if batch.status in _TERMINAL:
         raise errors.validation("批次已完成，没有可重试的商品", field="batchId",
                                 value=batch.id)
@@ -771,9 +822,10 @@ def retry_failed(db: Session, batch_id: str, *, allow_unknown: bool = False) -> 
             "message": f"{len(targets)} 件已改回待处理"}
 
 
-def delete(db: Session, batch_id: str) -> dict[str, Any]:
+def delete(db: Session, batch_id: str,
+           operator: Operator | None = None) -> dict[str, Any]:
     """删除批次。跑着的不许删——删了 current_index 就丢了，等于丢进度。"""
-    batch = get(db, batch_id)
+    batch = get(db, batch_id, operator=operator)
     if batch.status not in _DELETABLE:
         raise errors.validation(
             f"批次状态是 {batch.status}，只有 done / stopped / failed 可以删除",

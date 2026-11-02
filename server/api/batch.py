@@ -30,8 +30,8 @@ router = APIRouter(prefix="/batch", tags=["批次编排"],
                    dependencies=[require_permission("batch")])
 
 
-def _automation_batch(db, batch_id):
-    batch = batch_service.get(db, batch_id)
+def _automation_batch(db, batch_id, operator=None):
+    batch = batch_service.get(db, batch_id, operator=operator)
     if (batch.settings or {}).get("kind") == "warehouse_claim":
         from core import errors
         raise errors.not_found("批次不存在", batchId=batch_id)
@@ -52,11 +52,11 @@ def create_batch(payload: BatchCreateRequest, db: DbSession,
             shop_id=payload.shopId,
             detail_ids=payload.detailIds,
             settings=payload.settings,
-            operator_id=getattr(operator, "id", None),
+            operator=operator,
         )
         db.commit()
         # 回读一次：commit 之后 expire_on_commit 会重查，serialize 需要活着的行
-        batch = batch_service.get(db, batch.id)
+        batch = batch_service.get(db, batch.id, operator=operator)
     audit_service.record(db, operator=operator, action="batch.create",
                          target_kind="batch", target_id=batch.id,
                          account_id=batch.account_id, shop_id=batch.shop_id or "",
@@ -71,15 +71,18 @@ def create_batch(payload: BatchCreateRequest, db: DbSession,
 @router.get("", summary="批次列表")
 def list_batches(
     db: DbSession,
+    operator: OperatorDep,
     accountId: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
-    return batch_service.list_batches(db, account_id=accountId, limit=limit)
+    return batch_service.list_batches(db, account_id=accountId, limit=limit,
+                                       operator=operator)
 
 
 @router.get("/{batch_id}", summary="批次详情（含逐件状态）")
-def batch_detail(batch_id: str, db: DbSession) -> dict[str, Any]:
-    batch = _automation_batch(db, batch_id)
+def batch_detail(batch_id: str, db: DbSession,
+                 operator: OperatorDep) -> dict[str, Any]:
+    batch = _automation_batch(db, batch_id, operator=operator)
     return {"batch": batch_service.serialize(
                 batch, operator_name=batch_service.operator_names(db).get(
                     batch.operator_id or 0, "")),
@@ -100,7 +103,7 @@ def step_batch(batch_id: str, db: DbSession,
     失败时同样要 commit——失败记录本身也是进度，回滚掉就会无限重试同一件。
     """
     require_writable(db)
-    batch = _automation_batch(db, batch_id)
+    batch = _automation_batch(db, batch_id, operator=operator)
     # 审计的粒度是「一次 step」，不是「一件商品」：一批 200 件逐件记会让审计表
     # 涨得比业务表还快，而运营要问的是「这批是谁在推、什么时候推进的」。
     # 具体哪一件失败了，BatchItem.message 里有，审计 detail 里也带了一份。
@@ -108,7 +111,7 @@ def step_batch(batch_id: str, db: DbSession,
                              target_kind="batch", target_id=batch_id,
                              account_id=batch.account_id,
                              shop_id=batch.shop_id or ""):
-        result = batch_service.run_once(db, batch_id)
+        result = batch_service.run_once(db, batch_id, operator=operator)
         db.commit()
     item = result.get("item") if isinstance(result, dict) else None
     audit_service.record(
@@ -131,13 +134,14 @@ def step_batch(batch_id: str, db: DbSession,
 def control_batch(batch_id: str, payload: BatchControlRequest,
                   db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
-    batch = _automation_batch(db, batch_id)
+    batch = _automation_batch(db, batch_id, operator=operator)
     with audit_service.guard(db, operator=operator, action="batch.control",
                              target_kind="batch", target_id=batch_id,
                              account_id=batch.account_id,
                              shop_id=batch.shop_id or "",
                              detail={"action": payload.action}):
-        result = batch_service.control(db, batch_id, payload.action)
+        result = batch_service.control(db, batch_id, payload.action,
+                                       operator=operator)
         db.commit()
     audit_service.record(db, operator=operator, action="batch.control",
                          target_kind="batch", target_id=batch_id,
@@ -159,14 +163,15 @@ def retry_failed(batch_id: str, db: DbSession, operator: OperatorDep,
     盲目重跑会让重量被加第二次增量（prepare_weight 不幂等）。
     """
     require_writable(db)
-    batch = _automation_batch(db, batch_id)
+    batch = _automation_batch(db, batch_id, operator=operator)
     allow = bool(payload.allowUnknown) if payload is not None else False
     with audit_service.guard(db, operator=operator, action="batch.retry",
                              target_kind="batch", target_id=batch_id,
                              account_id=batch.account_id,
                              shop_id=batch.shop_id or "",
                              detail={"allowUnknown": allow}):
-        result = batch_service.retry_failed(db, batch_id, allow_unknown=allow)
+        result = batch_service.retry_failed(db, batch_id, allow_unknown=allow,
+                                            operator=operator)
         db.commit()
     audit_service.record(db, operator=operator, action="batch.retry",
                          target_kind="batch", target_id=batch_id,
@@ -181,12 +186,12 @@ def retry_failed(batch_id: str, db: DbSession, operator: OperatorDep,
 def delete_batch(batch_id: str, db: DbSession,
                  operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
-    batch = _automation_batch(db, batch_id)
+    batch = _automation_batch(db, batch_id, operator=operator)
     with audit_service.guard(db, operator=operator, action="batch.delete",
                              target_kind="batch", target_id=batch_id,
                              account_id=batch.account_id,
                              shop_id=batch.shop_id or ""):
-        result = batch_service.delete(db, batch_id)
+        result = batch_service.delete(db, batch_id, operator=operator)
         db.commit()
     audit_service.record(db, operator=operator, action="batch.delete",
                          target_kind="batch", target_id=batch_id,

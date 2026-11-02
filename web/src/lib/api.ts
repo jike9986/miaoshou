@@ -2,9 +2,10 @@
 // 统一 fetch 封装：Bearer 鉴权、超时、错误归一化（暴露 error.code）、幂等键、请求 id。
 
 import type { ApiErrorCode, ApiErrorPayload } from "@/lib/types";
-import { operatorToken } from "@/lib/operator";
+import { clearOperator, operatorToken } from "@/lib/operator";
 import { getSavedApiBase } from "@/lib/serverAddress";
 import { withAuthorizationHeader } from "@/lib/requestAuth";
+import { shouldClearOperatorSession } from "@/lib/operatorAuthExpiry.mjs";
 
 /* ------------------------------------------------------------------ *
  * 运行时配置
@@ -282,6 +283,12 @@ async function request<T, B = unknown>(
   ].includes(path);
   const isPublicCredentialStatus = method === "GET" && path === "/auth/credentials-status";
   const isPublicAuthRequest = isPublicAuthMutation || isPublicCredentialStatus;
+  // Only an automatically selected personal token can invalidate the current
+  // UI session.  Explicit tokens are used by account-switching tools and a
+  // rejected one must never log out the account currently on screen.
+  const sessionToken = !isPublicAuthRequest && options.authToken === undefined
+    ? operatorToken()
+    : null;
   const defaultToken = isPublicAuthRequest ? null : requestToken(path);
   const authorizationHeaders = withAuthorizationHeader({}, defaultToken, options.authToken);
   if (!isPublicAuthRequest && !authorizationHeaders.Authorization) {
@@ -360,6 +367,10 @@ async function request<T, B = unknown>(
   } finally {
     window.clearTimeout(timer);
     signal?.removeEventListener("abort", onExternalAbort);
+  }
+
+  if (shouldClearOperatorSession(response.status, sessionToken, operatorToken())) {
+    clearOperator();
   }
 
   // 204 / 空响应

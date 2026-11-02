@@ -25,6 +25,38 @@ test("switching directly between operators reuses isolated query caches", () => 
   clearOperatorQueryClients();
 });
 
+test("legacy identities without ids still keep token-scoped caches isolated", () => {
+  const root = new QueryClient();
+  const legacyA = getOperatorQueryClient("legacy-token-a:", root);
+  legacyA.setQueryData(["warehouse"], { owner: "legacy-a" });
+
+  const legacyB = getOperatorQueryClient("legacy-token-b:", root);
+  assert.notEqual(legacyB, legacyA);
+  assert.equal(legacyB.getQueryData(["warehouse"]), undefined);
+
+  legacyB.setQueryData(["warehouse"], { owner: "legacy-b" });
+  assert.deepEqual(legacyA.getQueryData(["warehouse"]), { owner: "legacy-a" });
+  assert.deepEqual(legacyB.getQueryData(["warehouse"]), { owner: "legacy-b" });
+
+  clearOperatorQueryClients();
+});
+
+test("changing an operator role does not reuse the previous role cache", () => {
+  const root = new QueryClient();
+  const teacher = getOperatorQueryClient("same-operator:teacher", root);
+  teacher.setQueryData(["operators"], [{ name: "private student list" }]);
+
+  const member = getOperatorQueryClient("same-operator:member", root);
+
+  assert.notEqual(member, teacher);
+  assert.equal(member.getQueryData(["operators"]), undefined);
+  assert.deepEqual(teacher.getQueryData(["operators"]), [
+    { name: "private student list" },
+  ]);
+
+  clearOperatorQueryClients();
+});
+
 test("leaving an operator clears its sensitive cache and retains the public cache", () => {
   const root = new QueryClient();
   const operatorA = getOperatorQueryClient("operator-a:member", root);

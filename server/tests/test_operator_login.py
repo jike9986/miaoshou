@@ -11,6 +11,7 @@ from db.session import SessionLocal, init_db
 from main import app
 from models.email_verification_code import EmailVerificationCode
 from models.login_rate_limit import LoginRateLimit
+from models.operator import Operator
 from services import (
     email_code_service,
     email_service,
@@ -27,6 +28,41 @@ def isolate_login_ip_rate_limit():
     login_rate_limit_service.clear_ip(ip)
     yield
     login_rate_limit_service.clear_ip(ip)
+
+
+@pytest.fixture
+def restore_default_operator():
+    """Keep the one-time local takeover test from polluting later tests.
+
+    The takeover endpoint intentionally retires the built-in machine identity.
+    Restore its exact pre-test state after the case so tests in other modules do
+    not accidentally inherit a disabled local secret.
+    """
+    db = SessionLocal()
+    try:
+        row = operator_service.ensure_default(db)
+        snapshot = {
+            field: getattr(row, field)
+            for field in (
+                "username", "email", "email_verified", "password_hash",
+                "must_change_password", "enabled", "is_admin", "role",
+            )
+        }
+        ident = row.id
+        db.commit()
+    finally:
+        db.close()
+
+    yield
+
+    db = SessionLocal()
+    try:
+        row = db.query(Operator).filter(Operator.id == ident).one()
+        for field, value in snapshot.items():
+            setattr(row, field, value)
+        db.commit()
+    finally:
+        db.close()
 
 
 @pytest.fixture(scope="module")
@@ -70,6 +106,28 @@ def test_local_secret_is_a_business_identity_in_single_machine_mode(client):
     # 探活接口不需要鉴权
     assert client.get(API + "/system/health").status_code == 200
     assert client.get("/api/system/health").status_code == 200
+
+
+def test_students_can_validate_their_session_with_operator_probe(client):
+    db = SessionLocal()
+    try:
+        operator, token = operator_service.create(
+            db, f"session-probe-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        operator_id = str(operator.id)
+        db.commit()
+    finally:
+        db.close()
+
+    valid = client.get(API + "/operators", headers={"Authorization": f"Bearer {token}"})
+    assert valid.status_code == 200, valid.text
+    payload = valid.json()
+    assert payload["current"]["id"] == operator_id
+    assert payload["total"] == 1
+    assert payload["operators"][0]["id"] == operator_id
+
+    revoked = client.get(API + "/operators", headers={"Authorization": "Bearer revoked-token"})
+    assert revoked.status_code == 401, revoked.text
 
 
 def test_teacher_creates_student_and_student_changes_password(client, tokens):
@@ -380,7 +438,8 @@ def test_login_failure_is_uniform_and_roles_cannot_manage_teachers(client, token
     assert member_denied.status_code == 403, member_denied.text
 
 
-def test_legacy_token_can_initialize_password_login(client, tokens):
+def test_legacy_token_can_initialize_password_login(client, tokens,
+                                                    restore_default_operator):
     before = client.get(API + "/auth/credentials-status")
     assert before.status_code == 200, before.text
     assert before.json() == {"initialized": False}

@@ -16,6 +16,7 @@ from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
 from services import (
     account_service,
+    collect_box_service,
     operator_service,
     publish_service,
     setting_service,
@@ -91,6 +92,59 @@ def _publish_payload(product: Product, account: Account, **overrides):
         "items": [{"warehouseId": str(product.id)}],
         **overrides,
     }
+
+
+def test_collect_box_claim_uses_stable_account_id_for_warehouse_status(
+    publish_db, monkeypatch
+):
+    """A collect-box claim must be visible to the matching account filter.
+
+    The collect-box route used to key ``Product.collected`` by the editable
+    account name, while warehouse filters read the canonical ``account:{id}``
+    key.  That made a successful claim still appear as unclaimed in the
+    warehouse.  Keep the regression at the service boundary where both paths
+    meet, without requiring a live Miaoshou request.
+    """
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-status-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    product = Product(
+        warehouse_key="12345:123", account_id=account.id,
+        detail_id="12345", shop_id="123", shop_name="Source shop",
+        title="Finished title", status="ready", claimed=False,
+        collected={}, payload={},
+    )
+    db.add(product)
+    db.flush()
+
+    class FakeClient:
+        def claim_to_shop(self, detail_ids, shop_ids):
+            assert detail_ids == [12345]
+            assert shop_ids == [123]
+            return {"ok": True}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collect_box_service, "account_client",
+                        lambda _account: FakeClient())
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda _db, _account, shop_id: {"name": f"Shop {shop_id}"})
+
+    result = collect_box_service.claim(
+        db, account, detail_id="12345", shop_id="123", target_shop_id="123")
+    db.commit()
+
+    assert result["claimed"] is True
+    assert product.collected == {
+        f"account:{account.id}": {"at": product.collected[f"account:{account.id}"]["at"],
+                                   "detailId": "12345"}
+    }
+    visible = warehouse_service.list_products(
+        db, account_id=account.id, claim_account_id=account.id, claimed=True)
+    assert {row["id"] for row in visible["items"]} == {str(product.id)}
 
 
 def test_shared_miaoshou_account_claim_state_is_per_member(publish_db):
