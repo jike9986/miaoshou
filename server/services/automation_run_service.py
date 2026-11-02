@@ -15,7 +15,7 @@ from models.image_job import ImageJob
 from models.operator import Operator
 from models.product import Product
 from models.publish_log import PublishLog
-from services import operator_service, warehouse_service
+from services import account_service, operator_service, warehouse_service
 
 PROCESS_STATUSES = {"queued", "running", "succeeded", "failed", "needs_review"}
 PUBLISH_STATUSES = {"not_requested", "queued", "running", "succeeded", "failed", "needs_review"}
@@ -26,9 +26,8 @@ def _teacher_or_admin(operator: Operator) -> bool:
         operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}
 
 
-def _assert_account_access(account: Account, operator: Operator) -> None:
-    if (operator_service.role_of(operator) == operator_service.ROLE_MEMBER
-            and account.owner_operator_id != operator.id):
+def _assert_account_access(db: Session, account: Account, operator: Operator) -> None:
+    if not account_service.has_account_access(db, account.id, operator.id):
         raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的自动化运行", status=403)
 
 
@@ -89,7 +88,7 @@ def create(db: Session, operator: Operator, *, account_id: Any, shop_id: Any,
     account = db.query(Account).filter(Account.id == int(account_text)).one_or_none()
     if account is None:
         raise errors.not_found(f"账号 {account_text} 不存在", accountId=account_text)
-    _assert_account_access(account, operator)
+    _assert_account_access(db, account, operator)
     shop_text = str(shop_id or "").strip()
     if not shop_text.isdigit():
         raise errors.validation("shopId 必须是数字", field="shopId")
@@ -164,7 +163,7 @@ def latest(db: Session, operator: Operator, *, account_id: Any,
     account = db.query(Account).filter(Account.id == int(text)).one_or_none()
     if account is None:
         raise errors.not_found(f"账号 {text} 不存在", accountId=text)
-    _assert_account_access(account, operator)
+    _assert_account_access(db, account, operator)
     query = db.query(AutomationRun).filter(AutomationRun.account_id == account.id)
     if shop_id not in (None, ""):
         query = query.filter(AutomationRun.shop_id == str(shop_id))

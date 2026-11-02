@@ -29,10 +29,12 @@ def _task_of(result: Any) -> dict[str, Any]:
 
 @router.get("", summary="定时任务列表")
 def list_schedules(db: DbSession,
-    credentials: CredentialsHeader = None, accountId: str | None = None,
+    operator: OperatorDep, credentials: CredentialsHeader = None,
+                   accountId: str | None = None,
                    enabled: str | None = None) -> dict[str, Any]:
     flag = None if enabled in (None, "") else parse_bool(enabled, "enabled")
-    return schedule_service.list_schedules(db, account_id=accountId, enabled=flag)
+    return schedule_service.list_schedules(db, account_id=accountId, enabled=flag,
+                                           operator=operator)
 
 
 @router.post("", status_code=201, summary="新建定时任务")
@@ -40,7 +42,7 @@ def create_schedule(payload: ScheduleCreate, db: DbSession,
                     operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
     body = payload.model_dump(by_alias=False, exclude_none=True)
-    result = schedule_service.create(db, body)
+    result = schedule_service.create(db, body, operator=operator)
     db.commit()
     # 定时任务是「会在半夜自己动别人商品」的东西：谁建的、建了哪条，
     # 必须留痕。target_kind="schedule" 让审计页拼出「定时任务「双十一」」。
@@ -62,7 +64,7 @@ def patch_schedule(task_id: str, payload: SchedulePatch, db: DbSession,
                    operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
     body = payload.model_dump(by_alias=False, exclude_unset=True)
-    result = schedule_service.update(db, task_id, body)
+    result = schedule_service.update(db, task_id, body, operator=operator)
     db.commit()
     # 记「改了哪些字段」而不是旧值新值：一条定时任务有十几个字段，
     # 全塞进 detail 只会让人懒得看。
@@ -85,7 +87,7 @@ def delete_schedule(task_id: str, db: DbSession,
     name = ""
     shop_id = ""
     try:
-        row = schedule_service.get_schedule(db, task_id)
+        row = schedule_service.get_schedule(db, task_id, operator=operator)
         name = str(row.name or "")
         shop_id = str(row.shop_id or "")
     except Exception:  # noqa: BLE001 - 名字取不到不影响删除本身
@@ -93,7 +95,7 @@ def delete_schedule(task_id: str, db: DbSession,
     with audit_service.guard(db, operator=operator, action="schedule.delete",
                              target_kind="schedule", target_id=str(task_id),
                              shop_id=shop_id, detail={"name": name}):
-        result = schedule_service.delete(db, task_id)
+        result = schedule_service.delete(db, task_id, operator=operator)
     db.commit()
     audit_service.record(db, operator=operator, action="schedule.delete",
                          target_kind="schedule", target_id=str(task_id),
@@ -105,13 +107,15 @@ def delete_schedule(task_id: str, db: DbSession,
 
 
 @router.get("/logs", summary="定时任务执行历史（最近 N 条）")
-def schedule_logs(db: DbSession, taskId: str = "", limit: int = 100) -> dict[str, Any]:
+def schedule_logs(db: DbSession, operator: OperatorDep, taskId: str = "",
+                  accountId: str | None = None, limit: int = 100) -> dict[str, Any]:
     """翻历史用：每次执行一行，含状态、选中数、成功数、失败数与原因。
 
     老版把历史追加在 `publish-schedule-log.json` 里，界面上能翻「昨天跑了几轮」。
     新版此前只留最近一次结果，上一轮干了什么永远查不到。
     """
-    return schedule_service.list_logs(db, task_id=taskId, limit=limit)
+    return schedule_service.list_logs(db, task_id=taskId, account_id=accountId,
+                                      limit=limit, operator=operator)
 
 
 @router.post("/{task_id}/run", summary="立即执行一次（演练）")
@@ -127,7 +131,7 @@ def run_schedule(task_id: str, db: DbSession,
     半夜那轮没有「谁」，这一轮有。
     """
     require_writable(db)
-    task = schedule_service.get_schedule(db, task_id)
+    task = schedule_service.get_schedule(db, task_id, operator=operator)
     account = account_service.get_account(db, task.account_id)
     if account is None:
         raise errors.not_found(f"账号 {task.account_id} 已不存在",

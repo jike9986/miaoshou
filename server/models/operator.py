@@ -27,6 +27,8 @@ class Operator(Base):
     # 显示名，如「张三」。唯一：两个人同名，审计日志里就分不清谁是谁了。
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     username: Mapped[str | None] = mapped_column(String(64), unique=True)
+    # 邮箱用于账号找回；不参与展示，邮件地址本身也不写审计日志。
+    email: Mapped[str | None] = mapped_column(String(254))
     password_hash: Mapped[str | None] = mapped_column(String(256))
     must_change_password: Mapped[bool] = mapped_column(
         default=False, server_default="0", nullable=False)

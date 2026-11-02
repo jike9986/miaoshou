@@ -176,6 +176,51 @@ def _ensure_sqlite_account_app_key_index() -> None:
         ))
 
 
+def _backfill_sqlite_account_bindings() -> None:
+    """将旧库里的账号负责人迁移为显式的共享账号绑定。
+
+    SQLite 启动路径不会执行 Alembic。新版 ``account_bindings`` 表虽然会由
+    ``create_all`` 创建，但老库里的 ``accounts.owner_operator_id`` 不会自动
+    复制进去，导致原学员登录后看不到自己已有的妙手账号。只补没有绑定的
+    操作员，保证重复启动幂等；同一旧操作员若意外拥有多个账号，按账号 ID
+    最小的记录保留，符合「一个软件用户只能绑定一个妙手账号」的现行规则。
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "accounts" not in tables or "account_bindings" not in tables:
+        return
+    account_columns = {column["name"] for column in inspector.get_columns("accounts")}
+    if "owner_operator_id" not in account_columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text(
+            """
+            INSERT INTO account_bindings
+                (account_id, operator_id, bound_by_operator_id, bound_at)
+            SELECT a.id, a.owner_operator_id, a.bound_by_operator_id,
+                   COALESCE(a.bound_at, 0.0)
+            FROM accounts AS a
+            JOIN (
+                SELECT owner_operator_id, MIN(id) AS account_id
+                FROM accounts
+                WHERE owner_operator_id IS NOT NULL
+                GROUP BY owner_operator_id
+            ) AS first_account
+              ON first_account.account_id = a.id
+            WHERE a.owner_operator_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM account_bindings AS existing
+                  WHERE existing.operator_id = a.owner_operator_id
+              )
+            ON CONFLICT(operator_id) DO NOTHING
+            """
+        ))
+
+
 def init_db() -> None:
     """建表 + 补列 + 写入默认设置。
 
@@ -198,6 +243,7 @@ def init_db() -> None:
     importlib.import_module("models")
     Base.metadata.create_all(engine)
     _add_missing_columns()
+    _backfill_sqlite_account_bindings()
     _ensure_sqlite_account_app_key_index()
     _seed_settings()
 

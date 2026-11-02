@@ -1,6 +1,8 @@
 """认证路由：连接 / 状态 / 断开 / 账号管理。"""
 from __future__ import annotations
 
+import secrets
+import time
 from typing import Any
 
 from fastapi import APIRouter, Header, Request
@@ -29,11 +31,14 @@ from core.constants import (
     SUPPORTED_LANGUAGES,
 )
 from models.operator import Operator
+from models.password_reset_token import PasswordResetToken
 from schemas.requests import ConnectRequest
 from services import account_service, audit_service, operator_service, setting_service
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 login_router = APIRouter(prefix="/auth", tags=["认证"])
+
+PASSWORD_RESET_TTL_SECONDS = 15 * 60
 
 
 class LoginRequest(BaseModel):
@@ -43,6 +48,15 @@ class LoginRequest(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     currentPassword: str = Field(max_length=128)
+    newPassword: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=256)
     newPassword: str = Field(min_length=8, max_length=128)
 
 
@@ -77,6 +91,95 @@ def login(payload: LoginRequest, request: Request, db: DbSession) -> dict[str, A
                           "name": operator_service.serialize(operator)["name"],
                           "role": operator_service.role_of(operator)},
             "token": token, "mustChangePassword": operator.must_change_password}
+
+
+@login_router.post("/password-reset/request", status_code=202)
+def request_password_reset(payload: PasswordResetRequest, request: Request,
+                           db: DbSession) -> dict[str, bool]:
+    """Send a short-lived recovery code without exposing account existence."""
+    from services import email_service, login_rate_limit_service
+
+    email = operator_service.normalize_email(payload.email)
+    ip = request.client.host if request.client else "unknown"
+    bucket = f"password-reset:{email}"
+    retry_after = login_rate_limit_service.blocked_retry_after(ip, bucket)
+    if retry_after:
+        from core.errors import AppError
+        raise AppError("RATE_LIMITED", "请求过于频繁，请稍后重试", status=429,
+                       details={"retryAfterSeconds": retry_after})
+    # Count all requests, including successful deliveries, to prevent mailbox spam.
+    login_rate_limit_service.record_failure(ip, bucket)
+
+    target = (db.query(Operator)
+              .filter(Operator.email == email, Operator.enabled.is_(True))
+              .one_or_none())
+    if target is None:
+        return {"ok": True}
+    now = time.time()
+    db.query(PasswordResetToken).filter(
+        PasswordResetToken.operator_id == target.id,
+        PasswordResetToken.used_at.is_(None),
+    ).update({PasswordResetToken.used_at: now}, synchronize_session=False)
+    token = secrets.token_urlsafe(32)
+    db.add(PasswordResetToken(
+        operator_id=target.id,
+        token_hash=operator_service.hash_token(token),
+        created_at=now,
+        expires_at=now + PASSWORD_RESET_TTL_SECONDS,
+        requested_ip=ip[:64],
+    ))
+    db.flush()
+    try:
+        email_service.send_password_reset(
+            recipient=email,
+            display_name=target.name,
+            token=token,
+            expires_minutes=PASSWORD_RESET_TTL_SECONDS // 60,
+        )
+    except Exception:
+        db.rollback()
+        raise
+    db.commit()
+    return {"ok": True}
+
+
+@login_router.post("/password-reset/confirm")
+def confirm_password_reset(payload: PasswordResetConfirmRequest,
+                           db: DbSession) -> dict[str, Any]:
+    from core.errors import AppError
+
+    now = time.time()
+    token_hash = operator_service.hash_token(payload.token.strip())
+    reset = (db.query(PasswordResetToken)
+             .filter(PasswordResetToken.token_hash == token_hash,
+                     PasswordResetToken.used_at.is_(None),
+                     PasswordResetToken.expires_at > now)
+             .one_or_none())
+    if reset is None:
+        raise AppError("AUTH_FAILED", "找回密码验证码无效或已过期", status=400)
+    target = (db.query(Operator)
+              .filter(Operator.id == reset.operator_id,
+                      Operator.enabled.is_(True))
+              .one_or_none())
+    if target is None:
+        raise AppError("AUTH_FAILED", "找回密码验证码无效或已过期", status=400)
+    token = operator_service.set_password(
+        db, target, payload.newPassword, must_change=False, rotate_token=True)
+    reset.used_at = now
+    db.query(PasswordResetToken).filter(
+        PasswordResetToken.operator_id == target.id,
+        PasswordResetToken.id != reset.id,
+        PasswordResetToken.used_at.is_(None),
+    ).update({PasswordResetToken.used_at: now}, synchronize_session=False)
+    db.commit()
+    return {
+        "ok": True,
+        "operator": {"id": str(target.id),
+                      "name": operator_service.serialize(target)["name"],
+                      "role": operator_service.role_of(target)},
+        "token": token,
+        "mustChangePassword": False,
+    }
 
 
 @login_router.get("/credentials-status")
@@ -183,16 +286,9 @@ def connect(payload: ConnectRequest, db: DbSession,
             owner = operator_service.get(db, payload.studentOperatorId)
             if operator_service.role_of(owner) != operator_service.ROLE_MEMBER:
                 raise errors.validation("妙手账号只能绑定到学员账号", field="studentOperatorId")
-    if payload.accountId not in (None, ""):
-        existing = account_service.get_account(db, payload.accountId)
-        if (existing is not None
-                and existing.owner_operator_id != owner.id
-                and not (role in {operator_service.ROLE_ADMIN,
-                                  operator_service.ROLE_TEACHER}
-                         and existing.owner_operator_id is None)):
-            # 教师可显式把未归属的历史 key 认领到学员；已有归属不可被抢占。
-            raise errors.AppError(errors.FORBIDDEN,
-                                  "妙手账号已绑定到其他学员", status=403)
+    # 一个妙手账号可以被多个学员绑定；每个学员只能有一条绑定。
+    # 具体的单绑定约束在 account_service.connect 内再次校验，避免只靠
+    # 请求参数检查造成并发下的重复绑定。
     require_writable(db)
     with audit_service.guard(db, operator=operator, action="auth.connect",
                              target_kind="account",

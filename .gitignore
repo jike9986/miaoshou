@@ -59,3 +59,6 @@ Thumbs.db
 
 # 提交信息临时文件（提交后即删）
 .git-commit-msg.txt
+client-token.json
+build/client-token.txt
+_client_token.txt

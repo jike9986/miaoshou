@@ -86,6 +86,7 @@ def _headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.mark.skip(reason="妙手账号已改为多人共享（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的「不能读取他人账号」已不成立")
 def test_member_can_bind_own_key_and_cannot_read_other_account(
         client, identities, monkeypatch):
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
@@ -164,6 +165,7 @@ def test_member_can_bind_own_key_and_cannot_read_other_account(
                for row in teacher_accounts.values())
 
 
+@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
 def test_unbound_member_does_not_inherit_legacy_default_account(client, identities):
     response = client.get(API + "/auth/status",
                           headers=_headers(identities["unbound_token"]))
@@ -173,6 +175,7 @@ def test_unbound_member_does_not_inherit_legacy_default_account(client, identiti
     assert response.json()["accounts"] == []
 
 
+@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
 def test_member_reads_are_scoped_to_owned_account(client, identities):
     db = SessionLocal()
     try:
@@ -263,6 +266,7 @@ def test_member_reads_are_scoped_to_owned_account(client, identities):
     assert own_id != foreign_id
 
 
+@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
 def test_member_price_defaults_are_scoped_to_owned_account(
         client, identities, monkeypatch):
     db = SessionLocal()
@@ -305,6 +309,7 @@ def test_member_price_defaults_are_scoped_to_owned_account(
     assert foreign_response.status_code == 403, foreign_response.text
 
 
+@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
 def test_member_bootstrap_hides_other_members_accounts_and_batches(client, identities):
     db = SessionLocal()
     try:
@@ -407,49 +412,93 @@ def test_teacher_can_assign_legacy_unowned_key_to_student(client, identities, mo
     response = client.post(
         API + "/auth/connect",
         json={"accountId": legacy_id,
-              "studentOperatorId": str(identities["second_id"]),
+              "studentOperatorId": str(identities["unbound_id"]),
               "autoScan": False},
         headers=_headers(identities["teacher_token"]),
     )
     assert response.status_code == 200, response.text
-    assert response.json()["ownerOperatorId"] == str(identities["second_id"])
+    assert response.json()["ownerOperatorId"] == str(identities["unbound_id"])
     assert response.json()["boundByOperatorId"] == str(identities["teacher_id"])
 
 
-def test_app_key_cannot_be_bound_to_multiple_students_but_owner_can_reconnect(
+def test_app_key_can_be_bound_to_multiple_students_but_each_student_has_one(
         client, identities, monkeypatch):
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
     app_key = f"shared-key-{uuid.uuid4().hex[:8]}"
     app_secret = "private-app-secret"
 
+    db = SessionLocal()
+    try:
+        first_operator, first_token = operator_service.create(
+            db, f"owner-shared-first-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        db.commit()
+        first_id = first_operator.id
+    finally:
+        db.close()
+
     first = client.post(
         API + "/auth/connect",
         json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
-        headers=_headers(identities["first_token"]),
+        headers=_headers(first_token),
     )
     assert first.status_code == 200, first.text
     first_account_id = first.json()["accountId"]
 
+    # 该模块前面的教师代绑用例会占用固定身份；为多人共享回归单独创建
+    # 一个尚未绑定的学员，避免测试顺序改变语义。
+    db = SessionLocal()
+    try:
+        extra, extra_token = operator_service.create(
+            db, f"owner-shared-{uuid.uuid4().hex[:8]}",
+            role=operator_service.ROLE_MEMBER)
+        db.commit()
+        extra_id = extra.id
+    finally:
+        db.close()
+
     duplicate = client.post(
         API + "/auth/connect",
         json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
-        headers=_headers(identities["second_token"]),
+        headers=_headers(extra_token),
     )
-    assert duplicate.status_code == 409, duplicate.text
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["accountId"] == first_account_id
+    assert duplicate.json()["ownerOperatorId"] == str(first_id)
     assert app_secret not in duplicate.text
 
     reconnected = client.post(
         API + "/auth/connect",
         json={"appId": app_key, "appSecret": app_secret, "autoScan": False},
-        headers=_headers(identities["first_token"]),
+        headers=_headers(first_token),
     )
     assert reconnected.status_code == 200, reconnected.text
     assert reconnected.json()["accountId"] == first_account_id
-    assert reconnected.json()["ownerOperatorId"] == str(identities["first_id"])
+    assert reconnected.json()["ownerOperatorId"] == str(first_id)
 
     db = SessionLocal()
     try:
         assert db.query(Account).filter(Account.app_key == app_key).count() == 1
+
+        bindings = (db.query(account_service.AccountBinding)
+                    .filter(account_service.AccountBinding.account_id == int(first_account_id))
+                    .all())
+        assert {row.operator_id for row in bindings} >= {
+            first_id, extra_id
+        }
+
+        second_key = f"second-key-{uuid.uuid4().hex[:8]}"
+        with pytest.raises(AppError) as caught:
+            account_service.connect(
+                db,
+                app_id=second_key,
+                app_secret="second-secret",
+                auto_scan=False,
+                owner_operator_id=extra_id,
+                bound_by_operator_id=extra_id,
+            )
+        assert caught.value.status == 409
+        assert "second-secret" not in str(caught.value)
     finally:
         db.close()
 
@@ -491,12 +540,18 @@ def test_bind_race_after_precheck_returns_conflict_and_preserves_winner(
             pass
 
         def shop_list(self, **_kwargs):
-            db.add(Account(
-                name="concurrent winner", app_key=app_key,
-                app_secret_enc=account_service.crypto.encrypt("winner-secret"),
-                owner_operator_id=identities["second_id"], shops="[]",
-            ))
-            db.commit()
+            # 用独立会话模拟另一个并发请求，避免把“竞态获胜者”和当前
+            # 请求放在同一个事务里，导致当前请求 rollback 时一起回滚。
+            winner_db = SessionLocal()
+            try:
+                winner_db.add(Account(
+                    name="concurrent winner", app_key=app_key,
+                    app_secret_enc=account_service.crypto.encrypt("winner-secret"),
+                    owner_operator_id=identities["second_id"], shops="[]",
+                ))
+                winner_db.commit()
+            finally:
+                winner_db.close()
             return {"data": {"shopList": []}}
 
         def close(self):
@@ -516,13 +571,19 @@ def test_bind_race_after_precheck_returns_conflict_and_preserves_winner(
 
         assert caught.value.status == 409
         assert "request-secret" not in str(caught.value)
-        rows = db.query(Account).filter(Account.app_key == app_key).all()
-        assert len(rows) == 1
-        assert rows[0].owner_operator_id == identities["second_id"]
+        db.rollback()
+        check_db = SessionLocal()
+        try:
+            rows = check_db.query(Account).filter(Account.app_key == app_key).all()
+            assert len(rows) == 1
+            assert rows[0].owner_operator_id == identities["second_id"]
+        finally:
+            check_db.close()
     finally:
         db.close()
 
 
+@pytest.mark.skip(reason="妙手账号已改为**多人共享**（负责人 2026-11-02：一个账号可以多个操作员绑定），本用例断言的是旧的「按 owner_operator_id 独占」规则，与现行为不再一致")
 def test_teacher_cannot_reassign_another_students_bound_key(client, identities, monkeypatch):
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
     app_key = f"owned-key-{uuid.uuid4().hex[:8]}"

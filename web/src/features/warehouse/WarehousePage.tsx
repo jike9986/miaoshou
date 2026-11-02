@@ -22,7 +22,6 @@ import {
   SearchX,
   Send,
   Trash2,
-  Link2,
   Zap,
 } from "lucide-react";
 import { cn, formatCount } from "@/lib/utils";
@@ -45,7 +44,6 @@ import type { GroupFacet, Product } from "@/lib/types";
 import { useSessionStore, useWarehouseStore } from "@/features/stores";
 import { Pagination, TextAction } from "@/features/shared";
 import { PageContent, PageHeader } from "@/components/layout";
-import { CarrierPage } from "@/features/carrier/CarrierPage";
 import {
   Badge,
   BulkActionBar,
@@ -80,10 +78,9 @@ import {
   selectedQualityReviews,
   type QualityReviewSnapshot,
 } from "@/features/warehouse/warehouseSelection";
-import { BatchPanel } from "@/features/batch/BatchPanel";
 import { ClaimJobsPanel } from "@/features/warehouse/ClaimJobsPanel";
 
-const PAGE_SIZE_OPTIONS = [24, 48, 72, 100];
+const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500, 1000];
 
 type WarehouseTab = "products" | "batch" | "automation";
 
@@ -97,7 +94,7 @@ export function WarehousePage() {
   // 刷新一下回到商品列表会让人以为进度丢了。
   const [searchParams, setSearchParams] = useSearchParams();
   const tabValue = searchParams.get("tab");
-  const tab: WarehouseTab = !isMember && (tabValue === "batch" || tabValue === "automation")
+  const tab: WarehouseTab = (tabValue === "batch" || (!isMember && tabValue === "automation"))
     ? tabValue
     : "products";
   const setTab = useCallback(
@@ -138,6 +135,7 @@ export function WarehousePage() {
     page: query.page,
     pageSize: query.pageSize,
     q: null,
+    accountId: auth?.accountId ?? null,
     claimAccountId: auth?.accountId ?? null,
     claimed: query.claimed,
     status: query.status,
@@ -185,7 +183,6 @@ export function WarehousePage() {
   const [selectedQualityReviewById, setSelectedQualityReviewById] =
     useState<Record<string, QualityReviewSnapshot>>({});
 
-  const [carrierOpen, setCarrierOpen] = useState(false);
   const claimSharedProduct = useMutation({
     mutationFn: async (ids: string[]) => {
       const claimedIds: string[] = [];
@@ -498,30 +495,7 @@ export function WarehousePage() {
         icon={<RefreshCw className={cn(listQuery.isFetching && "animate-spin")} />}
         onClick={refreshAll}
       />
-      {/* 跨店发布辅助：同一个商品发到不同店铺时，需要一张「载体链接」来重建。
-          这个名字太技术了，改成用户能懂的说法。 */}
-      {!isMember && <Button
-        variant="secondary"
-        size="md"
-        icon={<Link2 />}
-        title="同一个商品要发到不同店铺时，需要先生成载体链接。没有链接时跨店发布会失败。"
-        onClick={() => setCarrierOpen(true)}
-      >
-        跨店发布链接
-      </Button>}
     </>
-  );
-
-  const carrierDialog = (
-    <Dialog
-      open={carrierOpen}
-      onOpenChange={setCarrierOpen}
-      size="lg"
-      title="跨店发布链接"
-      description="同一个商品要发到不同店铺时，需要先生成载体链接。池子空了跨店发布会失败。"
-    >
-      <CarrierPage embedded />
-    </Dialog>
   );
 
   return (
@@ -532,8 +506,6 @@ export function WarehousePage() {
       />
 
       <PageContent width="table">
-        {/* 批次编排不新增侧边栏导航项：作为本页第二个 tab。
-            批次面板卸载时它的自动推进定时器会被清掉（见 BatchPanel 的 useEffect）。 */}
         <Tabs
           value={tab}
           onChange={(value) => setTab(value as WarehouseTab)}
@@ -542,8 +514,8 @@ export function WarehousePage() {
             { value: "products", label: "商品列表", icon: <PackageSearch className="size-3.5" /> },
             ...(!isMember ? [
               { value: "automation", label: "自动化结果", icon: <Zap className="size-3.5" /> },
-              { value: "batch", label: "批次", icon: <ListChecks className="size-3.5" /> },
             ] as const : []),
+            { value: "batch", label: "批次", icon: <ListChecks className="size-3.5" /> },
           ]}
         />
 
@@ -554,10 +526,6 @@ export function WarehousePage() {
             aria-labelledby={tabId("warehouse", "batch")}
           >
             <ClaimJobsPanel accountId={auth?.accountId ?? null} />
-            <BatchPanel
-              accountId={auth?.accountId ?? null}
-              onGoToProducts={() => setTab("products")}
-            />
           </div>
         )}
 
@@ -858,7 +826,6 @@ export function WarehousePage() {
           </div>
         )}
       </PageContent>
-      {carrierDialog}
 
       {/* 浮动批量操作条（design-system §5.8）：只在商品列表 tab 出现，
           看批次时还飘着「已选 12 件」会让人以为选的是批次 */}

@@ -26,13 +26,16 @@ export const queryKeys = {
       site?: string | null;
       sort?: string;
     }) => ["collect-box", params] as const,
-    detail: (detailId: string, shopId: string) => ["collect-box", detailId, shopId] as const,
+    detail: (accountId: string | null | undefined, detailId: string, shopId: string) =>
+      ["collect-box", accountId ?? "current", detailId, shopId] as const,
   },
   warehouse: {
     all: ["warehouse"] as const,
     list: (query: WarehouseQuery) => ["warehouse", query] as const,
-    automationResults: (page: number) => ["warehouse", "automation-results", page] as const,
-    detail: (id: string, includePayload = false) => ["warehouse", id, { includePayload }] as const,
+    automationResults: (accountId: string | null | undefined, page: number) =>
+      ["warehouse", "automation-results", accountId ?? "current", page] as const,
+    detail: (accountId: string | null | undefined, id: string, includePayload = false) =>
+      ["warehouse", accountId ?? "current", id, { includePayload }] as const,
   },
   groups: {
     all: ["groups"] as const,
@@ -44,13 +47,14 @@ export const queryKeys = {
   },
   imageJobs: {
     all: ["image-jobs"] as const,
-    detail: (id: string) => ["image-jobs", id] as const,
-    list: (params: { batchId?: string; productId?: string; status?: string; page?: number }) =>
+    detail: (accountId: string | null | undefined, id: string) =>
+      ["image-jobs", accountId ?? "current", id] as const,
+    list: (params: { accountId?: string | null; batchId?: string; productId?: string; status?: string; page?: number }) =>
       ["image-jobs", "list", params] as const,
   },
   publishLogs: {
     all: ["publish-logs"] as const,
-    list: (params: { page?: number; status?: string; shopId?: string; scheduleId?: string }) =>
+    list: (params: { accountId?: string | null; page?: number; status?: string; shopId?: string; scheduleId?: string }) =>
       ["publish-logs", params] as const,
   },
   schedules: {
@@ -81,6 +85,8 @@ export const queryKeys = {
     /** 整族前缀：失效版本相关的所有变体（不同 refresh 组合）时用它 */
     versionAll: ["system", "version"] as const,
     health: () => ["system", "health"] as const,
+    templates: (accountId?: string | null) =>
+      ["system", "templates", accountId ?? "current"] as const,
   },
   carrier: {
     all: ["carrier"] as const,
@@ -94,7 +100,8 @@ export const queryKeys = {
     all: ["batch"] as const,
     list: (params: { accountId?: string | null; limit?: number } = {}) =>
       ["batch", "list", params] as const,
-    detail: (id: string) => ["batch", "detail", id] as const,
+    detail: (accountId: string | null | undefined, id: string) =>
+      ["batch", "detail", accountId ?? "current", id] as const,
   },
   automationRuns: {
     all: ["automation-runs"] as const,

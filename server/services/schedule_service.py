@@ -26,7 +26,9 @@ from core.constants import (
 )
 from core.utils import clean_text, now_ts
 from models.account import Account
+from models.operator import Operator
 from models.schedule import Schedule
+from services import account_service, operator_service
 from services.account_service import get_account, require_shop
 
 # 放在 import 之后：原来夹在两组 import 中间，ruff 的 E402 会把下面每个 import
@@ -387,8 +389,9 @@ def record_log(db: Session, task: Schedule, summary: Mapping[str, Any],
         db.flush()
 
 
-def list_logs(db: Session, *, task_id: str = "", limit: Any = LOG_LIMIT_DEFAULT
-              ) -> dict[str, Any]:
+def list_logs(db: Session, *, task_id: str = "", account_id: Any = None,
+              limit: Any = LOG_LIMIT_DEFAULT,
+              operator: Operator | None = None) -> dict[str, Any]:
     """执行历史，新的在前。"""
     from models.schedule_log import ScheduleLog
 
@@ -398,8 +401,23 @@ def list_logs(db: Session, *, task_id: str = "", limit: Any = LOG_LIMIT_DEFAULT
         count = LOG_LIMIT_DEFAULT
     count = max(1, min(LOG_LIMIT_MAX, count))
     query = db.query(ScheduleLog)
-    if str(task_id or "").strip():
-        query = query.filter(ScheduleLog.task_id == str(task_id).strip())
+    task_text = str(task_id or "").strip()
+    if task_text:
+        # Authorize through the task's current account before exposing its history.
+        get_schedule(db, task_text, operator=operator)
+        query = query.filter(ScheduleLog.task_id == task_text)
+    if account_id not in (None, ""):
+        text = str(account_id).strip()
+        if text.isdigit():
+            _assert_operator_account_access(db, int(text), operator)
+            query = query.filter(ScheduleLog.account_id == int(text))
+        else:
+            # 无效账号筛选不应退化成“查看全部历史”。
+            query = query.filter(ScheduleLog.account_id == -1)
+    elif not task_text:
+        visible = _visible_account_ids(db, operator)
+        if visible is not None:
+            query = query.filter(ScheduleLog.account_id.in_(visible or [-1]))
     total = query.count()
     rows = (query.order_by(ScheduleLog.at.desc(), ScheduleLog.id.desc())
             .limit(count).all())
@@ -423,13 +441,48 @@ def list_logs(db: Session, *, task_id: str = "", limit: Any = LOG_LIMIT_DEFAULT
 
 
 # --- CRUD -----------------------------------------------------------------
+def _is_global_operator(operator: Operator | None) -> bool:
+    return (operator is None
+            or operator.name == operator_service.CLIENT_OPERATOR_NAME
+            or operator_service.role_of(operator) in {
+                operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER})
+
+
+def _assert_operator_account_access(db: Session, account_id: Any,
+                                    operator: Operator | None) -> None:
+    if operator is None or _is_global_operator(operator):
+        return
+    try:
+        account_pk = int(str(account_id))
+    except (TypeError, ValueError):
+        raise errors.not_found(f"账号 {account_id} 不存在", accountId=str(account_id)) from None
+    if not account_service.has_account_access(db, account_pk, operator.id):
+        raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的定时任务", status=403)
+
+
+def _visible_account_ids(db: Session, operator: Operator | None) -> list[int] | None:
+    if _is_global_operator(operator):
+        return None
+    return [row.id for row in db.query(Account).all()
+            if account_service.has_account_access(db, row.id, operator.id)]
+
+
 def list_schedules(db: Session, *, account_id: Any = None,
-                   enabled: bool | None = None) -> dict[str, Any]:
+                   enabled: bool | None = None,
+                   operator: Operator | None = None) -> dict[str, Any]:
     query = db.query(Schedule)
     if account_id not in (None, ""):
         text = str(account_id)
         if text.isdigit():
+            _assert_operator_account_access(db, int(text), operator)
             query = query.filter(Schedule.account_id == int(text))
+        else:
+            # 无效账号筛选不应退化成“查看全部任务”。
+            query = query.filter(Schedule.account_id == -1)
+    else:
+        visible = _visible_account_ids(db, operator)
+        if visible is not None:
+            query = query.filter(Schedule.account_id.in_(visible or [-1]))
     if enabled is not None:
         query = query.filter(Schedule.enabled.is_(bool(enabled)))
     rows = query.order_by(Schedule.created_at.asc()).all()
@@ -475,10 +528,12 @@ def _scheduler_alive() -> bool:
     return (time.time() - last) < SCAN_INTERVAL_SECONDS * 3
 
 
-def get_schedule(db: Session, task_id: str) -> Schedule:
+def get_schedule(db: Session, task_id: str,
+                 operator: Operator | None = None) -> Schedule:
     row = db.query(Schedule).filter(Schedule.id == str(task_id)).one_or_none()
     if row is None:
         raise errors.not_found(f"定时任务 {task_id} 不存在", taskId=str(task_id))
+    _assert_operator_account_access(db, row.account_id, operator)
     return row
 
 
@@ -505,8 +560,10 @@ def _verify_template(db: Session, template: str, *, required: bool = False) -> N
         raise errors.not_found(f"定价模板「{template}」不存在", template=template)
 
 
-def create(db: Session, payload: Mapping[str, Any]) -> dict[str, Any]:
+def create(db: Session, payload: Mapping[str, Any],
+           operator: Operator | None = None) -> dict[str, Any]:
     fields = normalize(db, payload)
+    _assert_operator_account_access(db, fields["account_id"], operator)
     _verify_template(db, fields["template_name"], required=True)
     _verify_shop(db, fields["account_id"], fields["shop_id"])
     row = Schedule(id=f"task-{uuid.uuid4().hex[:12]}", created_at=now_ts(),
@@ -524,11 +581,13 @@ def create(db: Session, payload: Mapping[str, Any]) -> dict[str, Any]:
                              shop_name=_shop_name_of(db, account, row.shop_id))}
 
 
-def update(db: Session, task_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+def update(db: Session, task_id: str, payload: Mapping[str, Any],
+           operator: Operator | None = None) -> dict[str, Any]:
     if not payload:
         raise errors.validation("请求体不能为空，请至少提供一个要修改的字段")
-    row = get_schedule(db, task_id)
+    row = get_schedule(db, task_id, operator=operator)
     fields = normalize(db, payload, partial=True, existing=row)
+    _assert_operator_account_access(db, fields["account_id"], operator)
     _verify_template(db, fields["template_name"])
     _verify_shop(db, fields["account_id"], fields["shop_id"])
     for key, value in fields.items():
@@ -542,10 +601,11 @@ def update(db: Session, task_id: str, payload: Mapping[str, Any]) -> dict[str, A
                              shop_name=_shop_name_of(db, account, row.shop_id))}
 
 
-def delete(db: Session, task_id: str) -> dict[str, Any]:
+def delete(db: Session, task_id: str,
+           operator: Operator | None = None) -> dict[str, Any]:
     from models.publish_log import PublishLog
 
-    row = get_schedule(db, task_id)
+    row = get_schedule(db, task_id, operator=operator)
     kept = db.query(PublishLog).filter(PublishLog.schedule_id == row.id).update(
         {PublishLog.schedule_id: None}, synchronize_session=False)
     db.delete(row)

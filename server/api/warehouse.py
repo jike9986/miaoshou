@@ -106,7 +106,7 @@ def list_warehouse(
     db: DbSession,
     operator: OperatorDep,
     page: int = Query(default=1, ge=1),
-    pageSize: int = Query(default=24, ge=1, le=100),
+    pageSize: int = Query(default=20, ge=1, le=1000),
     categoryId: str | None = None,
     cid: str | None = None,
     groupId: str | None = None,

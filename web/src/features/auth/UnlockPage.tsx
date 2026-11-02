@@ -5,14 +5,13 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, KeyRound, Link2, Server } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
-import { ApiError, apiErrorMessage, resolveApiBase } from "@/lib/api";
-import { getSavedApiBase, saveApiBase } from "@/lib/serverAddress";
-import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword, useInitializeSoftwareCredentials } from "@/lib/queries";
-import { clearOperator, setOperator, useOperatorIdentity } from "@/lib/operator";
+import { ApiError, apiErrorMessage } from "@/lib/api";
+import { useAuthStatus, useConnectAccount, useShops, useSoftwareLogin, useChangeSoftwarePassword, useInitializeSoftwareCredentials, useSoftwareCredentialsStatus, useRequestPasswordReset, useConfirmPasswordReset } from "@/lib/queries";
+import { setOperator, useOperatorIdentity } from "@/lib/operator";
 import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 import { useSessionStore } from "@/features/stores";
 import {
@@ -191,9 +190,8 @@ export function UnlockPage() {
     }
   }, [connected, navigate, redirectTo, location.state]);
 
-  // 单机模式已关闭软件账号登录：不再因为「没有个人身份」就拦一道登录页，
-  // 直接走下面的妙手绑定表单。SoftwareAccountPanel 保留在代码里，
-  // 需要恢复多人协作时把 featureFlags 的 SHOW_ACCOUNT_UI 打开即可。
+  const identity = useOperatorIdentity();
+  const credentialsStatus = useSoftwareCredentialsStatus(SHOW_ACCOUNT_UI);
 
   const submit = (): void => {
     const next: FormErrors = {};
@@ -261,7 +259,6 @@ export function UnlockPage() {
       <>
         <PageHeader title="连接妙手" />
         <PageContent width="form">
-          <ServerAddressControl />
           {SHOW_ACCOUNT_UI && <SoftwareAccountPanel redirectTo={redirectTo} onBack={() => undefined} />}
           <div className="mt-4 space-y-3">
             <Skeleton className="h-6 w-40" />
@@ -276,7 +273,6 @@ export function UnlockPage() {
     return (
       <div className="grid min-h-0 flex-1 place-items-center bg-canvas p-8">
         <div className="w-full max-w-[520px] space-y-4">
-          <ServerAddressControl />
           <Card padding="normal">
             <ErrorState
               title="读取连接状态失败"
@@ -294,11 +290,25 @@ export function UnlockPage() {
     );
   }
 
+  if (SHOW_ACCOUNT_UI && !identity) {
+    return (
+      <>
+        <PageHeader title="登录" />
+        <PageContent width="form">
+          <SoftwareAccountPanel
+            redirectTo={redirectTo}
+            onBack={() => undefined}
+            allowInitialize={!credentialsStatus.data?.initialized}
+          />
+        </PageContent>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeader title="连接妙手" />
       <PageContent width="form">
-        <ServerAddressControl />
         <motion.div
           variants={reduced ? undefined : fadeUp}
           initial={reduced ? undefined : "hidden"}
@@ -447,54 +457,6 @@ export function UnlockPage() {
   );
 }
 
-function ServerAddressControl() {
-  const [address, setAddress] = useState(() => getSavedApiBase() || resolveApiBase());
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const save = (): void => {
-    setError(null);
-    try {
-      const current = getSavedApiBase();
-      const next = saveApiBase(address);
-      if (current === next) return;
-      setSaving(true);
-      clearOperator();
-      window.location.reload();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "保存服务端地址失败");
-    }
-  };
-
-  return (
-    <Card className="mb-4" padding="normal">
-      <CardTitle className="text-h3">服务端地址</CardTitle>
-      <p className="mt-1 text-[13px] leading-5 text-fg-secondary">
-        当前：{getSavedApiBase() || resolveApiBase() || "本机服务"}
-      </p>
-      <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
-        <Field label="HTTPS 服务地址" className="min-w-0 flex-1" error={error}>
-          <Input
-            type="url"
-            value={address}
-            autoComplete="url"
-            spellCheck={false}
-            placeholder="留空使用默认服务器"
-            invalid={Boolean(error)}
-            onChange={(event) => setAddress(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") save();
-            }}
-          />
-        </Field>
-        <Button variant="secondary" icon={<Server />} loading={saving} onClick={save}>
-          保存地址
-        </Button>
-      </div>
-    </Card>
-  );
-}
-
 function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
   redirectTo: string;
   onBack: () => void;
@@ -509,6 +471,8 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
   const login = useSoftwareLogin();
   const initialize = useInitializeSoftwareCredentials();
   const change = useChangeSoftwarePassword();
+  const requestReset = useRequestPasswordReset();
+  const confirmReset = useConfirmPasswordReset();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
@@ -516,6 +480,11 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
   const [mustChange, setMustChange] = useState(identity?.mustChangePassword ?? false);
   const [error, setError] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetCode, setResetCode] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetSent, setResetSent] = useState(false);
   const [bootstrapUsername, setBootstrapUsername] = useState("");
   const [bootstrapPassword, setBootstrapPassword] = useState("");
   const navigate = useNavigate();
@@ -571,11 +540,45 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
     });
   };
 
+  const submitResetRequest = () => {
+    setError(null);
+    requestReset.mutate({ email: resetEmail.trim() }, {
+      onSuccess: () => setResetSent(true),
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
+  const submitResetConfirm = () => {
+    setError(null);
+    if (resetPassword.length < 8) {
+      setError("新密码至少需要 8 个字符");
+      return;
+    }
+    confirmReset.mutate({ token: resetCode.trim(), newPassword: resetPassword }, {
+      onSuccess: (result) => {
+        setOperator({ token: result.token, id: result.operator.id, name: result.operator.name,
+          role: result.operator.role, mustChangePassword: result.mustChangePassword });
+        void queryClient.invalidateQueries();
+        navigate(redirectTo, { replace: true });
+      },
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
   return (
     <Card className="w-full" padding="normal">
       <CardTitle>{allowInitialize && initializing ? "首次设置老师账号" : mustChange ? "设置新密码" : "软件账号登录"}</CardTitle>
       <div className="mt-4 flex flex-col gap-4">
-        {allowInitialize && initializing ? <>
+        {resetting ? <>
+          <p className="text-[13px] leading-5 text-fg-secondary">通过绑定邮箱接收一次性验证码，验证码 15 分钟内有效。</p>
+          <Field label="绑定邮箱" required htmlFor={usernameId}><Input id={usernameId} type="email" autoComplete="email" value={resetEmail} onChange={(e) => setResetEmail(e.currentTarget.value)} /></Field>
+          {!resetSent ? <Button loading={requestReset.isPending} onClick={submitResetRequest}>发送验证码</Button> : <>
+            <Field label="邮箱验证码" required htmlFor={passwordId}><Input id={passwordId} autoComplete="one-time-code" value={resetCode} onChange={(e) => setResetCode(e.currentTarget.value)} /></Field>
+            <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={resetPassword} onChange={(e) => setResetPassword(e.currentTarget.value)} /></Field>
+            <Button loading={confirmReset.isPending} onClick={submitResetConfirm}>重置密码并登录</Button>
+          </>}
+          <Button variant="ghost" onClick={() => { setResetting(false); setResetSent(false); setError(null); }}>返回登录</Button>
+        </> : allowInitialize && initializing ? <>
           <p className="text-[13px] leading-5 text-fg-secondary">首次接管仅可设置一次。完成后本机令牌失效，后续请使用老师账号登录。</p>
           <Field label="老师用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={bootstrapUsername} onChange={(e) => setBootstrapUsername(e.currentTarget.value)} /></Field>
           <Field label="登录密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="new-password" value={bootstrapPassword} onChange={(e) => setBootstrapPassword(e.currentTarget.value)} /></Field>
@@ -589,6 +592,7 @@ function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false }: {
           <Field label="用户名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="username" value={username} onChange={(e) => setUsername(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
           <Field label="密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
           <div className="flex flex-wrap gap-2"><Button loading={login.isPending} onClick={submitLogin}>登录</Button>{!allowInitialize && <Button variant="ghost" onClick={onBack}>返回妙手绑定</Button>}</div>
+          <Button variant="ghost" onClick={() => { setResetting(true); setError(null); }}>忘记密码</Button>
           {allowInitialize && <Button variant="ghost" onClick={() => setInitializing(true)}>首次设置老师账号</Button>}
         </>}
         {error && <InlineError>{error}</InlineError>}

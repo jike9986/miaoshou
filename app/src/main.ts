@@ -185,12 +185,15 @@ function createWindow(): void {
   if (isDev) {
     void mainWindow.loadURL(DEV_URL);
   } else {
-    // file:// 下没有 Vite 代理，前端需要知道后端的绝对地址（用探测到的真实端口）。
+    // file:// 下没有 Vite 代理，前端需要知道后端的绝对地址。
+    // 关键：这里必须用 bootInfo.apiBase（服务器模式是线上地址），
+    // 不能再硬编码 127.0.0.1 —— 前端 resolveApiBase() 会优先读这个查询参数，
+    // 写死本地地址会让服务器模式的客户端仍然去连本机后端。
     // extraResources 把 web/dist 的内容平铺到了 resources/web/，所以这里不能再拼 dist。
     // 打包后 __dirname 在 app.asar/dist 里，用相对路径会指到 asar 内部，必须走 resourcesPath。
     const indexHtml = path.join(process.resourcesPath, "web", "index.html");
     void mainWindow.loadFile(indexHtml, {
-      query: { apiBase: `http://127.0.0.1:${apiPort}` },
+      query: { apiBase: bootInfo.apiBase },
     });
   }
 }
@@ -217,7 +220,30 @@ const bootInfo: { apiBase: string; token: string; version: string; platform: str
  */
 const REMOTE_API_BASE =
   process.env.AOHUANG_REMOTE_API_BASE?.trim() || "https://aohuang888.com/miaoshou-platform";
+// 客户端令牌：打包时由 scripts/inject-token.mjs 写入 build/client-token.json，
+// 随 resources 一起分发（不进 git）。运行时优先环境变量，其次读该文件。
 const REMOTE_CLIENT_TOKEN = process.env.AOHUANG_REMOTE_CLIENT_TOKEN?.trim() || "";
+
+function readBundledToken(): string {
+  if (REMOTE_CLIENT_TOKEN) return REMOTE_CLIENT_TOKEN;
+  try {
+    // 打包后位于 resources/client-token.json；开发时在 app/build 下
+    const candidates = [
+      path.join(process.resourcesPath || "", "client-token.json"),
+      path.join(__dirname, "..", "build", "client-token.json"),
+    ];
+    for (const file of candidates) {
+      if (!file) continue;
+      if (!fs.existsSync(file)) continue;
+      const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as { token?: string };
+      const value = String(parsed.token || "").trim();
+      if (value) return value;
+    }
+  } catch {
+    /* 读不到就当没有，下面会打日志 */
+  }
+  return "";
+}
 
 /** 是否为「连服务器」模式：没显式要求本地后端时默认走服务器。 */
 function useRemoteServer(): boolean {
@@ -267,9 +293,9 @@ app.whenReady().then(async () => {
   if (useRemoteServer()) {
     // 服务器端模式：不启本地后端，直接连线上；令牌用内置的客户端令牌。
     bootInfo.apiBase = REMOTE_API_BASE.replace(/\/+$/, "");
-    bootInfo.token = REMOTE_CLIENT_TOKEN;
-    if (!REMOTE_CLIENT_TOKEN) {
-      console.error("未内置客户端令牌（AOHUANG_REMOTE_CLIENT_TOKEN），界面会提示未连接");
+    bootInfo.token = readBundledToken();
+    if (!bootInfo.token) {
+      console.error("未内置客户端令牌（client-token.json / AOHUANG_REMOTE_CLIENT_TOKEN），界面会提示未连接");
     }
     createWindow();
     app.on("activate", () => {

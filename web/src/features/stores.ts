@@ -68,7 +68,7 @@ export interface WarehouseState {
 
 export const useWarehouseStore = create<WarehouseState>((set) => ({
   page: 1,
-  pageSize: 24,
+  pageSize: 20,
   sort: "savedDesc",
   searchDraft: "",
   q: "",

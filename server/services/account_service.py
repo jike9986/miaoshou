@@ -17,9 +17,12 @@ from core import errors
 from core.constants import SITE_LANGUAGES, SITE_NAMES
 from core.utils import clean_text, now_ts, redact
 from models.account import Account
+from models.account_binding import AccountBinding
+from models.operator import Operator
 from models.shop import Shop
-from services import crypto
+from services import crypto, operator_service
 from services.miaoshou import MiaoshouClient, MiaoshouError
+from services.operator_service import CLIENT_OPERATOR_NAME
 
 
 def request_operator(db: Session) -> tuple[int, str] | None:
@@ -34,8 +37,39 @@ def _assert_account_access(db: Session, account: Account) -> None:
     context = request_operator(db)
     if context is None or context[1] != "member":
         return
-    if account.owner_operator_id != context[0]:
+    operator = db.query(Operator).filter(Operator.id == context[0]).one_or_none()
+    if operator is not None and operator.name == CLIENT_OPERATOR_NAME:
+        return
+    if not has_account_access(db, account.id, context[0]):
         raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的妙手账号", status=403)
+
+
+def has_account_access(db: Session, account_id: Any, operator_id: int | None) -> bool:
+    """Return whether a member is bound to an account; teachers/admins are global."""
+    if operator_id is None:
+        return False
+    operator = db.query(Operator).filter(Operator.id == operator_id).one_or_none()
+    if operator is None:
+        return False
+    if operator_service.role_of(operator) in {
+            operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}:
+        return True
+    if operator.name == CLIENT_OPERATOR_NAME:
+        return True
+    binding = db.query(AccountBinding.id).filter(
+        AccountBinding.account_id == account_id,
+        AccountBinding.operator_id == operator_id,
+    ).first()
+    if binding is not None:
+        return True
+    # 只为尚未迁移、且该账号完全没有显式绑定记录的旧数据保留回退。
+    # 一旦账号已有 bindings，owner_operator_id 不再是权限来源。
+    has_bindings = db.query(AccountBinding.id).filter(
+        AccountBinding.account_id == account_id).first() is not None
+    return (not has_bindings and db.query(Account.id).filter(
+        Account.id == account_id,
+        Account.owner_operator_id == operator_id,
+    ).first() is not None)
 
 
 # --- 读 -------------------------------------------------------------------
@@ -65,8 +99,10 @@ def require_account(db: Session, account_id: Any = None) -> Account:
         return account
     context = request_operator(db)
     if context is not None and context[1] == "member":
-        account = (db.query(Account).filter(
-            Account.owner_operator_id == context[0], Account.status == "active")
+        visible_ids = [row.id for row in db.query(Account.id).filter(
+            Account.status == "active").all()
+            if has_account_access(db, row.id, context[0])]
+        account = (db.query(Account).filter(Account.id.in_(visible_ids or [-1]))
             .order_by(Account.last_used.desc().nullslast(), Account.id.desc()).first())
         if account is None:
             raise errors.not_connected()
@@ -80,9 +116,13 @@ def require_account(db: Session, account_id: Any = None) -> Account:
 def current_account(db: Session) -> Account | None:
     context = request_operator(db)
     if context is not None and context[1] == "member":
-        return (db.query(Account).filter(
-            Account.owner_operator_id == context[0], Account.status == "active")
-            .order_by(Account.last_used.desc().nullslast(), Account.id.desc()).first())
+        operator = db.query(Operator).filter(Operator.id == context[0]).one_or_none()
+        if operator is None or operator.name != CLIENT_OPERATOR_NAME:
+            visible_ids = [row.id for row in db.query(Account.id).filter(
+                Account.status == "active").all()
+                if has_account_access(db, row.id, context[0])]
+            return (db.query(Account).filter(Account.id.in_(visible_ids or [-1]))
+                .order_by(Account.last_used.desc().nullslast(), Account.id.desc()).first())
     default = (db.query(Account).filter(Account.is_default.is_(True))
                .order_by(Account.id.desc()).first())
     if default is not None:
@@ -332,19 +372,18 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
             raise errors.validation("App Secret 不能为空", field="appSecret")
         if len(app_secret) > 512:
             raise errors.validation("App Secret 长度不能超过 512", field="appSecret")
+        existing = (db.query(Account)
+                    .filter(Account.app_key == app_id)
+                    .order_by(Account.id.asc()).first())
+
         if owner_operator_id is not None:
-            other_owner = (db.query(Account.id)
-                           .filter(Account.app_key == app_id,
-                                   Account.owner_operator_id.isnot(None),
-                                   Account.owner_operator_id != owner_operator_id)
-                           .first())
-            if other_owner is not None:
+            current_binding = (db.query(AccountBinding)
+                               .filter(AccountBinding.operator_id == owner_operator_id)
+                               .one_or_none())
+            if current_binding is not None and (existing is None or
+                                                current_binding.account_id != existing.id):
                 raise errors.AppError(
-                    "CONFLICT", "这个妙手账号已绑定到其他学员", status=409)
-            existing = (db.query(Account)
-                        .filter(Account.app_key == app_id,
-                                Account.owner_operator_id == owner_operator_id)
-                        .order_by(Account.id.asc()).first())
+                    "CONFLICT", "每个学员只能绑定一个妙手账号", status=409)
 
     label = clean_text(name, 60)
     if label and name_taken(db, label, exclude_id=existing.id if existing else None):
@@ -386,7 +425,8 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
     account.site = site or account.site or "MY"
     account.status = "active"
     if owner_operator_id is not None:
-        account.owner_operator_id = owner_operator_id
+        if account.owner_operator_id is None:
+            account.owner_operator_id = owner_operator_id
         account.bound_by_operator_id = bound_by_operator_id
         account.bound_at = stamp
     account.last_verified_at = stamp
@@ -395,6 +435,14 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
     account.shops_synced_at = stamp
     if existing is None:
         account.is_default = db.query(Account).count() == 0
+    # 当前账号由 auth/status 返回给客户端，切换已有账号时也要更新默认项。
+    # 只更新 last_used 会被旧的 is_default 优先级覆盖，导致仓库认领状态、
+    # 店铺和批次仍然指向上一个妙手账号。
+    if account.status == "active":
+        (db.query(Account)
+         .filter(Account.id != account.id, Account.is_default.is_(True))
+         .update({Account.is_default: False}, synchronize_session="fetch"))
+        account.is_default = True
     try:
         db.flush()
     except IntegrityError:
@@ -408,6 +456,18 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
             ) from None
         raise
     sync_shop_table(db, account, shops)
+
+    if owner_operator_id is not None:
+        binding = (db.query(AccountBinding)
+                   .filter(AccountBinding.operator_id == owner_operator_id)
+                   .one_or_none())
+        if binding is None:
+            db.add(AccountBinding(account_id=account.id, operator_id=owner_operator_id,
+                                  bound_by_operator_id=bound_by_operator_id,
+                                  bound_at=stamp))
+        elif binding.account_id != account.id:
+            raise errors.AppError(
+                "CONFLICT", "每个学员只能绑定一个妙手账号", status=409)
 
     scan: dict[str, Any] = {}
     if auto_scan:
@@ -486,7 +546,11 @@ def account_summaries(db: Session) -> list[dict[str, Any]]:
     context = request_operator(db)
     query = db.query(Account)
     if context is not None and context[1] == "member":
-        query = query.filter(Account.owner_operator_id == context[0])
+        operator = db.query(Operator).filter(Operator.id == context[0]).one_or_none()
+        if operator is None or operator.name != CLIENT_OPERATOR_NAME:
+            visible_ids = [row.id for row in db.query(Account.id).all()
+                           if has_account_access(db, row.id, context[0])]
+            query = query.filter(Account.id.in_(visible_ids or [-1]))
     rows = query.order_by(Account.id.asc()).all()
     return [
         {

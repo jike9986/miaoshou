@@ -121,9 +121,10 @@ function Shell() {
 }
 
 function RequireSoftwareLogin() {
-  // 软件账号登录已彻底移除：直接放行，本机令牌（Electron 注入）就是身份。
-  // 不再校验个人身份、不再跳 /unlock、不再因身份失效卡白屏。
-  return <Outlet />;
+  const identity = useOperatorIdentity();
+  const location = useLocation();
+  if (!SHOW_ACCOUNT_UI || identity) return <Outlet />;
+  return <Navigate to="/unlock" replace state={{ from: location.pathname }} />;
 }
 
 /* ------------------------------------------------------------------ *

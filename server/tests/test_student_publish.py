@@ -13,7 +13,8 @@ from models.operator import Operator
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
-from services import operator_service, publish_service, setting_service, warehouse_service
+from services import (account_service, operator_service, publish_service,
+                      setting_service, warehouse_service)
 from services.price_template import DEFAULT_TEMPLATE
 
 
@@ -142,6 +143,42 @@ def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db
                                                     claim_account_id=account.id, claimed=True)
         assert {item["id"] for item in filtered["items"]} == expected
         assert result["stats"]["totalClaimed"] == len(expected)
+
+
+def test_connecting_existing_account_switches_current_account(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    first = Account(name=f"first-{suffix}", app_key=f"key-first-{suffix}",
+                    app_secret_enc=account_service.crypto.encrypt("secret-first"),
+                    is_default=True, shops="[]")
+    second = Account(name=f"second-{suffix}", app_key=f"key-second-{suffix}",
+                     app_secret_enc=account_service.crypto.encrypt("secret-second"),
+                     is_default=False, shops="[]")
+    db.add_all([first, second])
+    db.flush()
+
+    class FakeClient:
+        def __init__(self, *_args):
+            pass
+
+        def shop_list(self, **_kwargs):
+            return {"data": {"shopList": []}}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(account_service, "MiaoshouClient", FakeClient)
+    result = account_service.connect(db, account_id=str(second.id),
+                                     app_id=None, app_secret=None,
+                                     auto_scan=False)
+    db.flush()
+
+    assert result["accountId"] == str(second.id)
+    assert account_service.current_account(db).id == second.id
+    db.refresh(first)
+    db.refresh(second)
+    assert first.is_default is False
+    assert second.is_default is True
 
 
 def test_member_must_explicitly_acknowledge_unverified_specifications(

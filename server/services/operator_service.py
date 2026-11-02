@@ -40,6 +40,7 @@ TOUCH_INTERVAL_SECONDS = 60.0
 # 显示名长度上限，与 models/operator.py 的 String(64) 对齐
 NAME_MAX_LENGTH = 64
 USERNAME_MAX_LENGTH = 64
+EMAIL_MAX_LENGTH = 254
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 128
 TOKEN_HASH_PREFIX = "sha256:"
@@ -56,7 +57,7 @@ VALID_ROLES = {ROLE_ADMIN, ROLE_TEACHER, ROLE_MEMBER}
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     ROLE_ADMIN: {"*"},
     ROLE_TEACHER: {"*"},
-    ROLE_MEMBER: {"warehouse", "words", "product_claim", "publish_claimed", "account.bind"},
+    ROLE_MEMBER: {"warehouse", "words", "product_claim", "publish_claimed", "account.bind", "schedule"},
 }
 
 
@@ -67,6 +68,37 @@ def normalize_username(value: Any) -> str:
             or any(ch.isspace() for ch in normalized)):
         raise errors.validation("用户名长度为 1-64 个字符且不能包含空白", field="username")
     return normalized
+
+
+def normalize_email(value: Any, *, required: bool = True) -> str | None:
+    """Normalize a login/recovery address without storing user-supplied whitespace."""
+    text = str(value or "").strip().casefold()
+    if not text and not required:
+        return None
+    local, separator, domain = text.partition("@")
+    if (not text or len(text) > EMAIL_MAX_LENGTH or not separator or not local
+            or not domain or any(ch.isspace() for ch in text)):
+        raise errors.validation("邮箱格式不正确", field="email")
+    return text
+
+
+def mask_email(value: str | None) -> str | None:
+    """Return a useful status hint while keeping the credential private."""
+    if not value:
+        return None
+    local, _, domain = value.partition("@")
+    if len(local) <= 1:
+        masked_local = "***"
+    elif len(local) == 2:
+        masked_local = f"{local[0]}***"
+    else:
+        masked_local = f"{local[0]}***{local[-1]}"
+    domain_parts = domain.rsplit(".", 1)
+    if len(domain_parts) == 2 and domain_parts[0]:
+        masked_domain = f"{domain_parts[0][0]}***.{domain_parts[1]}"
+    else:
+        masked_domain = "***"
+    return f"{masked_local}@{masked_domain}"
 
 
 def hash_password(password: str) -> str:
@@ -108,6 +140,9 @@ def role_of(operator: Operator) -> str:
     if operator.role and operator.role in VALID_ROLES:
         return operator.role
     return ROLE_MEMBER
+
+
+CLIENT_OPERATOR_NAME = "客户端"
 
 
 def can(operator: Operator, permission: str) -> bool:
@@ -161,9 +196,6 @@ def ensure_default(db: Session) -> Operator:
         row.token = hash_token(secret)
         db.flush()
     return row
-
-
-CLIENT_OPERATOR_NAME = "客户端"
 
 
 def ensure_client(db: Session) -> Operator:
@@ -279,7 +311,7 @@ def _clean_name(name: Any) -> str:
 
 
 def create(db: Session, name: Any, *, is_admin: bool = False,
-           role: str | None = None) -> tuple[Operator, str]:
+           role: str | None = None, email: Any = None) -> tuple[Operator, str]:
     """新建操作员，返回 (操作员, 明文 token)。
 
     明文 token **只在这里返回一次**，之后任何接口都不再给出（包括列表）。
@@ -294,25 +326,51 @@ def create(db: Session, name: Any, *, is_admin: bool = False,
     resolved_role = role if role in VALID_ROLES else (ROLE_ADMIN if is_admin else ROLE_MEMBER)
     token = secrets.token_urlsafe(32)
     row = Operator(name=text, token=hash_token(token), enabled=True,
+                   email=normalize_email(email, required=False),
                    is_admin=(resolved_role == ROLE_ADMIN),
                    role=resolved_role, created_at=now_ts())
     db.add(row)
+    if row.email is not None:
+        clash = (db.query(Operator)
+                 .filter(Operator.email == row.email, Operator.id != row.id)
+                 .one_or_none())
+        if clash is not None:
+            raise errors.validation("邮箱已绑定其他账号", field="email")
     db.flush()
     return row, token
 
 
-def create_student(db: Session, name: Any, username: Any, password: str) -> Operator:
+def _set_email(db: Session, row: Operator, value: Any) -> None:
+    normalized = normalize_email(value, required=False)
+    if normalized is not None:
+        clash = (db.query(Operator)
+                 .filter(Operator.email == normalized, Operator.id != row.id)
+                 .one_or_none())
+        if clash is not None:
+            raise errors.validation("邮箱已绑定其他账号", field="email")
+    row.email = normalized
+
+
+def create_student(db: Session, name: Any, username: Any, password: str,
+                   *, email: Any = None) -> Operator:
     clean_username = normalize_username(username)
     if db.query(Operator).filter(Operator.username == clean_username).one_or_none():
         raise errors.validation("用户名已存在", field="username")
     row = Operator(
         name=_clean_name(name), username=clean_username,
+        email=normalize_email(email, required=False),
         password_hash=hash_password(password),
         token=hash_token(secrets.token_urlsafe(32)),
         enabled=True, is_admin=False, role=ROLE_MEMBER,
         must_change_password=True, created_at=now_ts(),
     )
     db.add(row)
+    if row.email is not None:
+        clash = (db.query(Operator)
+                 .filter(Operator.email == row.email, Operator.id != row.id)
+                 .one_or_none())
+        if clash is not None:
+            raise errors.validation("邮箱已绑定其他账号", field="email")
     db.flush()
     return row
 
@@ -331,7 +389,8 @@ def authenticate_password(db: Session, username: Any, password: str) -> tuple[Op
 
 
 def set_password(db: Session, row: Operator, password: str, *, must_change: bool,
-                 rotate_token: bool = False, username: Any = None) -> str | None:
+                 rotate_token: bool = False, username: Any = None,
+                 email: Any = None) -> str | None:
     if username is not None:
         clean_username = normalize_username(username)
         clash = (db.query(Operator)
@@ -340,6 +399,8 @@ def set_password(db: Session, row: Operator, password: str, *, must_change: bool
         if clash is not None:
             raise errors.validation("用户名已存在", field="username")
         row.username = clean_username
+    if email is not None:
+        _set_email(db, row, email)
     row.password_hash = hash_password(password)
     row.must_change_password = must_change
     if rotate_token:
@@ -370,6 +431,8 @@ def serialize(row: Operator) -> dict[str, Any]:
         "id": str(row.id),
         "name": display_name,
         "username": row.username,
+        "email": mask_email(row.email),
+        "hasEmail": bool(row.email),
         "hasLoginCredentials": bool(row.username and row.password_hash),
         "enabled": bool(row.enabled),
         "admin": bool(row.is_admin),

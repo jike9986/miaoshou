@@ -52,11 +52,13 @@ class StudentCreateRequest(CamelModel):
     name: str = Field(min_length=1, max_length=64)
     username: str = Field(max_length=64)
     password: str = Field(min_length=8, max_length=128)
+    email: str | None = Field(default=None, max_length=254)
 
 
 class PasswordResetRequest(CamelModel):
     password: str = Field(min_length=8, max_length=128)
     username: str | None = Field(default=None, max_length=64)
+    email: str | None = Field(default=None, max_length=254)
 
 
 def _require_teacher_or_admin(operator: Any) -> None:
@@ -72,11 +74,12 @@ def create_student(payload: StudentCreateRequest, db: DbSession,
     _require_teacher_or_admin(operator)
     require_writable(db)
     row = operator_service.create_student(
-        db, payload.name, payload.username, payload.password)
+        db, payload.name, payload.username, payload.password, email=payload.email)
     db.commit()
     audit_service.record(db, operator=operator, action="operator.student_create",
                          target_kind="operator", target_id=str(row.id),
-                         detail={"name": row.name, "role": operator_service.ROLE_MEMBER})
+                         detail={"name": row.name, "role": operator_service.ROLE_MEMBER,
+                                 "hasEmail": bool(row.email)})
     db.commit()
     return {"operator": operator_service.serialize(row)}
 
@@ -92,11 +95,12 @@ def reset_student_password(operator_id: str, payload: PasswordResetRequest,
     require_writable(db)
     operator_service.set_password(
         db, target, payload.password, must_change=True, rotate_token=True,
-        username=payload.username)
+        username=payload.username, email=payload.email)
     db.commit()
     audit_service.record(db, operator=operator, action="operator.student_reset_password",
                          target_kind="operator", target_id=str(target.id),
-                         detail={"role": operator_service.ROLE_MEMBER})
+                         detail={"role": operator_service.ROLE_MEMBER,
+                                 "hasEmail": bool(target.email)})
     db.commit()
     return {"ok": True}
 
@@ -110,6 +114,7 @@ class OperatorCreateRequest(CamelModel):
     admin: bool | None = None
     # admin 是历史兼容值，与 teacher 权限相同；新界面只创建 teacher / member。
     role: str | None = None
+    email: str | None = Field(default=None, max_length=254)
 
 
 class OperatorPatchRequest(CamelModel):
@@ -165,12 +170,12 @@ def create_operator(payload: OperatorCreateRequest, db: DbSession,
     # role 优先于旧 isAdmin 字段；admin 只保留为旧客户端兼容的角色值。
     is_admin = role == operator_service.ROLE_ADMIN
     row, token = operator_service.create(db, payload.name, is_admin=is_admin,
-                                          role=role)
+                                          role=role, email=payload.email)
     db.commit()
     audit_service.record(db, operator=operator, action="operator.create",
                          target_kind="operator", target_id=str(row.id),
                          detail={"name": row.name, "admin": bool(row.is_admin),
-                                 "role": role})
+                                  "role": role, "hasEmail": bool(row.email)})
     db.commit()
     # token 明文只在这一次响应里出现；之后（包括 GET /operators）永不再给
     return {"operator": operator_service.serialize(row), "token": token}

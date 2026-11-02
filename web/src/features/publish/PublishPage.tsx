@@ -7,7 +7,7 @@ import { ExternalLink, RefreshCw, Search, Undo2 } from "lucide-react";
 import { cn, formatCount, formatRelative } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
 import { publishStatus } from "@/features/shared/status";
-import { usePublishLogs, useRefreshPublishLogs } from "@/lib/queries";
+import { useAuthStatus, usePublishLogs, useRefreshPublishLogs } from "@/lib/queries";
 import { usePublishLogsStore } from "@/features/stores";
 import { Pagination } from "@/features/shared";
 import { PageContent, PageHeader } from "@/components/layout";
@@ -41,10 +41,12 @@ export function PublishPage({ embedded = false }: { embedded?: boolean } = {}) {
   const navigate = useNavigate();
   const store = usePublishLogsStore();
   const refreshLogs = useRefreshPublishLogs();
+  const { data: auth } = useAuthStatus(true);
 
   const logsQuery = usePublishLogs({
     page: store.page,
     pageSize: store.pageSize,
+    accountId: auth?.accountId ?? null,
     status: store.status,
   });
 

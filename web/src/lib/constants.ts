@@ -7,7 +7,7 @@ import type { PublishItem, ScheduleFrequency } from "@/lib/types";
 export const LIMITS = {
   pageSize: { min: 1, max: 100, default: 20 },
   collectBoxPageSize: { min: 1, max: 20, default: 20 },
-  warehousePageSize: { min: 1, max: 100, default: 24 },
+  warehousePageSize: { min: 1, max: 1000, default: 20 },
   warehouseBatch: 200,
   imageBatch: 200,
   publishBatch: 200,

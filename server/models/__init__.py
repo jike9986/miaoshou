@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from models.account import Account
+from models.account_binding import AccountBinding
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.batch import Batch, BatchItem
 from models.category import Category
@@ -28,9 +29,11 @@ from models.violation_word import ViolationWord
 from models.audit_log import AuditLog
 from models.operator import Operator
 from models.login_rate_limit import LoginRateLimit
+from models.password_reset_token import PasswordResetToken
 
 __all__ = [
     "Account",
+    "AccountBinding",
     "AutomationRun",
     "AutomationRunItem",
     "Batch",
@@ -50,4 +53,5 @@ __all__ = [
     "AuditLog",
     "Operator",
     "LoginRateLimit",
+    "PasswordResetToken",
 ]

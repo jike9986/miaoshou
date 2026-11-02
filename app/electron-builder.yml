@@ -13,6 +13,10 @@ extraResources:
   # PyInstaller 打好的后端（含 Python 运行时），用户机器无需装 Python
   - from: ../server/dist/server
     to: server
+  # 客户端令牌：由 scripts/inject-token.mjs 在打包前写入。
+  # 服务器端模式下客户端用它免登录，用户装完即用、不出现账号界面。
+  - from: build/client-token.json
+    to: client-token.json
 extraFiles:
   # 启动器必须落在 exe 同级目录（不是 resources/），所以用 extraFiles。
   # 本机必须命令行带 --no-sandbox 才能起窗口，原因见 build/launch.bat 顶部。

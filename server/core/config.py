@@ -91,6 +91,17 @@ class Settings(BaseSettings):
     #   · 不配 → 保持原有「必须个人令牌」的行为，不影响别的部署。
     # 令牌只授予「业务可用」身份，不等同管理员：落到内置「客户端」记录上。
     client_token: str = ""
+    # 登录凭据邮件（SMTP）。默认关闭，部署方通过环境变量显式配置，避免
+    # 把服务器邮箱密码写进代码或数据库。password 只在进程内使用，不会被 API 返回。
+    mail_host: str = ""
+    mail_port: int = 587
+    mail_username: str = ""
+    mail_password: str = ""
+    mail_from: str = ""
+    mail_reply_to: str = ""
+    mail_use_tls: bool = True
+    mail_use_ssl: bool = False
+    mail_timeout: float = 15.0
     # 显式指定监听地址，优先于 shared_mode。
     # 为什么两个都要：shared_mode 是「给人用的语义开关」（开/关），
     # bind_host 是「给部署用的具体值」（只想绑某个内网网卡时用得上）。

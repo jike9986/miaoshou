@@ -173,6 +173,28 @@ export function useInitializeSoftwareCredentials(): UseMutationResult<
   });
 }
 
+export function useRequestPasswordReset(): UseMutationResult<
+  { ok: true },
+  Error,
+  { email: string }
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<{ ok: true }, typeof body>(
+      "/auth/password-reset/request", body),
+  });
+}
+
+export function useConfirmPasswordReset(): UseMutationResult<
+  SoftwareLoginResponse,
+  Error,
+  { token: string; newPassword: string }
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<SoftwareLoginResponse, typeof body>(
+      "/auth/password-reset/confirm", body),
+  });
+}
+
 export function useCreateStudent(): UseMutationResult<StudentCreateResponse, Error, StudentCreateRequest> {
   const client = useQueryClient();
   return useMutation({
@@ -289,13 +311,18 @@ export function useWarehouseList(params: WarehouseListParams): UseQueryResult<Wa
 }
 
 export function useAutomationResults(page: number, enabled = true): UseQueryResult<AutomationResultsResponse> {
+  const { data: auth } = useAuthStatus(enabled);
+  const accountId = auth?.accountId ?? null;
   return useQuery({
-    queryKey: queryKeys.warehouse.automationResults(page),
+    queryKey: queryKeys.warehouse.automationResults(accountId, page),
     queryFn: () => api.get<AutomationResultsResponse>("/warehouse/automation-results", {
-      query: { page, pageSize: 24 },
+      query: { page, pageSize: 24, accountId: accountId ?? undefined },
     }),
     enabled,
-    placeholderData: (previous) => previous,
+    placeholderData: (previous, previousQuery) => {
+      const previousKey = previousQuery?.queryKey as readonly unknown[] | undefined;
+      return previousKey?.[2] === accountId ? previous : undefined;
+    },
   });
 }
 
@@ -318,11 +345,13 @@ export function useProductDetail(
   id: string | null,
   includePayload = false
 ): UseQueryResult<ProductDetailResponse> {
+  const { data: auth } = useAuthStatus(Boolean(id));
+  const accountId = auth?.accountId ?? null;
   return useQuery({
-    queryKey: queryKeys.warehouse.detail(id ?? "none", includePayload),
+    queryKey: queryKeys.warehouse.detail(accountId, id ?? "none", includePayload),
     queryFn: () =>
       api.get<ProductDetailResponse>(`/warehouse/${encodeURIComponent(id ?? "")}`, {
-        query: includePayload ? { includePayload: true } : undefined,
+        query: compactQuery({ includePayload: includePayload ? true : undefined, accountId }),
       }),
     enabled: Boolean(id),
   });
@@ -358,11 +387,8 @@ export function useReviewProductQuality(): UseMutationResult<
       api.patch<{ id: string; revision: number }, ProductQualityReviewRequest>(
         `/warehouse/${encodeURIComponent(id)}/quality-review`, review
       ),
-    onSuccess: (_result, variables) => {
+    onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
-      void client.invalidateQueries({
-        queryKey: queryKeys.warehouse.detail(variables.id, true),
-      });
     },
   });
 }
@@ -701,12 +727,16 @@ export function useCollectBoxList(
           status: params.status,
           keyword: params.keyword,
           shopId: params.shopId,
+          accountId: params.accountId,
           sort: params.sort,
         }),
         timeoutMs: 60_000,
       }),
     enabled,
-    placeholderData: (previous) => previous,
+    placeholderData: (previous, previousQuery) => {
+      const previousParams = previousQuery?.queryKey[1] as { accountId?: string | null } | undefined;
+      return previousParams?.accountId === (params.accountId ?? null) ? previous : undefined;
+    },
   });
 }
 
@@ -714,11 +744,13 @@ export function useCollectBoxDetail(
   detailId: string | null,
   shopId: string | null
 ): UseQueryResult<CollectBoxDetail> {
+  const { data: auth } = useAuthStatus(Boolean(detailId && shopId));
+  const accountId = auth?.accountId ?? null;
   return useQuery({
-    queryKey: queryKeys.collectBox.detail(detailId ?? "none", shopId ?? "none"),
+    queryKey: queryKeys.collectBox.detail(accountId, detailId ?? "none", shopId ?? "none"),
     queryFn: () =>
       api.get<CollectBoxDetail>(`/collect-box/${encodeURIComponent(detailId ?? "")}`, {
-        query: { shopId: shopId ?? "" },
+        query: compactQuery({ shopId, accountId }),
         timeoutMs: 60_000,
       }),
     enabled: Boolean(detailId && shopId),
@@ -1141,10 +1173,13 @@ export function useImageVerifyPaid(): UseMutationResult<
  * 这里返回完整 job，才有「公网链接 / 传到图床」两列可显示。
  */
 export function useImageJobs(
-  params: { productId?: string | null; batchId?: string; status?: string; page?: number; pageSize?: number } = {},
+  params: { accountId?: string | null; productId?: string | null; batchId?: string; status?: string; page?: number; pageSize?: number } = {},
   options: { enabled?: boolean } = {}
 ): UseQueryResult<ImageJobsResponse> {
+  const { data: auth } = useAuthStatus(options.enabled ?? true);
+  const accountId = params.accountId ?? auth?.accountId ?? null;
   const search: QueryParams = {
+    accountId: accountId ?? undefined,
     productId: params.productId ?? undefined,
     batchId: params.batchId,
     status: params.status,
@@ -1153,6 +1188,7 @@ export function useImageJobs(
   };
   return useQuery({
     queryKey: [...queryKeys.imageJobs.list({
+      accountId,
       productId: params.productId ?? undefined,
       batchId: params.batchId,
       status: params.status,
@@ -1277,13 +1313,14 @@ export interface ScheduleLogsResponse {
 
 /** 定时任务执行历史。老版存在 `publish-schedule-log.json` 里，新版此前只有最近一次。 */
 export function useScheduleLogs(
-  params: { taskId?: string; limit?: number } = {}
+  params: { taskId?: string; accountId?: string; limit?: number } = {}
 ): UseQueryResult<ScheduleLogsResponse> {
   const search = new URLSearchParams();
   if (params.taskId) search.set("taskId", params.taskId);
+  if (params.accountId) search.set("accountId", params.accountId);
   search.set("limit", String(params.limit ?? 100));
   return useQuery({
-    queryKey: ["schedule-logs", params.taskId ?? "", params.limit ?? 100],
+    queryKey: ["schedule-logs", params.taskId ?? "", params.accountId ?? "", params.limit ?? 100],
     queryFn: () => api.get<ScheduleLogsResponse>(`/schedules/logs?${search.toString()}`),
     staleTime: 10_000,
   });
@@ -1311,15 +1348,19 @@ export function usePublish(): UseMutationResult<PublishResponse, Error, PublishR
 export interface PublishLogParams {
   page: number;
   pageSize: number;
+  accountId?: string | null;
   /** processing / success / fail / cancel（api.md §8.2） */
   status?: string | null;
   shopId?: string | null;
 }
 
 export function usePublishLogs(params: PublishLogParams): UseQueryResult<PublishLogsResponse> {
+  const { data: auth } = useAuthStatus(true);
+  const accountId = params.accountId ?? auth?.accountId ?? null;
   return useQuery({
     queryKey: [
       ...queryKeys.publishLogs.list({
+        accountId,
         page: params.page,
         status: params.status ?? undefined,
         shopId: params.shopId ?? undefined,
@@ -1331,6 +1372,7 @@ export function usePublishLogs(params: PublishLogParams): UseQueryResult<Publish
         query: compactQuery({
           page: params.page,
           pageSize: params.pageSize,
+          accountId,
           status: params.status,
           shopId: params.shopId,
           refresh: true,
@@ -1543,9 +1585,13 @@ export interface TemplatesResponse {
 }
 
 export function useTemplates(enabled = true): UseQueryResult<TemplatesResponse> {
+  const { data: auth } = useAuthStatus(enabled);
+  const accountId = auth?.accountId ?? null;
   return useQuery({
-    queryKey: ["system", "templates"],
-    queryFn: () => api.get<TemplatesResponse>("/system/templates"),
+    queryKey: queryKeys.system.templates(accountId),
+    queryFn: () => api.get<TemplatesResponse>("/system/templates", {
+      query: compactQuery({ accountId }),
+    }),
     enabled,
     staleTime: 60_000,
   });
@@ -1847,7 +1893,7 @@ export interface BatchListParams {
  * 没缓存就什么都不做，等用户展开时正常拉一次。
  */
 function patchBatchDetail(client: ReturnType<typeof useQueryClient>, batch: Batch): void {
-  client.setQueryData<BatchDetailResponse>(queryKeys.batch.detail(batch.id), (previous) =>
+  client.setQueryData<BatchDetailResponse>(queryKeys.batch.detail(batch.accountId, batch.id), (previous) =>
     previous ? { batch, items: previous.items } : previous
   );
 }
@@ -1872,9 +1918,13 @@ export function useBatch(
   id: string | null,
   options: { enabled?: boolean } = {}
 ): UseQueryResult<BatchDetailResponse> {
+  const { data: auth } = useAuthStatus(Boolean(id));
+  const accountId = auth?.accountId ?? null;
   return useQuery({
-    queryKey: queryKeys.batch.detail(id ?? "none"),
-    queryFn: () => api.get<BatchDetailResponse>(`/batch/${encodeURIComponent(id ?? "")}`),
+    queryKey: queryKeys.batch.detail(accountId, id ?? "none"),
+    queryFn: () => api.get<BatchDetailResponse>(`/batch/${encodeURIComponent(id ?? "")}`, {
+      query: compactQuery({ accountId }),
+    }),
     enabled: Boolean(id) && (options.enabled ?? true),
     refetchOnWindowFocus: false,
   });
@@ -1891,7 +1941,7 @@ export function useCreateBatch(): UseMutationResult<
     mutationFn: (body: BatchCreateRequest) =>
       api.post<BatchDetailResponse, BatchCreateRequest>("/batch", body),
     onSuccess: (result) => {
-      client.setQueryData(queryKeys.batch.detail(result.batch.id), result);
+      client.setQueryData(queryKeys.batch.detail(result.batch.accountId, result.batch.id), result);
       void client.invalidateQueries({ queryKey: queryKeys.batch.all });
     },
   });
@@ -1916,7 +1966,7 @@ export function useBatchStep(): UseMutationResult<BatchStepResponse, Error, stri
       // 只修补「已经展开过」的详情缓存：没查过就别造一个 items 为空的假缓存，
       // 否则展开的瞬间会先闪一屏「没有逐件记录」再被真正的数据替换。
       client.setQueryData<BatchDetailResponse>(
-        queryKeys.batch.detail(result.batch.id),
+        queryKeys.batch.detail(result.batch.accountId, result.batch.id),
         (previous) => {
           if (!previous) return previous;
           return {
@@ -1986,8 +2036,7 @@ export function useDeleteBatch(): UseMutationResult<BatchDeleteResult, Error, st
   const client = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.del<BatchDeleteResult>(`/batch/${encodeURIComponent(id)}`),
-    onSuccess: (_result, id) => {
-      client.removeQueries({ queryKey: queryKeys.batch.detail(id) });
+    onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.batch.all });
     },
   });

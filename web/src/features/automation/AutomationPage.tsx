@@ -476,8 +476,7 @@ export function AutomationPage() {
     specificationResolver.current = resolve;
     setSpecificationPrompt({ productId, title, stale });
     void queryClient.invalidateQueries({
-      queryKey: queryKeys.warehouse.detail(productId, true),
-      exact: true,
+      queryKey: queryKeys.warehouse.all,
     });
   }), [queryClient]);
 

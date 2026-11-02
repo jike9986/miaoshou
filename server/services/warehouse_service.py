@@ -32,6 +32,7 @@ from core.utils import (
     product_key,
 )
 from models.account import Account
+from models.account_binding import AccountBinding
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.category import Category
 from models.group import Group
@@ -199,7 +200,7 @@ def _payload_weight(product: Product) -> float | None:
         value = float(raw)
     except (TypeError, ValueError):
         return None
-    if not (value == value) or value <= 0 or value == float("inf"):
+    if value != value or value <= 0 or value == float("inf"):
         return None
     return round(value, 3)
 
@@ -350,13 +351,23 @@ def _assert_member_account_access(db: Session, account_id: int | None,
                                   operator_id: int | None) -> None:
     if not _is_member(db, operator_id):
         return
-    owned = (account_id is not None and db.query(Account.id).filter(
-        Account.id == account_id,
-        Account.owner_operator_id == operator_id,
-    ).first() is not None)
-    if not owned:
+    from services import account_service
+
+    if not account_service.has_account_access(db, account_id, operator_id):
         raise errors.AppError(errors.FORBIDDEN,
                               "无权访问其他学员的仓库商品", status=403)
+
+
+def _owned_account_ids(db: Session, operator_id: int):
+    """Return accounts visible to one student, with legacy fallback scoped safely."""
+    accounts = db.query(Account.id, Account.owner_operator_id).all()
+    bindings = db.query(AccountBinding.account_id, AccountBinding.operator_id).all()
+    bound_account_ids = {account_id for account_id, _ in bindings}
+    own_bound_ids = {account_id for account_id, owner_id in bindings
+                     if owner_id == operator_id}
+    return [account_id for account_id, legacy_owner_id in accounts
+            if account_id in own_bound_ids
+            or (account_id not in bound_account_ids and legacy_owner_id == operator_id)]
 
 
 def _source_owned_product_ids(db: Session, operator_id: int):
@@ -397,8 +408,7 @@ def _latest_operator_publish_logs(db: Session, operator_id: int | None,
                                   ) -> dict[int, PublishLog]:
     if operator_id is None or not product_ids:
         return {}
-    owned_accounts = db.query(Account.id).filter(
-        Account.owner_operator_id == operator_id)
+    owned_accounts = _owned_account_ids(db, operator_id)
     rows = (db.query(PublishLog)
             .filter(PublishLog.operator_id == operator_id,
                     PublishLog.account_id.in_(owned_accounts),
@@ -416,8 +426,7 @@ def _successful_operator_publish_shops(
 ) -> dict[int, list[str]]:
     if operator_id is None or not product_ids:
         return {}
-    owned_accounts = db.query(Account.id).filter(
-        Account.owner_operator_id == operator_id)
+    owned_accounts = _owned_account_ids(db, operator_id)
     rows = (db.query(PublishLog.product_id, PublishLog.shop_id)
             .filter(PublishLog.operator_id == operator_id,
                     PublishLog.account_id.in_(owned_accounts),
@@ -461,8 +470,8 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                   ) -> dict[str, Any]:
     if page < 1:
         raise errors.validation("页码必须不小于 1", field="page", value=page)
-    if not 1 <= page_size <= 100:
-        raise errors.validation("每页数量必须在 1 到 100 之间", field="pageSize", value=page_size)
+    if not 1 <= page_size <= 1000:
+        raise errors.validation("每页数量必须在 1 到 1000 之间", field="pageSize", value=page_size)
     if sort not in SORTS:
         raise errors.validation("排序方式无效", field="sort", value=sort)
     if status is not None and status not in STATUSES:
@@ -887,8 +896,7 @@ def stats(db: Session, *, account_id: int | None = None,
             base.filter(db.query(PublishLog.id).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
-                PublishLog.account_id.in_(db.query(Account.id).filter(
-                    Account.owner_operator_id == operator_id)),
+                PublishLog.account_id.in_(_owned_account_ids(db, operator_id)),
                 PublishLog.status == "success",
             ).exists()).count() if member_view else
             base.filter(Product.status == "published").count()
@@ -992,8 +1000,7 @@ def detail(db: Session, ident: Any, *, include_payload: bool = False,
     if member_view:
         history_query = history_query.filter(
             PublishLog.operator_id == operator_id,
-            PublishLog.account_id.in_(db.query(Account.id).filter(
-                Account.owner_operator_id == operator_id)),
+            PublishLog.account_id.in_(_owned_account_ids(db, operator_id)),
         )
     history = history_query.order_by(
         PublishLog.requested_at.desc()).limit(20).all()
@@ -1916,7 +1923,7 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
         except (TypeError, ValueError):
             # 取不到重量：按「为空」处理，稍后按品类补默认值
             value = 0.0
-        if not (value == value) or value in (float("inf"), float("-inf")):
+        if value != value or value in (float("inf"), float("-inf")):
             value = 0.0
         # 超过该品类上限（普通鞋 1.2 / 暴走鞋 1.5）：判为数据异常，跳过不处理。
         if value > hard_max:

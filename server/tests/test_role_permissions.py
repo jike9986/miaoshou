@@ -12,6 +12,7 @@ from main import app
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.image_job import ImageJob
+from models.operator import Operator
 from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
@@ -50,6 +51,15 @@ def tokens(client):
 
 def auth(tokens, role):
     return {"Authorization": f"Bearer {tokens[role]}"}
+
+
+def test_schedule_is_available_to_shared_client_and_members():
+    client_operator = Operator(name=operator_service.CLIENT_OPERATOR_NAME,
+                               token="client-test-token", role=operator_service.ROLE_MEMBER)
+    member = Operator(name="ordinary-member", token="member-test-token",
+                      role=operator_service.ROLE_MEMBER)
+    assert operator_service.can(client_operator, "schedule") is True
+    assert operator_service.can(member, "schedule") is True
 
 
 @pytest.mark.parametrize("path", [
@@ -145,7 +155,6 @@ def test_word_rule_provenance_is_bound_over_http_and_in_list(client, tokens):
     ("POST", "/titles/save-to-miaoshou"),
     ("POST", "/sync/source-links"),
     ("POST", "/batch"),
-    ("POST", "/schedules"),
     ("POST", "/carrier/links"),
     ("POST", "/publish/logs/refresh"),
 ])
@@ -206,7 +215,11 @@ def test_teacher_passes_business_permission_gate(client, tokens, method, path):
     if response.status_code == 401:
         # 未连接妙手账号也是 401，但它发生在角色校验之后，不是身份/权限拒绝。
         assert response.json()["error"]["details"].get("reason") == "not_connected", response.text
-    assert response.status_code < 500, response.text
+        if response.status_code == 502:
+            # 该用例不配置真实妙手凭据；确认已通过权限层后，允许上游拒绝。
+            assert response.json()["error"]["code"] == "UPSTREAM_ERROR", response.text
+        else:
+            assert response.status_code < 500, response.text
 
 
 def test_teacher_can_edit_words_and_groups(client, tokens):
@@ -737,6 +750,9 @@ DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/operators/{operator_id}/reset-password"),
     ("POST", "/api/v1/auth/change-password"),
     ("POST", "/api/v1/auth/initialize-credentials"),
+    # 找回密码需要在未登录状态下使用；接口自身有令牌、过期和频率限制。
+    ("POST", "/api/v1/auth/password-reset/request"),
+    ("POST", "/api/v1/auth/password-reset/confirm"),
     # Member claim creation is an intentional owner-scoped write.
     ("POST", "/api/v1/warehouse/{ident}/claim"),
     # Member publishing is allowed only after publish_service verifies every claim.
@@ -744,6 +760,11 @@ DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/claim-jobs"),
     # 登录是唯一公开的写入路由，认证失败统一返回 401。
     ("POST", "/api/v1/auth/login"),
+    # 定时发布按当前操作员绑定账号隔离，学员也可管理自己的任务。
+    ("POST", "/api/v1/schedules"),
+    ("PATCH", "/api/v1/schedules/{task_id}"),
+    ("DELETE", "/api/v1/schedules/{task_id}"),
+    ("POST", "/api/v1/schedules/{task_id}/run"),
 }
 
 

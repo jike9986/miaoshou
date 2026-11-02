@@ -1019,7 +1019,8 @@ function ScheduleFormDrawer({
  *  老版把历史写在 `publish-schedule-log.json` 里；新版此前只留最近一次结果，
  *  出了问题只能去翻服务日志。 */
 function ScheduleHistoryPanel() {
-  const query = useScheduleLogs({ limit: 200 });
+  const { data: auth } = useAuthStatus();
+  const query = useScheduleLogs({ accountId: auth?.accountId ?? undefined, limit: 200 });
   const rows = query.data?.items ?? [];
 
   const statusTone = (status: string): "success" | "warning" | "danger" | "neutral" => {
