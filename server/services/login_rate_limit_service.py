@@ -103,13 +103,22 @@ def reserve(
     return 0
 
 
-def record_failure(ip: str, username: str, *, namespace: str = "login") -> None:
-    """Charge failed authentication to both the source IP and account buckets."""
+def record_failure(
+    ip: str,
+    username: str,
+    *,
+    namespace: str = "login",
+    ip_limit: int = MAX_FAILURES,
+    username_limit: int = MAX_FAILURES,
+) -> None:
+    """Charge failed authentication to source-IP and account buckets."""
     now = time.time()
     cutoff = now - WINDOW_SECONDS
     keys = bucket_keys(ip, username, namespace=namespace)
+    limits = {keys[0]: ip_limit, keys[1]: username_limit}
     with SessionLocal() as db:
         for key in keys:
+            limit = limits[key]
             insert = _session_insert(db).values(
                 bucket_key=key,
                 window_started_at=now,
@@ -120,7 +129,7 @@ def record_failure(ip: str, username: str, *, namespace: str = "login") -> None:
             reset = previous.c.window_started_at <= cutoff
             capped_count = case(
                 (reset, 1),
-                (previous.c.failure_count >= MAX_FAILURES, previous.c.failure_count),
+                (previous.c.failure_count >= limit, previous.c.failure_count),
                 else_=previous.c.failure_count + 1,
             )
             next_count = case((reset, 1), else_=previous.c.failure_count + 1)
@@ -134,7 +143,7 @@ def record_failure(ip: str, username: str, *, namespace: str = "login") -> None:
                     "locked_until": case(
                         (previous.c.locked_until > now, previous.c.locked_until),
                         (reset, 0),
-                        (next_count >= MAX_FAILURES, now + LOCK_SECONDS),
+                        (next_count >= limit, now + LOCK_SECONDS),
                         else_=0,
                     ),
                 },

@@ -20,10 +20,14 @@ from services import login_rate_limit_service
 CODE_TTL_SECONDS = 15 * 60
 MAX_CODE_ATTEMPTS = 5
 CODE_LENGTH = 6
-REGISTRATION_IP_SEND_LIMIT = 30
+EMAIL_CODE_IP_SEND_LIMIT = 30
+EMAIL_CODE_IP_VERIFY_FAILURE_LIMIT = 100
+# Kept for existing callers/tests; the source-IP cap now applies to every code purpose.
+REGISTRATION_IP_SEND_LIMIT = EMAIL_CODE_IP_SEND_LIMIT
 PURPOSE_REGISTRATION = "registration"
 PURPOSE_PASSWORD_RESET = "password_reset"
 PURPOSE_EMAIL_VERIFICATION = "email_verification"
+PURPOSE_EMAIL_LOGIN = "email_login"
 _CLEANUP_INTERVAL_SECONDS = 60 * 60
 _last_cleanup_at = 0.0
 _cleanup_lock = threading.Lock()
@@ -33,11 +37,8 @@ def enforce_send_limit(ip: str, purpose: str, email: str) -> None:
     """Limit code requests by source IP and normalized mailbox."""
     bucket = f"email-code:{purpose}:{email}"
     namespace = f"email-code:{purpose}"
-    ip_limit = (REGISTRATION_IP_SEND_LIMIT
-                if purpose == PURPOSE_REGISTRATION
-                else login_rate_limit_service.MAX_FAILURES)
     retry_after = login_rate_limit_service.reserve(
-        ip, bucket, namespace=namespace, ip_limit=ip_limit)
+        ip, bucket, namespace=namespace, ip_limit=EMAIL_CODE_IP_SEND_LIMIT)
     if retry_after:
         raise errors.AppError(
             errors.RATE_LIMITED, "验证码请求过于频繁，请稍后重试", status=429,

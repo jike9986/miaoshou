@@ -911,6 +911,11 @@ DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/claim-jobs"),
     # 登录是唯一公开的写入路由，认证失败统一返回 401。
     ("POST", "/api/v1/auth/login"),
+    # 邮箱验证码登录与登录同属公开认证入口，不得继承当前个人会话门禁。
+    ("POST", "/api/v1/auth/email-code-login/request"),
+    ("POST", "/api/v1/auth/email-code-login/confirm"),
+    # 首次密码设置只修改当前用户自己的密码，仍须身份和首次修改门禁。
+    ("POST", "/api/v1/auth/complete-password-setup"),
     # 定时发布按当前操作员绑定账号隔离，学员也可管理自己的任务。
     ("POST", "/api/v1/schedules"),
     ("PATCH", "/api/v1/schedules/{task_id}"),
@@ -930,6 +935,43 @@ def _required_permissions(dependant):
             found.add(permission)
         found.update(_required_permissions(dependency))
     return found
+
+
+def _dependency_calls(dependant):
+    calls = set()
+    for dependency in dependant.dependencies:
+        calls.add(dependency.call)
+        calls.update(_dependency_calls(dependency))
+    return calls
+
+
+def _route_for(method, path):
+    matches = [
+        route for route in app.routes
+        if getattr(route, "path", None) == path
+        and method in (getattr(route, "methods", set()) or set())
+    ]
+    assert len(matches) == 1, f"预期恰好一个路由：{method} {path}，实际 {len(matches)}"
+    return matches[0]
+
+
+def test_email_code_login_routes_are_public_but_password_setup_is_guarded():
+    auth_gates = {
+        deps.require_token,
+        deps.current_operator,
+        deps.require_password_change_complete,
+    }
+    for path in (
+        API + "/auth/email-code-login/request",
+        API + "/auth/email-code-login/confirm",
+    ):
+        calls = _dependency_calls(_route_for("POST", path).dependant)
+        assert calls.isdisjoint(auth_gates), f"公开验证码接口意外继承个人会话门禁：{path}"
+
+    setup_calls = _dependency_calls(
+        _route_for("POST", API + "/auth/complete-password-setup").dependant
+    )
+    assert auth_gates <= setup_calls, "首次密码设置必须保留身份与密码修改门禁"
 
 
 def test_every_mutating_route_has_a_permission_above_member():

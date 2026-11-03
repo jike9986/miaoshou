@@ -30,6 +30,15 @@ def client():
     instance.close()
 
 
+@pytest.fixture(autouse=True)
+def configured_email_service(monkeypatch):
+    monkeypatch.setattr(email_service, "get_settings", lambda: types.SimpleNamespace(
+        mail_host="smtp.example.test", mail_from="no-reply@example.test",
+        mail_port=587, mail_username="", mail_password="", mail_reply_to="",
+        mail_use_tls=True, mail_use_ssl=False, mail_timeout=10,
+    ))
+
+
 def _student(email: str, *, verified: bool = True) -> tuple[str, str]:
     suffix = uuid.uuid4().hex[:10]
     username = f"reset-{suffix}"
@@ -131,6 +140,33 @@ def test_password_reset_unknown_email_has_same_public_response(client, monkeypat
     assert len(sent) == 1
     _clear_email_limit(email)
     _clear_email_limit(existing_email)
+
+
+def test_password_reset_request_fails_generically_when_mail_is_unconfigured(
+        client, monkeypatch):
+    known_email = f"known-{uuid.uuid4().hex[:10]}@example.com"
+    _student(known_email)
+    unknown_email = f"missing-{uuid.uuid4().hex[:10]}@example.com"
+    monkeypatch.setattr(email_service, "get_settings", lambda: types.SimpleNamespace(
+        mail_host="", mail_from=""))
+
+    responses = [client.post(API + "/auth/password-reset/request", json={
+        "email": email,
+    }) for email in (known_email, unknown_email)]
+
+    assert [response.status_code for response in responses] == [503, 503]
+    assert [response.json()["error"]["code"] for response in responses] == [
+        "MAIL_NOT_CONFIGURED", "MAIL_NOT_CONFIGURED"]
+    assert [response.json()["error"]["message"] for response in responses][0] == \
+        responses[1].json()["error"]["message"]
+    assert all(response.json()["error"]["code"] == "MAIL_NOT_CONFIGURED"
+               for response in responses)
+    with SessionLocal() as db:
+        assert db.query(EmailVerificationCode).filter(
+            EmailVerificationCode.purpose == email_code_service.PURPOSE_PASSWORD_RESET,
+            EmailVerificationCode.email.in_([known_email, unknown_email]),
+            EmailVerificationCode.used_at.is_(None),
+        ).count() == 0
 
 
 def test_password_reset_does_not_deliver_to_unverified_operator_email(client, monkeypatch):
@@ -271,12 +307,44 @@ def test_wrong_code_attempt_limit_is_persisted(client, monkeypatch):
         "email": email, "code": sent["code"],
         "newPassword": "changed-pass-456",
     })
-    assert correct_after_limit.status_code == 400
+    assert correct_after_limit.status_code == 429
     with SessionLocal() as db:
         stored = db.query(EmailVerificationCode).filter_by(
             purpose=email_code_service.PURPOSE_PASSWORD_RESET, email=email).one()
         assert stored.failed_attempts == email_code_service.MAX_CODE_ATTEMPTS
         assert stored.used_at is not None
+    _clear_email_limit(email)
+
+
+def test_resending_password_reset_code_does_not_bypass_verification_limit(
+        client, monkeypatch):
+    email = f"resend-limit-{uuid.uuid4().hex[:10]}@example.com"
+    _student(email)
+    sent: dict[str, str] = {}
+    monkeypatch.setattr(email_service, "send_verification_code",
+                        lambda **kwargs: sent.update(kwargs))
+    requested = client.post(API + "/auth/password-reset/request", json={"email": email})
+    assert requested.status_code == 202, requested.text
+    wrong_code = "000000" if sent["code"] != "000000" else "000001"
+    for _ in range(email_code_service.MAX_CODE_ATTEMPTS):
+        invalid = client.post(API + "/auth/password-reset/confirm", json={
+            "email": email, "code": wrong_code, "newPassword": "changed-pass-456",
+        })
+        assert invalid.status_code == 400, invalid.text
+
+    _clear_email_limit(email)
+    resent = client.post(API + "/auth/password-reset/request", json={"email": email})
+    assert resent.status_code == 202, resent.text
+    blocked = client.post(API + "/auth/password-reset/confirm", json={
+        "email": email, "code": sent["code"], "newPassword": "changed-pass-456",
+    })
+    assert blocked.status_code == 429, blocked.text
+    with SessionLocal() as db:
+        fresh_code = db.query(EmailVerificationCode).filter_by(
+            purpose=email_code_service.PURPOSE_PASSWORD_RESET, email=email).filter(
+                EmailVerificationCode.used_at.is_(None)).one()
+        assert fresh_code.used_at is None
+        assert fresh_code.failed_attempts == 0
     _clear_email_limit(email)
 
 
@@ -362,11 +430,17 @@ def test_registration_code_ip_limit_blocks_after_thirty_requests(
     assert len(sent) == email_code_service.REGISTRATION_IP_SEND_LIMIT
 
 
-def test_password_reset_keeps_five_request_ip_limit(client):
+def test_password_reset_allows_multiple_mailboxes_from_one_ip(client):
     namespace = f"email-code:{email_code_service.PURPOSE_PASSWORD_RESET}"
     login_rate_limit_service.clear_ip("testclient", namespace=namespace)
     try:
-        for index in range(login_rate_limit_service.MAX_FAILURES):
+        for index in range(6):
+            response = client.post(API + "/auth/password-reset/request", json={
+                "email": f"reset-ip-{index}-{uuid.uuid4().hex[:8]}@example.com",
+            })
+            assert response.status_code == 202, response.text
+
+        for index in range(6, email_code_service.EMAIL_CODE_IP_SEND_LIMIT):
             response = client.post(API + "/auth/password-reset/request", json={
                 "email": f"reset-ip-{index}-{uuid.uuid4().hex[:8]}@example.com",
             })

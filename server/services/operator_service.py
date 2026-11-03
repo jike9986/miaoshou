@@ -490,6 +490,24 @@ def authenticate_password(db: Session, username: Any, password: str) -> tuple[Op
     return row, token
 
 
+def authenticate_verified_email(db: Session, email: Any) -> tuple[Operator, str] | None:
+    """Issue a session only for an enabled account with a verified mailbox."""
+    try:
+        normalized_email = normalize_deliverable_email(email)
+    except errors.AppError:
+        return None
+    row = (db.query(Operator)
+           .filter(func.lower(func.trim(Operator.email)) == normalized_email,
+                   Operator.enabled.is_(True),
+                   Operator.email_verified.is_(True))
+           .one_or_none())
+    if row is None:
+        return None
+    token = secrets.token_urlsafe(32)
+    row.token = hash_token(token)
+    return row, token
+
+
 def set_password(db: Session, row: Operator, password: str, *, must_change: bool,
                  rotate_token: bool = False, username: Any = None,
                  email: Any = None) -> str | None:

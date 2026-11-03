@@ -21,6 +21,11 @@ def configured() -> bool:
     return bool(settings.mail_host.strip() and settings.mail_from.strip())
 
 
+def ensure_configured() -> None:
+    """Fail synchronously when account email delivery is unavailable."""
+    _validate_settings(get_settings())
+
+
 def status() -> dict[str, object]:
     """Return non-secret delivery settings for local diagnostics."""
     settings = get_settings()
@@ -48,6 +53,7 @@ def send_verification_code(*, recipient: str, display_name: str, code: str,
         "registration": "完成邮箱注册",
         "email_verification": "验证并绑定邮箱",
         "password_reset": "重置登录密码",
+        "email_login": "登录账号",
     }.get(purpose, "完成账号验证")
     message = EmailMessage()
     sender = settings.mail_from.strip()

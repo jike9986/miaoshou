@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -24,6 +25,15 @@ def client():
     instance = TestClient(app, raise_server_exceptions=False)
     yield instance
     instance.close()
+
+
+@pytest.fixture(autouse=True)
+def configured_email_service(monkeypatch):
+    monkeypatch.setattr(email_service, "get_settings", lambda: SimpleNamespace(
+        mail_host="smtp.example.test", mail_from="no-reply@example.test",
+        mail_port=587, mail_username="", mail_password="", mail_reply_to="",
+        mail_use_tls=True, mail_use_ssl=False, mail_timeout=10,
+    ))
 
 
 def _identity(*, email: str | None = None) -> tuple[int, str]:

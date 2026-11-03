@@ -223,7 +223,10 @@ OperatorDep = Annotated[Operator, Depends(current_operator)]
 def require_password_change_complete(request: Request,
                                     operator: OperatorDep) -> Operator:
     if (operator.must_change_password
-            and request.url.path != "/api/v1/auth/change-password"):
+            and request.url.path not in {
+                "/api/v1/auth/change-password",
+                "/api/v1/auth/complete-password-setup",
+            }):
         raise errors.AppError(
             "PASSWORD_CHANGE_REQUIRED", "首次登录请先修改密码", status=403,
             details={"reason": "password_change_required"})

@@ -38,6 +38,7 @@ from services import (
     audit_service,
     email_code_service,
     email_service,
+    login_rate_limit_service,
     operator_service,
     setting_service,
 )
@@ -80,12 +81,20 @@ class EmailCodeRequest(BaseModel):
     email: str = Field(min_length=3, max_length=254)
 
 
+class EmailCodeLoginConfirmRequest(EmailCodeRequest):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 class EmailCodeConfirmRequest(EmailCodeRequest):
     code: str = Field(pattern=r"^\d{6}$")
 
 
 class ChangePasswordRequest(BaseModel):
     currentPassword: str = Field(max_length=128)
+    newPassword: str = Field(min_length=8, max_length=128)
+
+
+class CompletePasswordSetupRequest(BaseModel):
     newPassword: str = Field(min_length=8, max_length=128)
 
 
@@ -102,6 +111,25 @@ class PasswordResetConfirmRequest(BaseModel):
 class InitializeCredentialsRequest(BaseModel):
     username: str = Field(max_length=64)
     password: str = Field(min_length=8, max_length=128)
+
+
+def _check_email_code_verify_limit(ip: str, email: str, purpose: str) -> str:
+    namespace = f"email-code-{purpose}-verify"
+    retry_after = login_rate_limit_service.blocked_retry_after(
+        ip, email, namespace=namespace)
+    if retry_after:
+        raise errors.AppError(
+            errors.RATE_LIMITED, "验证码验证失败次数过多，请稍后重试", status=429,
+            details={"retryAfterSeconds": retry_after})
+    return namespace
+
+
+def _record_email_code_verify_failure(ip: str, email: str, *, namespace: str) -> None:
+    login_rate_limit_service.record_failure(
+        ip, email, namespace=namespace,
+        ip_limit=email_code_service.EMAIL_CODE_IP_VERIFY_FAILURE_LIMIT,
+        username_limit=email_code_service.MAX_CODE_ATTEMPTS,
+    )
 
 
 @login_router.post("/login")
@@ -135,30 +163,115 @@ def login(payload: LoginRequest, request: Request, db: DbSession) -> dict[str, A
             "token": token, "mustChangePassword": operator.must_change_password}
 
 
+@login_router.post("/email-code-login/request", status_code=202)
+def request_email_code_login(payload: EmailCodeRequest, request: Request,
+                             db: DbSession,
+                             background_tasks: BackgroundTasks) -> dict[str, bool]:
+    """Request a sign-in code without disclosing whether an address can log in."""
+    email = operator_service.normalize_deliverable_email(payload.email)
+    email_service.ensure_configured()
+    ip = request.client.host if request.client else "unknown"
+    purpose = email_code_service.PURPOSE_EMAIL_LOGIN
+    email_code_service.enforce_send_limit(ip, purpose, email)
+
+    target = (db.query(Operator)
+              .filter(func.lower(func.trim(Operator.email)) == email,
+                      Operator.enabled.is_(True),
+                      Operator.email_verified.is_(True))
+              .one_or_none())
+    code = email_code_service.issue(db, purpose=purpose, email=email)
+    db.commit()
+    if target is not None:
+        background_tasks.add_task(
+            _deliver_email_login_code,
+            recipient=email,
+            display_name=target.name,
+            code=code,
+        )
+    return {"ok": True}
+
+
+@login_router.post("/email-code-login/confirm")
+def confirm_email_code_login(payload: EmailCodeLoginConfirmRequest,
+                             request: Request,
+                             db: DbSession) -> dict[str, Any]:
+    """Consume a one-time login code and rotate the account's active session."""
+    email = operator_service.normalize_deliverable_email(payload.email)
+    purpose = email_code_service.PURPOSE_EMAIL_LOGIN
+    invalid_code = errors.AppError("AUTH_FAILED", "邮箱或验证码错误", status=401)
+    ip = request.client.host if request.client else "unknown"
+    verify_namespace = _check_email_code_verify_limit(ip, email, purpose)
+    if not email_code_service.consume(
+            db, purpose=purpose, email=email, code=payload.code):
+        db.commit()
+        _record_email_code_verify_failure(ip, email, namespace=verify_namespace)
+        raise invalid_code
+    result = operator_service.authenticate_verified_email(db, email)
+    if result is None:
+        db.commit()
+        _record_email_code_verify_failure(ip, email, namespace=verify_namespace)
+        raise invalid_code
+    operator, token = result
+    db.commit()
+    login_rate_limit_service.clear_username(email, namespace=verify_namespace)
+    return {
+        "operator": {
+            "id": str(operator.id),
+            "name": operator_service.serialize(operator)["name"],
+            "role": (operator_service.ROLE_ADMIN
+                     if operator_service.is_superadmin(db, operator)
+                     else operator_service.role_of(operator)),
+        },
+        "token": token,
+        "mustChangePassword": operator.must_change_password,
+    }
+
+
+def _deliver_email_login_code(*, recipient: str, display_name: str,
+                              code: str) -> None:
+    """Deliver sign-in mail without exposing delivery or account status publicly."""
+    try:
+        email_service.send_verification_code(
+            recipient=recipient,
+            display_name=display_name,
+            code=code,
+            purpose=email_code_service.PURPOSE_EMAIL_LOGIN,
+            expires_minutes=email_code_service.CODE_TTL_SECONDS // 60,
+        )
+    except Exception as exc:  # pragma: no cover - exercised by background runner
+        logger.warning("email login code delivery failed: %s", type(exc).__name__)
+
+
 @login_router.post("/register", status_code=201)
-def register(payload: RegisterRequest, db: DbSession) -> dict[str, Any]:
+def register(payload: RegisterRequest, request: Request,
+             db: DbSession) -> dict[str, Any]:
     """Public email registration creates a least-privileged student account."""
     email = operator_service.normalize_deliverable_email(payload.email)
+    ip = request.client.host if request.client else "unknown"
+    verify_namespace = _check_email_code_verify_limit(
+        ip, email, email_code_service.PURPOSE_REGISTRATION)
     invalid_code = errors.AppError(
         "AUTH_FAILED", "邮箱验证码无效或已过期", status=400)
     if not email_code_service.consume(
             db, purpose=email_code_service.PURPOSE_REGISTRATION,
             email=email, code=payload.code):
         db.commit()  # Persist invalid-code attempts and the five-attempt cap.
+        _record_email_code_verify_failure(ip, email, namespace=verify_namespace)
         raise invalid_code
-
     # Consume a valid code before checking mailbox ownership so a duplicate
     # registration has the same public response as an invalid code.
     if (db.query(Operator.id)
             .filter(func.lower(func.trim(Operator.email)) == email)
             .first() is not None):
         db.commit()
+        login_rate_limit_service.clear_username(email, namespace=verify_namespace)
         raise invalid_code
 
     try:
         operator, token = operator_service.register_email_account(
             db, payload.name, email, payload.password)
         db.commit()
+        login_rate_limit_service.clear_username(email, namespace=verify_namespace)
     except errors.AppError as exc:
         if exc.code != "CONFLICT":
             raise
@@ -219,6 +332,7 @@ def request_email_verification(payload: EmailCodeRequest, request: Request,
                                background_tasks: BackgroundTasks) -> dict[str, bool]:
     """Request a code to bind or verify the signed-in user's recovery mailbox."""
     email = operator_service.normalize_deliverable_email(payload.email)
+    email_service.ensure_configured()
     ip = request.client.host if request.client else "unknown"
     email_code_service.enforce_send_limit(
         ip, email_code_service.PURPOSE_EMAIL_VERIFICATION, email)
@@ -246,15 +360,19 @@ def request_email_verification(payload: EmailCodeRequest, request: Request,
 
 @router.post("/email-verification/confirm")
 def confirm_email_verification(payload: EmailCodeConfirmRequest,
+                               request: Request,
                                db: DbSession,
                                operator: OperatorDep) -> dict[str, Any]:
     email = operator_service.normalize_deliverable_email(payload.email)
+    ip = request.client.host if request.client else "unknown"
+    verify_namespace = _check_email_code_verify_limit(
+        ip, email, email_code_service.PURPOSE_EMAIL_VERIFICATION)
     if not email_code_service.consume(
             db, purpose=email_code_service.PURPOSE_EMAIL_VERIFICATION,
             email=email, code=payload.code):
         db.commit()
+        _record_email_code_verify_failure(ip, email, namespace=verify_namespace)
         raise errors.AppError("AUTH_FAILED", "邮箱验证码无效或已过期", status=400)
-
     # Consume a correct code before checking ownership so that a mailbox already
     # bound elsewhere is indistinguishable from an invalid/expired challenge.
     if (db.query(Operator.id)
@@ -271,6 +389,7 @@ def confirm_email_verification(payload: EmailCodeConfirmRequest,
     except IntegrityError:
         db.rollback()
         raise errors.AppError("AUTH_FAILED", "邮箱验证码无效或已过期", status=400) from None
+    login_rate_limit_service.clear_username(email, namespace=verify_namespace)
     return {"ok": True, "email": operator_service.mask_email(email),
             "emailVerified": True}
 
@@ -297,6 +416,7 @@ def request_password_reset(payload: PasswordResetRequest, request: Request,
                            background_tasks: BackgroundTasks) -> dict[str, bool]:
     """Send a short-lived recovery code without exposing account existence."""
     email = operator_service.normalize_deliverable_email(payload.email)
+    email_service.ensure_configured()
     ip = request.client.host if request.client else "unknown"
     email_code_service.enforce_send_limit(
         ip, email_code_service.PURPOSE_PASSWORD_RESET, email)
@@ -344,14 +464,19 @@ def _deliver_password_reset_code(*, recipient: str, display_name: str,
 
 @login_router.post("/password-reset/confirm")
 def confirm_password_reset(payload: PasswordResetConfirmRequest,
+                           request: Request,
                            db: DbSession) -> dict[str, Any]:
     from core.errors import AppError
 
     email = operator_service.normalize_deliverable_email(payload.email)
+    ip = request.client.host if request.client else "unknown"
+    verify_namespace = _check_email_code_verify_limit(
+        ip, email, email_code_service.PURPOSE_PASSWORD_RESET)
     if not email_code_service.consume(
             db, purpose=email_code_service.PURPOSE_PASSWORD_RESET,
             email=email, code=payload.code):
         db.commit()  # Persist invalid-code attempts and the five-attempt cap.
+        _record_email_code_verify_failure(ip, email, namespace=verify_namespace)
         raise AppError("AUTH_FAILED", "找回密码验证码无效或已过期", status=400)
     target = (db.query(Operator)
               .filter(func.lower(func.trim(Operator.email)) == email,
@@ -360,10 +485,12 @@ def confirm_password_reset(payload: PasswordResetConfirmRequest,
               .one_or_none())
     if target is None:
         db.commit()
+        _record_email_code_verify_failure(ip, email, namespace=verify_namespace)
         raise AppError("AUTH_FAILED", "找回密码验证码无效或已过期", status=400)
     token = operator_service.set_password(
         db, target, payload.newPassword, must_change=False, rotate_token=True)
     db.commit()
+    login_rate_limit_service.clear_username(email, namespace=verify_namespace)
     return {
         "ok": True,
         "operator": {"id": str(target.id),
@@ -393,6 +520,19 @@ def change_password(payload: ChangePasswordRequest, db: DbSession,
     if not operator_service.verify_password(payload.currentPassword, operator.password_hash):
         from core.errors import AppError
         raise AppError("AUTH_FAILED", "当前密码错误", status=401)
+    token = operator_service.set_password(
+        db, operator, payload.newPassword, must_change=False, rotate_token=True)
+    db.commit()
+    return {"ok": True, "token": token, "mustChangePassword": False}
+
+
+@router.post("/complete-password-setup")
+def complete_password_setup(payload: CompletePasswordSetupRequest,
+                            db: DbSession,
+                            operator: OperatorDep) -> dict[str, Any]:
+    """Allow a newly created account to set its first password without the temporary one."""
+    if not operator.must_change_password:
+        raise errors.AppError("CONFLICT", "账号不需要设置初始密码", status=409)
     token = operator_service.set_password(
         db, operator, payload.newPassword, must_change=False, rotate_token=True)
     db.commit()
@@ -495,11 +635,7 @@ def connect(payload: ConnectRequest, db: DbSession,
         if role not in {operator_service.ROLE_TEACHER, operator_service.ROLE_ADMIN}:
             raise errors.AppError(errors.FORBIDDEN, "无权绑定妙手账号", status=403)
         if payload.studentOperatorId in (None, ""):
-            # 单机模式（默认，未开共享部署）：这台机器没有「学员/老师」之分，
-            # 操作者本人就是账号所有者，不需要再指定「代绑给哪个学员」。
-            # 共享部署才要求教师代绑时必须指明学员，否则账号会挂到老师名下。
-            if get_settings().shared_mode:
-                raise errors.validation("代绑时必须指定学员账号", field="studentOperatorId")
+            # 未选择代绑学员时绑定给本人；共享部署同样允许老师使用自己的账号。
             owner = operator
         else:
             owner = operator_service.get(db, payload.studentOperatorId)

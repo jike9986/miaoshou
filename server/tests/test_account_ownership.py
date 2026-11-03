@@ -481,10 +481,10 @@ def test_member_bootstrap_hides_other_members_accounts_and_batches(client, ident
             db.close()
 
 
-def test_teacher_must_target_a_student_to_bind_key(client, identities, monkeypatch):
-    """共享部署（多人共用）下：教师代绑必须指明学员，否则账号会挂到老师名下。"""
+@pytest.mark.parametrize("role", [operator_service.ROLE_TEACHER, operator_service.ROLE_ADMIN])
+def test_staff_can_bind_own_key_in_shared_mode(client, monkeypatch, role):
+    """Teachers and admins may bind themselves, with the same one-key limit."""
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
-    # 共享部署才要求代绑指明学员；单机模式（默认）操作者本人即账号所有者。
     from core.config import get_settings as _gs
     real = _gs()
 
@@ -497,15 +497,42 @@ def test_teacher_must_target_a_student_to_bind_key(client, identities, monkeypat
     import api.auth as auth_module
     monkeypatch.setattr(auth_module, "get_settings", lambda: _Shared())
 
+    suffix = uuid.uuid4().hex[:8]
+    db = SessionLocal()
+    try:
+        owner, token = operator_service.create(db, f"self-bind-{role}-{suffix}", role=role)
+        db.commit()
+        owner_id = owner.id
+    finally:
+        db.close()
+
     response = client.post(
         API + "/auth/connect",
-        json={"appId": "key-teacher", "appSecret": "secret-teacher",
+        json={"appId": f"key-staff-{suffix}", "appSecret": "secret-staff",
               "autoScan": False},
-        headers=_headers(identities["admin_token"]),
+        headers=_headers(token),
     )
-    assert response.status_code == 400, response.text
-    assert response.json()["error"]["details"].get("field") == "studentOperatorId"
+    assert response.status_code == 200, response.text
+    assert response.json()["ownerOperatorId"] == str(owner_id)
+    assert response.json()["boundByOperatorId"] == str(owner_id)
 
+    second = client.post(
+        API + "/auth/connect",
+        json={"appId": f"key-staff-extra-{suffix}", "appSecret": "secret-extra",
+              "autoScan": False},
+        headers=_headers(token),
+    )
+    assert second.status_code == 409, second.text
+    db = SessionLocal()
+    try:
+        bindings = db.query(AccountBinding).filter(AccountBinding.operator_id == owner_id).all()
+        assert [row.account_id for row in bindings] == [int(response.json()["accountId"])]
+    finally:
+        db.close()
+
+
+def test_teacher_can_bind_key_for_student(client, identities, monkeypatch):
+    monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
     bound = client.post(
         API + "/auth/connect",
         json={"appId": "key-assisted", "appSecret": "secret-assisted",
