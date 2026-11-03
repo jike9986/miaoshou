@@ -154,7 +154,8 @@ def _already_published_blocker(db: Session, *, account: Account,
 
 
 def _require_started_automation_publish(db: Session, *, entries: list[dict[str, Any]],
-                                        account: Account, target_shop_id: str) -> None:
+                                        account: Account, target_shop_id: str,
+                                        operator_id: int | None = None) -> None:
     """Automation results can only publish through a started, matching run item."""
     products = [entry["product"] for entry in entries
                 if isinstance(entry.get("product"), Product)
@@ -169,7 +170,7 @@ def _require_started_automation_publish(db: Session, *, entries: list[dict[str, 
             "CONFLICT", "自动化商品没有与当前版本匹配的妙手草稿读回核验", status=409)
 
     product_ids = {product.id for product in products}
-    rows = (db.query(AutomationRunItem, AutomationRun)
+    query = (db.query(AutomationRunItem, AutomationRun)
             .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
             .filter(
                 AutomationRunItem.product_id.in_(product_ids),
@@ -177,7 +178,10 @@ def _require_started_automation_publish(db: Session, *, entries: list[dict[str, 
                 AutomationRunItem.publish_status == "running",
                 AutomationRun.account_id == account.id,
                 AutomationRun.shop_id == str(target_shop_id),
-            ).all())
+            ))
+    if operator_id is not None:
+        query = query.filter(AutomationRun.owner_operator_id == operator_id)
+    rows = query.all()
     eligible = {
         item.product_id: run for item, run in rows
         if isinstance(run.settings, dict) and run.settings.get("publishEnabled") is True
@@ -630,7 +634,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             _log_operator_id: int | None = None) -> dict[str, Any]:
     """POST /publish。发布不可撤销，所有守卫都在这里。
 
-    学员发布必须由已认领的仓库商品触发，并始终走个人店铺载体流程。
+    学员可发布本人已认领的成品，或本人匹配自动化任务已核验的处理结果。
     定时任务（schedule_service.run_due）不传 operator_id，不属于学员发布。
     """
     if payload.get("confirm") is not True:
@@ -671,8 +675,10 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         operator_name = warehouse_service.operator_names(db).get(int(log_operator_id), "")
     entries = _resolve_items(db, items)
     _require_started_automation_publish(
-        db, entries=entries, account=account, target_shop_id=target_shop_id)
+        db, entries=entries, account=account, target_shop_id=target_shop_id,
+        operator_id=operator_id)
     claim_only = payload.get("claimOnly") is True
+    member_automation_publish = False
     if member_publish:
         if claim_only:
             raise errors.AppError(errors.FORBIDDEN,
@@ -681,7 +687,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         if any(not isinstance(item, Mapping) or item.get("warehouseId") in (None, "")
                for item in items):
             raise errors.AppError(errors.FORBIDDEN,
-                                  "学员发布必须选择已认领的成品仓库商品",
+                                  "学员发布必须选择已认领成品或本人自动化处理结果",
                                   status=403)
         product_ids = [entry["product"].id for entry in entries
                        if isinstance(entry.get("product"), Product)]
@@ -691,10 +697,18 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                           ProductClaim.product_id.in_(product_ids)).all()
                   if product_ids else [])
         claimed_ids = {row[0] for row in claims}
-        if len(claimed_ids) != len(entries):
+        automation_ids = {entry["product"].id for entry in entries
+                          if isinstance(entry.get("product"), Product)
+                          and entry["product"].automation_result
+                          and entry["product"].operator_id == operator.id
+                          and entry["product"].account_id == account.id}
+        if len(claimed_ids | automation_ids) != len(entries):
             raise errors.AppError(errors.FORBIDDEN,
-                                  "商品未由当前学员认领，不能发布",
+                                  "商品未由当前学员认领或处理，不能发布",
                                   status=403)
+        if automation_ids and len(automation_ids) != len(entries):
+            raise errors.validation("请分别发布自动化处理结果和已认领成品", field="items")
+        member_automation_publish = bool(automation_ids)
         unverified_specs = []
         for entry in entries:
             product = entry.get("product")
@@ -704,7 +718,8 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             if quality_status != "verified":
                 unverified_specs.append({"warehouseId": str(product.id),
                                          "reasons": reasons})
-        if unverified_specs and payload.get("confirmUnverifiedSpecifications") is not True:
+        if (not member_automation_publish and unverified_specs
+                and payload.get("confirmUnverifiedSpecifications") is not True):
             raise errors.AppError(
                 "QUALITY_REVIEW_REQUIRED",
                 "所选商品存在待核验规格；请检查后明确确认再继续发布",
@@ -727,10 +742,11 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                     for entry in entries]
 
     template_name = payload.get("template")
-    if member_publish and not str(template_name or "").strip():
+    member_claimed_publish = member_publish and not member_automation_publish
+    if member_claimed_publish and not str(template_name or "").strip():
         template_name = setting_service.selected_template_name(db, str(account.id))
     template = _find_template(db, template_name)
-    if member_publish and template is None:
+    if member_claimed_publish and template is None:
         raise errors.AppError(errors.TEMPLATE_INVALID,
                               "学员发布需要先选择可用的定价模板",
                               status=422, details={"field": "template"})
@@ -746,7 +762,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         rate = rate_d
     titles = payload.get("titles") if isinstance(payload.get("titles"), dict) else {}
 
-    same_shop = (not member_publish and
+    same_shop = (not member_claimed_publish and
                  all(str(entry["shopId"]) == str(target_shop_id) for entry in entries))
     mode = "direct" if same_shop else "carrier"
     warning: str | None = language_warning

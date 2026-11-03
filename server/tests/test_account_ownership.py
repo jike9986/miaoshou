@@ -1108,6 +1108,10 @@ def test_member_cannot_reuse_another_operators_image_translation(client, identit
     monkeypatch.setattr(image_service, "_fetch_source", lambda _url: raw)
     monkeypatch.setattr(image_service, "_shrink", lambda data: data)
     monkeypatch.setattr(image_service, "_image_type", lambda _data: "png")
+    monkeypatch.setattr(image_service, "_reserve_slot", lambda _db: None)
+    monkeypatch.setattr(image_service, "budget_limit", lambda _db: 10**9)
+    monkeypatch.setattr(image_service, "_submit", lambda *_args, **_kwargs: {
+        "status": "submitted", "taskId": "isolated-own-image"})
     digest = image_service.image_job_id(
         raw, image_service.IMAGE_MODEL, image_service.TRANSLATION_PROMPT, "1:1")
     db = SessionLocal()
@@ -1115,13 +1119,17 @@ def test_member_cannot_reuse_another_operators_image_translation(client, identit
         db.add(ImageJob(id=digest, operator_id=identities["second_id"],
                         batch_id="foreign-image", status="ready"))
         db.commit()
-        with pytest.raises(AppError) as caught:
-            image_service.translate(
-                    db, {"items": [{"url": "https://example.test/image.png",
-                                    "source": "main"}]},
-                operator_id=identities["first_id"],
-                owner_operator_id=identities["first_id"],
-            )
-        assert caught.value.status == 403
+        result = image_service.translate(
+            db, {"items": [{"url": "https://example.test/image.png", "source": "main"}]},
+            operator_id=identities["first_id"],
+            owner_operator_id=identities["first_id"],
+        )
+        own = result["jobs"][0]
+        assert own["id"] != digest
+        assert own["reused"] is False
+        assert db.get(ImageJob, own["id"]).operator_id == identities["first_id"]
+        foreign = db.get(ImageJob, digest)
+        assert foreign.operator_id == identities["second_id"]
+        assert foreign.status == "ready"
     finally:
         db.close()

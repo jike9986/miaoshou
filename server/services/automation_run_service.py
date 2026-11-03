@@ -26,6 +26,14 @@ def _teacher_or_admin(operator: Operator) -> bool:
         operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}
 
 
+def _require_product_owner(db: Session, run: AutomationRun, product: Product) -> None:
+    owner = operator_service.get(db, run.owner_operator_id)
+    if (operator_service.role_of(owner) == operator_service.ROLE_MEMBER
+            and product.operator_id != run.owner_operator_id):
+        raise errors.AppError(
+            errors.FORBIDDEN, "自动化运行只能使用本人处理的商品", status=403)
+
+
 def _assert_account_access(db: Session, account: Account, operator: Operator) -> None:
     if not account_service.has_account_access(db, account.id, operator.id):
         raise errors.AppError(errors.FORBIDDEN, "无权访问其他学员的自动化运行", status=403)
@@ -34,7 +42,11 @@ def _assert_account_access(db: Session, account: Account, operator: Operator) ->
 def _recompute(run: AutomationRun, rows: list[AutomationRunItem]) -> None:
     process = [row.process_status for row in rows]
     publish = [row.publish_status for row in rows]
-    if "running" in process or "running" in publish:
+    images_queued = any(
+        row.process_status == "succeeded"
+        and isinstance((row.process_result or {}).get("images"), dict)
+        and row.process_result["images"].get("queued") is True for row in rows)
+    if "running" in process or "running" in publish or images_queued:
         run.status = "running"
         run.finished_at = None
     elif "queued" in process or "queued" in publish:
@@ -183,6 +195,23 @@ def get_full(db: Session, run: AutomationRun) -> dict[str, Any]:
 
 def recover(db: Session, run: AutomationRun) -> dict[str, Any]:
     for row in _items(db, run.id):
+        product = db.get(Product, row.product_id) if row.product_id is not None else None
+        images = product.automation_images if product is not None else None
+        if (isinstance(images, dict) and images.get("queued") is True
+                and images.get("startedAt", now_ts()) < now_ts() - 600):
+            from core.locks import hold_for_session
+
+            hold_for_session(db, [f"automation-image-result:{product.id}"])
+            db.refresh(product)
+            images = product.automation_images
+            if (images.get("queued") is True
+                    and images.get("startedAt", now_ts()) < now_ts() - 600):
+                product.automation_images = {
+                    **images, "queued": False, "completed": True, "failed": 1,
+                    "reason": "图片处理已中断或超时，请核对已提交任务；未自动重新扣费提交",
+                }
+                product.draft_verified_revision = None
+                complete_image_processing(db, product)
         if row.process_status == "running":
             row.process_status = "needs_review"
             row.process_reason = "客户端在处理响应前中断；请核对妙手与商品记录后再处理。"
@@ -201,15 +230,16 @@ def recover(db: Session, run: AutomationRun) -> dict[str, Any]:
                 run.settings.get("publishEnabled") is True
                 and run.settings.get("imagesEnabled") is True
                 and isinstance(image_result, Mapping)
-                and isinstance(image_result.get("submitted"), int)
-                and image_result["submitted"] > 0
+                and (image_result.get("queued") is True
+                     or (isinstance(image_result.get("submitted"), int)
+                         and image_result["submitted"] > 0))
             )
             if image_work_submitted:
                 row.publish_status = "needs_review"
                 row.publish_reason = "图片处理尚需核对；请确认图片任务状态后再发布。"
                 row.publish_result = (
                     {"resumeKind": "images_pending"}
-                    if has_image_job is not None else {}
+                    if has_image_job is not None or images is not None else {}
                 )
                 row.updated_at = now_ts()
     _recompute(run, _items(db, run.id))
@@ -239,6 +269,62 @@ def start_item(db: Session, run: AutomationRun, item_id: Any) -> dict[str, Any]:
     return get_full(db, run)
 
 
+def image_processing_result(product: Product) -> dict[str, Any] | None:
+    state = product.automation_images
+    if not isinstance(state, dict):
+        return None
+    return {key: value for key, value in state.items()
+            if key not in {"generation", "revision", "startedAt"}}
+
+
+def _require_images_complete(product: Product) -> None:
+    images = image_processing_result(product)
+    if images is not None and (images.get("completed") is not True
+                               or images.get("failed", 0) != 0):
+        raise errors.AppError(
+            "CONFLICT", images.get("reason") or "图片仍在处理或尚未通过草稿核验，暂不能发布",
+            status=409)
+
+
+def complete_image_processing(db: Session, product: Product) -> None:
+    """Bind the final image draft proof only to the run which queued this work."""
+    images = image_processing_result(product)
+    if images is None:
+        return
+    db.flush()  # updated_at must describe the exact payload and readback proof.
+    rows = (db.query(AutomationRunItem, AutomationRun)
+            .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
+            .filter(AutomationRunItem.product_id == product.id,
+                    AutomationRun.owner_operator_id == product.operator_id,
+                    AutomationRunItem.process_status == "succeeded").all())
+    for row, run in rows:
+        previous = dict(row.process_result or {})
+        if previous.get("_imageGeneration") != product.automation_images.get("generation"):
+            continue
+        previous["images"] = images
+        verified = (images.get("completed") is True and images.get("failed", 0) == 0
+                    and product.draft_verified_revision == product.revision)
+        previous["draftVerified"] = verified
+        if verified:
+            previous["_serverVerification"] = {
+                "productId": str(product.id), "productUpdatedAt": product.updated_at,
+                "productRevision": product.revision,
+            }
+        else:
+            previous.pop("_serverVerification", None)
+            row.process_status = "needs_review"
+            row.process_reason = str(images.get("reason") or "图片处理未通过核验")[:2000]
+        row.process_result = previous
+        if (run.settings.get("publishEnabled") is True
+                and row.publish_status in {"queued", "needs_review"}):
+            row.publish_status = "needs_review"
+            row.publish_reason = ("图片已完成，请核对后继续发布" if verified
+                                  else row.process_reason)
+            row.publish_result = {"resumeKind": "images_pending"} if verified else {}
+        row.updated_at = now_ts()
+        _recompute(run, _items(db, run.id))
+
+
 def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str,
                    reason: str = "", product_id: Any = None,
                    result: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -255,30 +341,42 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
             raise errors.validation("productId 必须是数字", field="productId")
         product_pk = int(text)
     server_verification: dict[str, Any] | None = None
+    images = None
     if status == "succeeded":
         if product_pk is None:
             raise errors.AppError(
                 "CONFLICT", "处理成功必须关联已保存并核验的商品", status=409)
-        product = db.query(Product).filter(
+        from core.locks import hold_for_session
+
+        hold_for_session(db, [f"automation-image-result:{product_pk}"])
+        product = db.query(Product).populate_existing().filter(
             Product.id == product_pk,
             Product.account_id == run.account_id,
             Product.automation_result.is_(True),
             Product.detail_id == row.detail_id,
             Product.shop_id == row.source_shop_id,
         ).one_or_none()
+        images = image_processing_result(product) if product is not None else None
+        pending_images = images is not None and images.get("queued") is True
+        failed_images = images is not None and images.get("failed", 0) != 0
         if (product is None or product.updated_at < row.updated_at
-                or product.draft_verified_revision is None
-                or product.draft_verified_revision != product.revision):
+                or (not pending_images and not failed_images
+                    and (product.draft_verified_revision is None
+                    or product.draft_verified_revision != product.revision))):
             raise errors.AppError(
                 "CONFLICT", "商品没有与当前版本匹配的妙手草稿读回核验", status=409)
-        if (run.settings.get("publishEnabled") is True
+        _require_product_owner(db, run, product)
+        if images is not None and images.get("failed", 0) != 0:
+            status = "needs_review"
+            reason = str(images.get("reason") or "图片处理未通过核验")
+        if (images is None and run.settings.get("publishEnabled") is True
                 and run.settings.get("imagesEnabled") is True
                 and (not isinstance(result, Mapping)
                      or not isinstance(result.get("images"), Mapping)
                      or result["images"].get("failed") != 0)):
             raise errors.AppError(
                 "CONFLICT", "发布前需确认图片处理无失败", status=409)
-        server_verification = {
+        server_verification = None if pending_images or status != "succeeded" else {
             "productId": str(product.id),
             "productUpdatedAt": product.updated_at,
             "productRevision": product.revision,
@@ -288,10 +386,13 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
     row.product_id = product_pk
     row.process_result = {
         key: value for key, value in (result or {}).items()
-        if key not in {"_serverVerification", "saved", "draftVerified"}
+        if key not in {"_serverVerification", "_imageGeneration", "saved", "draftVerified"}
     }
+    if images is not None:
+        row.process_result["images"] = images
+        row.process_result["_imageGeneration"] = product.automation_images.get("generation")
     if status == "succeeded":
-        row.process_result.update({"saved": True, "draftVerified": True})
+        row.process_result.update({"saved": True, "draftVerified": server_verification is not None})
     if server_verification is not None:
         row.process_result["_serverVerification"] = server_verification
     if row.publish_status == "queued" and status in {"failed", "needs_review"}:
@@ -357,19 +458,27 @@ def start_publish(db: Session, run: AutomationRun, item_id: Any, *,
         Product.account_id == run.account_id,
         Product.automation_result.is_(True),
     ).one_or_none()
+    if product is not None:
+        _require_images_complete(product)
     if (product is None
             or product.updated_at != server_verification.get("productUpdatedAt")
             or product.revision != server_verification.get("productRevision")
             or product.draft_verified_revision != product.revision):
         raise errors.AppError(
             "CONFLICT", "商品自处理核验后发生变化，请重新处理并核对", status=409)
+    _require_product_owner(db, run, product)
     _confirm_automation_specifications(
         db, run, product, confirmed_product_id, confirmed_revision)
     if run.settings.get("imagesEnabled") is True:
-        unfinished_images = db.query(ImageJob.id).filter(
+        unfinished_query = db.query(ImageJob.id).filter(
             ImageJob.product_id == product.id,
             ImageJob.status != "ready",
-        ).first()
+        )
+        if product.automation_images is not None:
+            unfinished_query = unfinished_query.filter(ImageJob.id.in_(
+                [job["id"] for job in product.automation_images.get("jobs", [])
+                 if job.get("id")]))
+        unfinished_images = unfinished_query.first()
         if unfinished_images:
             raise errors.AppError(
                 "CONFLICT", "图片翻译任务尚未全部完成，请完成并核对后再发布", status=409)
@@ -419,6 +528,14 @@ def finish_publish(db: Session, run: AutomationRun, item_id: Any, *, status: str
             and image_result["submitted"] > 0
             and has_image_job is not None):
         row.publish_result["resumeKind"] = "images_pending"
+    product = db.get(Product, row.product_id) if row.product_id is not None else None
+    images = image_processing_result(product) if product is not None else None
+    if (status == "needs_review" and previous_status in {"queued", "needs_review"}
+            and row.process_status == "succeeded"
+            and run.settings.get("publishEnabled") is True
+            and run.settings.get("imagesEnabled") is True
+            and images is not None and images.get("failed", 0) == 0):
+        row.publish_result["resumeKind"] = "images_pending"
     row.updated_at = now_ts()
     _recompute(run, _items(db, run.id))
     db.commit()
@@ -446,6 +563,8 @@ def resume_publish_after_images(db: Session, run: AutomationRun,
         Product.account_id == run.account_id,
         Product.automation_result.is_(True),
     ).one_or_none()
+    if product is not None:
+        _require_images_complete(product)
     if (product is None
             or not isinstance(server_verification, dict)
             or server_verification.get("productId") != str(product.id)
@@ -453,14 +572,19 @@ def resume_publish_after_images(db: Session, run: AutomationRun,
             or product.revision != server_verification.get("productRevision")
             or product.draft_verified_revision != product.revision):
         raise errors.AppError("CONFLICT", "商品草稿已变化或核验已失效，请重新核对", status=409)
+    _require_product_owner(db, run, product)
 
     _confirm_automation_specifications(
         db, run, product, confirmed_product_id, confirmed_revision)
 
-    unfinished_images = db.query(ImageJob.id).filter(
+    unfinished_query = db.query(ImageJob.id).filter(
         ImageJob.product_id == product.id,
         ImageJob.status != "ready",
-    ).first()
+    )
+    if product.automation_images is not None:
+        unfinished_query = unfinished_query.filter(ImageJob.id.in_(
+            [job["id"] for job in product.automation_images.get("jobs", []) if job.get("id")]))
+    unfinished_images = unfinished_query.first()
     if unfinished_images:
         raise errors.AppError("CONFLICT", "图片翻译任务尚未全部完成", status=409)
 
@@ -501,7 +625,8 @@ def retry_publish(db: Session, run: AutomationRun, item_id: Any) -> dict[str, An
         PublishLog.batch_id == str(result.get("batchId") or ""),
         PublishLog.status.in_(("fail", "cancel")),
     ).one_or_none()
-    if log is None or log.status != platform_status:
+    if (log is None or log.status != platform_status
+            or (log.operator_id is not None and log.operator_id != run.owner_operator_id)):
         raise errors.AppError(
             "CONFLICT", "发布失败记录已变化或无法匹配，请刷新发布记录后再试", status=409)
 
@@ -527,6 +652,8 @@ def reconcile_publish_log(db: Session, log: PublishLog) -> bool:
                      AutomationRun.shop_id == log.shop_id,
                      AutomationRunItem.product_id == log.product_id,
                      AutomationRunItem.publish_status == "needs_review"))
+    if log.operator_id is not None:
+        query = query.filter(AutomationRun.owner_operator_id == log.operator_id)
     matched = []
     for item in query.all():
         result = item.publish_result if isinstance(item.publish_result, dict) else {}

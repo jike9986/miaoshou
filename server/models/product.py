@@ -121,6 +121,8 @@ class Product(Base):
     # Set only after the processed payload has been read back from Miaoshou.
     # A value is valid only for the exact local product revision it records.
     draft_verified_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Server-owned image lifecycle; never sent as part of the upstream payload.
+    automation_images: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("account_id", "detail_id", "shop_id", name="uq_products_identity"),

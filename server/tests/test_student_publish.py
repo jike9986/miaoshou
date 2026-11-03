@@ -736,6 +736,92 @@ def test_automation_result_can_publish_after_run_item_is_started(publish_db, mon
     assert result["published"] == [product.detail_id]
 
 
+def test_member_automation_publishes_verified_draft_without_repricing_or_claim(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    product.automation_result = True
+    product.operator_id = member.id
+    product.draft_verified_revision = product.revision
+    item = _automation_run(db, suffix, member, account, product,
+                           publish_status="running")
+    run = db.get(AutomationRun, item.run_id)
+    run.settings = {**run.settings, "specificationConfirmations": {
+        str(product.id): product.revision,
+    }}
+    original_payload = dict(product.payload)
+    client = _stub_member_publish(monkeypatch, db, account)
+
+    def unexpected_rebuild(*_args, **_kwargs):
+        pytest.fail("An already verified automation draft must not be rebuilt or repriced")
+
+    monkeypatch.setattr(publish_service, "_repricing", unexpected_rebuild)
+    monkeypatch.setattr(publish_service.carrier_service, "collect_carriers", unexpected_rebuild)
+    # Match the AutomationPage request: no language/template and no second,
+    # unversioned specification confirmation after publish-start confirmed it.
+    result = publish_service.publish(db, {
+        "confirm": True, "accountId": str(account.id), "shopId": "123",
+        "items": [{"warehouseId": str(product.id)}],
+    }, operator_id=member.id)
+
+    assert result["published"] == [product.detail_id]
+    assert client.published == ([int(product.detail_id)], [123])
+    assert result["repriced"] == []
+    assert product.payload == original_payload
+    assert not db.query(ProductClaim).filter_by(product_id=product.id).first()
+    log = db.query(PublishLog).filter_by(
+        product_id=product.id, operator_id=member.id).one()
+    assert log.status == "processing"
+    assert log.mode == "direct"
+
+
+@pytest.mark.parametrize("own_run_status", [None, "queued"])
+def test_member_automation_cannot_use_someone_elses_started_run(
+        publish_db, monkeypatch, own_run_status):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, account = _identity(db, suffix)
+    other, _ = _identity(db, suffix + "-other")
+    product = _product(db, suffix, account)
+    product.automation_result = True
+    product.operator_id = member.id
+    product.draft_verified_revision = product.revision
+    product.quality_review = {"verifiedRevision": product.revision, "evidence": "test"}
+    _automation_run(db, suffix + "-other", other, account, product, publish_status="running")
+    if own_run_status:
+        _automation_run(db, suffix, member, account, product, publish_status=own_run_status)
+    client = _stub_member_publish(monkeypatch, db, account)
+
+    with pytest.raises(errors.AppError) as exc:
+        publish_service.publish(db, _publish_payload(product, account), operator_id=member.id)
+
+    assert exc.value.status == 409
+    assert not hasattr(client, "published")
+
+
+def test_member_automation_cannot_publish_other_users_private_result(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, account = _identity(db, suffix)
+    other, _ = _identity(db, suffix + "-other")
+    product = _product(db, suffix, account)
+    product.automation_result = True
+    product.operator_id = other.id
+    product.draft_verified_revision = product.revision
+    product.quality_review = {"verifiedRevision": product.revision, "evidence": "test"}
+    _automation_run(db, suffix, member, account, product, publish_status="running")
+    client = _stub_member_publish(monkeypatch, db, account)
+
+    with pytest.raises(errors.AppError) as exc:
+        publish_service.publish(db, _publish_payload(product, account), operator_id=member.id)
+
+    assert exc.value.status == 403
+    assert not hasattr(client, "published")
+
+
 def test_member_cannot_republish_successful_product_to_same_shop(publish_db, monkeypatch):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]

@@ -45,7 +45,7 @@ class PublishStartRequest(CamelModel):
     confirmed_revision: StrictInt | None = None
 
 
-@router.post("", status_code=201, dependencies=[require_permission("process")])
+@router.post("", status_code=201, dependencies=[require_permission("automation")])
 def create_run(payload: RunCreateRequest, db: DbSession,
                operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -72,7 +72,7 @@ def get_run(run_id: str, db: DbSession, operator: OperatorDep) -> dict[str, Any]
     return {"run": automation_run_service.get_full(db, run)}
 
 
-@router.post("/{run_id}/recover", dependencies=[require_permission("process")])
+@router.post("/{run_id}/recover", dependencies=[require_permission("automation")])
 def recover_run(run_id: str, db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
     run = automation_run_service.get(db, run_id, operator)
@@ -80,7 +80,7 @@ def recover_run(run_id: str, db: DbSession, operator: OperatorDep) -> dict[str, 
 
 
 @router.post("/{run_id}/items/{item_id}/start",
-             dependencies=[require_permission("process")])
+             dependencies=[require_permission("automation")])
 def start_item(run_id: str, item_id: str, db: DbSession,
                operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -89,7 +89,7 @@ def start_item(run_id: str, item_id: str, db: DbSession,
 
 
 @router.post("/{run_id}/items/{item_id}/process-result",
-             dependencies=[require_permission("process")])
+             dependencies=[require_permission("automation")])
 def process_result(run_id: str, item_id: str, payload: ProcessResultRequest,
                    db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -100,7 +100,7 @@ def process_result(run_id: str, item_id: str, payload: ProcessResultRequest,
 
 
 @router.post("/{run_id}/items/{item_id}/publish-start",
-             dependencies=[require_permission("publish")])
+             dependencies=[require_permission("automation")])
 def start_publish(run_id: str, item_id: str, db: DbSession,
                   operator: OperatorDep,
                   payload: PublishStartRequest = PublishStartRequest()) -> dict[str, Any]:
@@ -113,7 +113,7 @@ def start_publish(run_id: str, item_id: str, db: DbSession,
 
 
 @router.post("/{run_id}/items/{item_id}/resume-publish",
-             dependencies=[require_permission("publish")])
+             dependencies=[require_permission("automation")])
 def resume_publish(run_id: str, item_id: str, db: DbSession,
                    operator: OperatorDep,
                    payload: PublishStartRequest = PublishStartRequest()) -> dict[str, Any]:
@@ -126,7 +126,7 @@ def resume_publish(run_id: str, item_id: str, db: DbSession,
 
 
 @router.post("/{run_id}/items/{item_id}/retry-publish",
-             dependencies=[require_permission("publish")])
+             dependencies=[require_permission("automation")])
 def retry_publish(run_id: str, item_id: str, db: DbSession,
                   operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -135,7 +135,7 @@ def retry_publish(run_id: str, item_id: str, db: DbSession,
 
 
 @router.post("/{run_id}/items/{item_id}/publish-result",
-             dependencies=[require_permission("publish")])
+             dependencies=[require_permission("automation")])
 def publish_result(run_id: str, item_id: str, payload: PublishResultRequest,
                    db: DbSession, operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)

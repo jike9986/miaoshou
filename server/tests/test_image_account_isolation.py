@@ -11,7 +11,8 @@ from api import images as images_api
 from db.session import SessionLocal, init_db
 from main import app
 from models.image_job import ImageJob
-from services import operator_service
+from models.product import Product
+from services import image_service, operator_service
 
 API = "/api/v1"
 
@@ -127,3 +128,60 @@ def test_member_image_key_check_omits_the_global_key_hint(client, accounts, monk
         API + "/images/verify", headers=_auth(accounts, "teacher"))
     assert teacher_response.status_code == 200, teacher_response.text
     assert teacher_response.json()["keyHint"] == f"{key[:4]}...{key[-4:]}"
+
+
+@pytest.mark.parametrize("different_owner", [False, True])
+def test_image_deduplication_preserves_product_and_operator_ownership(
+        client, accounts, monkeypatch, different_owner):
+    del client
+    raw = uuid.uuid4().bytes
+    submitted = []
+    monkeypatch.setattr(image_service, "_api_key", lambda: "configured")
+    monkeypatch.setattr(image_service, "_fetch_source", lambda _url: raw)
+    monkeypatch.setattr(image_service, "_shrink", lambda data: data)
+    monkeypatch.setattr(image_service, "_image_type", lambda _data: "png")
+    monkeypatch.setattr(image_service, "_reserve_slot", lambda _db: None)
+    monkeypatch.setattr(image_service, "budget_limit", lambda _db: 10**9)
+
+    def submit(data, size, *, prompt):
+        submitted.append((data, size, prompt))
+        return {"status": "submitted", "taskId": f"isolated-{len(submitted)}"}
+
+    monkeypatch.setattr(image_service, "_submit", submit)
+    db = SessionLocal()
+    try:
+        products = []
+        for _ in range(2):
+            detail_id = uuid.uuid4().hex
+            product = Product(warehouse_key=f"{detail_id}:1", detail_id=detail_id,
+                              shop_id="1", operator_id=accounts["first"][0])
+            db.add(product)
+            products.append(product)
+        db.flush()
+        first_operator = accounts["first"][0]
+        second_operator = accounts["second"][0] if different_owner else first_operator
+        first_product = products[0].id
+        second_product = first_product if different_owner else products[1].id
+
+        def translate(operator_id, product_id):
+            return image_service.translate(
+                db, {"items": [{"url": "https://example.test/same-image.png",
+                                 "source": "main", "productId": str(product_id)}]},
+                operator_id=operator_id, owner_operator_id=operator_id)["jobs"][0]
+
+        first = translate(first_operator, first_product)
+        second = translate(second_operator, second_product)
+        repeated = translate(second_operator, second_product)
+        assert first["id"] != second["id"]
+        assert repeated["id"] == second["id"]
+        assert repeated["reused"] is True
+        assert len(submitted) == 2
+        for result, operator_id, product_id in (
+                (first, first_operator, first_product),
+                (second, second_operator, second_product)):
+            row = db.get(ImageJob, result["id"])
+            assert row.operator_id == operator_id
+            assert row.product_id == product_id
+    finally:
+        db.rollback()
+        db.close()

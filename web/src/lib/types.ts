@@ -307,6 +307,8 @@ export interface ProcessImagesResult {
   reason?: string;
   /** 图片翻译整体转后台异步时为 true（文字/价格已成功，图片在后台翻） */
   queued?: boolean;
+  /** OCR、翻译及妙手草稿写回均已结束；零张需翻译图片也能完成。 */
+  completed?: boolean;
 }
 
 /** POST /collect-box/{detailId}/process 响应（server/api/collect_box.py: process） */

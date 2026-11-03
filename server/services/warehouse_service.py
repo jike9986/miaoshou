@@ -1542,7 +1542,8 @@ def attach_image_translation(db: Session, product: Mapping[str, Any], *,
               "source": source, "url": url} for url in selected]
     try:
         result = image_service.translate(db, {"items": items, "size": "1:1"},
-                                        operator_id=operator_id)
+                                        operator_id=operator_id,
+                                        owner_operator_id=operator_id)
     except errors.AppError as exc:
         # 没配密钥（IMAGE_KEY_MISSING）或超预算：如实回报，不阻断入库
         logger.warning("图片翻译未提交：%s", exc.message if hasattr(exc, "message") else exc)
@@ -1736,7 +1737,8 @@ def _public_result_url(job: ImageJob, uploader: Any = None) -> str:
 
 
 def apply_image_results(db: Session, product: Product, payload: Any, *,
-                        uploader: Any = None) -> dict[str, Any]:
+                        uploader: Any = None,
+                        job_ids: list[str] | None = None) -> dict[str, Any]:
     """把已完成的图片翻译结果写回商品 payload（老版第 1928-1938 行的移植）。
 
     返回 `{replaced, main, detail, sku, missing}`：
@@ -1759,10 +1761,10 @@ def apply_image_results(db: Session, product: Product, payload: Any, *,
         return report
 
     try:
-        jobs = (db.query(ImageJob)
-                .filter(ImageJob.product_id == product_id)
-                .order_by(ImageJob.created_at.asc())
-                .all())
+        query = db.query(ImageJob).filter(ImageJob.product_id == product_id)
+        if job_ids is not None:
+            query = query.filter(ImageJob.id.in_(job_ids))
+        jobs = query.order_by(ImageJob.created_at.asc()).all()
     except Exception as exc:  # noqa: BLE001 - 查库失败也不能掀翻入仓
         logger.warning("读取图片任务失败 product=%s type=%s", product_id, type(exc).__name__)
         report["error"] = "读取图片任务失败，本次未写回译文图"
@@ -2058,11 +2060,34 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     抛错停下等人看，确认过才放行。`skip_image_review` 给批量路径用 —— 主图 OCR
     一件最多 9 张、冷跑要几十秒，批量入仓时按需开。
 
-    `operator_id` 只写进「最后改的人」那一列，不参与任何判定（这不是权限系统）。
-    定时任务、批量重试这些没有操作员上下文的调用方传 None，列就是空的——
-    空着比编一个名字诚实。
+    自动化结果归本次操作员所有；学员不能覆盖共享成品或其他人的处理结果。
     """
     from services import product_service
+
+    key = product_key(detail_id, shop_id)
+    if automation_result:
+        # One upstream draft is shared by everyone bound to this Miaoshou key.
+        # Serialize processing before any upstream read/write, then refuse to
+        # turn a shared product or somebody else's private result into our own.
+        from core.locks import hold_for_session
+
+        hold_for_session(
+            db, [f"automation-process:{account.id}:{key}"], blocking=False,
+            busy_message="该采集箱商品正在处理中，请稍后再试")
+    existing = (db.query(Product)
+                .filter(Product.account_id == account.id,
+                        Product.warehouse_key == key)
+                .one_or_none())
+    if (automation_result and _is_member(db, operator_id)
+            and existing is not None
+            and (not existing.automation_result or existing.operator_id != operator_id)):
+        raise errors.AppError(
+            errors.FORBIDDEN,
+            "该采集箱商品已关联共享成品或其他用户的处理结果，请选择另一件商品",
+            status=403)
+    if (automation_result and existing is not None
+            and (existing.automation_images or {}).get("queued") is True):
+        raise errors.busy("该商品的图片仍在处理，请等待完成后再操作")
 
     try:
         response = client.shop_detail(detail_id, shop_id)
@@ -2099,10 +2124,6 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # prepare_weight 不幂等：同一件重复入仓会一次次 +0.1，重量越漂越远。
     # 老版靠 run_records 比对上次保存结果来拦（「已处理商品与上次保存结果
     # 不一致，请在妙手核对，避免重复增加重量」），这里用现成的仓库行做同等检查。
-    existing = (db.query(Product)
-                .filter(Product.account_id == account.id,
-                        Product.warehouse_key == product_key(detail_id, shop_id))
-                .one_or_none())
     already_processed = bool(existing is not None and existing.saved_at)
 
     increment = _workflow_setting(db, "weightIncrement", 0.1, operator_id)
@@ -2359,6 +2380,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         if removed_words:
             fields["payload"]["removedWords"] = removed_words
     product = product_service.upsert_product(db, account.id, fields, warehouse_key=key)
+    if automation_result:
+        product.automation_images = None
     if automation_result and (existing is None or existing.automation_result):
         product.automation_result = True
     if existing is not None:
@@ -2391,7 +2414,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 在深拷贝上改、再整份赋值：JSON 列不会感知就地 mutation，直接改
     # product.payload 里的字典不会产生 UPDATE。
     updated_payload = deepcopy(product.payload) if isinstance(product.payload, dict) else {}
-    image_applied = apply_image_results(db, product, updated_payload)
+    image_applied = (apply_image_results(db, product, updated_payload)
+                     if not automation_result else {"replaced": 0})
     if image_applied.get("replaced"):
         product.payload = updated_payload
         # 展示字段跟着走，否则列表页与详情页看到的还是原图

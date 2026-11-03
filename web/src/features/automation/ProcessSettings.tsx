@@ -78,6 +78,8 @@ export interface ProcessSettingsProps {
   onOpenTemplates: () => void;
   /** 当前任务固定的目标店铺；没有任务时显示当前店铺或未选择状态 */
   publishShopName: string;
+  /** 共享尺码图库的增删只供老师和管理员使用，学员可以选用。 */
+  canManageSharedAssets?: boolean;
   /** 运行中：全部控件禁用 */
   disabled?: boolean;
   className?: string;
@@ -89,6 +91,7 @@ export function ProcessSettings({
   connected,
   onOpenTemplates,
   publishShopName,
+  canManageSharedAssets = false,
   disabled = false,
   className,
 }: ProcessSettingsProps) {
@@ -397,7 +400,7 @@ export function ProcessSettings({
               尺码图
             </span>
             <div className="flex shrink-0 items-center gap-1.5">
-              <Button
+              {canManageSharedAssets && <Button
                 size="sm"
                 variant="secondary"
                 icon={<ImagePlus className="size-3.5" />}
@@ -412,10 +415,10 @@ export function ProcessSettings({
                 }}
               >
                 添加尺码图
-              </Button>
+              </Button>}
               {/* disabled 的 Button 带 pointer-events-none，鼠标事件落不到它身上，
                   title 必须挂在父级 span 才能弹出「为什么点不了」 */}
-              <span
+              {canManageSharedAssets && <span
                 className="inline-flex"
                 title={
                   selectedIsDefault
@@ -437,7 +440,7 @@ export function ProcessSettings({
                 >
                   删除所选
                 </Button>
-              </span>
+              </span>}
               <IconButton
                 label="刷新尺码图"
                 size="sm"

@@ -741,6 +741,11 @@ def translate(db: Session, payload: Mapping[str, Any],
                 "图片格式须为 PNG、JPEG 或 WebP",
                 details={"index": index, "url": url})
         digest = image_job_id(raw, IMAGE_MODEL, prompt, size)
+        if owner_operator_id is not None:
+            # A job has one product and one owner. Global content deduplication
+            # would leave the next user's/product's result on somebody else's row.
+            digest = sha256_hex(
+                f"{digest}:{owner_operator_id}:{item.get('productId') or ''}".encode())
         existing = db.query(ImageJob).filter(ImageJob.id == digest).one_or_none()
         if (existing is not None and owner_operator_id is not None
                 and existing.operator_id != owner_operator_id):

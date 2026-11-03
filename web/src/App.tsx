@@ -118,9 +118,7 @@ function Shell() {
     <>
       <TokenNotice />
       <AppShell
-        nav={operatorIdentity?.role === "member"
-          ? NAV.map((group) => ({ ...group, items: group.items.filter((item) => item.to !== "/automation") }))
-          : NAV}
+        nav={NAV}
         brand={{ icon: <BrandMark className="size-4" />, name: "奥皇上品" }}
         account={SHOW_ACCOUNT_UI ? {
           name: operatorLabel,
@@ -147,12 +145,6 @@ function RequireSoftwareLogin() {
 function WorkspaceHome() {
   const identity = useOperatorIdentity();
   return <Navigate to={identity?.role === "member" ? "/warehouse" : "/automation"} replace />;
-}
-
-/** Match the existing server processing permissions before mounting business queries. */
-function RequireAutomationAccess() {
-  const identity = useOperatorIdentity();
-  return identity?.role === "member" ? <Navigate to="/warehouse" replace /> : <Outlet />;
 }
 
 /** Validate the persisted token before rendering routes that can issue business requests. */
@@ -236,9 +228,7 @@ export default function App() {
               <Route index element={<WorkspaceHome />} />
               <Route element={<RequireSoftwareLogin />}>
                 <Route path="unlock" element={<UnlockPage />} />
-                <Route element={<RequireAutomationAccess />}>
-                  <Route path="automation" element={<AutomationPage />} />
-                </Route>
+                <Route path="automation" element={<AutomationPage />} />
                 <Route path="warehouse" element={<WarehousePage />} />
                 <Route path="schedules" element={<SchedulesPage />} />
                 <Route path="words" element={<WordsPage />} />

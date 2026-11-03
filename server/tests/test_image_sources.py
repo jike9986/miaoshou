@@ -5,7 +5,8 @@ from services import image_service, warehouse_service
 def test_attach_image_translation_supports_sku_and_detail(monkeypatch):
     calls = []
 
-    def fake_translate(db, payload, *, operator_id=None):
+    def fake_translate(db, payload, *, operator_id=None, owner_operator_id=None):
+        assert owner_operator_id == operator_id
         calls.append((payload, operator_id))
         return {
             "batchId": "imgb-test",

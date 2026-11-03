@@ -31,7 +31,6 @@ export function LoginPage() {
     const fallback = identity?.role === "member" ? "/warehouse" : "/automation";
     const from = state?.from;
     if (!from || from === "/login") return fallback;
-    if (identity?.role === "member" && ["/automation", "/collect", "/collect-box", "/images"].includes(from.split("?")[0])) return fallback;
     return from;
   }, [identity?.role, location.state]);
   const scrollToTop = useCallback(() => {

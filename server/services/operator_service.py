@@ -65,7 +65,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     ROLE_TEACHER: {"*"},
     ROLE_MEMBER: {"warehouse", "words", "product_claim", "publish_claimed",
                   "workflow.settings",
-                  "account.bind", "schedule"},
+                  "account.bind", "schedule", "automation"},
 }
 
 

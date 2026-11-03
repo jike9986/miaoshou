@@ -137,7 +137,6 @@ def test_word_rule_provenance_is_bound_over_http_and_in_list(client, tokens):
     assert item["ruleVersion"] == "2026-10"
 
 @pytest.mark.parametrize(("method", "path"), [
-    ("POST", "/collect-box/123/process"),
     ("POST", "/collect-box/123/claim"),
     ("POST", "/collect-box/delete"),
     ("PATCH", "/warehouse/123"),
@@ -903,7 +902,7 @@ DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/auth/registration-code/request"),
     # Member claim creation is an intentional owner-scoped write.
     ("POST", "/api/v1/warehouse/{ident}/claim"),
-    # Member publishing is allowed only after publish_service verifies every claim.
+    # Member publishing verifies claims or an owned, started automation result.
     ("POST", "/api/v1/publish"),
     # Receipt refresh is allowed for claimed-product publishers and is scoped
     # to the requesting member's own publish rows in the handler.
@@ -921,6 +920,17 @@ DYNAMIC_WRITE_ROUTES = {
     ("PATCH", "/api/v1/schedules/{task_id}"),
     ("DELETE", "/api/v1/schedules/{task_id}"),
     ("POST", "/api/v1/schedules/{task_id}/run"),
+    # Automation uses a separate permission; each handler verifies the current
+    # account binding and run owner, without granting shared process writes.
+    ("POST", "/api/v1/collect-box/{detail_id}/process"),
+    ("POST", "/api/v1/automation-runs"),
+    ("POST", "/api/v1/automation-runs/{run_id}/recover"),
+    ("POST", "/api/v1/automation-runs/{run_id}/items/{item_id}/start"),
+    ("POST", "/api/v1/automation-runs/{run_id}/items/{item_id}/process-result"),
+    ("POST", "/api/v1/automation-runs/{run_id}/items/{item_id}/publish-start"),
+    ("POST", "/api/v1/automation-runs/{run_id}/items/{item_id}/resume-publish"),
+    ("POST", "/api/v1/automation-runs/{run_id}/items/{item_id}/retry-publish"),
+    ("POST", "/api/v1/automation-runs/{run_id}/items/{item_id}/publish-result"),
 }
 
 
