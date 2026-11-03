@@ -14,11 +14,12 @@ class ExistingCommonBox:
 
     def claim_common_to_platform(self, items):
         self.calls.append(items)
-        count = items[0][2]
-        ids = list(range(1000 + (len(self.calls) - 1) * 100,
-                         1000 + (len(self.calls) - 1) * 100 + count))
+        assert items == [(42, "tiktok", 1)]
+        ids = [1000 + len(self.calls) - 1]
         self.box_ids.extend(ids)
-        return {"data": {"detailIds": ids}}
+        return {"data": {"platformCollectBoxDetailIdMap": {
+            "tiktok": {"42": ids[0]},
+        }}}
 
     def collect_box_list(self, **kwargs):
         return {"data": {"detailList": [
@@ -27,26 +28,29 @@ class ExistingCommonBox:
         ]}}
 
 
-def test_existing_common_box_copies_in_batches(monkeypatch):
+def test_existing_common_box_copies_one_at_a_time_with_spacing(monkeypatch):
     client = ExistingCommonBox()
+    sleeps = []
     monkeypatch.setattr(
         carrier_service, "take_link", lambda *_: pytest.fail("should reuse common box"))
+    monkeypatch.setattr(carrier_service.time, "sleep", sleeps.append)
     ids = carrier_service.collect_carriers(None, client, count=137)
     assert len(ids) == len(set(ids)) == 137
     assert all(call[0][0] == 42 for call in client.calls)
-    assert [call[0][2] for call in client.calls] == [100, 37]
+    assert all(call[0][2] == 1 for call in client.calls)
+    assert len(client.calls) == 137
+    assert sleeps == [0.7] * 135
 
 
-def test_partial_copy_receipt_recovers_all_new_drafts_from_box():
+def test_missing_single_copy_receipt_recovers_new_draft_from_box():
     client = ExistingCommonBox()
     def partial(items):
         client.calls.append(items)
-        count = items[0][2]
-        client.box_ids.extend(range(1001, 1001 + count))
-        return {"data": {"detailIds": [1001]}}
+        client.box_ids.append(1001)
+        return {"data": {}}
     client.claim_common_to_platform = partial
-    ids = carrier_service.collect_carriers(None, client, count=20)
-    assert ids == list(range(1001, 1021))
+    ids = carrier_service.collect_carriers(None, client, count=1)
+    assert ids == [1001]
     assert len(client.calls) == 1
 
 
@@ -56,32 +60,52 @@ def test_readback_skips_existing_same_source_rows_before_scanning_new_copies():
 
     def partial(items):
         client.calls.append(items)
-        client.box_ids.extend([2001, 2002, 2003])
-        return {"data": {"detailIds": [2001]}}
+        detail_id = 2000 + len(client.calls)
+        client.box_ids.append(detail_id)
+        return {"data": {"platformCollectBoxDetailIdMap": {
+            "tiktok": {"42": detail_id},
+        }}}
 
     client.claim_common_to_platform = partial
     ids = carrier_service.collect_carriers(None, client, count=3)
     assert ids == [2001, 2002, 2003]
-    assert len(client.calls) == 1
+    assert len(client.calls) == 3
 
 
 def test_partial_copy_receipt_without_full_new_drafts_stops_without_retry():
     client = ExistingCommonBox()
-    def partial(items):
+    def partial_then_fail(items):
         client.calls.append(items)
-        return {"data": {"detailIds": [1001]}}
-    client.claim_common_to_platform = partial
-    with pytest.raises(carrier_service.CarrierError, match="数量不完整"):
-        carrier_service.collect_carriers(None, client, count=20)
-    assert len(client.calls) == 1
+        if len(client.calls) == 1:
+            client.box_ids.append(1001)
+            return {"data": {"detailIds": [1001]}}
+        raise MiaoshouError("rate limited", kind="error")
+    client.claim_common_to_platform = partial_then_fail
+    with pytest.raises(carrier_service.CarrierError, match="结果未确认"):
+        carrier_service.collect_carriers(None, client, count=2)
+    assert len(client.calls) == 2
+
+
+def test_wait_until_collected_uses_public_box_list_status():
+    class CollectingCommonBox(ExistingCommonBox):
+        def common_box_list(self, **kwargs):
+            return {"data": {"detailList": [
+                {"commonCollectBoxDetailId": 42, "status": "success"},
+            ]}}
+
+        def common_box_detail(self, *_args):
+            pytest.fail("stable collection status must come from the list")
+
+    assert carrier_service.wait_until_collected(CollectingCommonBox(), 42)
 
 
 def test_copy_receipt_deduplicates_ids_across_fields():
     client = ExistingCommonBox()
     client.claim_common_to_platform = lambda *_: {"data": {
-        "detailIds": [1001, 1002], "collectBoxDetailIds": [1001, 1002],
+        "platformCollectBoxDetailIdMap": {"tiktok": {"42": 1001}},
+        "detailIds": [1001],
     }}
-    assert carrier_service.collect_carriers(None, client, count=2) == [1001, 1002]
+    assert carrier_service.collect_carriers(None, client, count=1) == [1001]
 
 
 def test_missing_copy_ids_stops_without_using_existing_products():

@@ -466,18 +466,16 @@ class MiaoshouClient:
     def claim_common_to_platform(self, items: list[tuple[int, str, int]]) -> dict[str, Any]:
         if not items:
             raise MiaoshouError("请指定要认领的商品", kind="error")
-        total = sum(int(copies) for _, _, copies in items)
-        if total > 100:
+        if len(items) > 100:
             raise MiaoshouError("一次最多认领 100 个商品", kind="error")
         payload = []
         for common_id, platform, copies in items:
             count = int(copies)
             if count < 1:
                 raise MiaoshouError("复制数量至少为 1", kind="error")
-            payload.extend({"detailId": int(common_id),
+            payload.append({"detailId": int(common_id),
                             "platform": str(platform or "tiktok"),
-                            "serialNumber": serial_number}
-                           for serial_number in range(1, count + 1))
+                            "serialNumber": count})
         return self.post(COMMON_BOX_BASE + "claimed",
                          {"detailSerialNumberPlatformList": payload})
 

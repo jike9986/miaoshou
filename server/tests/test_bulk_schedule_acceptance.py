@@ -191,7 +191,7 @@ def test_bulk_copy_overwrite_progress_and_shared_key_isolation(isolated_services
             reopened, operator_id=second.id, claim_account_id=str(account.id), claimed=True)
         assert first_claimed["total"] == quantity
         assert second_claimed["total"] == 0
-    assert fake.copy_sizes == [100] * (quantity // 100)
+    assert fake.copy_sizes == [1] * quantity
     assert len(fake.drafts) == quantity
     assert fake.published == []
     assert {draft["title"] for draft in fake.drafts.values()} == {

@@ -263,35 +263,70 @@ def mark(db: Session, url: str, *, ok: bool) -> None:
 
 
 # --- 公共采集箱 -----------------------------------------------------------
+def _box_status_from_list(client: MiaoshouClient, common_id: int) -> str:
+    """从公共采集箱**列表**里查这条商品的真实状态（找不到返回空串）。
+
+    为什么不用详情接口：
+      `get_common_collect_box_detail` 在采集过程中会一直报
+      「商品采集中」（这是进度提示，不是错误），稳定之后返回的字段里
+      **没有 status** —— 只有 commonCollectBoxDetailId/title/itemNum/notes。
+      老版靠详情接口的 status 判断，结果永远是空，只能等到超时判失败。
+      实测列表接口的 `detailList[].status` 才是可信来源（success/skip/fail）。
+    """
+    try:
+        listing = client.common_box_list(page_no=1, page_size=50)
+    except Exception:  # noqa: BLE001 - 查不到就当还没好，下一轮再试
+        return ""
+    rows = (listing.get("data") or {}).get("detailList") or []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("commonCollectBoxDetailId")) == str(common_id):
+            return str(row.get("status") or "").lower()
+    return ""
+
+
 def wait_until_collected(client: MiaoshouClient, common_id: int, *,
                          progress: Callable[[dict[str, Any]], None] | None = None,
                          rounds: int = COLLECT_SETTLE_ROUNDS) -> bool:
-    """fetch_item 只是排队；未采集成功前认领会失败。"""
+    """fetch_item 只是排队；未采集成功前认领会失败。
+
+    判定口径（2026-11-03 用老版实测确认）：
+      · 列表接口里 status=success → 就绪；
+      · status=skip → 之前已采集过，同样可以认领；
+      · status=fail → 真失败；
+      · 查不到 / 详情接口报「商品采集中」→ 继续等。
+    """
     for attempt in range(rounds):
-        try:
-            detail = client.common_box_detail(common_id)
-        except MiaoshouError as exc:
-            # 「商品已经采集过了」不是失败，是**已经就绪**。妙手对重复查询/已完成的
-            # 采集直接回 fail + 这句提示，之前一律当成「还没好」继续等，白等到超时，
-            # 再把链接标成坏的 —— 结果整个链接池被误判耗尽。
-            message = str(exc)
-            if "已经采集" in message or "already" in message.lower():
-                if progress:
-                    progress({"stage": "collected", "commonId": common_id,
-                              "note": "already collected"})
+        status = _box_status_from_list(client, common_id)
+        if status:
+            if progress:
+                progress({"stage": "waiting", "commonId": common_id,
+                          "status": status, "attempt": attempt + 1})
+            if status in {"success", "collectsuccess", "skip"}:
                 return True
-            time.sleep(COLLECT_SETTLE_SECONDS)
-            continue
-        data = detail.get("data") or {}
-        info = data.get("editCommonCollectBoxDetail") or data
-        status = str(info.get("status") or "").lower()
-        if progress:
-            progress({"stage": "waiting", "commonId": common_id,
-                      "status": status or "?", "attempt": attempt + 1})
-        if status in {"success", "collectsuccess"}:
-            return True
-        if status in {"fail", "collectfail"}:
-            return False
+            if status in {"fail", "collectfail"}:
+                return False
+        else:
+            # 列表里还没有：再试详情接口，顺便消化「已经采集过了」这种提示
+            try:
+                detail = client.common_box_detail(common_id)
+            except MiaoshouError as exc:
+                message = str(exc)
+                if "已经采集" in message or "already" in message.lower():
+                    return True
+                if progress:
+                    progress({"stage": "waiting", "commonId": common_id,
+                              "status": "collecting", "attempt": attempt + 1})
+            else:
+                data = detail.get("data") or {}
+                info = data.get("editCommonCollectBoxDetail") or data
+                detail_status = str(info.get("status") or "").lower()
+                if detail_status in {"success", "collectsuccess", "skip"}:
+                    return True
+                if progress and detail_status:
+                    progress({"stage": "waiting", "commonId": common_id,
+                              "status": detail_status, "attempt": attempt + 1})
         time.sleep(COLLECT_SETTLE_SECONDS)
     return False
 
@@ -478,31 +513,39 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
         if progress:
             progress({"stage": "claim", "commonId": common_id, "copies": copies})
         before_ids = _collect_box_snapshot(client)
-        try:
-            claimed = client.claim_common_to_platform([(common_id, "tiktok", copies)])
-        except MiaoshouError as exc:
-            raise CarrierError("复制结果未确认，请先检查采集箱，勿重复操作",
-                               available=len(details), required=count) from exc
+        new_ids: list[int] = []
+        for copy_index in range(copies):
+            try:
+                claimed = client.claim_common_to_platform([(common_id, "tiktok", 1)])
+            except MiaoshouError as exc:
+                raise CarrierError("复制结果未确认，请先检查采集箱，勿重复操作",
+                                   available=len(details) + len(new_ids),
+                                   required=count) from exc
+            returned_ids = list(dict.fromkeys(claimed_detail_ids(claimed)))
+            if len(returned_ids) != 1 and before_ids is not None:
+                known_ids = before_ids | set(new_ids)
+                readback = _fresh_box_ids(client, common_id, known_ids)
+                if len(readback) == 1:
+                    returned_ids = readback
+            invalid_receipt = len(returned_ids) != 1
+            if (before_ids is not None and returned_ids
+                    and returned_ids[0] in before_ids):
+                invalid_receipt = True
+            if invalid_receipt:
+                raise CarrierError("复制回执数量不完整，请先检查采集箱，勿重复操作",
+                                   commonId=common_id, requested=copies,
+                                   returned=len(returned_ids),
+                                   available=len(details) + len(new_ids), required=count)
+            detail_id = returned_ids[0]
+            if detail_id in new_ids or detail_id in details:
+                raise CarrierError("复制接口返回了重复商品 ID，请先检查采集箱，勿重复操作",
+                                   commonId=common_id, available=len(details) + len(new_ids),
+                                   required=count)
+            new_ids.append(detail_id)
+            if copy_index + 1 < copies:
+                time.sleep(0.7)
         if url:
             mark(db, url, ok=True)
-        new_ids = list(dict.fromkeys(claimed_detail_ids(claimed)))
-        if (len(new_ids) != copies and before_ids is not None):
-            # The upstream may create all requested drafts but return only part of
-            # their IDs. Recover only IDs that appeared after this request and are
-            # tied to the same common-box source; never infer success from old rows.
-            readback = _fresh_box_ids(client, common_id, before_ids)
-            if len(readback) == copies and set(new_ids).issubset(readback):
-                new_ids = readback
-        if not new_ids:
-            raise CarrierError("复制请求已提交但未返回新商品 ID，请先检查采集箱，勿重复操作",
-                               commonId=common_id, required=count)
-        duplicates = any(detail_id in details for detail_id in new_ids)
-        existed_before = (before_ids is not None
-                          and any(detail_id in before_ids for detail_id in new_ids))
-        if len(set(new_ids)) != copies or duplicates or existed_before:
-            raise CarrierError("复制回执数量不完整，请先检查采集箱，勿重复操作",
-                               commonId=common_id, requested=copies, returned=len(set(new_ids)),
-                               available=len(details), required=count)
         before = len(details)
         for detail_id in new_ids:
             if len(details) >= count:
