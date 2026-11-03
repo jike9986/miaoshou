@@ -1,68 +1,63 @@
-# 完整打包：前端 → 后端 exe → Electron → NSIS 安装程序
+﻿# 生产客户端：校验 → 前端/Electron → 无共享令牌的目录包 → Inno 安装程序。
+param([string]$InnoCompiler = "")
+
 $root = Split-Path -Parent $PSScriptRoot
 $ErrorActionPreference = "Stop"
+$originalTemp = $env:TEMP
+$originalTmp = $env:TMP
 Push-Location $root
 try {
-  # NSIS 要往 %TEMP% 写临时文件。若当前环境的进程被限制写用户目录，
-  # 会弹「Error writing temporary file」并让打包失败，这里统一指到工作区。
   $buildTmp = Join-Path $root "_build_tmp"
   New-Item -ItemType Directory -Path $buildTmp -Force | Out-Null
   $env:TEMP = $buildTmp
   $env:TMP = $buildTmp
-  $env:AOHUANG_DATA_DIR = Join-Path $buildTmp "regression-data"
 
-  Write-Host "0/6 静态检查（pyflakes + tsc + 回归）..." -ForegroundColor Cyan
-  Push-Location server
-  python -m pyflakes api services core schemas main.py run_server.py 2>&1 | Tee-Object -Variable pyflakesOut
-  $pyflakesBad = $pyflakesOut | Where-Object { $_ -match "undefined name|syntax error|redefinition" }
-  Pop-Location
-  if ($pyflakesBad) { throw "pyflakes 检查未通过：`n$($pyflakesBad -join "`n")" }
+  if (-not $InnoCompiler) {
+    $compilerCandidates = @(
+      "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+      "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    )
+    $InnoCompiler = $compilerCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  }
+  if (-not $InnoCompiler -or -not (Test-Path -LiteralPath $InnoCompiler)) {
+    throw "未找到 Inno Setup 6，请安装或通过 -InnoCompiler 指定 ISCC.exe。"
+  }
 
-  Push-Location web
-  npx tsc --noEmit
-  if ($LASTEXITCODE -ne 0) { throw "前端 TypeScript 类型检查失败" }
-  Pop-Location
+  Write-Host "1/5 版本与静态检查..." -ForegroundColor Cyan
+  python -X utf8 scripts\check_version.py
+  if ($LASTEXITCODE -ne 0) { throw "版本号不一致" }
+  pnpm check
+  if ($LASTEXITCODE -ne 0) { throw "静态检查失败" }
 
+  Write-Host "2/5 构建前端和 Electron..." -ForegroundColor Cyan
+  pnpm build
+  if ($LASTEXITCODE -ne 0) { throw "客户端构建失败" }
+
+  Write-Host "3/5 生成目录包（仅连接 HTTPS 服务端）..." -ForegroundColor Cyan
   Push-Location app
-  npx tsc --noEmit
-  if ($LASTEXITCODE -ne 0) { throw "Electron TypeScript 类型检查失败" }
-  Pop-Location
+  try {
+    pnpm exec electron-builder --win --dir
+    if ($LASTEXITCODE -ne 0) { throw "Electron 目录包构建失败" }
+  } finally {
+    Pop-Location
+  }
 
-  # P0/P1 回归：mock 上游、跑完自动清理，基线应为 355 商品 / 0 定时任务
-  Push-Location server
-  python -c "from db.session import init_db; init_db()"
-  $dbInitExitCode = $LASTEXITCODE
-  Pop-Location
-  if ($dbInitExitCode -ne 0) { throw "回归测试数据库初始化失败" }
+  Write-Host "4/5 校验目录包和登录启动..." -ForegroundColor Cyan
+  node scripts\verify-desktop-package.mjs
+  if ($LASTEXITCODE -ne 0) { throw "目录包校验失败" }
 
-  python scripts\regression.py
-  if ($LASTEXITCODE -ne 0) { throw "P0/P1 回归未通过（详见上方 FAIL 行）" }
+  Write-Host "5/5 生成可选择目录和新建文件夹的安装程序..." -ForegroundColor Cyan
+  & $InnoCompiler installer\setup.iss
+  if ($LASTEXITCODE -ne 0) { throw "Inno 安装程序构建失败" }
 
-  Write-Host "1/6 构建前端..." -ForegroundColor Cyan
-  pnpm build:web
-  if ($LASTEXITCODE -ne 0) { throw "前端构建失败" }
-
-  Write-Host "2/6 打包后端 (PyInstaller)..." -ForegroundColor Cyan
-  Push-Location server
-  python -m PyInstaller --noconfirm server.spec
-  if ($LASTEXITCODE -ne 0) { throw "后端打包失败" }
-  Pop-Location
-
-  Write-Host "3/6 编译 Electron 主进程..." -ForegroundColor Cyan
-  pnpm build:app
-  if ($LASTEXITCODE -ne 0) { throw "Electron 编译失败" }
-
-  Write-Host "4/6 生成安装程序..." -ForegroundColor Cyan
-  Push-Location app
-  pnpm exec electron-builder --win
-  if ($LASTEXITCODE -ne 0) { throw "安装程序打包失败" }
-  Pop-Location
-
-  Write-Host "5/6 校验产物..." -ForegroundColor Cyan
-  if (-not (Test-Path "release")) { throw "release/ 不存在，打包未产出" }
-
-  Write-Host "6/6 完成，产物在 release/" -ForegroundColor Green
-  Get-ChildItem release -Filter "*.exe" | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+  $version = (Get-Content -LiteralPath app\package.json -Raw | ConvertFrom-Json).version
+  $installer = Join-Path $root "release\奥皇上品-$version-安装程序.exe"
+  if (-not (Test-Path -LiteralPath $installer)) { throw "安装程序产物不存在" }
+  Get-Item -LiteralPath $installer | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+  python -X utf8 -c "import hashlib,sys; from pathlib import Path; p=Path(sys.argv[1]); print('SHA256: '+hashlib.file_digest(p.open('rb'), 'sha256').hexdigest())" $installer
+  if ($LASTEXITCODE -ne 0) { throw "安装程序校验和计算失败" }
 } finally {
+  $env:TEMP = $originalTemp
+  $env:TMP = $originalTmp
   Pop-Location
 }

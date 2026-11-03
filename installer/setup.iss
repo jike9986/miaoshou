@@ -3,7 +3,7 @@
 ; AohuangShangpin），中文名在 ISCC/cmd 下会被按 GBK 误解码。用户看到的中文
 ; 来自快捷方式名与窗口标题，不受影响。
 #define MyAppName "奥皇上品"
-#define MyAppVersion "0.1.5"
+#define MyAppVersion "0.1.6"
 #define MyAppPublisher "AOHUANG"
 #define MyAppExeName "AohuangShangpin.exe"
 
@@ -12,13 +12,14 @@ AppId={{8F3A2C41-7B5E-4D9A-9C1F-2E6B8D4A7F30}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-; 装到当前用户目录、不需要管理员权限：
-;   之前 {autopf} + PrivilegesRequired=admin 需要 UAC 提权，在受限账户/远程桌面
-;   里会直接报「拒绝访问」「RegCreateKeyEx 失败」，装不上。
-;   普通用户装到 %LOCALAPPDATA%\Programs 是 Electron/VS Code 等主流软件的做法，
-;   全程不弹 UAC，也不需要写 HKEY_LOCAL_MACHINE。
+; 默认按当前用户安装到 %LOCALAPPDATA%\Programs，无需写 HKEY_LOCAL_MACHINE。
+; 本机验收须从正常完整性目录运行；工作区继承的 Low Mandatory Level
+; 会让安装进程降为低完整性，导致正常桌面和 HKCU 写入被系统拒绝。
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
+; 升级时沿用上次安装目录，同时保留目录选择页供用户确认。
+UsePreviousAppDir=yes
+DisableDirPage=no
 ; 安装/卸载列表里显示的名字：中文 + 版本，避免出现英文或纯版本号
 AppVerName={#MyAppName} {#MyAppVersion}
 UninstallDisplayName={#MyAppName}
@@ -27,12 +28,13 @@ OutputBaseFilename=奥皇上品-{#MyAppVersion}-安装程序
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-; 普通用户安装：不请求管理员权限，避免受限账户装不上
+; 默认不请求管理员权限。
 PrivilegesRequired=lowest
-; 允许覆盖提权要求：受限环境（UAC 被拒）下也能装
+; 允许用户明确选择按当前用户或全部用户安装。
 PrivilegesRequiredOverridesAllowed=dialog
-; 32/64 位都按默认模式装（不再强制 64 位注册表视图，减少权限相关失败）
+; Electron 分发包为 x64，安装和卸载注册项统一使用 64 位视图。
 ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64compatible
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -66,13 +68,16 @@ ButtonCancel=取消
 [Files]
 Source: "..\release\win-unpacked\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
+[InstallDelete]
+; 旧测试版可能留有共享令牌；只清除此文件，不动用户登录和商品缓存。
+Type: files; Name: "{app}\resources\client-token.json"
+
 [Icons]
 ; 快捷方式必须带 --no-sandbox：本机 Electron 沙箱在原生层就崩（JS 都没执行），
 ; 双击 exe 不带参数起不来，参数只能写在快捷方式里。
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--no-sandbox"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
-; 用 {userdesktop} 而不是 {autodesktop}：后者在免管理员安装时会指向
-; C:\Users\Public\Desktop，受限环境写它会报「拒绝访问」导致安装失败。
+; 只为当前用户创建桌面入口。
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--no-sandbox"; Tasks: desktopicon
 
 [Tasks]

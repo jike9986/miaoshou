@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, ipcMain, screen, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -158,11 +158,18 @@ function startServer(): void {
 }
 
 function createWindow(): void {
+  // Electron 使用逻辑像素；高缩放或小屏幕下不能把窗口最小尺寸固定得比工作区还大。
+  const display = screen.getPrimaryDisplay();
+  const workArea = display.workAreaSize;
+  const width = Math.min(1440, workArea.width);
+  const height = Math.min(920, workArea.height);
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 920,
-    minWidth: 1180,
-    minHeight: 720,
+    width,
+    height,
+    minWidth: Math.min(900, workArea.width),
+    minHeight: Math.min(600, workArea.height),
+    x: display.workArea.x + Math.floor((workArea.width - width) / 2),
+    y: display.workArea.y + Math.floor((workArea.height - height) / 2),
     show: false,
     frame: false,
     titleBarStyle: "hidden",
@@ -209,48 +216,15 @@ const bootInfo: { apiBase: string; token: string; version: string; platform: str
 /**
  * 服务器端模式（发给别人用的版本）。
  *
- * 负责人 2026-11-02 明确：软件发给别人后，**装上就能用、不出现账号登录**，
- * 所有业务都在服务器处理。所以这一版客户端：
- *   · 不再启动本地后端（省内存，也避免用户机器上跑一份重复数据）；
- *   · 直接连线上服务器；
- *   · 内置一把部署方统一配置的客户端令牌，用户无需输入任何账号。
- *
- * 两个值都可以在打包时用环境变量覆盖，方便换环境：
- *   AOHUANG_REMOTE_API_BASE / AOHUANG_REMOTE_CLIENT_TOKEN
+ * 正式客户端默认连接 HTTPS 服务，由每位用户通过软件账号登录。
+ * 不分发共享客户端令牌，用户会话由前端登录流程保存。
+ * 开发/验收环境可用 AOHUANG_REMOTE_API_BASE 覆盖服务地址。
  */
 const REMOTE_API_BASE =
   process.env.AOHUANG_REMOTE_API_BASE?.trim() || "https://aohuang888.com/miaoshou-platform";
-// 客户端令牌：打包时由 scripts/inject-token.mjs 写入 build/client-token.json，
-// 随 resources 一起分发（不进 git）。运行时优先环境变量，其次读该文件。
-const REMOTE_CLIENT_TOKEN = process.env.AOHUANG_REMOTE_CLIENT_TOKEN?.trim() || "";
-
-function readBundledToken(): string {
-  if (REMOTE_CLIENT_TOKEN) return REMOTE_CLIENT_TOKEN;
-  try {
-    // 打包后位于 resources/client-token.json；开发时在 app/build 下
-    // 开发态使用仓库里的 token 文件；打包态使用 extraResources。
-    // 避免开发机器的 Electron 安装目录里有旧文件时抢先读到旧令牌。
-    const candidates = app.isPackaged
-      ? [path.join(process.resourcesPath, "client-token.json")]
-      : [
-          path.join(app.getAppPath(), "build", "client-token.json"),
-          path.join(__dirname, "..", "build", "client-token.json"),
-        ];
-    for (const file of candidates) {
-      if (!file) continue;
-      if (!fs.existsSync(file)) continue;
-      const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as { token?: string };
-      const value = String(parsed.token || "").trim();
-      if (value) return value;
-    }
-  } catch {
-    /* 读不到就当没有，下面会打日志 */
-  }
-  return "";
-}
-
-/** 是否为「连服务器」模式：没显式要求本地后端时默认走服务器。 */
+/** 正式客户端只连接服务器；本地后端仅用于开发。 */
 function useRemoteServer(): boolean {
+  if (app.isPackaged) return true;
   const flag = (process.env.AOHUANG_LOCAL_BACKEND || "").trim();
   if (flag === "1") return false;      // 显式要求本地后端（开发/单机测试）
   if (flag === "0") return true;
@@ -295,12 +269,9 @@ ipcMain.handle("window:is-maximized", () => mainWindow?.isMaximized() ?? false);
 
 app.whenReady().then(async () => {
   if (useRemoteServer()) {
-    // 服务器端模式：不启本地后端，直接连线上；令牌用内置的客户端令牌。
+    // 软件账号登录后才取得用户会话；不再读取旧安装目录中的共享令牌。
     bootInfo.apiBase = REMOTE_API_BASE.replace(/\/+$/, "");
-    bootInfo.token = readBundledToken();
-    if (!bootInfo.token) {
-      console.error("未内置客户端令牌（client-token.json / AOHUANG_REMOTE_CLIENT_TOKEN），界面会提示未连接");
-    }
+    bootInfo.token = "";
     createWindow();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
