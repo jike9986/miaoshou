@@ -59,13 +59,21 @@ logger = logging.getLogger("aohuang.publish")
 
 PUBLISH_STATUSES = ("processing", "success", "fail", "cancel")
 
-# 「这件还在发布中」的时间窗（秒）。发布是异步的：本工具把商品提交给平台后
-# 只拿到「已受理」，真正结果要回源才知道，所以一行台账会长时间停在 processing。
-# 10 分钟的选择：
-#   · 覆盖一次正常发布的耗时（载体重建 + 上传 + 平台受理，几十秒到几分钟）；
-#   · 又短到「上一轮其实早挂了」时不会把商品永久锁死 —— 超过 10 分钟的
-#     processing 视为僵尸记录，允许重新发。
+# 仅用于提示等待时长；结果未确认的发布不会因超过此时长而自动解锁。
 PUBLISH_PROCESSING_SECONDS = 600.0
+
+
+def _is_claim_only_log(db: Session, row: PublishLog) -> bool:
+    detail = row.detail if isinstance(row.detail, dict) else {}
+    if "claimOnly" in detail:
+        return detail["claimOnly"] is True
+    # Older warehouse-claim jobs predate the explicit log marker.
+    if row.batch_id:
+        from models.batch import Batch
+
+        batch = db.get(Batch, row.batch_id)
+        return batch is not None and (batch.settings or {}).get("kind") == "warehouse_claim"
+    return False
 
 
 def _in_flight_blocker(db: Session, *, account: Account,
@@ -74,30 +82,36 @@ def _in_flight_blocker(db: Session, *, account: Account,
 
     锁只管得住同一进程；进程重启、或者有人另起一个实例时锁是空的，
     台账里的 processing 行是唯一还留着的证据。
-    只认 10 分钟内的：更早的 processing 说明上一轮根本没拿到回执（进程被杀、
-    平台没回），再拦下去这件商品就永久发不出去了。
+    processing 只代表结果未确认。超时、断网或进程退出都不能证明平台没有
+    受理，因此即使记录很旧，也必须先核对回执，不能自动重新提交。
     """
     wanted = set(keys)
     if not wanted:
         return
-    cutoff = now_ts() - PUBLISH_PROCESSING_SECONDS
     owner_filter = (PublishLog.operator_id.is_(None) if operator_id is None
                     else PublishLog.operator_id == operator_id)
     rows = (db.query(PublishLog)
             .filter(PublishLog.account_id == account.id,
                     owner_filter,
-                    PublishLog.status == "processing",
-                    PublishLog.requested_at >= cutoff)
+                    PublishLog.status == "processing")
             .all())
     for row in rows:
         key = str(row.warehouse_key or "") or product_key(row.detail_id, row.shop_id)
+        if key not in wanted and row.product_id is not None:
+            # Legacy carrier logs stored the source-shop warehouse key. The
+            # product identity plus the actual target shop still identifies it.
+            product = db.get(Product, row.product_id)
+            if product is not None:
+                key = product_key(product.detail_id, row.shop_id)
         if key not in wanted:
             continue
+        if _is_claim_only_log(db, row):
+            continue
         raise errors.busy(
-            "这件正在发布中，请等上一轮结束",
+            "这件商品的发布结果尚未确认，请先刷新发布记录核对",
             warehouseKey=key, detailId=row.detail_id, shopId=row.shop_id,
             status=row.status, requestedAt=row.requested_at,
-            retryAfterSeconds=int(PUBLISH_PROCESSING_SECONDS) + 1)
+            lastRequestedAt=row.last_requested_at)
 
 
 def _already_published_blocker(db: Session, *, account: Account,
@@ -384,6 +398,50 @@ def _find_log(db: Session, *, account_id: int, detail_id: str, shop_id: str,
                     PublishLog.warehouse_key == key,
                     PublishLog.shop_id == shop_id)
             .order_by(PublishLog.id.desc()).first())
+
+
+def _submit_persisted_publish(db: Session, client: MiaoshouClient, *,
+                              detail_ids: list[str], shop_id: str,
+                              logs: list[PublishLog]) -> None:
+    """Persist the exact submission before an irreversible upstream request.
+
+    A caller rollback or process exit after submission must not erase the only
+    evidence that the platform may already have accepted these products.
+    """
+    numeric_ids = [int(value) for value in detail_ids]
+    numeric_shop_id = int(shop_id)
+    if len(logs) != len(numeric_ids):
+        raise errors.AppError(
+            errors.UPSTREAM_UNKNOWN_RESULT,
+            "发布商品与待提交记录不一致，已阻止发布", status=502)
+    for row in logs:
+        row.reason = "正在提交发布，等待平台回执；请勿重复发布"
+    # The committed processing rows take over from the session locks when this
+    # checkpoint releases them. Claim-only operations never enter this helper.
+    db.commit()
+    try:
+        client.publish_items(numeric_ids, [numeric_shop_id])
+    except MiaoshouError as exc:
+        rejected = (
+            exc.kind == "rate_limit"
+            or (exc.status is not None and 400 <= exc.status < 500 and exc.status != 408)
+            or (isinstance(exc.payload, dict)
+                and bool(exc.code) and exc.code not in {"0", "200", "success"})
+        )
+        message = redact(str(exc))[:160]
+        for row in logs:
+            row.status = "fail" if rejected else "processing"
+            row.reason = (message if rejected else
+                          f"发布结果未知，请刷新发布记录核对，勿重复提交：{message}")
+            row.finished_at = now_ts() if rejected else None
+        db.commit()
+        if rejected:
+            raise map_upstream_error(exc) from None
+        raise errors.AppError(
+            errors.UPSTREAM_UNKNOWN_RESULT,
+            "发布请求可能已被平台受理，请刷新发布记录核对；已阻止重复发布",
+            status=502, details={"detailIds": detail_ids, "shopId": shop_id},
+        ) from None
 
 
 # --- 语言校验 -------------------------------------------------------------
@@ -804,12 +862,6 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             db.flush()
         elif same_shop:
             detail_ids = [int(entry["detailId"]) for entry in entries]
-            try:
-                client.publish_items(detail_ids, [int(target_shop_id)])
-            except (MiaoshouError, ValueError) as exc:
-                if isinstance(exc, MiaoshouError):
-                    raise map_upstream_error(exc) from None
-                raise errors.validation(str(exc), field="items") from None
             published = [str(value) for value in detail_ids]
             if template is not None:
                 template_warning = (
@@ -832,14 +884,6 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                     errors.CARRIER_UNAVAILABLE,
                     "载体全部写入失败，本次没有发布任何商品",
                     status=422, details={"failures": filled["failures"][:5]})
-            try:
-                client.publish_items(list(filled["saved"]), [int(target_shop_id)])
-            except (MiaoshouError, ValueError) as exc:
-                message = str(exc)
-                raise errors.AppError(
-                    errors.UPSTREAM_ERROR,
-                    f"已写入 {len(filled['saved'])} 件但发布失败：{redact(message)[:160]}",
-                    status=502, details={"savedCount": len(filled["saved"])}) from None
             sources = filled.get("savedSources") or []
             filled_sources = [int(i) for i in sources if isinstance(i, int)
                               and 0 <= i < len(entries)]
@@ -865,16 +909,16 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                               schedule_id=payload.get("scheduleId"),
                               # 载体重建会换掉 detailId，originDetailId 是重建前
                               # 那个 id；用它拼出的仓库键才是这一单的稳定身份。
-                              warehouse_key=(
-                                  product_key(entry["originDetailId"], target_shop_id)
-                                  if entry.get("originDetailId") else None),
+                              warehouse_key=product_key(
+                                  entry.get("originDetailId") or entry["detailId"],
+                                  target_shop_id),
                               operator_id=log_operator_id)
+            row.detail = {**(row.detail or {}), "claimOnly": claim_only}
             logged.append(row)
         db.flush()
-        if published and not claim_only and not member_publish:
-            succeeded = [entries[i] for i in filled_sources] if filled_sources else (
-                _entries_for_ids(entries, published))
-            _mark_published(db, succeeded, target_shop_id, account)
+        if published and not claim_only:
+            _submit_persisted_publish(
+                db, client, detail_ids=published, shop_id=str(target_shop_id), logs=logged)
         # 平台只「已受理」时**不能**记 success：发布是异步的，平台侧稍后才判
         # 成功或失败。强制写 success 有两个后果——界面上把未确认的发布显示成
         # 「发布成功」，而且 /logs/refresh 只回源 processing 行，这些行再也
@@ -939,12 +983,24 @@ def _pair_entries(entries: list[dict[str, Any]], published: list[str],
     return []
 
 
-def _entries_for_ids(entries: list[dict[str, Any]],
-                     published: list[str]) -> list[dict[str, Any]]:
-    """按发布后的 detailId 找回对应条目（direct 分支 detailId 未变）。"""
-    wanted = {str(value) for value in published}
-    return [entry for entry in entries
-            if str(entry.get("detailId")) in wanted]
+def reconcile_product_publish(db: Session, log: PublishLog) -> None:
+    """Only a final successful receipt can mark a teacher's shared product published."""
+    if log.status != "success" or log.product_id is None or _is_claim_only_log(db, log):
+        return
+    if log.operator_id is not None:
+        from models.operator import Operator
+        from services import operator_service
+
+        operator = db.get(Operator, log.operator_id)
+        # A member's publication is represented by their own log and never
+        # changes the shared product for other members.
+        if operator is None or operator_service.role_of(operator) == operator_service.ROLE_MEMBER:
+            return
+    product = db.get(Product, log.product_id)
+    account = db.get(Account, log.account_id) if log.account_id is not None else None
+    if product is None or product.deleted_at is not None or account is None:
+        return
+    _mark_published(db, [{"product": product, "detailId": log.detail_id}], log.shop_id, account)
 
 
 def _mark_published(db: Session, entries: list[dict[str, Any]], shop_id: str,
@@ -954,6 +1010,8 @@ def _mark_published(db: Session, entries: list[dict[str, Any]], shop_id: str,
         product = entry.get("product")
         if not isinstance(product, Product):
             continue
+        draft_verified = product.draft_verified_revision == product.revision
+        quality_verified = warehouse_service._quality_review_summary(product)[0] == "verified"
         product.claimed = True
         product.claimed_at = product.claimed_at or stamp
         product.claimed_shop_id = str(shop_id)
@@ -965,6 +1023,13 @@ def _mark_published(db: Session, entries: list[dict[str, Any]], shop_id: str,
         # 发布也会改商品行（status → published）。漏了这一步，别人手上那份
         # 「发布前」的详情页仍然能拿旧版本号改标题，把刚发布的商品改回 ready。
         warehouse_service.bump_revision(product)
+        # Only publication metadata changed; verified product contents stay valid.
+        if draft_verified:
+            product.draft_verified_revision = product.revision
+        if quality_verified:
+            product.quality_review = {
+                **(product.quality_review or {}), "verifiedRevision": product.revision,
+            }
     db.flush()
 
 

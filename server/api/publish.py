@@ -181,7 +181,7 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
         PublishLog.status == "processing")
     if operator_id is not None:
         query = query.filter(PublishLog.operator_id == operator_id)
-    rows = query.all()
+    rows = [row for row in query.all() if not publish_service._is_claim_only_log(db, row)]
     local_by_detail: dict[str, list[Any]] = {}
     for row in rows:
         local_by_detail.setdefault(str(row.detail_id), []).append(row)
@@ -229,6 +229,7 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
             row.finished_at = now_ts() if remote_status != "processing" else None
             updated += 1
             if remote_status in ("success", "fail", "cancel"):
+                publish_service.reconcile_product_publish(db, row)
                 automation_run_service.reconcile_publish_log(db, row)
     db.commit()
     return {"updated": updated, "degraded": degraded, "accountId": str(account.id),

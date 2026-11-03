@@ -380,6 +380,253 @@ def _stub_member_publish(monkeypatch, db, account, *, received_payloads: list | 
     return client
 
 
+def _stub_guarded_publish(monkeypatch, db, account, *, target_shop_id="123"):
+    blocker = publish_service._in_flight_blocker
+    hold = publish_service.hold_for_session
+    client = _stub_member_publish(monkeypatch, db, account, target_shop_id=target_shop_id)
+    monkeypatch.setattr(publish_service, "_in_flight_blocker", blocker)
+    monkeypatch.setattr(publish_service, "hold_for_session", hold)
+    return client
+
+
+@pytest.mark.parametrize("role", [operator_service.ROLE_MEMBER, operator_service.ROLE_TEACHER])
+@pytest.mark.parametrize("failure", ["timeout", "crash", "caller_rollback"])
+@pytest.mark.parametrize("source_shop_id", ["123", "456"])
+def test_publish_intent_survives_unknown_result_and_caller_rollback(
+        publish_db, monkeypatch, role, failure, source_shop_id):
+    from services.miaoshou import MiaoshouError
+
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix, role=role)
+    product = _product(db, suffix, account, shop_id=source_shop_id)
+    if role == operator_service.ROLE_MEMBER:
+        db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+        db.flush()
+    client = _stub_guarded_publish(monkeypatch, db, account)
+    product_id, account_id, operator_id = product.id, account.id, operator.id
+    expected_detail_id = (product.detail_id
+                          if role == operator_service.ROLE_TEACHER and source_shop_id == "123"
+                          else "98765")
+    calls = []
+
+    def submit(detail_ids, shop_ids):
+        calls.append((detail_ids, shop_ids))
+        # A separate transaction must see the exact intent before the HTTP call.
+        with SessionLocal() as other:
+            log = other.query(PublishLog).filter_by(
+                account_id=account_id, operator_id=operator_id, product_id=product_id).one()
+            assert log.status == "processing"
+            assert log.detail_id == expected_detail_id
+            assert log.shop_id == "123"
+            assert log.detail["claimOnly"] is False
+        if failure == "timeout":
+            raise MiaoshouError("read timeout after submission", kind="timeout")
+        if failure == "crash":
+            raise RuntimeError("process interrupted after submission")
+
+    client.publish_items = submit
+    payload = _publish_payload(product, account)
+    if failure == "timeout":
+        with pytest.raises(errors.AppError) as exc:
+            publish_service.publish(db, payload, operator_id=operator_id)
+        assert exc.value.code == errors.UPSTREAM_UNKNOWN_RESULT
+    elif failure == "crash":
+        with pytest.raises(RuntimeError, match="interrupted"):
+            publish_service.publish(db, payload, operator_id=operator_id)
+    else:
+        result = publish_service.publish(db, payload, operator_id=operator_id)
+        assert result["records"]["items"][0]["status"] == "processing"
+    db.rollback()
+
+    with pytest.raises(errors.AppError) as retry:
+        publish_service.publish(db, payload, operator_id=operator_id)
+    assert retry.value.code == "CONFLICT_BUSY"
+    assert len(calls) == 1
+    assert db.query(PublishLog).filter_by(product_id=product_id).one().status == "processing"
+
+
+def test_publish_checkpoint_failure_never_submits_to_platform(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    teacher, account = _identity(db, suffix, role=operator_service.ROLE_TEACHER)
+    product = _product(db, suffix, account)
+    client = _stub_guarded_publish(monkeypatch, db, account)
+    calls = []
+    client.publish_items = lambda *_args: calls.append(True)
+
+    def fail_commit():
+        raise RuntimeError("cannot persist submission")
+
+    monkeypatch.setattr(db, "commit", fail_commit)
+    with pytest.raises(RuntimeError, match="cannot persist submission"):
+        publish_service.publish(db, _publish_payload(product, account), operator_id=teacher.id)
+    assert calls == []
+
+
+@pytest.mark.parametrize("role", [operator_service.ROLE_MEMBER, operator_service.ROLE_TEACHER])
+@pytest.mark.parametrize("remote_status", ["processing", "success", "fail", "cancel"])
+def test_warehouse_published_state_requires_final_receipt_and_stays_owner_scoped(
+        publish_db, monkeypatch, role, remote_status):
+    from api import publish as publish_api
+
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix, role=role)
+    product = _product(db, suffix, account)
+    if role == operator_service.ROLE_MEMBER:
+        db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+        db.flush()
+    client = _stub_guarded_publish(monkeypatch, db, account)
+    revision = product.revision
+    result = publish_service.publish(
+        db, _publish_payload(product, account), operator_id=operator.id)
+    assert result["records"]["items"][0]["status"] == "processing"
+    assert product.status == "ready"
+    assert product.claimed is False
+    assert product.revision == revision
+
+    client.publish_records = lambda **_kwargs: {"data": {"detailList": [{
+        "detailId": result["published"][0], "shopId": "123", "status": remote_status,
+    }]}}
+    client.close = lambda: None
+    refreshed = publish_api._refresh_processing(db, str(account.id), operator_id=operator.id)
+    assert refreshed["updated"] == 1
+    assert db.query(PublishLog).filter_by(product_id=product.id).one().status == remote_status
+    globally_published = role == operator_service.ROLE_TEACHER and remote_status == "success"
+    assert product.status == ("published" if globally_published else "ready")
+    assert product.claimed is globally_published
+    assert product.revision == revision + int(globally_published)
+    if role == operator_service.ROLE_MEMBER:
+        visible = warehouse_service.detail(db, product.id, operator_id=operator.id)["product"]
+        assert visible["publishStatus"] == remote_status
+        assert visible["status"] == ("published" if remote_status == "success" else "claimed")
+
+
+@pytest.mark.parametrize("currently_verified", [False, True])
+def test_final_receipt_keeps_current_content_verification_without_reviving_stale_checks(
+        publish_db, currently_verified):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    teacher, account = _identity(db, suffix, role=operator_service.ROLE_TEACHER)
+    product = _product(db, suffix, account)
+    product.automation_result = True
+    verified_revision = product.revision if currently_verified else product.revision - 1
+    product.draft_verified_revision = verified_revision
+    product.quality_review = {
+        "verifiedRevision": verified_revision, "source": "source inspection",
+    }
+    _automation_run(db, suffix, teacher, account, product, publish_status="running")
+    log = PublishLog(account_id=account.id, operator_id=teacher.id, product_id=product.id,
+                     detail_id=product.detail_id, shop_id="123", status="success")
+    db.add(log)
+    db.flush()
+
+    publish_service.reconcile_product_publish(db, log)
+
+    assert product.status == "published"
+    expected_verified_revision = product.revision if currently_verified else verified_revision
+    assert product.draft_verified_revision == expected_verified_revision
+    assert product.quality_review["verifiedRevision"] == expected_verified_revision
+    result_ids = {row[0] for row in warehouse_service._verified_automation_product_ids(db).all()}
+    assert (product.id in result_ids) is currently_verified
+
+
+def test_legacy_carrier_processing_log_matches_source_product_and_target_shop(publish_db):
+    from core.utils import product_key
+
+    db = publish_db
+    operator, account = _identity(db, uuid.uuid4().hex[:8])
+    product = _product(db, uuid.uuid4().hex[:8], account, shop_id="456")
+    db.add(PublishLog(account_id=account.id, operator_id=operator.id, product_id=product.id,
+                      detail_id="98765", shop_id="123", warehouse_key=product.warehouse_key,
+                      status="processing"))
+    db.flush()
+    with pytest.raises(errors.AppError) as exc:
+        publish_service._in_flight_blocker(
+            db, account=account, keys=[product_key(product.detail_id, "123")],
+            operator_id=operator.id)
+    assert exc.value.code == "CONFLICT_BUSY"
+    publish_service._in_flight_blocker(
+        db, account=account, keys=[product_key(product.detail_id, "789")],
+        operator_id=operator.id)
+
+
+@pytest.mark.parametrize("recent_retry", [False, True])
+def test_unresolved_publish_does_not_expire_or_unlock_after_recent_retry(
+        publish_db, recent_retry):
+    from core.utils import now_ts, product_key
+
+    db = publish_db
+    operator, account = _identity(db, uuid.uuid4().hex[:8])
+    row = PublishLog(account_id=account.id, operator_id=operator.id,
+                     detail_id="98765", shop_id="123", warehouse_key="12345:123",
+                     status="processing", requested_at=now_ts() - 86400,
+                     last_requested_at=now_ts() if recent_retry else None)
+    db.add(row)
+    db.flush()
+
+    with pytest.raises(errors.AppError) as exc:
+        publish_service._in_flight_blocker(
+            db, account=account, keys=[product_key("12345", "123")], operator_id=operator.id)
+    assert exc.value.code == "CONFLICT_BUSY"
+
+
+def test_definite_upstream_rejection_is_durable_and_can_be_retried(publish_db, monkeypatch):
+    from services.miaoshou import MiaoshouError
+
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+    db.flush()
+    client = _stub_guarded_publish(monkeypatch, db, account)
+    payload = _publish_payload(product, account)
+
+    def reject(*_args):
+        raise MiaoshouError("invalid listing", code="INVALID_LISTING",
+                            payload={"code": "INVALID_LISTING", "result": "fail"})
+
+    client.publish_items = reject
+    with pytest.raises(errors.AppError):
+        publish_service.publish(db, payload, operator_id=operator.id)
+    db.rollback()
+    log = db.query(PublishLog).filter_by(product_id=product.id).one()
+    assert log.status == "fail"
+    assert log.finished_at is not None
+    client.publish_items = lambda *_args: None
+    publish_service.publish(db, payload, operator_id=operator.id)
+    assert log.status == "processing"
+    assert log.attempts == 2
+
+
+@pytest.mark.parametrize("marker", [True, None, False])
+def test_claim_only_logs_do_not_block_formal_publish_but_explicit_publish_does(
+        publish_db, marker):
+    from models.batch import Batch
+
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    batch = Batch(id=f"clm_{suffix}", settings={"kind": "warehouse_claim"},
+                  account_id=account.id, operator_id=operator.id)
+    db.add(batch)
+    db.flush()
+    db.add(PublishLog(account_id=account.id, operator_id=operator.id,
+                      detail_id="12345", shop_id="123", warehouse_key="12345:123",
+                      batch_id=batch.id, status="processing",
+                      detail={} if marker is None else {"claimOnly": marker}))
+    db.flush()
+    if marker is False:
+        with pytest.raises(errors.AppError):
+            publish_service._in_flight_blocker(
+                db, account=account, keys=["12345:123"], operator_id=operator.id)
+    else:
+        publish_service._in_flight_blocker(
+            db, account=account, keys=["12345:123"], operator_id=operator.id)
+
+
 def test_member_can_publish_claimed_product_with_template_without_mutating_shared_product(
     publish_db, monkeypatch,
 ):
