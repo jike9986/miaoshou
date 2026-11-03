@@ -915,7 +915,7 @@ export function WarehousePage() {
           ...(memberClaimableIds.length > 0 ? [{
             label: claimOnly.isPending
               ? "正在认领…"
-              : `认领/再次认领 ${memberClaimableIds.length} 件`,
+              : `认领 ${memberClaimableIds.length} 件`,
             icon: <PackageCheck className="size-3.5" />,
             disabled: claimOnly.isPending,
             onClick: () => claimSelected(memberClaimableIds),
