@@ -555,6 +555,7 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
   const [loginCode, setLoginCode] = useState("");
   const [loginCodeSent, setLoginCodeSent] = useState(false);
   const loginCodeInputRef = useRef<HTMLInputElement>(null);
+  const loginEmailInputRef = useRef<HTMLInputElement>(null);
   const identifierInputRef = useRef<HTMLInputElement>(null);
   const passwordInputRef = useRef<HTMLInputElement>(null);
   const [loginFieldErrors, setLoginFieldErrors] = useState<{
@@ -807,6 +808,22 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
     });
   };
 
+  const switchLoginMethod = (method: "password" | "email-code") => {
+    setLoginMethod(method);
+    setError(null);
+    setLoginFieldErrors({ identifier: null, password: null });
+    if (method === "email-code" && !loginEmail && identifier.includes("@")) {
+      setLoginEmail(identifier.trim());
+    }
+    window.requestAnimationFrame(() => {
+      if (method === "email-code") {
+        if (loginCodeSent) loginCodeInputRef.current?.focus();
+        else loginEmailInputRef.current?.focus();
+      }
+      else passwordInputRef.current?.focus();
+    });
+  };
+
   return (
     <Card className="w-full rounded-2xl border-border-subtle bg-surface/95 p-6 shadow-3 backdrop-blur-sm sm:p-7" padding="none">
       <CardTitle className="text-[20px] leading-7">
@@ -847,38 +864,21 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
           {!registerCodeSent ? <Button block size="lg" loading={requestRegistrationCode.isPending} disabled={registerCooldown.remainingSeconds > 0} onClick={submitRegistrationCode}>{registerCooldown.remainingSeconds > 0 ? `等待 ${registerCooldown.remainingSeconds} 秒后重发` : "发送验证码"}</Button> : <div className="flex flex-wrap gap-2"><Button block size="lg" loading={register.isPending} onClick={submitRegister}>完成注册并登录</Button><Button size="sm" variant="ghost" loading={requestRegistrationCode.isPending} disabled={registerCooldown.remainingSeconds > 0} onClick={submitRegistrationCode}>{registerCooldown.remainingSeconds > 0 ? `重新发送（${registerCooldown.remainingSeconds} 秒）` : "重新发送验证码"}</Button></div>}
           <Button size="sm" variant="ghost" onClick={() => { setRegistering(false); setError(null); }}>已有账号，返回登录</Button>
         </> : <>
-          <div role="group" aria-label="登录方式" className="grid grid-cols-2 rounded-lg bg-canvas p-1">
-            <button
-              type="button"
-              aria-pressed={loginMethod === "password"}
-              onClick={() => { setLoginMethod("password"); setError(null); }}
-              className={cn(
-                "min-h-10 rounded-md px-3 text-[13px] font-medium transition-colors duration-fast",
-                loginMethod === "password" ? "bg-surface text-fg shadow-1" : "text-fg-secondary hover:text-fg"
-              )}
-            >
-              密码登录
-            </button>
-            <button
-              type="button"
-              aria-pressed={loginMethod === "email-code"}
-              onClick={() => {
-                setLoginMethod("email-code");
-                if (!loginEmail && identifier.includes("@")) setLoginEmail(identifier.trim());
-                setError(null);
-              }}
-              className={cn(
-                "min-h-10 rounded-md px-3 text-[13px] font-medium transition-colors duration-fast",
-                loginMethod === "email-code" ? "bg-surface text-fg shadow-1" : "text-fg-secondary hover:text-fg"
-              )}
-            >
-              邮箱验证码
-            </button>
-          </div>
           {loginMethod === "email-code" ? <>
             <p className="text-[13px] leading-5 text-fg-secondary">使用已验证邮箱接收一次性验证码登录。</p>
-            <Field label="邮箱" required htmlFor={currentId}>
+            <Field
+              label="邮箱"
+              required
+              htmlFor={currentId}
+              action={
+                <Button size="sm" variant="ghost" className="-my-1 shrink-0 px-1 text-brand-700 hover:bg-transparent hover:text-brand-800"
+                  disabled={requestEmailCodeLogin.isPending || emailCodeLogin.isPending} onClick={() => switchLoginMethod("password")}>
+                  密码登录
+                </Button>
+              }
+            >
               <Input
+                ref={loginEmailInputRef}
                 id={currentId}
                 type="email"
                 autoComplete="email"
@@ -933,7 +933,20 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
             </>}
           </> : <>
           <Field label="邮箱或用户名" required htmlFor={usernameId} error={loginFieldErrors.identifier}><Input ref={identifierInputRef} id={usernameId} autoComplete="username" value={identifier} invalid={Boolean(loginFieldErrors.identifier)} onChange={(e) => { setIdentifier(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, identifier: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
-          <Field label="密码" required htmlFor={passwordId} error={loginFieldErrors.password}><Input ref={passwordInputRef} id={passwordId} type="password" autoComplete="current-password" value={password} invalid={Boolean(loginFieldErrors.password)} onChange={(e) => { setPassword(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, password: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
+          <Field
+            label="密码"
+            required
+            htmlFor={passwordId}
+            error={loginFieldErrors.password}
+            action={
+              <Button size="sm" variant="ghost" className="-my-1 shrink-0 px-1 text-brand-700 hover:bg-transparent hover:text-brand-800"
+                disabled={login.isPending} onClick={() => switchLoginMethod("email-code")}>
+                验证码登录
+              </Button>
+            }
+          >
+            <Input ref={passwordInputRef} id={passwordId} type="password" autoComplete="current-password" value={password} invalid={Boolean(loginFieldErrors.password)} onChange={(e) => { setPassword(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, password: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} />
+          </Field>
           <div className="flex flex-col gap-1">
             <Button block size="lg" loading={login.isPending} iconRight={<ArrowRight className="size-4" />} onClick={submitLogin}>登录</Button>
           </div>
