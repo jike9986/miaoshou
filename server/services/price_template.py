@@ -5,7 +5,7 @@
          - 联盟佣金 - 尾程税 - 平台支持费 - 其他费用 - 利润 = 0
 其中利润按售价（bySalePriceProfit）或成本（byCostProfit）计算。
 
-originPrice（采购价）永远不改：它是汇率的来源，也是操作者核对成本的依据。
+originPrice（采购价）永远不改：它是定价成本，也是操作者核对成本的依据。
 """
 from __future__ import annotations
 
@@ -15,15 +15,6 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 FALLBACK_EXCHANGE_RATE = Decimal("1.6393")
-
-# originPrice/price 当汇率使用时必须是「CNY→站点币种」的真实汇率区间。
-# 妙手把 originPrice（CNY 采购价）和 price（同一采购金额的 MYR 表示）成对给出，
-# 比值就是汇率，实测正常商品稳定在 1.2~1.7（如 354=1.63、353=1.63）。
-# 一旦某商品的 price 被写过一次（比如先处理过、或上游异常），比值就会跑到
-# 0.5 以下（售价/采购价级别），继续拿它当汇率会算成天价。
-# 因此把区间收紧到 [1.2, 2.2]：落在区间内才认，越界一律回退实时/内置汇率。
-RATE_MIN = Decimal("1.2")
-RATE_MAX = Decimal("2.2")
 
 DEFAULT_FREIGHT_TABLE = {
     "currency": "MYR",
@@ -201,9 +192,10 @@ def cross_border_freight_myr(weight_kg: Any, template: Mapping[str, Any]) -> Dec
 def resolve_rate_with_source(product: Mapping[str, Any] | None,
                              override: Any = None,
                              *, allow_live: bool = True) -> tuple[Decimal, str]:
-    """CNY→站点币种汇率，连同来源一起返回（老版 exchange_rate 的四级链路）。
+    """返回每 1 MYR 对应的 CNY 数值，连同来源一起返回。
 
-    顺序：手填 override > 商品自身 originPrice/price 比值 > 实时接口 > 内置兜底。
+    顺序：手填 override > 有效缓存或实时接口 > 内置兜底。
+    product 参数为兼容调用方保留；商品售价含利润，不能用来反推汇率。
     来源文案会原样显示给用户——「这个价是按什么汇率算的」必须能追溯，
     否则报价对不对只能靠猜。
     """
@@ -213,37 +205,15 @@ def resolve_rate_with_source(product: Mapping[str, Any] | None,
             raise PriceTemplateError("汇率必须大于 0")
         return rate, "手动填写"
 
-    if isinstance(product, Mapping):
-        sku_map = product.get("skuMap") or {}
-        rates: list[Decimal] = []
-        for sku in sku_map.values():
-            if not isinstance(sku, Mapping) or str(sku.get("isDelete", "0")) == "1":
-                continue
-            origin = sku.get("originPrice")
-            price = sku.get("price")
-            if origin in (None, "") or price in (None, ""):
-                continue
-            origin_d, price_d = _decimal(origin, "originPrice"), _decimal(price, "price")
-            if origin_d > 0 and price_d > 0:
-                ratio = origin_d / price_d
-                # 合理性护栏：originPrice/price 只在「price 是目标币种售价」时才有汇率意义。
-                # 有些商品的 price 是异常值（如 63217.19，而 originPrice 才 23），
-                # 比值会变成 0.0003 这种天价汇率，直接算出 10 万块的售价。
-                # CNY→站点币种汇率实际在 0.5~3.0 之间；越界的比值一律丢弃，
-                # 回退到实时汇率 / 内置兜底，绝不用坏比值把整批价算成天文数字。
-                if RATE_MIN <= ratio <= RATE_MAX:
-                    rates.append(ratio)
-        if rates:
-            return sum(rates) / len(rates), "商品自身采购价与售价之比"
-
     if allow_live:
         from services import exchange_rate
 
+        cached, source = exchange_rate.cached_rate()
+        if cached is not None:
+            return cached, f"缓存汇率（{source}）"
         live, source = exchange_rate.live_rate()
         if live is not None:
-            cached, cached_source = exchange_rate.cached_rate()
-            label = source or cached_source
-            return live, f"实时汇率（{label}）" if source else f"缓存汇率（{label}）"
+            return live, f"实时汇率（{source}）"
         return FALLBACK_EXCHANGE_RATE, f"内置汇率（网络不可用，{FALLBACK_EXCHANGE_RATE}）"
 
     return FALLBACK_EXCHANGE_RATE, f"内置汇率（{FALLBACK_EXCHANGE_RATE}）"
@@ -417,7 +387,7 @@ def preview_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
     """未入仓商品的定价预览：手填采购价 + 重量，按模板算展示价。
 
     与 display_price 的区别只是「不需要 skuMap、汇率可以不给」。
-    汇率不给时走 resolve_rate 的兜底（内置 FALLBACK_EXCHANGE_RATE）。
+    汇率不给时使用有效缓存或实时汇率，网络不可用时使用内置兜底。
     返回 display_price 的结果 + rateSource。
 
     为什么单独一个函数：`apply_template` 要求完整 item（含 skuMap），
@@ -428,7 +398,6 @@ def preview_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
     """
     normalized = normalize_template(template)
     if rate in (None, ""):
-        # 没有商品就没有 originPrice/price 比值可用，链路直接落到实时/内置汇率。
         rate_d, rate_source = resolve_rate_with_source(None, None)
     else:
         rate_d, rate_source = resolve_rate_with_source(None, rate)
@@ -464,7 +433,7 @@ def apply_template(item: Mapping[str, Any], template: Mapping[str, Any], *,
             continue
         purchase = purchase_price if purchase_price not in (None, "") else sku.get("originPrice")
         if purchase in (None, ""):
-            purchase = sku.get("price")
+            raise PriceTemplateError(f"SKU {key} 采购价缺失，请补充采购价后再套用定价模板")
         sku_weight = weight if by_spu else (sku.get("weight") or weight)
         calculation = display_price(purchase, sku_weight, template, rate=rate_d)
         new_price = Decimal(str(calculation["price"]))
@@ -500,7 +469,7 @@ def apply_template(item: Mapping[str, Any], template: Mapping[str, Any], *,
     return result, {
         "templateName": template.get("name"),
         "rate": float(rate_d),
-        # 汇率来源要能追溯：这批价是按手填、商品比值、实时还是内置兜底算的，
+        # 汇率来源要能追溯：这批价是按手填、有效缓存、实时还是内置兜底算的，
         # 报价对不对全靠这一行判断。
         "rateSource": rate_source,
         "changedCount": changed,

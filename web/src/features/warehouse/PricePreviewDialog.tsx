@@ -138,7 +138,7 @@ export function PricePreviewDialog({ open, onOpenChange, ids }: PricePreviewDial
               ]}
             />
           </Field>
-          <Field label="汇率" hint="留空则用商品记录里的汇率">
+          <Field label="汇率" hint="留空使用有效缓存或实时汇率；无法获取时会标明使用内置汇率">
             <input
               type="text"
               inputMode="decimal"

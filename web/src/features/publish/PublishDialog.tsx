@@ -81,7 +81,7 @@ export function PublishDialog({
   // 注意顺序：hasValidTemplate 依赖 template 状态，必须写在 useState 之后，
   // 否则会命中「Cannot access 'Q' before initialization」的 TDZ 崩溃。
   const hasValidTemplate = usableTemplates.some((item) => item.name === template);
-  // 汇率覆盖：留空则用商品自身的 originPrice/price 比值（老版 wh-price-rate）
+  // 汇率覆盖：留空由后端使用有效缓存或实时汇率。
   const [exchangeRate, setExchangeRate] = useState<string>("");
   const [language, setLanguage] = useState<string>("");
   const [claimOnly, setClaimOnly] = useState(false);
@@ -438,14 +438,14 @@ export function PublishDialog({
 
             <Field
               label="汇率（1 CNY ≈ ? 目标币种）"
-              hint="留空用商品自带的采购价/售价比值；填了覆盖它"
+              hint="留空使用有效缓存或实时汇率；无法获取时会标明使用内置汇率"
               error={rateInvalid ? "汇率需大于 0 且不超过 1000" : null}
             >
               <Input
                 value={exchangeRate}
                 onChange={(event) => setExchangeRate(event.target.value)}
                 inputMode="decimal"
-                placeholder="留空用商品汇率"
+                placeholder="留空自动获取"
                 invalid={rateInvalid}
               />
             </Field>

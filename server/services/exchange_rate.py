@@ -1,10 +1,9 @@
-"""CNY→MYR 实时汇率（老版 exchange_rate.py 的移植）。
+"""MYR 定价汇率：返回每 1 MYR 对应的 CNY 数值。
 
-取汇率的优先顺序，与老版一致：
+定价时取汇率的优先顺序：
   1. 操作者手填的 override
-  2. 商品自身的 originPrice/price 比值——这是妙手实际用的汇率，
-     真实跑批必须以它为准
-  3. 公开汇率接口（给还没加载商品时的计算器用）
+  2. 有效缓存
+  3. 公开汇率接口
   4. 内置常量，只在网络不可达时兜底
 
 每条网络路径都是 best-effort 且超时很短：计算器离线也得能算，
@@ -27,8 +26,9 @@ FX_ENDPOINTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 FX_TIMEOUT_SECONDS = 6
 FX_CACHE_TTL_SECONDS = 3600
+FX_FAILURE_CACHE_TTL_SECONDS = 30
 
-_cache: dict[str, Any] = {"rate": None, "at": 0.0, "source": ""}
+_cache: dict[str, Any] = {"rate": None, "at": 0.0, "source": "", "failedAt": None}
 
 
 def _myr_per_cny(payload: Any, keys: tuple[str, ...]) -> float | None:
@@ -47,10 +47,14 @@ def _myr_per_cny(payload: Any, keys: tuple[str, ...]) -> float | None:
 
 def live_rate(*, timeout: float = FX_TIMEOUT_SECONDS,
               use_cache: bool = True) -> tuple[Decimal | None, str]:
-    """查实时汇率，返回 (汇率, 来源)；全失败返回 (None, "")。"""
-    now = time.time()
-    if use_cache and _cache["rate"] and now - _cache["at"] < FX_CACHE_TTL_SECONDS:
-        return _cache["rate"], _cache["source"]
+    """查实时汇率；全失败短暂缓存后返回 (None, "")，use_cache=False 强制重试。"""
+    if use_cache:
+        cached, source = cached_rate()
+        if cached is not None:
+            return cached, source
+        failed_at = _cache["failedAt"]
+        if failed_at is not None and 0 <= time.time() - failed_at < FX_FAILURE_CACHE_TTL_SECONDS:
+            return None, ""
 
     for name, url, keys in FX_ENDPOINTS:
         try:
@@ -70,17 +74,20 @@ def live_rate(*, timeout: float = FX_TIMEOUT_SECONDS,
         if not per_cny or per_cny <= 0:
             continue
         rate = Decimal(str(round(1.0 / per_cny, 6)))
-        _cache.update({"rate": rate, "at": now, "source": name})
-        logger.info("汇率已更新：1 CNY = %s MYR（来源 %s）", rate, name)
+        _cache.update({"rate": rate, "at": time.time(), "source": name, "failedAt": None})
+        logger.info("汇率已更新：1 MYR = %s CNY（来源 %s）", rate, name)
         return rate, name
+    _cache["failedAt"] = time.time()
     return None, ""
 
 
 def cached_rate() -> tuple[Decimal | None, str]:
-    """上次成功取到的汇率，不碰网络。"""
-    return _cache["rate"], _cache["source"]
+    """返回有效期内的缓存汇率，不碰网络；过期返回 (None, "")。"""
+    if _cache["rate"] and 0 <= time.time() - _cache["at"] < FX_CACHE_TTL_SECONDS:
+        return _cache["rate"], _cache["source"]
+    return None, ""
 
 
 def reset_cache() -> None:
     """清掉进程内缓存（测试与手工「重新取汇率」用）。"""
-    _cache.update({"rate": None, "at": 0.0, "source": ""})
+    _cache.update({"rate": None, "at": 0.0, "source": "", "failedAt": None})
