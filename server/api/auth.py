@@ -519,7 +519,7 @@ def change_password(payload: ChangePasswordRequest, db: DbSession,
                     operator: OperatorDep) -> dict[str, Any]:
     if not operator_service.verify_password(payload.currentPassword, operator.password_hash):
         from core.errors import AppError
-        raise AppError("AUTH_FAILED", "当前密码错误", status=401)
+        raise AppError("AUTH_FAILED", "当前密码错误", status=400)
     token = operator_service.set_password(
         db, operator, payload.newPassword, must_change=False, rotate_token=True)
     db.commit()

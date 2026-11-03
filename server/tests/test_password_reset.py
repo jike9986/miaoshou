@@ -191,6 +191,33 @@ def test_password_reset_does_not_deliver_to_unverified_operator_email(client, mo
     _clear_email_limit(email)
 
 
+def test_wrong_current_password_keeps_authenticated_session_usable(client):
+    email = f"change-{uuid.uuid4().hex[:10]}@example.com"
+    username, _ident = _student(email)
+    login = client.post(API + "/auth/login", json={
+        "username": username, "password": "initial-pass-456",
+    })
+    assert login.status_code == 200, login.text
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+    rejected = client.post(API + "/auth/change-password", json={
+        "currentPassword": "incorrect-password", "newPassword": "updated-pass-456",
+    }, headers=headers)
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["error"]["message"] == "当前密码错误"
+    assert client.get(API + "/operators", headers=headers).status_code == 200
+
+    changed = client.post(API + "/auth/change-password", json={
+        "currentPassword": "initial-pass-456", "newPassword": "updated-pass-456",
+    }, headers=headers)
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["token"] != login.json()["token"]
+    assert client.get(API + "/operators", headers=headers).status_code == 401
+    assert client.get(API + "/operators", headers={
+        "Authorization": f"Bearer {changed.json()['token']}",
+    }).status_code == 200
+
+
 def test_signed_in_user_verifies_new_email_before_replacing_old_recovery_email(
         client, monkeypatch):
     old_email = f"old-{uuid.uuid4().hex[:10]}@example.com"
