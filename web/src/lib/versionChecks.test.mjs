@@ -112,3 +112,33 @@ test("manual update checks reuse their response across active query variants wit
     client.clear();
   }
 });
+
+test("remote updates open the official installer without asking Linux to install or download", () => {
+  const calls = [];
+  const exported = {};
+  runInNewContext(compile("../components/layout/Sidebar.tsx"), {
+    exports: exported, URL,
+    window: { open: (...args) => calls.push(args) },
+    require: (name) => ({
+      react: { useState: () => [null, () => {}] },
+      "react/jsx-runtime": { jsx: (type, props) => ({ type, props }) },
+      "@/lib/api": { resolveApiBase: () => "https://aohuang888.com/miaoshou-platform" },
+      "@/lib/apiTarget": apiTarget,
+      "@/lib/queries": {
+        useUpdateStatus: (options) => { assert.equal(options.enabled, false); return {}; },
+        useDownloadUpdate: () => ({ mutate: () => assert.fail("remote backend must not install on Linux") }),
+      },
+    })[name] ?? {},
+  });
+  const url = "https://aohuang888.com/miaoshou-downloads/setup.exe";
+  const button = exported.UpdateActions({ version: { updateAvailable: true, url } });
+  assert.equal(button.props.disabled, false);
+  button.props.onClick();
+  assert.deepEqual(calls[0], [url, "_blank", "noopener,noreferrer"]);
+  for (const unsafe of ["http://aohuang888.com/a.exe", "https://evil.test/a.exe",
+    "https://aohuang888.com:8443/a.exe", "https://user:pass@aohuang888.com/a.exe",
+    "javascript:alert(1)", "https://aohuang888.com/page"]) {
+    assert.equal(apiTarget.officialUpdateUrl(unsafe), null);
+    assert.equal(exported.UpdateActions({ version: { updateAvailable: true, url: unsafe } }).props.disabled, true);
+  }
+});

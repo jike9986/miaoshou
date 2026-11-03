@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -69,12 +70,23 @@ def fetch_manifest(url: str, *, timeout: float = TIMEOUT_SECONDS) -> dict[str, A
     return data
 
 
-def check_update(*, refresh: bool = True, manifest_url: str = "") -> dict[str, Any]:
+def client_version(value: str = "") -> str:
+    version = str(value or "").strip()
+    if (len(version) <= 64
+            and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", version)
+            and any(parse_version(version))):
+        return version
+    return APP_VERSION
+
+
+def check_update(*, refresh: bool = True, manifest_url: str = "",
+                 current_version: str = "") -> dict[str, Any]:
     url = _manifest_url(manifest_url)
+    current = client_version(current_version)
     base = {
         "name": APP_NAME,
         "nameEn": APP_NAME_EN,
-        "current": APP_VERSION,
+        "current": current,
         "latest": "",
         "updateAvailable": False,
         "ok": False,
@@ -93,7 +105,7 @@ def check_update(*, refresh: bool = True, manifest_url: str = "") -> dict[str, A
     base.update({
         "ok": True,
         "latest": latest,
-        "updateAvailable": bool(latest and download and is_newer(latest, APP_VERSION)),
+        "updateAvailable": bool(latest and download and is_newer(latest, current)),
         "url": download or None,
         "sha256": str(manifest.get("sha256") or "") or None,
         "sizeBytes": manifest.get("sizeBytes"),
@@ -135,8 +147,10 @@ def validate_update_request(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def version_payload(*, refresh: bool = True, manifest_url: str = "") -> dict[str, Any]:
-    return check_update(refresh=refresh, manifest_url=manifest_url)
+def version_payload(*, refresh: bool = True, manifest_url: str = "",
+                    current_version: str = "") -> dict[str, Any]:
+    return check_update(refresh=refresh, manifest_url=manifest_url,
+                        current_version=current_version)
 
 
 def data_dir() -> str:

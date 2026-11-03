@@ -21,7 +21,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDownloadUpdate, useUpdateStatus, type VersionPayload } from "@/lib/queries";
-import { apiErrorMessage, errorCode } from "@/lib/api";
+import { apiErrorMessage, errorCode, resolveApiBase } from "@/lib/api";
+import { isLoopbackBase, officialUpdateUrl } from "@/lib/apiTarget";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { toast } from "@/components/ui/toast";
@@ -189,9 +190,10 @@ interface UpdateActionsProps {
 
 export function UpdateActions({ version, collapsed = false }: UpdateActionsProps) {
   const updateAvailable = Boolean(version?.updateAvailable);
+  const remote = !isLoopbackBase(resolveApiBase());
   // 只在真有新版本时才去查 canInstall / readOnly：这个接口内部会拉一次清单，
   // 没更新的时候每次开页都打一遍纯属浪费。
-  const status = useUpdateStatus({ enabled: updateAvailable });
+  const status = useUpdateStatus({ enabled: updateAvailable && !remote });
   // 下载和安装各用一个实例，否则 isPending 会互相串：下载时「安装」按钮也会转圈。
   const download = useDownloadUpdate();
   const install = useDownloadUpdate();
@@ -199,6 +201,21 @@ export function UpdateActions({ version, collapsed = false }: UpdateActionsProps
   const [downloaded, setDownloaded] = useState<{ verified: boolean; size?: number } | null>(null);
 
   if (!updateAvailable) return null;
+
+  if (remote) {
+    const url = officialUpdateUrl(version?.url);
+    const label = url ? "下载安装包" : "更新链接暂不可用";
+    const openDownload = (): void => {
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+    };
+    return collapsed ? (
+      <IconButton size="sm" label={label} title={label} icon={<Download />}
+        disabled={!url} onClick={openDownload} />
+    ) : (
+      <Button size="sm" variant="secondary" icon={<Download />}
+        disabled={!url} onClick={openDownload}>{label}</Button>
+    );
+  }
 
   const readOnly = status.data?.readOnly === true;
   const canInstall = status.data?.canInstall === true;

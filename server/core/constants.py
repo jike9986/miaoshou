@@ -27,12 +27,12 @@ def _package_version() -> str:
     # 打包后读不到仓库里的 package.json，用这里的值兜底。
     # 必须和 app/package.json、web/package.json 的 version 手动保持一致：
     # 兜底值偏小会让已装的新版永远判定「有更新」，侧栏挂一个永不消失的角标。
-    return "0.1.5"
+    return "0.1.6"
 
 
 APP_VERSION = _package_version()
 
-UPDATE_MANIFEST_URL = "https://aohuang888.com/tk-product-automation/update/version.json"
+UPDATE_MANIFEST_URL = "https://aohuang888.com/miaoshou-downloads/version.json"
 UPDATE_HOST_WHITELIST = {"aohuang888.com", "www.aohuang888.com"}
 UPDATE_CHANNEL = "stable"
 

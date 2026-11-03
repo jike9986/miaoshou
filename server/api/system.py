@@ -67,25 +67,28 @@ def health(db: DbSession) -> dict[str, Any]:
 
 
 @router.get("/version", summary="本地版本 + 更新清单比对")
-def version(db: DbSession, refresh: str | None = None) -> dict[str, Any]:
+def version(db: DbSession, request: Request, refresh: str | None = None) -> dict[str, Any]:
     refresh_flag = parse_bool(refresh, "refresh", True)
     channel = setting_service.update_channel(db)
     manifest = str(channel.get("manifestUrl") or "") if isinstance(channel, dict) else ""
-    return system_service.version_payload(refresh=refresh_flag, manifest_url=manifest)
+    return system_service.version_payload(refresh=refresh_flag, manifest_url=manifest,
+                                         current_version=request.headers.get("X-Client-Version", ""))
 
 
 @router.post("/update-check", summary="检查更新（等价 GET /system/version）")
-def update_check(db: DbSession, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def update_check(db: DbSession, request: Request,
+                 payload: dict[str, Any] | None = None) -> dict[str, Any]:
     refresh_flag = True
     if isinstance(payload, dict) and "refresh" in payload:
         refresh_flag = parse_bool(payload.get("refresh"), "refresh", True)
     channel = setting_service.update_channel(db)
     manifest = str(channel.get("manifestUrl") or "") if isinstance(channel, dict) else ""
-    return system_service.version_payload(refresh=refresh_flag, manifest_url=manifest)
+    return system_service.version_payload(refresh=refresh_flag, manifest_url=manifest,
+                                         current_version=request.headers.get("X-Client-Version", ""))
 
 
 @router.get("/update", summary="查询是否有新版本（只查询，不下载）")
-def update_status(db: DbSession) -> dict[str, Any]:
+def update_status(db: DbSession, request: Request) -> dict[str, Any]:
     """GET 只回答「有没有新版本、装不装得了」，绝不落盘。
 
     查询动作本身是只读的，所以不套 require_writable；但要把 readOnly / 是否
@@ -93,7 +96,8 @@ def update_status(db: DbSession) -> dict[str, Any]:
     """
     channel = setting_service.update_channel(db)
     manifest = str(channel.get("manifestUrl") or "") if isinstance(channel, dict) else ""
-    payload = system_service.version_payload(refresh=True, manifest_url=manifest)
+    payload = system_service.version_payload(refresh=True, manifest_url=manifest,
+                                            current_version=request.headers.get("X-Client-Version", ""))
     last = update_service.last_downloaded()
     return {
         "ok": bool(payload.get("ok")),

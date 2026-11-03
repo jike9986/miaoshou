@@ -6,12 +6,23 @@ export interface BootstrapTargetConfig {
   environmentBase?: string | null;
 }
 
-function isLoopbackBase(base: string): boolean {
+export function isLoopbackBase(base: string): boolean {
   try {
     const hostname = new URL(base).hostname;
     return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
   } catch {
     return false;
+  }
+}
+
+export function officialUpdateUrl(value?: string | null): string | null {
+  try {
+    const url = new URL(value ?? "");
+    return url.protocol === "https:" && url.hostname === "aohuang888.com"
+      && !url.username && !url.password && (!url.port || url.port === "443")
+      && url.pathname.toLowerCase().endsWith(".exe") ? url.href : null;
+  } catch {
+    return null;
   }
 }
 
