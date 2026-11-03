@@ -199,6 +199,20 @@ def test_claim_uses_consistent_sku_weight_only_for_missing_product_weight():
     assert payload["weight"] is None
 
 
+def test_claim_defaults_missing_cod_switch_and_preserves_explicit_value():
+    missing = {"isCodOpen": None}
+    explicit = {"isCodOpen": "0"}
+
+    adapted_missing = carrier_service.adapt_payload(
+        missing, shop_id=9, warehouse_id="w1")
+    adapted_explicit = carrier_service.adapt_payload(
+        explicit, shop_id=9, warehouse_id="w1")
+
+    assert adapted_missing["isCodOpen"] == "1"
+    assert adapted_explicit["isCodOpen"] == "0"
+    assert missing["isCodOpen"] is None
+
+
 def test_claim_does_not_infer_product_weight_from_inconsistent_skus():
     payload = {"weight": None, "skuMap": {
         "sku-a": {"weight": 0.8, "isDelete": "0"},

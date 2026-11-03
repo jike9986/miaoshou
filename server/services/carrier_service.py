@@ -785,6 +785,11 @@ def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
     """改写 payload 归属：目标 shopId + 目标仓库库存映射，库存数量保留。"""
     body = deepcopy(dict(payload))
     body["shopId"] = int(shop_id)
+    # Older finished-product payloads already carry this switch, while some
+    # warehouse snapshots omit it. Keep explicit source values and match the
+    # established Miaoshou drafts for missing values.
+    if body.get("isCodOpen") in (None, ""):
+        body["isCodOpen"] = "1"
     if leaf_cid not in (None, ""):
         body["cid"] = leaf_cid
     for attribute in body.get("productAttributes") or []:
