@@ -211,6 +211,26 @@ export function WarehousePage() {
     mutationFn: (body: { items: ReturnType<typeof toPublishItems>; shopId: string; accountId: string; claimOnly: boolean; confirm: boolean }) =>
       api.post<BatchDetailResponse>("/claim-jobs", body),
   });
+  const reconcileClaims = useMutation({
+    mutationFn: () => api.post<{ cleared: number }>(
+      `/warehouse/reconcile-claims?accountId=${encodeURIComponent(accountId ?? "")}`,
+    ),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+      if (result.cleared > 0) {
+        toast.info(`已按妙手采集箱状态修正 ${result.cleared} 件商品的认领标记`);
+      }
+    },
+    onError: (error) => {
+      toast.warning("无法核对当前账号的采集箱状态", {
+        description: `${apiErrorMessage(error)}。原有认领标记已保留。`,
+      });
+    },
+  });
+  const reconcileMemberClaims = reconcileClaims.mutate;
+  useEffect(() => {
+    if (isMember && accountId) reconcileMemberClaims();
+  }, [accountId, isMember, reconcileMemberClaims]);
   const selectedIds = query.selected;
   const selectedCount = selectedIds.length;
   const pageIds = items.map((item) => item.id);
@@ -895,7 +915,7 @@ export function WarehousePage() {
           ...(memberClaimableIds.length > 0 ? [{
             label: claimOnly.isPending
               ? "正在认领…"
-              : `认领成品 ${memberClaimableIds.length} 件`,
+              : `认领/再次认领 ${memberClaimableIds.length} 件`,
             icon: <PackageCheck className="size-3.5" />,
             disabled: claimOnly.isPending,
             onClick: () => claimSelected(memberClaimableIds),

@@ -15,7 +15,7 @@ test("keeps claim and publish actions for selections made on earlier pages", () 
   };
 
   assert.deepEqual(partitionMemberSelection(selectedIds, claimedById), {
-    claimable: ["page-1-unclaimed", "page-2-unclaimed"],
+    claimable: selectedIds,
     publishable: ["page-1-claimed"],
   });
 });
@@ -34,7 +34,7 @@ test("hides items already published to the selected shop but keeps other shops e
     { "published-here": ["shop-a"], "published-elsewhere": ["shop-b"] },
     "shop-a",
   ), {
-    claimable: [],
+    claimable: ["published-here", "published-elsewhere"],
     publishable: ["published-elsewhere"],
   });
 });

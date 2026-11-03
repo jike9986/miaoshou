@@ -127,6 +127,16 @@ def list_warehouse(
         operator_id=operator.id, claim_account_id=claimAccountId)
 
 
+@router.post("/reconcile-claims", summary="按妙手采集箱核对当前学员认领状态")
+def reconcile_claims(db: DbSession, operator: OperatorDep,
+                     accountId: str = Query(...)) -> dict[str, int]:
+    require_writable(db)
+    result = warehouse_service.reconcile_member_claims(
+        db, operator_id=operator.id, account_id=accountId)
+    db.commit()
+    return result
+
+
 @router.get("/automation-results", summary="自动化处理成功记录",
             dependencies=[require_permission("process")])
 def list_automation_results(

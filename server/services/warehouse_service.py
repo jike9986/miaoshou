@@ -432,6 +432,87 @@ def _claim_account_keys(db: Session, operator_id: int | None,
     return None
 
 
+def reconcile_member_claims(db: Session, *, operator_id: int,
+                            account_id: Any) -> dict[str, int]:
+    """Reconcile this member's saved claim markers with the live collect box."""
+    from services import account_service, collect_box_service
+
+    text = str(account_id or "")
+    if not text.isdigit():
+        raise errors.validation("accountId 须为数字", field="accountId")
+    account = db.get(Account, int(text))
+    if account is None:
+        raise errors.not_found("妙手账号不存在", accountId=text)
+    if not _is_member(db, operator_id) or not account_service.has_account_access(
+        db, account.id, operator_id
+    ):
+        raise errors.AppError(errors.FORBIDDEN, "无权访问该妙手账号", status=403)
+
+    claim_key = f"operator:{operator_id}:account:{account.id}"
+    products = _scope_member_products(
+        db, active_query(db).filter(Product.automation_result.is_(False)), operator_id
+    ).all()
+    candidates: dict[tuple[str, str], list[Product]] = {}
+    for product in products:
+        collected = product.collected if isinstance(product.collected, dict) else {}
+        marker = collected.get(claim_key)
+        if not isinstance(marker, dict):
+            continue
+        detail_id = str(marker.get("detailId") or "")
+        shop_id = str(marker.get("shopId") or "")
+        if detail_id.isdigit() and shop_id.isdigit():
+            candidates.setdefault((shop_id, detail_id), []).append(product)
+
+    present: set[tuple[str, str]] = set()
+    if candidates:
+        from services.miaoshou import MiaoshouError
+
+        client = account_service.account_client(account)
+        try:
+            for shop_id in {shop for shop, _ in candidates}:
+                detail_ids = {detail for shop, detail in candidates if shop == shop_id}
+                found = collect_box_service.verify_items_present(client, detail_ids, shop_id)
+                present.update((shop_id, detail_id) for detail_id in found)
+        except MiaoshouError as exc:
+            raise account_service.map_upstream_error(exc) from None
+        finally:
+            client.close()
+
+    cleared = 0
+    for (shop_id, detail_id), rows in candidates.items():
+        is_present = (shop_id, detail_id) in present
+        for product in rows:
+            collected = dict(product.collected or {})
+            marker = collected.get(claim_key)
+            if not isinstance(marker, dict):
+                continue
+            if is_present:
+                claim_product(db, product.id, operator_id)
+                continue
+            collected.pop(claim_key, None)
+            account_key = f"account:{account.id}"
+            account_marker = collected.get(account_key)
+            account_detail_id = str(account_marker.get("detailId") or "") if isinstance(
+                account_marker, dict) else ""
+            account_shop_id = str(account_marker.get("shopId") or "") if isinstance(
+                account_marker, dict) else ""
+            if account_detail_id == detail_id and account_shop_id == shop_id:
+                collected.pop(account_key, None)
+            product.collected = collected
+            claim = db.query(ProductClaim).filter(
+                ProductClaim.product_id == product.id,
+                ProductClaim.owner_operator_id == operator_id,
+            ).one_or_none()
+            if claim is not None:
+                claim.status = "released"
+            bump_revision(product)
+            cleared += 1
+
+    return {"checked": sum(len(rows) for rows in candidates.values()),
+            "present": sum(len(rows) for key, rows in candidates.items() if key in present),
+            "cleared": cleared}
+
+
 def _claim_expression(keys: list[str] | None):
     if keys is None:
         return None
@@ -1142,6 +1223,8 @@ def claim_product(db: Session, ident: Any, owner_operator_id: int) -> ProductCla
         ProductClaim.owner_operator_id == owner_operator_id,
     ).one_or_none()
     if existing is not None:
+        existing.status = "claimed"
+        existing.claimed_at = now_ts()
         return existing
 
     row = ProductClaim(product_id=product.id, owner_operator_id=owner_operator_id)

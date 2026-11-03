@@ -335,6 +335,67 @@ def test_member_claim_requires_verified_account_scoped_collect_marker(publish_db
     assert exc.value.status == 403
 
 
+def test_reconcile_member_claims_clears_only_items_missing_from_live_collect_box(
+    publish_db, monkeypatch
+):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, account = _identity(db, f"claim-reconcile-{suffix}")
+    stale = _product(db, f"claim-reconcile-stale-{suffix}", account, detail_id="91001")
+    present = _product(db, f"claim-reconcile-present-{suffix}", account, detail_id="91002")
+    _mark_operator_collected(stale, member.id, account.id, detail_id="81001")
+    stale.collected = {
+        **stale.collected,
+        f"account:{account.id}": {"detailId": "81001", "shopId": "different-shop"},
+    }
+    _mark_operator_collected(present, member.id, account.id, detail_id="81002")
+    db.add_all([
+        ProductClaim(product_id=stale.id, owner_operator_id=member.id),
+        ProductClaim(product_id=present.id, owner_operator_id=member.id),
+    ])
+    db.flush()
+
+    class FakeClient:
+        def collect_box_list(self, **_kwargs):
+            return {"data": {
+                "total": 1,
+                "detailList": [{
+                    "collectBoxDetailId": "81002",
+                    "collectBoxDetailShopList": [{"shopId": "123"}],
+                }],
+            }}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(account_service, "account_client", lambda _account: FakeClient())
+    result = warehouse_service.reconcile_member_claims(
+        db, operator_id=member.id, account_id=account.id)
+
+    assert result == {"checked": 2, "present": 1, "cleared": 1}
+    assert f"operator:{member.id}:account:{account.id}" not in stale.collected
+    assert stale.collected[f"account:{account.id}"]["shopId"] == "different-shop"
+    assert f"operator:{member.id}:account:{account.id}" in present.collected
+    assert db.query(ProductClaim).filter_by(
+        product_id=stale.id, owner_operator_id=member.id).one().status == "released"
+    assert db.query(ProductClaim).filter_by(
+        product_id=present.id, owner_operator_id=member.id).one().status == "claimed"
+
+
+def test_reclaim_reactivates_a_released_member_claim(publish_db):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, account = _identity(db, f"claim-reactivate-{suffix}")
+    product = _product(db, f"claim-reactivate-product-{suffix}", account)
+    claim = ProductClaim(product_id=product.id, owner_operator_id=member.id,
+                         status="released")
+    db.add(claim)
+    db.flush()
+
+    assert warehouse_service.claim_product(db, product.id, member.id) is claim
+    assert claim.status == "claimed"
+
+
 def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db, monkeypatch):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]

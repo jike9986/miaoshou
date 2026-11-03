@@ -15,7 +15,7 @@ export function partitionMemberSelection(
   const publishable: string[] = [];
   for (const id of selectedIds) {
     const claimed = claimedById[id];
-    if (claimed === false) claimable.push(id);
+    if (claimed === false || claimed === true) claimable.push(id);
     if (claimed === true && !publishedShopIdsById[id]?.includes(String(targetShopId ?? ""))) {
       publishable.push(id);
     }

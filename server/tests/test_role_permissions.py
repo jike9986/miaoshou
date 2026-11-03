@@ -894,6 +894,8 @@ DYNAMIC_WRITE_ROUTES = {
     # email, and require the signed-in OperatorDep at the handler.
     ("POST", "/api/v1/auth/email-verification/request"),
     ("POST", "/api/v1/auth/email-verification/confirm"),
+    # The handler restricts this repair to the signed-in member's bound account.
+    ("POST", "/api/v1/warehouse/reconcile-claims"),
     ("POST", "/api/v1/auth/initialize-credentials"),
     # 找回密码需要在未登录状态下使用；接口自身有令牌、过期和频率限制。
     ("POST", "/api/v1/auth/password-reset/request"),
