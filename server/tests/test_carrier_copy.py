@@ -120,6 +120,9 @@ def test_claim_uses_consistent_sku_weight_only_for_missing_product_weight():
         payload, shop_id=9, warehouse_id="w1")
 
     assert adapted["weight"] == 0.8
+    assert "packageLength" not in adapted
+    assert "packageWidth" not in adapted
+    assert "packageHeight" not in adapted
     assert payload["weight"] is None
 
 
@@ -180,7 +183,57 @@ def test_claim_keeps_repeated_color_when_sku_data_differs():
     assert set(payload["skuMap"]) == {"white-a;size-s", "white-b;size-s"}
 
 
-def test_claim_deduplicates_repeated_color_when_only_images_and_item_nums_differ():
+def test_claim_renames_duplicate_long_colors_without_exceeding_platform_limit():
+    long_color = "Color " + "x" * 50
+    payload = {"skuPropertyList": [{"attrName": "Warna", "attrValueList": [
+        {"attrValueId": "color-a", "attrValue": long_color},
+        {"attrValueId": "color-b", "attrValue": long_color},
+    ]}]}
+
+    changed = publish_service._disambiguate_duplicate_claim_colors(payload)
+    names = [row["attrValue"] for row in payload["skuPropertyList"][0]["attrValueList"]]
+
+    assert changed == 2
+    assert all(len(name) <= 50 for name in names)
+    assert len({name.casefold() for name in names}) == 2
+
+
+def test_claim_trims_only_size_recommendation_and_keeps_variants_unique():
+    payload = {"skuPropertyList": [{"attrName": "Saiz", "attrValueList": [
+        {"attrValueId": "size-a", "attrValue": "36-37"},
+        {"attrValueId": "size-b", "attrValue": (
+            "36-37 (Kami Mengesyorkan Anda Memesan Saiz yang Lebih Besar daripada biasa)"
+        )},
+        {"attrValueId": "size-c", "attrValue": "Custom " + "x" * 55},
+    ]}]}
+
+    changed = publish_service._trim_long_claim_size_values(payload)
+    names = [row["attrValue"] for row in payload["skuPropertyList"][0]["attrValueList"]]
+
+    assert changed == 1
+    assert names == ["36-37", "36-37 (2)", "Custom " + "x" * 55]
+
+
+def test_claim_maps_known_season_values_to_miaoshou_ids():
+    payload = {"productAttributes": [
+        {"attributeId": "100397", "attributeValues": [
+            {"valueName": "Musim Bunga"}, {"valueName": "Musim Panas"},
+        ]},
+        {"attributeId": "other", "attributeValues": [
+            {"valueName": "Musim Bunga"},
+        ]},
+    ]}
+
+    adapted = carrier_service.adapt_payload(
+        payload, shop_id=9, warehouse_id="w1")
+
+    values = adapted["productAttributes"][0]["attributeValues"]
+    assert [value["valueId"] for value in values] == ["1001161", "1001162"]
+    assert "valueId" not in adapted["productAttributes"][1]["attributeValues"][0]
+    assert "valueId" not in payload["productAttributes"][0]["attributeValues"][0]
+
+
+def test_claim_keeps_repeated_color_when_color_images_differ():
     payload = {"skuPropertyList": [{"attrName": "warna", "attrValueList": [
         {"attrValueId": "white-a", "attrValue": "Putih", "imgUrl": "a.jpg"},
         {"attrValueId": "white-b", "attrValue": " putih ", "imgUrl": "b.jpg"},
@@ -191,10 +244,14 @@ def test_claim_deduplicates_repeated_color_when_only_images_and_item_nums_differ
 
     result = publish_service._dedupe_exact_duplicate_claim_colors(payload)
 
-    assert result == {"removedColorValues": 1, "removedSkuVariants": 1}
+    assert result is None
+    renamed = publish_service._disambiguate_duplicate_claim_colors(payload)
+    assert renamed == 1
     assert payload["skuPropertyList"][0]["attrValueList"] == [
-        {"attrValueId": "white-a", "attrValue": "Putih", "imgUrl": "a.jpg"}]
-    assert set(payload["skuMap"]) == {"white-a;size-s"}
+        {"attrValueId": "white-a", "attrValue": "Putih", "imgUrl": "a.jpg"},
+        {"attrValueId": "white-b", "attrValue": "putih (2)", "imgUrl": "b.jpg"},
+    ]
+    assert set(payload["skuMap"]) == {"white-a;size-s", "white-b;size-s"}
 
 
 def test_reported_cost_floor_raises_only_active_matching_skus_once():
@@ -229,6 +286,35 @@ def test_reported_cost_floor_equal_to_price_still_adds_one_cent():
 
     assert adjustment["newPrice"] == "9.67"
     assert payload["skuMap"]["sku-a"]["price"] == "9.67"
+
+
+def test_reported_cost_floor_preserves_price_include_vat_ratio():
+    message = ("产品设置的本地展示价35.90MYR，无法覆盖产品基础成本"
+               "(跨境物流运费+关税+增值税)：36.00MYR")
+    payload = {"skuMap": {"sku-a": {
+        "price": "35.90", "priceIncludeVat": "39.49",
+    }}}
+
+    carrier_service._raise_price_to_reported_floor(
+        payload, MiaoshouError(message, payload={"message": message}))
+
+    assert payload["skuMap"]["sku-a"]["price"] == "36.01"
+    assert payload["skuMap"]["sku-a"]["priceIncludeVat"] == "39.61"
+
+
+def test_reported_cost_floor_can_raise_price_above_ten_percent_when_required():
+    message = ("产品设置的本地展示价6.12MYR，无法覆盖产品基础成本"
+               "(跨境物流运费+关税+增值税)：12.43MYR")
+    payload = {"skuMap": {"sku-a": {
+        "price": "6.12", "priceIncludeVat": "6.12", "originPrice": "10.00",
+    }}}
+
+    adjustment = carrier_service._raise_price_to_reported_floor(
+        payload, MiaoshouError(message, payload={"message": message}))
+
+    assert adjustment == {"oldPrice": "6.12", "costFloor": "12.43",
+                          "newPrice": "12.44", "skuKeys": ["sku-a"]}
+    assert payload["skuMap"]["sku-a"]["price"] == "12.44"
 
 
 def test_fill_retries_increasing_reported_cost_floors_with_small_increments():

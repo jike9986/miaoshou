@@ -17,7 +17,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -32,7 +32,14 @@ logger = logging.getLogger("aohuang.carrier")
 _COST_FLOOR_MESSAGE = re.compile(
     r"本地(?:显示|展示)价\s*([0-9]+(?:\.[0-9]+)?)\s*MYR.*?基础成本.*?[：:]\s*"
     r"([0-9]+(?:\.[0-9]+)?)\s*MYR")
-MAX_COST_FLOOR_RETRIES = 3
+MAX_COST_FLOOR_RETRIES = 12
+SEASON_VALUE_IDS = {
+    "musim bunga": "1001161",
+    "musim panas": "1001162",
+    "musim luruh": "1003131",
+    "musim sejuk": "1001163",
+    "semua musim": "1005840",
+}
 
 
 def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouError
@@ -48,7 +55,7 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
         old_price, floor = (Decimal(value) for value in match.groups())
     except InvalidOperation:
         return None
-    if floor < old_price:
+    if old_price <= 0 or floor < old_price:
         return None
     new_price = floor + Decimal("0.01")
     sku_map = payload.get("skuMap")
@@ -65,7 +72,15 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
         if current != old_price:
             continue
         sku["price"] = format(new_price, ".2f")
-        sku["priceIncludeVat"] = format(new_price, ".2f")
+        include_vat = new_price
+        try:
+            old_include_vat = Decimal(str(sku.get("priceIncludeVat")))
+            if old_include_vat.is_finite() and old_price > 0:
+                include_vat = (old_include_vat * new_price / old_price).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+        sku["priceIncludeVat"] = format(include_vat, ".2f")
         changed.append(str(key))
     if not changed:
         return None
@@ -772,6 +787,16 @@ def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
     body["shopId"] = int(shop_id)
     if leaf_cid not in (None, ""):
         body["cid"] = leaf_cid
+    for attribute in body.get("productAttributes") or []:
+        if not isinstance(attribute, dict) or str(attribute.get("attributeId") or "") != "100397":
+            continue
+        for value in attribute.get("attributeValues") or []:
+            if not isinstance(value, dict) or value.get("valueId") not in (None, ""):
+                continue
+            option_id = SEASON_VALUE_IDS.get(
+                str(value.get("valueName") or "").strip().casefold())
+            if option_id:
+                value["valueId"] = option_id
     skus = body.get("skuMap") or {}
     if isinstance(skus, dict):
         if body.get("weight") in (None, ""):

@@ -684,8 +684,7 @@ def _dedupe_exact_duplicate_claim_colors(payload: dict[str, Any]) -> dict[str, i
         normalized_values = []
         for value in group:
             normalized = {key: item for key, item in value.items()
-                          if key not in {"attrValueId", "attrValue", "imgUrl",
-                                         "supplementarySkuImageUrls"}}
+                          if key not in {"attrValueId", "attrValue"}}
             normalized["attrValue"] = str(value.get("attrValue") or "").strip().casefold()
             normalized_values.append(normalized)
         if any(value != normalized_values[0] for value in normalized_values[1:]):
@@ -730,6 +729,69 @@ def _dedupe_exact_duplicate_claim_colors(payload: dict[str, Any]) -> dict[str, i
                           if key not in removed_sku_keys}
     return {"removedColorValues": len(removed_ids),
             "removedSkuVariants": len(removed_sku_keys)}
+
+
+def _unique_claim_attribute_value(name: str, seen: set[str]) -> str:
+    candidate = name[:50].rstrip()
+    if candidate.casefold() not in seen:
+        return candidate
+    suffix = 2
+    while True:
+        marker = f" ({suffix})"
+        candidate = f"{name[:50 - len(marker)].rstrip()}{marker}"
+        if candidate.casefold() not in seen:
+            return candidate
+        suffix += 1
+
+
+def _disambiguate_duplicate_claim_colors(payload: dict[str, Any]) -> int:
+    """Keep distinct source SKUs while making colliding translated colors unique."""
+    renamed = 0
+    for prop in payload.get("skuPropertyList") or []:
+        if (not isinstance(prop, dict)
+                or str(prop.get("attrName") or "").casefold() not in {
+                    "warna", "color", "colour", "颜色"}):
+            continue
+        seen: set[str] = set()
+        for value in prop.get("attrValueList") or []:
+            if not isinstance(value, dict):
+                continue
+            name = str(value.get("attrValue") or "").strip()
+            if name:
+                unique = _unique_claim_attribute_value(name, seen)
+                if unique != name:
+                    value["attrValue"] = unique
+                    renamed += 1
+            seen.add(str(value.get("attrValue") or "").strip().casefold())
+    return renamed
+
+
+def _trim_long_claim_size_values(payload: dict[str, Any]) -> int:
+    """Drop translated fit advice from overlong size labels, preserving the size."""
+    changed = 0
+    for prop in payload.get("skuPropertyList") or []:
+        if (not isinstance(prop, dict)
+                or str(prop.get("attrName") or "").casefold() not in {
+                    "saiz", "size", "规格"}):
+            continue
+        seen: set[str] = set()
+        for value in prop.get("attrValueList") or []:
+            if not isinstance(value, dict):
+                continue
+            name = str(value.get("attrValue") or "").strip()
+            shortened = name
+            if len(name) > 50:
+                advice = re.search(
+                    r"\s+\(?\s*(?:(?:kami\s+)?mengesyorkan|recommended|recommend|建议|推荐)\b",
+                    name, re.IGNORECASE)
+                if advice:
+                    shortened = name[:advice.start()].rstrip()
+            if shortened != name:
+                unique = _unique_claim_attribute_value(shortened, seen)
+                value["attrValue"] = unique
+                changed += 1
+            seen.add(str(value.get("attrValue") or "").strip().casefold())
+    return changed
 
 
 def _repricing(payloads: list[dict[str, Any]], entries: list[dict[str, Any]],
@@ -1003,11 +1065,15 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 payloads = _limit_claim_images(source_payloads)
                 for index, item in enumerate(payloads):
                     sku_change = _dedupe_exact_duplicate_claim_colors(item)
-                    if sku_change:
+                    renamed_colors = _disambiguate_duplicate_claim_colors(item)
+                    trimmed_sizes = _trim_long_claim_size_values(item)
+                    if sku_change or renamed_colors or trimmed_sizes:
                         claim_adjustments.append({
                             "warehouseId": entries[index].get("warehouseId"),
                             "stage": "sku",
-                            **sku_change,
+                            **(sku_change or {}),
+                            "renamedColorValues": renamed_colors,
+                            "trimmedSizeValues": trimmed_sizes,
                         })
                     original = entries[index].get("payload") or {}
                     main_before = len(original.get("imgUrls") or [])
@@ -1072,6 +1138,18 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                             "certain": item.get("certain") is True,
                             "reason": str(item.get("reason") or "载体写入失败")[:200],
                         })
+                    rejected_carriers = [
+                        int(item["detailId"])
+                        for item in failure_details
+                        if item.get("certain") is True
+                        and str(item.get("detailId") or "").isdigit()
+                    ]
+                    if rebuilt and rejected_carriers:
+                        try:
+                            client.delete_collect_box(rejected_carriers)
+                        except Exception as exc:  # noqa: BLE001 - retain original failures
+                            logger.warning("清理明确拒绝的临时载体失败 %s: %s",
+                                           rejected_carriers, exc)
                 else:
                     for reason in (filled.get("failures") or []):
                         failures.append({"stage": "carrier", "certain": False,
