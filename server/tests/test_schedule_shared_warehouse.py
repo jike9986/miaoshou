@@ -15,6 +15,7 @@ from models.product import Product
 from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
 from models.schedule import Schedule
+from models.schedule_log import ScheduleLog
 from services import schedule_service
 
 
@@ -83,6 +84,93 @@ def test_member_schedule_selects_claimed_shared_goods_independently_of_source_st
         db, account_id=target.id, count=10, operator_id=first.id)
 
     assert [item["id"] for item in items] == [shared.id]
+
+
+def test_explicit_schedule_selection_slices_final_run_to_remaining_products(shared_warehouse):
+    db, first, _second, source, target = shared_warehouse
+    products = [_product(db, source, f"selected-{index}") for index in range(6)]
+    db.add_all([ProductClaim(product_id=product.id, owner_operator_id=first.id)
+                for product in products])
+    db.commit()
+    selected = [str(product.id) for product in products]
+
+    first_run = schedule_service.pick_products(
+        db, account_id=target.id, count=5, operator_id=first.id,
+        selected_product_ids=selected, run_index=0)
+    final_run = schedule_service.pick_products(
+        db, account_id=target.id, count=5, operator_id=first.id,
+        selected_product_ids=selected, run_index=1)
+
+    assert len(first_run) == 5
+    assert len(final_run) == 1
+
+
+def test_schedule_selection_capacity_rejects_201_for_four_runs_of_50(shared_warehouse):
+    db, _first, _second, _source, target = shared_warehouse
+    with pytest.raises(errors.AppError) as caught:
+        schedule_service.normalize(db, {
+            "accountId": str(target.id), "shopId": "9", "template": "template",
+            "frequency": "daily", "time": "09:00", "perRun": 50,
+            "selectedProductIds": [str(index) for index in range(201)],
+            "plannedRuns": 4,
+        })
+
+    assert caught.value.status == 400
+
+
+def test_schedule_selection_capacity_accepts_246_for_five_runs_of_50(shared_warehouse):
+    db, _first, _second, _source, target = shared_warehouse
+    fields = schedule_service.normalize(db, {
+        "accountId": str(target.id), "shopId": "9", "template": "template",
+        "frequency": "daily", "time": "09:00", "perRun": 50,
+        "selectedProductIds": [str(index) for index in range(246)],
+        "plannedRuns": 5,
+    })
+
+    assert len(fields["selected_product_ids"]) == 246
+    assert fields["per_run"] == 50
+
+
+def test_planned_run_waits_for_every_platform_receipt(shared_warehouse):
+    db, first, _second, _source, target = shared_warehouse
+    task = Schedule(
+        id="receipt-plan", account_id=target.id, owner_operator_id=first.id,
+        selected_product_ids=["501", "502"], planned_runs=1, completed_runs=0,
+        enabled=True,
+    )
+    db.add(task)
+    db.flush()
+    logs = [PublishLog(
+        account_id=target.id, detail_id=str(detail_id), warehouse_key=f"{detail_id}:7",
+        shop_id="9", status="processing", batch_id="receipt-batch",
+        schedule_id=task.id, operator_id=first.id,
+    ) for detail_id in (501, 502)]
+    db.add_all(logs)
+    db.flush()
+    history = ScheduleLog(
+        task_id=task.id, task_name="receipt-plan", account_id=target.id,
+        owner_operator_id=first.id, status="submitted", requested=2, selected=2,
+        summary=json.dumps({
+            "taskId": task.id, "batchId": "receipt-batch", "scheduledRunIndex": 0,
+            "status": "submitted", "requested": 2, "selected": 2,
+            "publishStatuses": {str(row.id): "processing" for row in logs},
+        }),
+    )
+    db.add(history)
+    db.commit()
+
+    logs[0].status = "success"
+    assert schedule_service.reconcile_publish_log(db, logs[0])
+    db.flush()
+    assert task.completed_runs == 0
+    assert task.enabled is True
+
+    logs[1].status = "success"
+    assert schedule_service.reconcile_publish_log(db, logs[1])
+    db.flush()
+    assert task.completed_runs == 1
+    assert task.completed is True
+    assert task.enabled is False
 
 
 @pytest.mark.parametrize("status, eligible", [

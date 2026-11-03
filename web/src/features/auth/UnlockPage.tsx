@@ -11,7 +11,7 @@ import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
 import { useAuthStatus, useConnectAccount, useSelectAccount, useOperators, useShops, useSoftwareLogin, useEmailCodeLogin, useRequestEmailCodeLogin, useSoftwareRegister, useRequestRegistrationCode, useCompletePasswordSetup, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset, useWorkflowDefaults } from "@/lib/queries";
-import { setOperator, useOperatorIdentity } from "@/lib/operator";
+import { lastLoginIdentifier, rememberLoginIdentifier, setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
 import { normalizeEmailForVerification } from "@/features/auth/emailBinding.mjs";
 import {
@@ -24,6 +24,7 @@ import {
   Button,
   Card,
   CardTitle,
+  Checkbox,
   DropdownSelect,
   ErrorState,
   Field,
@@ -90,10 +91,10 @@ export function AccountSwitcher({ compact = false, disabled = false, className }
   return (
     <div className={cn("flex items-center gap-2", className)}>
       {/* 账号切换 */}
-      {accountOptions.length > 1 ? (
+      {accountOptions.length > 0 ? (
         <DropdownSelect
           size="sm"
-          className={compact ? "w-[104px]" : "w-[148px]"}
+          className={compact ? "w-[124px]" : "w-[148px]"}
           disabled={switchDisabled}
           value={status?.accountId ?? null}
           onChange={(accountId) => {
@@ -114,8 +115,8 @@ export function AccountSwitcher({ compact = false, disabled = false, className }
             );
           }}
           options={accountOptions}
-          placeholder="切换账号"
-          searchable
+          placeholder={accountOptions.length === 1 ? "当前妙手账号" : "切换账号"}
+          searchable={accountOptions.length > 1}
           searchPlaceholder="搜索账号名"
           aria-label="切换账号"
           emptyText="没有匹配的账号"
@@ -528,10 +529,11 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
   const completePasswordSetup = useCompletePasswordSetup();
   const requestReset = useRequestPasswordReset();
   const confirmReset = useConfirmPasswordReset();
-  const [identifier, setIdentifier] = useState("");
+  const [identifier, setIdentifier] = useState(lastLoginIdentifier);
   const [password, setPassword] = useState("");
   const [loginMethod, setLoginMethod] = useState<"password" | "email-code">("password");
-  const [loginEmail, setLoginEmail] = useState("");
+  const [loginEmail, setLoginEmail] = useState(lastLoginIdentifier);
+  const [rememberIdentifier, setRememberIdentifier] = useState(true);
   const [loginCode, setLoginCode] = useState("");
   const [loginCodeSent, setLoginCodeSent] = useState(false);
   const loginCodeInputRef = useRef<HTMLInputElement>(null);
@@ -582,6 +584,7 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
     }
     login.mutate({ identifier: identifier.trim(), password }, {
       onSuccess: (result) => {
+        rememberLoginIdentifier(rememberIdentifier ? identifier : null);
         setOperator({ token: result.token, id: result.operator.id, name: result.operator.name, role: result.operator.role, mustChangePassword: result.mustChangePassword });
         setPassword("");
         if (!result.mustChangePassword) {
@@ -630,6 +633,7 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
     }
     emailCodeLogin.mutate({ email, code: loginCode.trim() }, {
       onSuccess: (result) => {
+        rememberLoginIdentifier(rememberIdentifier ? email : null);
         setOperator({ token: result.token, id: result.operator.id, name: result.operator.name,
           role: result.operator.role, mustChangePassword: result.mustChangePassword });
         setLoginCode("");
@@ -927,6 +931,17 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
           >
             <Input ref={passwordInputRef} id={passwordId} type="password" autoComplete="current-password" value={password} invalid={Boolean(loginFieldErrors.password)} onChange={(e) => { setPassword(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, password: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} />
           </Field>
+          <div className="flex items-center justify-between gap-3">
+            <Checkbox
+              checked={rememberIdentifier}
+              onChange={(checked) => {
+                setRememberIdentifier(checked);
+                if (!checked) rememberLoginIdentifier(null);
+              }}
+              label="记住账号"
+            />
+            <span className="text-xs text-fg-muted">仅保存账号名，不保存密码</span>
+          </div>
           <div className="flex flex-col gap-1">
             <Button block size="lg" loading={login.isPending} iconRight={<ArrowRight className="size-4" />} onClick={submitLogin}>登录</Button>
           </div>

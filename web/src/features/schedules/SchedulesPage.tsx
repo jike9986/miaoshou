@@ -31,6 +31,7 @@ import {
   useShops,
   useTemplates,
   useScheduleLogs,
+  useWarehouseList,
 } from "@/lib/queries";
 import type { Schedule, ScheduleFrequency } from "@/lib/types";
 import { EMPTY_SCHEDULE_FORM, type ScheduleFormDraft } from "@/features/stores";
@@ -38,7 +39,6 @@ import { ConnectHintBar } from "@/features/shared";
 import { useConnectionState } from "@/features/auth/guard";
 import { PageContent, PageHeader } from "@/components/layout";
 import { Tabs, tabId, tabPanelId } from "@/components/ui";
-import { PublishPage } from "@/features/publish/PublishPage";
 import {
   Badge,
   Button,
@@ -96,7 +96,7 @@ function frequencyText(task: Schedule): string {
 }
 
 /** 定时发布 + 发布记录合并为一个板块：上面的标签切换，两边功能都保留。 */
-export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" } = {}) {
+export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "history" } = {}) {
   const navigate = useNavigate();
   const { connected, blocked } = useConnectionState();
   const { data: auth } = useAuthStatus();
@@ -181,40 +181,7 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
     });
   };
 
-  const [tab, setTab] = useState<"schedules" | "logs" | "history">(initialTab ?? "schedules");
-
-  if (tab === "logs") {
-    return (
-      <>
-        <PageHeader
-          title="定时发布"
-          description="定时任务与发布回执"
-        />
-        <PageContent width="table" padding="p-0" scroll={false}>
-          <div className="border-b border-border-subtle px-6 pt-3">
-            <Tabs
-              value={tab}
-              onChange={(value) => setTab(value as "schedules" | "logs" | "history")}
-              bordered={false}
-              items={[
-                { value: "schedules", label: "定时任务" },
-                { value: "logs", label: "发布记录" },
-                { value: "history", label: "执行历史" },
-              ]}
-            />
-          </div>
-          <div
-            role="tabpanel"
-            id={tabPanelId("schedules", "logs")}
-            aria-labelledby={tabId("schedules", "logs")}
-            className="contents"
-          >
-            <PublishPage embedded />
-          </div>
-        </PageContent>
-      </>
-    );
-  }
+  const [tab, setTab] = useState<"schedules" | "history">(initialTab === "history" ? "history" : "schedules");
 
   if (tab === "history") {
     return (
@@ -227,11 +194,10 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
           <div className="border-b border-border-subtle px-6 pt-3">
             <Tabs
               value={tab}
-              onChange={(value) => setTab(value as "schedules" | "logs" | "history")}
+              onChange={(value) => setTab(value as "schedules" | "history")}
               bordered={false}
               items={[
                 { value: "schedules", label: "定时任务" },
-                { value: "logs", label: "发布记录" },
                 { value: "history", label: "执行历史" },
               ]}
             />
@@ -283,12 +249,11 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
         <div className="px-6 pt-3">
           <Tabs
             value={tab}
-            onChange={(value) => setTab(value as "schedules" | "logs" | "history")}
+            onChange={(value) => setTab(value as "schedules" | "history")}
             bordered={false}
             idBase="schedules"
             items={[
               { value: "schedules", label: "定时任务" },
-              { value: "logs", label: "发布记录" },
               { value: "history", label: "执行历史" },
             ]}
           />
@@ -355,8 +320,8 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
 
         {connected && !schedulesQuery.isLoading && !schedulesQuery.isError && items.length > 0 && (
           <div className="overflow-hidden rounded-lg border border-border bg-surface">
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-sm">
+            <div className="w-full">
+              <table className="w-full table-fixed border-collapse text-sm">
                 <thead>
                   <tr className="h-10 bg-canvas-inset/85 backdrop-blur-[2px]">
                     <th className="sticky top-0 w-[64px] border-b border-border pl-4 text-left text-xs font-medium text-fg-muted">
@@ -365,19 +330,19 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
                     <th className="sticky top-0 border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
                       任务
                     </th>
-                    <th className="sticky top-0 w-[148px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
+                    <th className="sticky top-0 w-[16%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
                       频率 / 时间
                     </th>
-                    <th className="sticky top-0 w-[88px] border-b border-border px-3 text-right text-xs font-medium text-fg-muted">
+                    <th className="sticky top-0 w-[8%] border-b border-border px-3 text-right text-xs font-medium text-fg-muted">
                       每次
                     </th>
-                    <th className="sticky top-0 w-[152px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
+                    <th className="sticky top-0 w-[16%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
                       店铺 / 模板
                     </th>
-                    <th className="sticky top-0 w-[168px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
+                    <th className="sticky top-0 w-[17%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
                       下次执行
                     </th>
-                    <th className="sticky top-0 w-[176px] border-b border-border px-3 pr-4 text-right text-xs font-medium text-fg-muted">
+                    <th className="sticky top-0 w-[22%] border-b border-border px-3 pr-4 text-right text-xs font-medium text-fg-muted">
                       操作
                     </th>
                   </tr>
@@ -399,7 +364,9 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
                       <td className="px-3 py-2.5">
                         <p className="truncate text-[13px] font-medium text-fg">{task.name}</p>
                         <p className="truncate font-mono text-2xs text-fg-muted">
-                          {task.id}
+                          {task.selectedProductIds?.length
+                            ? `已选 ${task.selectedProductIds.length} 件 · 共 ${task.plannedRuns ?? 0} 轮`
+                            : `自动选品 · ${task.id}`}
                           {task.claimOnly ? " · 仅认领" : ""}
                         </p>
                       </td>
@@ -418,8 +385,15 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
                       </td>
                       <td className="px-3 py-2.5">
                         <p className="text-[13px] text-fg">
-                          {task.enabled ? task.nextDueText || "—" : "已停用"}
+                          {task.completed
+                            ? "已完成"
+                            : !task.enabled
+                              ? "已暂停"
+                            : !task.lastRunDate
+                              ? "未开始"
+                              : "进行中"}
                         </p>
+                        <p className="truncate text-2xs text-fg-muted">{task.enabled ? task.nextDueText || "等待执行" : "可重新启用"}</p>
                         {/* lastResult.status 为空（从未跑过）时不渲染「上次」行，避免出现孤零零的 0/20 */}
                         {task.lastResult?.status && (
                           <p className="flex items-center gap-1 text-2xs text-fg-muted">
@@ -507,6 +481,8 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
             if (payload.frequency !== editing.frequency) patch.frequency = payload.frequency;
             if (payload.time !== editing.time) patch.time = payload.time;
             if (payload.perRun !== editing.perRun) patch.perRun = payload.perRun;
+            if (JSON.stringify(payload.selectedProductIds) !== JSON.stringify(editing.selectedProductIds ?? [])) patch.selectedProductIds = payload.selectedProductIds;
+            if (payload.plannedRuns !== editing.plannedRuns) patch.plannedRuns = payload.plannedRuns;
             if (payload.claimOnly !== editing.claimOnly) patch.claimOnly = payload.claimOnly;
             if (JSON.stringify(payload.days) !== JSON.stringify(editing.days)) patch.days = payload.days;
             if (JSON.stringify(payload.dayOfMonth) !== JSON.stringify(editing.dayOfMonth)) {
@@ -614,6 +590,8 @@ interface ScheduleFormDrawerProps {
     endDate: string;
     time: string;
     perRun: number;
+    selectedProductIds: string[];
+    plannedRuns: number | null;
     claimOnly: boolean;
   }) => void;
 }
@@ -634,6 +612,9 @@ function ScheduleFormDrawer({
   const [enabled, setEnabled] = useState(true);
   const [shopId, setShopId] = useState("");
   const [template, setTemplate] = useState("");
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [plannedRuns, setPlannedRuns] = useState(1);
+  const [productPage, setProductPage] = useState(1);
   /**
    * 用户是否手动选过模板。
    *
@@ -652,6 +633,14 @@ function ScheduleFormDrawer({
     enabled: switched,
   });
   const scopedShops = scopedShopsQuery.data?.shops;
+  const productsQuery = useWarehouseList({
+    page: productPage,
+    pageSize: 100,
+    accountId: runAccountId,
+    claimAccountId: runAccountId,
+    sort: "savedDesc",
+  });
+  const products = productsQuery.data?.items ?? [];
   const shopOptions = useMemo(
     () =>
       switched
@@ -694,10 +683,15 @@ function ScheduleFormDrawer({
       setShopId(task.shopId);
       setTemplate(task.template);
       setRunAccountId(task.accountId || accountId);
+      setSelectedProductIds(task.selectedProductIds ?? []);
+      setPlannedRuns(task.plannedRuns ?? 1);
       return;
     }
     setDraft(EMPTY_SCHEDULE_FORM);
     setEnabled(true);
+    setSelectedProductIds([]);
+    setPlannedRuns(1);
+    setProductPage(1);
     setShopId(shops[0]?.shopId ?? "");
     setRunAccountId(accountId);
     // 模板默认值单独一个 effect（见下），因为它依赖异步回来的 selectedTemplates
@@ -737,9 +731,13 @@ function ScheduleFormDrawer({
       next.name = `名称最多 ${LIMITS.scheduleNameLength} 个字符`;
     }
     if (!shopId) next.shopId = "请选择目标店铺";
+    if (!task && selectedProductIds.length === 0) next.selectedProductIds = "请至少选择一件仓库商品";
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(draft.time)) next.time = "时间格式应为 HH:MM";
-    if (draft.perRun < LIMITS.schedulePerRun.min || draft.perRun > LIMITS.schedulePerRun.max) {
-      next.perRun = `每次数量需在 ${LIMITS.schedulePerRun.min}–${LIMITS.schedulePerRun.max} 之间`;
+    if (draft.perRun < LIMITS.schedulePerRun.min || draft.perRun > 2000) {
+      next.perRun = `每次数量需在 ${LIMITS.schedulePerRun.min}–2000 之间`;
+    }
+    if (selectedProductIds.length > draft.perRun * plannedRuns) {
+      next.selectedProductIds = `已选 ${selectedProductIds.length} 件，计划容量只有 ${draft.perRun * plannedRuns} 件`;
     }
     if (draft.frequency === "weekly" && draft.days.length === 0) {
       next.days = "每周任务至少选一个星期几";
@@ -780,6 +778,8 @@ function ScheduleFormDrawer({
       endDate: draft.frequency === "range" ? draft.endDate : "",
       time: draft.time,
       perRun: draft.perRun,
+      selectedProductIds,
+      plannedRuns: selectedProductIds.length ? plannedRuns : null,
       claimOnly: draft.claimOnly,
     });
   };
@@ -793,7 +793,7 @@ function ScheduleFormDrawer({
       onOpenChange={onOpenChange}
       size="lg"
       title={task ? "编辑定时任务" : "新建定时任务"}
-      description={task ? task.id : "按频率把仓库里未上架的商品自动发布到指定店铺"}
+      description={task ? task.id : "选择仓库商品并安排每轮发布数量"}
       closeOnOverlay={false}
       footer={
         <>
@@ -861,6 +861,36 @@ function ScheduleFormDrawer({
         </div>
 
         <Separator />
+
+        <Field
+          label="选择发布商品"
+          required
+          error={errors.selectedProductIds ?? null}
+          hint={`已选 ${selectedProductIds.length} 件`}
+        >
+          <div className="max-h-56 overflow-y-auto rounded-md border border-border-subtle">
+            {productsQuery.isLoading ? (
+              <p className="p-3 text-sm text-fg-muted">正在加载仓库商品…</p>
+            ) : products.length === 0 ? (
+              <p className="p-3 text-sm text-fg-muted">当前账号没有可选仓库商品</p>
+            ) : products.map((product) => (
+              <label key={product.id} className="flex min-h-10 items-center gap-2 border-b border-border-subtle px-3 last:border-0 hover:bg-surface-hover">
+                <Checkbox
+                  checked={selectedProductIds.includes(product.id)}
+                  onChange={(checked) => setSelectedProductIds((current) =>
+                    checked ? [...current, product.id] : current.filter((id) => id !== product.id))}
+                />
+                <span className="min-w-0 flex-1 truncate text-[13px]">{product.title || "未命名商品"}</span>
+                <span className="text-2xs text-fg-muted">{product.status}</span>
+              </label>
+            ))}
+          </div>
+          <div className="mt-2 flex items-center justify-between">
+            <Button size="sm" variant="ghost" disabled={productPage <= 1} onClick={() => setProductPage((page) => page - 1)}>上一页</Button>
+            <span className="text-xs text-fg-muted">第 {productPage} 页 / 共 {Math.max(1, Math.ceil((productsQuery.data?.total ?? 0) / 100))} 页</span>
+            <Button size="sm" variant="ghost" disabled={!productsQuery.data?.hasMore} onClick={() => setProductPage((page) => page + 1)}>下一页</Button>
+          </div>
+        </Field>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="频率" required>
@@ -970,12 +1000,12 @@ function ScheduleFormDrawer({
             label="每次数量"
             required
             error={errors.perRun ?? null}
-            hint={`${LIMITS.schedulePerRun.min}–${LIMITS.schedulePerRun.max} 件`}
+            hint={`${LIMITS.schedulePerRun.min}–2000 件`}
           >
             <NumberInput
               value={draft.perRun}
               min={LIMITS.schedulePerRun.min}
-              max={LIMITS.schedulePerRun.max}
+              max={2000}
               step={1}
               decimals={0}
               suffix="件"
@@ -994,6 +1024,17 @@ function ScheduleFormDrawer({
           </div>
         </div>
 
+        {selectedProductIds.length > 0 && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="计划执行轮数" required hint={`最多可发布 ${draft.perRun * plannedRuns} 件`}>
+              <NumberInput value={plannedRuns} min={1} max={180} step={1} decimals={0} suffix="轮" onChange={(value) => setPlannedRuns(value ?? 1)} />
+            </Field>
+            <p className="self-end pb-2 text-[13px] text-fg-secondary">
+              每天执行一次时，轮数就是天数。预计 {Math.ceil(selectedProductIds.length / draft.perRun)} 轮完成；最后一轮只发布剩余商品。
+            </p>
+          </div>
+        )}
+
         {Object.keys(errors).length > 0 && (
           <InlineError>有 {Object.keys(errors).length} 项需要修正后再提交。</InlineError>
         )}
@@ -1004,8 +1045,9 @@ function ScheduleFormDrawer({
             执行说明
           </p>
           <p className="mt-1">
-            任务会挑选该账号下「未发布」的仓库商品，按入库时间倒序取每轮数量；不足时不报错，只记一次
-            <span className="text-fg-secondary"> 部分完成</span>。
+            {selectedProductIds.length > 0
+              ? "任务只会处理上方选中的商品；超过计划容量时无法创建。"
+              : "未选择商品时，旧版兼容模式会自动挑选该账号下未发布的仓库商品。"}
           </p>
           <p className="mt-1">
             站点语言参考：

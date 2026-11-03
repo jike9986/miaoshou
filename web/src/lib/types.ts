@@ -970,6 +970,9 @@ export interface Schedule {
   endDate: string;
   time: string;
   perRun: number;
+  selectedProductIds: string[];
+  plannedRuns: number | null;
+  completed: boolean;
   claimOnly: boolean;
   lastRunDate: string;
   attemptDate: string;
@@ -998,6 +1001,7 @@ export type ScheduleCreateRequest = Omit<
   | "nextDueAt"
   | "nextDueText"
   | "createdAt"
+  | "completed"
   | "updatedAt"
   | "lastResult"
 > & { name?: string | null; days?: number[]; dayOfMonth?: number[]; startDate?: string; endDate?: string };

@@ -154,7 +154,9 @@ class ScheduleCreate(CamelModel):
     startDate: str = ""
     endDate: str = ""
     time: str = "09:00"
-    perRun: int = Field(default=10, ge=1, le=200)
+    perRun: int = Field(default=10, ge=1, le=2000)
+    selectedProductIds: list[str] = Field(default_factory=list)
+    plannedRuns: int | None = Field(default=None, ge=1, le=180)
     claimOnly: bool = False
 
 
@@ -170,7 +172,9 @@ class SchedulePatch(CamelModel):
     startDate: str | None = None
     endDate: str | None = None
     time: str | None = None
-    perRun: int | None = Field(default=None, ge=1, le=200)
+    perRun: int | None = Field(default=None, ge=1, le=2000)
+    selectedProductIds: list[str] | None = None
+    plannedRuns: int | None = Field(default=None, ge=1, le=180)
     claimOnly: bool | None = None
 
 

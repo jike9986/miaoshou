@@ -390,6 +390,8 @@ def test_background_schedule_run_copies_task_owner_to_both_histories(
         "template": "",
         "claim_only": False,
         "operator_id": first.id,
+        "selected_product_ids": None,
+        "run_index": 0,
     }]
     history = db.query(ScheduleLog).filter(ScheduleLog.task_id == task.id).one()
     assert history.owner_operator_id == first.id

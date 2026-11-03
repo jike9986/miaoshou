@@ -27,6 +27,7 @@ export const OPERATOR_ID_KEY = "aohuang.operator.id";
 export const OPERATOR_NAME_KEY = "aohuang.operator.name";
 export const OPERATOR_ROLE_KEY = "aohuang.operator.role";
 export const OPERATOR_CHANGE_PASSWORD_KEY = "aohuang.operator.must-change-password";
+export const OPERATOR_LAST_LOGIN_KEY = "aohuang.operator.last-login";
 
 /** 后端在没有 X-Operator 时使用的内置操作员名（与 server 侧常量对齐） */
 export const LOCAL_OPERATOR_NAME = "本机";
@@ -206,6 +207,14 @@ export function clearOperator(): boolean {
   writeItem(OPERATOR_CHANGE_PASSWORD_KEY, null);
   emit();
   return cleared;
+}
+
+export function lastLoginIdentifier(): string {
+  return readItem(OPERATOR_LAST_LOGIN_KEY) ?? "";
+}
+
+export function rememberLoginIdentifier(value: string | null): void {
+  writeItem(OPERATOR_LAST_LOGIN_KEY, value?.trim() || null);
 }
 
 /** React 侧订阅：身份变化会触发重渲染 */

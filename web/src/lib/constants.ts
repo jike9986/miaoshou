@@ -16,7 +16,7 @@ export const LIMITS = {
   titleLength: { min: 25, max: 255 },
   groupNameLength: 64,
   scheduleNameLength: 120,
-  schedulePerRun: { min: 1, max: 200 },
+  schedulePerRun: { min: 1, max: 2000 },
   scheduleRangeDays: 180,
   searchMaxLength: 64,
 } as const;

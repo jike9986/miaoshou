@@ -109,6 +109,8 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
             "endDate": existing.end_date,
             "time": existing.time_of_day,
             "perRun": existing.per_run,
+            "selectedProductIds": list(existing.selected_product_ids or []),
+            "plannedRuns": existing.planned_runs,
             "claimOnly": bool(existing.claim_only),
         }
     provided = set(raw.keys())
@@ -163,9 +165,21 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
             per_run = int(per_run_raw)
         except (TypeError, ValueError):
             raise errors.validation("每次发布数量必须是整数", field="perRun") from None
-        if not 1 <= per_run <= 200:
-            raise errors.validation("每次发布数量必须在 1 到 200 之间",
+        if not 1 <= per_run <= 2000:
+            raise errors.validation("每次发布数量必须在 1 到 2000 之间",
                                     field="perRun", value=per_run)
+
+    selected_raw = pick("selectedProductIds")
+    selected_product_ids = list(dict.fromkeys(
+        str(value).strip() for value in (selected_raw or []) if str(value).strip()))
+    planned_raw = pick("plannedRuns")
+    planned_runs = None if planned_raw in (None, "") else int(planned_raw)
+    if selected_product_ids and planned_runs is None:
+        raise errors.validation("选择商品后，请设置计划发布天数", field="plannedRuns")
+    if selected_product_ids and len(selected_product_ids) > per_run * (planned_runs or 0):
+        raise errors.validation(
+            f"已选 {len(selected_product_ids)} 件，但 {planned_runs} 天最多发布 {per_run * (planned_runs or 0)} 件",
+            field="selectedProductIds")
 
     time_value = pick("time", "timeOfDay")
     if time_value in (None, "") and existing is None and not partial:
@@ -219,6 +233,8 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
         "end_date": end_date,
         "time_of_day": time_text,
         "per_run": per_run,
+        "selected_product_ids": selected_product_ids or None,
+        "planned_runs": planned_runs,
         "claim_only": bool(pick("claimOnly") if "claimOnly" in provided else
                            (existing.claim_only if existing else False)),
     }
@@ -297,6 +313,9 @@ def as_dict(row: Schedule) -> dict[str, Any]:
         "endDate": row.end_date or "",
         "time": row.time_of_day,
         "perRun": int(row.per_run or 0),
+        "selectedProductIds": list(row.selected_product_ids or []),
+        "plannedRuns": row.planned_runs,
+        "completed": bool(row.completed),
         "lastRunDate": row.last_run_date or "",
         "attemptDate": row.attempt_date or "",
         "attempts": int(row.attempts or 0),
@@ -322,6 +341,9 @@ def serialize(row: Schedule, *, account_name: str = "", shop_name: str = "") -> 
         "endDate": row.end_date or "",
         "time": row.time_of_day,
         "perRun": int(row.per_run or 0),
+        "selectedProductIds": list(row.selected_product_ids or []),
+        "plannedRuns": row.planned_runs,
+        "completed": bool(row.completed),
         "claimOnly": bool(row.claim_only),
         "lastRunDate": row.last_run_date or "",
         "attemptDate": row.attempt_date or "",
@@ -591,6 +613,15 @@ def create(db: Session, payload: Mapping[str, Any],
     fields = normalize(db, payload)
     _assert_operator_account_access(db, fields["account_id"], operator)
     _assert_member_schedule_mode(operator, fields["claim_only"])
+    if not fields["selected_product_ids"]:
+        raise errors.validation("请至少选择一件要发布的仓库商品", field="selectedProductIds")
+    eligible = pick_products(
+        db, account_id=fields["account_id"], count=len(fields["selected_product_ids"]),
+        claim_only=fields["claim_only"], operator_id=operator.id if operator else None,
+        selected_product_ids=fields["selected_product_ids"])
+    if len(eligible) != len(fields["selected_product_ids"]):
+        raise errors.validation("部分所选商品不可用于该账号发布，请刷新商品列表后重选",
+                                field="selectedProductIds")
     _verify_template(db, fields["template_name"], required=True)
     _verify_shop(db, fields["account_id"], fields["shop_id"])
     row = Schedule(id=f"task-{uuid.uuid4().hex[:12]}", created_at=now_ts(),
@@ -600,6 +631,7 @@ def create(db: Session, payload: Mapping[str, Any],
                    owner_operator_id=(operator.id if operator is not None else None))
     for key, value in fields.items():
         setattr(row, key, value)
+    row.completed = False
     due = next_due(as_dict(row), datetime.now())
     row.next_due_at = due.timestamp() if due else None
     db.add(row)
@@ -621,6 +653,10 @@ def update(db: Session, task_id: str, payload: Mapping[str, Any],
     _verify_shop(db, fields["account_id"], fields["shop_id"])
     for key, value in fields.items():
         setattr(row, key, value)
+    if payload.get("enabled") is True or "selectedProductIds" in payload:
+        row.completed = False
+    if "selectedProductIds" in payload:
+        row.completed_runs = 0
     due = next_due(as_dict(row), datetime.now())
     row.next_due_at = due.timestamp() if due else None
     row.updated_at = now_ts()
@@ -672,7 +708,9 @@ def note_result(db: Session, task_id: str, *, success: bool, result: dict[str, A
 
 def pick_products(db: Session, *, account_id: int | None, count: int,
                   template: str = "", claim_only: bool = False,
-                  operator_id: int | None = None
+                  operator_id: int | None = None,
+                  selected_product_ids: list[str] | None = None,
+                  run_index: int = 0
                   ) -> list[dict[str, Any]]:
     """挑出本轮要处理的商品，按 saved_at 倒序，最多 per_run 件。
 
@@ -683,6 +721,12 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
     from models.product_claim import ProductClaim
 
     query = db.query(Product).filter(Product.deleted_at.is_(None))
+    if selected_product_ids is not None:
+        start = max(run_index, 0) * count
+        ids = selected_product_ids[start:start + count]
+        if not ids:
+            return []
+        query = query.filter(Product.id.in_(ids))
     operator = (operator_service.get(db, operator_id)
                 if operator_id is not None else None)
     if (operator is not None
@@ -953,6 +997,7 @@ def reconcile_publish_log(db: Session, log: Any) -> bool:
     from models.schedule_log import ScheduleLog
 
     changed = False
+    completed_run_index: int | None = None
     rows = (db.query(ScheduleLog).filter(
         ScheduleLog.task_id == log.schedule_id,
         ScheduleLog.account_id == log.account_id,
@@ -968,6 +1013,8 @@ def reconcile_publish_log(db: Session, log: Any) -> bool:
         row.failed = result["failed"]
         row.summary = json.dumps(result, ensure_ascii=False, default=str)
         changed = True
+        if result["status"] == RUN_OK and "scheduledRunIndex" in result:
+            completed_run_index = int(result["scheduledRunIndex"])
         break
     task = db.query(Schedule).filter(
         Schedule.id == log.schedule_id,
@@ -979,6 +1026,17 @@ def reconcile_publish_log(db: Session, log: Any) -> bool:
         if result is not None:
             task.last_result = result
             changed = True
+            if result["status"] == RUN_OK and "scheduledRunIndex" in result:
+                completed_run_index = int(result["scheduledRunIndex"])
+    if (task is not None and completed_run_index is not None
+            and task.selected_product_ids and task.planned_runs
+            and completed_run_index == int(task.completed_runs or 0)):
+        task.completed_runs = int(task.completed_runs or 0) + 1
+        if task.completed_runs >= int(task.planned_runs):
+            task.enabled = False
+            task.completed = True
+        task.updated_at = now_ts()
+        changed = True
     return changed
 
 
@@ -986,12 +1044,21 @@ def _store(db: Session, task: Schedule, summary: dict[str, Any],
            *, moment: datetime | None = None) -> dict[str, Any]:
     """记账：只有 failed 才累加当天重试次数，其余（含 partial）算当天已跑。"""
     saved = note_result(db, str(task.id), moment=moment,
-                        success=summary["status"] != RUN_FAILED, result=summary)
+                        success=summary["status"] in (RUN_OK, RUN_SUBMITTED),
+                        result=summary)
     summary["at"] = (saved.last_result or {}).get("at")
     # 追加一条执行历史。`last_result` 只留最近一次，翻不出「昨天跑了几轮」。
     # 历史写失败不能影响发布结果本身的记账，所以单独吞掉。
     try:
         record_log(db, task, summary, moment=moment)
+        if (task.selected_product_ids and task.planned_runs
+                and summary.get("selected", 0) > 0
+                and summary.get("status") == RUN_OK):
+            task.completed_runs = int(task.completed_runs or 0) + 1
+            if task.completed_runs >= int(task.planned_runs):
+                task.enabled = False
+                task.completed = True
+                task.updated_at = now_ts()
     except Exception:  # noqa: BLE001
         logger.warning("写入定时任务执行历史失败 taskId=%s", task.id, exc_info=True)
     return summary
@@ -1087,9 +1154,20 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
         items = pick_products(db, account_id=task.account_id, count=requested,
                               template=str(task.template_name or ""),
                               claim_only=bool(task.claim_only),
-                              operator_id=task.owner_operator_id)
+                              operator_id=task.owner_operator_id,
+                              selected_product_ids=(list(task.selected_product_ids)
+                                                    if task.selected_product_ids else None),
+                              run_index=int(task.completed_runs or 0))
         selected = len(items)
         if not items:
+            if task.selected_product_ids:
+                task.completed = True
+                task.enabled = False
+                task.updated_at = now_ts()
+                return _store(db, task, summarize(
+                    task_id=str(task.id), requested=requested, selected=0,
+                    published=0, reason="所选商品均已完成或不可发布，任务已结束"),
+                    moment=moment)
             # 判断到底是「都发完了」还是「账号/仓库选错了」
             if member_owner:
                 # Shared-account products and other students' claims are outside
@@ -1131,6 +1209,8 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
         summary = _publish_summary(
             outcome, task=task, requested=requested, selected=selected,
             batch_id=batch_id, with_results=with_results)
+        if task.selected_product_ids:
+            summary["scheduledRunIndex"] = int(task.completed_runs or 0)
         return _store(db, task, summary, moment=moment)
     except errors.AppError as exc:
         if exc.code == errors.UPSTREAM_UNKNOWN_RESULT:
@@ -1151,6 +1231,8 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
                     outcome, task=task, requested=requested, selected=selected,
                     batch_id=batch_id, with_results=with_results)
                 summary["reason"] = exc.message
+                if task.selected_product_ids:
+                    summary["scheduledRunIndex"] = int(task.completed_runs or 0)
                 return _store(db, task, summary, moment=moment)
         summary = summarize(task_id=str(task.id), requested=requested,
                             selected=selected, published=0, error=exc.message)
