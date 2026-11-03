@@ -357,12 +357,17 @@ def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None) -> list
             ids.append(int(value))
 
     def scan(page_size: int) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
         try:
-            listing = client.collect_box_list(page_no=1, page_size=page_size)
+            for page_no in range(1, 4):
+                listing = client.collect_box_list(page_no=page_no, page_size=page_size)
+                rows = (listing.get("data") or {}).get("detailList") or []
+                found.extend(row for row in rows if isinstance(row, Mapping))
+                if len(rows) < page_size:
+                    break
         except (MiaoshouError, ValueError):
             return []
-        rows = (listing.get("data") or {}).get("detailList") or []
-        return [row for row in rows if isinstance(row, Mapping)]
+        return found
 
     # 主路径：只认挂着这个公共箱 id 的行
     rows = scan(20)
@@ -376,10 +381,35 @@ def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None) -> list
     for row in scan(50):
         row_common = str(row.get("commonCollectBoxDetailId") or "")
         # 行上带了别的公共箱 id 就不是这次认领的产物；没带 id 的行无法区分，一律留下
-        if common_id is not None and row_common and row_common != str(common_id):
+        if common_id is not None and row_common != str(common_id):
             continue
         remember(row.get("collectBoxDetailId") or row.get("detailId"))
     return ids
+
+
+def _collect_box_snapshot(client: MiaoshouClient) -> set[int] | None:
+    """Return visible TK draft IDs, or None when the pre-copy snapshot failed."""
+    found: set[int] = set()
+    try:
+        for page_no in range(1, 4):
+            listing = client.collect_box_list(page_no=page_no, page_size=50)
+            data = listing.get("data") or {}
+            if not isinstance(data, Mapping):
+                return None
+            rows = data.get("detailList")
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                value = row.get("collectBoxDetailId") or row.get("detailId")
+                if str(value).isdigit():
+                    found.add(int(value))
+            if len(rows) < 50:
+                break
+    except (MiaoshouError, ValueError):
+        return None
+    return found
 
 
 def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
@@ -450,6 +480,7 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
         copies = min(count - len(details), 100)
         if progress:
             progress({"stage": "claim", "commonId": common_id, "copies": copies})
+        before_ids = _collect_box_snapshot(client)
         try:
             claimed = client.claim_common_to_platform([(common_id, "tiktok", copies)])
         except MiaoshouError as exc:
@@ -458,10 +489,21 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
         if url:
             mark(db, url, ok=True)
         new_ids = list(dict.fromkeys(claimed_detail_ids(claimed)))
+        if (len(new_ids) != copies and before_ids is not None):
+            # The upstream may create all requested drafts but return only part of
+            # their IDs. Recover only IDs that appeared after this request and are
+            # tied to the same common-box source; never infer success from old rows.
+            readback = [detail_id for detail_id in _fresh_box_ids(client, common_id)
+                        if detail_id not in before_ids]
+            if len(readback) == copies and set(new_ids).issubset(readback):
+                new_ids = readback
         if not new_ids:
             raise CarrierError("复制请求已提交但未返回新商品 ID，请先检查采集箱，勿重复操作",
                                commonId=common_id, required=count)
-        if len(set(new_ids)) != copies or any(detail_id in details for detail_id in new_ids):
+        duplicates = any(detail_id in details for detail_id in new_ids)
+        existed_before = (before_ids is not None
+                          and any(detail_id in before_ids for detail_id in new_ids))
+        if len(set(new_ids)) != copies or duplicates or existed_before:
             raise CarrierError("复制回执数量不完整，请先检查采集箱，勿重复操作",
                                commonId=common_id, requested=copies, returned=len(set(new_ids)),
                                available=len(details), required=count)
