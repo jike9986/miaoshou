@@ -696,6 +696,14 @@ def account_summaries(db: Session) -> list[dict[str, Any]]:
 # --- 上游错误映射 ---------------------------------------------------------
 def map_upstream_error(exc: MiaoshouError, *, secrets: tuple[str, ...] = ()) -> errors.AppError:
     message = redact(str(exc), secrets)
+    if str(exc.code or "").casefold() in {"appnotfound", "app_not_found"}:
+        return errors.AppError(
+            errors.UPSTREAM_ERROR,
+            "妙手未找到此 AppKey 对应的应用。请切换到有效的妙手账号；"
+            "旧账号记录或错误环境中的密钥不能用于当前连接。",
+            status=502,
+            details={"upstream": {"code": exc.code, "msg": "application_not_found"}},
+        )
     if exc.kind == "rate_limit":
         return errors.upstream_rate_limit(f"{message}（已重试 {5} 次仍被限流）")
     if exc.kind == "timeout":

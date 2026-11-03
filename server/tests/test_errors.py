@@ -130,6 +130,19 @@ def test_read_only_factory() -> None:
     assert exc.status == 403
 
 
+def test_miaoshou_app_not_found_explains_invalid_account_record() -> None:
+    from services.account_service import map_upstream_error
+    from services.miaoshou import MiaoshouError
+
+    exc = map_upstream_error(MiaoshouError(
+        "妙手接口失败 [appNotFound]", code="appNotFound"))
+
+    assert exc.code == errors.UPSTREAM_ERROR
+    assert exc.status == 502
+    assert "未找到此 AppKey" in exc.message
+    assert exc.details["upstream"]["code"] == "appNotFound"
+
+
 @pytest.mark.parametrize("name", sorted(FACTORIES), ids=sorted(FACTORIES))
 def test_factory_code_is_upper_snake(name: str) -> None:
     """每个工厂产出的 code 都必须匹配 ^[A-Z][A-Z0-9_]*$。"""
