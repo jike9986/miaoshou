@@ -410,10 +410,16 @@ def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None,
     # Use the larger page size before deciding whether any rows were found.
     # Existing copies of this common item are normal and must not short-circuit
     # the scan before newly created IDs later in the page can be observed.
-    for row in scan(50):
-        row_common = str(row.get("commonCollectBoxDetailId") or "")
-        if common_id is not None and row_common != str(common_id):
-            continue
+    rows = scan(50)
+    matching = [row for row in rows
+                if common_id is not None
+                and str(row.get("commonCollectBoxDetailId") or "") == str(common_id)]
+    if not matching:
+        # Some TK collect-box responses omit the common-box source ID. In that
+        # case, the pre-copy snapshot still lets us identify a single new draft.
+        matching = [row for row in rows
+                    if not str(row.get("commonCollectBoxDetailId") or "")]
+    for row in matching:
         value = row.get("collectBoxDetailId") or row.get("detailId")
         if known_ids is not None and str(value).isdigit() and int(value) in known_ids:
             continue
@@ -527,9 +533,14 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
             returned_ids = list(dict.fromkeys(claimed_detail_ids(claimed)))
             if len(returned_ids) != 1 and before_ids is not None:
                 known_ids = before_ids | set(new_ids)
-                readback = _fresh_box_ids(client, common_id, known_ids)
-                if len(readback) == 1:
-                    returned_ids = readback
+                for attempt in range(3):
+                    readback = _fresh_box_ids(client, common_id, known_ids)
+                    if readback:
+                        if len(readback) == 1:
+                            returned_ids = readback
+                        break
+                    if attempt < 2:
+                        time.sleep(1)
             invalid_receipt = len(returned_ids) != 1
             if (before_ids is not None and returned_ids
                     and returned_ids[0] in before_ids):

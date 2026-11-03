@@ -121,6 +121,35 @@ def test_missing_single_copy_receipt_recovers_new_draft_from_box():
     assert len(client.calls) == 1
 
 
+def test_delayed_copy_receipt_recovers_draft_without_common_box_id(monkeypatch):
+    class DelayedReadback(ExistingCommonBox):
+        def __init__(self):
+            super().__init__()
+            self.list_calls = 0
+
+        def claim_common_to_platform(self, items):
+            self.calls.append(items)
+            self.box_ids.append(1001)
+            return {"data": {}}
+
+        def collect_box_list(self, **kwargs):
+            self.list_calls += 1
+            rows = ([{"collectBoxDetailId": 1001}]
+                    if self.list_calls >= 4 else [])
+            return {"data": {"detailList": rows}}
+
+    client = DelayedReadback()
+    sleeps = []
+    monkeypatch.setattr(carrier_service.time, "sleep", sleeps.append)
+
+    ids = carrier_service.collect_carriers(None, client, count=1)
+
+    assert ids == [1001]
+    assert client.list_calls == 4  # one pre-copy snapshot and three readbacks
+    assert client.calls == [[(42, "tiktok", 1)]]
+    assert sleeps == [1, 1]
+
+
 def test_readback_skips_existing_same_source_rows_before_scanning_new_copies():
     client = ExistingCommonBox()
     client.box_ids = list(range(900, 925))
@@ -175,9 +204,10 @@ def test_copy_receipt_deduplicates_ids_across_fields():
     assert carrier_service.collect_carriers(None, client, count=1) == [1001]
 
 
-def test_missing_copy_ids_stops_without_using_existing_products():
+def test_missing_copy_ids_stops_without_using_existing_products(monkeypatch):
     client = ExistingCommonBox()
     client.claim_common_to_platform = lambda *_: {"data": {}}
+    monkeypatch.setattr(carrier_service.time, "sleep", lambda *_: None)
     with pytest.raises(carrier_service.CarrierError, match="勿重复操作"):
         carrier_service.collect_carriers(None, client, count=1)
 
