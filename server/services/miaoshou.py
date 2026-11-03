@@ -264,9 +264,10 @@ class MiaoshouClient:
         except httpx.HTTPError as exc:
             self._breaker.record_transport_failure()
             _name = type(exc).__name__
-            # ConnectError / ConnectTimeout 这类是「根本连不上」，归成 unreachable，
-            # 好让上层给出「网络不通」而不是含糊的「接口失败」。
-            _kind = "unreachable" if "Connect" in _name else "error"
+            # Only connection establishment failures are known not to have
+            # reached the upstream write handler. Other transport failures may
+            # happen after the request body was accepted.
+            _kind = "unreachable" if "Connect" in _name else "unknown"
             raise MiaoshouError(f"请求妙手接口失败：{_name}", kind=_kind) from None
 
         raw = response.content
@@ -284,8 +285,11 @@ class MiaoshouClient:
                     message = str(data.get("message") or data.get("msg") or message)
             except (UnicodeDecodeError, json.JSONDecodeError):
                 pass
+            # A gateway/server error may arrive after an upstream write has
+            # already taken effect, so callers must verify before continuing.
+            kind = "unknown" if response.status_code >= 500 else "error"
             raise MiaoshouError(f"妙手接口失败：{message}", code=code,
-                                status=response.status_code, kind="error")
+                                status=response.status_code, kind=kind)
         if not raw:
             raise MiaoshouError("妙手接口返回空响应", kind="error")
         try:

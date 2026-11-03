@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
@@ -20,6 +21,8 @@ from sqlalchemy.orm import Session
 
 from core import errors
 from core.constants import (
+    DETAIL_IMAGE_HARD_LIMIT,
+    MAIN_IMAGE_LIMIT,
     PUBLISH_MAX_ITEMS,
     SITE_LANGUAGES,
     SITE_NAMES,
@@ -58,6 +61,8 @@ from services.miaoshou import MiaoshouClient, MiaoshouError
 logger = logging.getLogger("aohuang.publish")
 
 PUBLISH_STATUSES = ("processing", "success", "fail", "cancel")
+
+_DETAIL_IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 
 # 仅用于提示等待时长；结果未确认的发布不会因超过此时长而自动解锁。
 PUBLISH_PROCESSING_SECONDS = 600.0
@@ -584,6 +589,134 @@ def _load_carrier_payloads(db: Session, entries: list[dict[str, Any]],
     return payloads
 
 
+def _limit_claim_images(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep warehouse claims within the same image limits used by processing."""
+    from copy import deepcopy
+
+    from services import pre_save_check
+
+    limited: list[dict[str, Any]] = []
+    for source in payloads:
+        payload = deepcopy(source)
+        main = payload.get("imgUrls")
+        seen_images: set[str] = set()
+        if isinstance(main, list):
+            unique_main = []
+            for image in main:
+                url = str(image or "").strip()
+                if url and url in seen_images:
+                    continue
+                if url:
+                    seen_images.add(url)
+                unique_main.append(image)
+            payload["imgUrls"] = unique_main[:MAIN_IMAGE_LIMIT]
+            seen_images = {str(image or "").strip()
+                           for image in payload["imgUrls"] if str(image or "").strip()}
+
+        remaining = DETAIL_IMAGE_HARD_LIMIT
+
+        def keep_detail_image(match: re.Match[str], seen: set[str] = seen_images) -> str:
+            nonlocal remaining
+            urls = pre_save_check.extract_detail_image_urls(match.group(0))
+            if not urls:
+                return match.group(0)
+            url = urls[0].strip()
+            if url in seen:
+                return ""
+            seen.add(url)
+            if remaining == 0:
+                return ""
+            remaining -= 1
+            return match.group(0)
+
+        notes = payload.get("notes")
+        if isinstance(notes, str) and notes:
+            payload["notes"] = _DETAIL_IMG_TAG.sub(keep_detail_image, notes)
+        limited.append(payload)
+    return limited
+
+
+def _dedupe_exact_duplicate_claim_colors(payload: dict[str, Any]) -> dict[str, int] | None:
+    color_props = [
+        prop for prop in payload.get("skuPropertyList") or []
+        if isinstance(prop, dict)
+        and str(prop.get("attrName") or "").casefold() in {
+            "warna", "color", "colour", "颜色"}
+    ]
+    if len(color_props) != 1:
+        return None
+    prop = color_props[0]
+    values = prop.get("attrValueList") or []
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            return None
+        name = str(value.get("attrValue") or "").strip()
+        if not name:
+            return None
+        groups.setdefault(name.casefold(), []).append(value)
+    duplicate_groups = [group for group in groups.values() if len(group) > 1]
+    if not duplicate_groups:
+        return None
+    sku_map = payload.get("skuMap")
+    if not isinstance(sku_map, dict):
+        return None
+
+    removed_ids: set[str] = set()
+    for group in duplicate_groups:
+        ids = [str(value.get("attrValueId") or "") for value in group]
+        if not all(ids) or len(set(ids)) != len(ids):
+            return None
+        normalized_values = []
+        for value in group:
+            normalized = {key: item for key, item in value.items()
+                          if key not in {"attrValueId", "attrValue"}}
+            normalized["attrValue"] = str(value.get("attrValue") or "").strip().casefold()
+            normalized_values.append(normalized)
+        if any(value != normalized_values[0] for value in normalized_values[1:]):
+            return None
+        variants_by_id: dict[str, dict[tuple[str, ...], dict[str, Any]]] = {}
+        for value_id in ids:
+            variants: dict[tuple[str, ...], dict[str, Any]] = {}
+            for key, sku in sku_map.items():
+                if not isinstance(sku, dict):
+                    return None
+                key_parts = [part for part in str(key).strip(";").split(";") if part]
+                color_ids = [part for part in key_parts if part in ids]
+                if not color_ids:
+                    continue
+                if len(color_ids) != 1:
+                    return None
+                if color_ids[0] != value_id:
+                    continue
+                dimensions = tuple(sorted(part for part in key_parts if part not in ids))
+                if dimensions in variants:
+                    return None
+                variants[dimensions] = {name: item for name, item in sku.items()
+                                        if name != "itemNum"}
+            if not variants:
+                return None
+            variants_by_id[value_id] = variants
+        baseline = variants_by_id[ids[0]]
+        if any(variants != baseline for variants in variants_by_id.values()):
+            return None
+        removed_ids.update(ids[1:])
+
+    removed_sku_keys = [
+        key for key in sku_map
+        if removed_ids.intersection(str(key).strip(";").split(";"))
+    ]
+    if not removed_sku_keys:
+        return None
+    prop["attrValueList"] = [
+        value for value in values if str(value.get("attrValueId") or "") not in removed_ids
+    ]
+    payload["skuMap"] = {key: value for key, value in sku_map.items()
+                          if key not in removed_sku_keys}
+    return {"removedColorValues": len(removed_ids),
+            "removedSkuVariants": len(removed_sku_keys)}
+
+
 def _repricing(payloads: list[dict[str, Any]], entries: list[dict[str, Any]],
                template: Mapping[str, Any] | None, rate: Any
                ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -781,6 +914,8 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     claimed_ids: list[str] = []
     failures: list[dict[str, Any]] = []
     repriced: list[dict[str, Any]] = []
+    claim_adjustments: list[dict[str, Any]] = []
+    claim_price_adjustments: list[dict[str, Any]] = []
     logged: list[PublishLog] = []
 
     # 发布互斥。位置是刻意的：所有参数校验都做完了，还没碰上游。
@@ -842,7 +977,31 @@ def publish(db: Session, payload: Mapping[str, Any], *,
 
             if need_rebuild or (not claimed_ids and entries):
                 # 用本地 payload 在目标店铺新建载体并写入商品内容。
-                payloads = _load_carrier_payloads(db, entries, account, client)
+                payloads = _limit_claim_images(
+                    _load_carrier_payloads(db, entries, account, client))
+                for index, item in enumerate(payloads):
+                    sku_change = _dedupe_exact_duplicate_claim_colors(item)
+                    if sku_change:
+                        claim_adjustments.append({
+                            "warehouseId": entries[index].get("warehouseId"),
+                            "stage": "sku",
+                            **sku_change,
+                        })
+                    original = entries[index].get("payload") or {}
+                    main_before = len(original.get("imgUrls") or [])
+                    main_after = len(item.get("imgUrls") or [])
+                    from services.pre_save_check import extract_detail_image_urls
+                    detail_before = len(extract_detail_image_urls(original.get("notes")))
+                    detail_after = len(extract_detail_image_urls(item.get("notes")))
+                    if main_before != main_after or detail_before != detail_after:
+                        claim_adjustments.append({
+                            "warehouseId": entries[index].get("warehouseId"),
+                            "stage": "images",
+                            "mainImagesBefore": main_before,
+                            "mainImagesAfter": main_after,
+                            "detailImagesBefore": detail_before,
+                            "detailImagesAfter": detail_after,
+                        })
                 carrier_service.harvest_from_payloads(db, payloads)
                 try:
                     listing = client.common_box_list(page_no=1, page_size=20)
@@ -865,8 +1024,36 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 rebuilt = [str(v) for v in (filled.get("saved") or [])]
                 claimed_ids = rebuilt
                 filled_sources = filled.get("savedSources") or []
-                for reason in (filled.get("failures") or []):
-                    failures.append({"stage": "carrier", "reason": str(reason)[:200]})
+                claim_price_adjustments = [
+                    {"warehouseId": entries[item["sourceIndex"]].get("warehouseId"),
+                     "stage": "price",
+                     "oldPrice": item.get("oldPrice"),
+                     "costFloor": item.get("costFloor"),
+                     "newPrice": item.get("newPrice"),
+                     "skuKeys": item.get("skuKeys") or []}
+                    for item in filled.get("priceAdjustments") or []
+                    if isinstance(item.get("sourceIndex"), int)
+                    and 0 <= item["sourceIndex"] < len(entries)
+                ]
+                failure_details = filled.get("failureDetails") or []
+                if failure_details:
+                    for item in failure_details:
+                        source_index = item.get("sourceIndex")
+                        entry = (entries[source_index]
+                                 if isinstance(source_index, int)
+                                 and 0 <= source_index < len(entries) else {})
+                        failures.append({
+                            "stage": "carrier",
+                            "sourceIndex": source_index,
+                            "warehouseId": entry.get("warehouseId"),
+                            "detailId": item.get("detailId"),
+                            "certain": item.get("certain") is True,
+                            "reason": str(item.get("reason") or "载体写入失败")[:200],
+                        })
+                else:
+                    for reason in (filled.get("failures") or []):
+                        failures.append({"stage": "carrier", "certain": False,
+                                         "reason": str(reason)[:200]})
                 if not rebuilt:
                     try:
                         client.delete_collect_box([int(v) for v in carriers])
@@ -885,9 +1072,16 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 client, claimed_ids, str(target_shop_id))
             missing_ids = set(claimed_ids) - confirmed_ids
             if missing_ids:
+                missing_sources = {str(detail_id): source_index
+                                   for detail_id, source_index in zip(
+                                       claimed_ids, filled_sources, strict=False)}
                 failures.extend({
                     "stage": "collect_box_verify",
                     "detailId": detail_id,
+                    "sourceIndex": missing_sources.get(detail_id),
+                    "warehouseId": (entries[missing_sources[detail_id]].get("warehouseId")
+                                    if missing_sources.get(detail_id) is not None else None),
+                    "certain": False,
                     "reason": "已提交，但目标店铺采集箱列表尚未确认到该商品",
                 } for detail_id in sorted(missing_ids))
                 logger.warning("认领回执未出现在目标采集箱 account=%s shop=%s detailIds=%s",
@@ -1023,6 +1217,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                                               saved_sources=filled_sources)
                                 if isinstance(entry.get("product"), Product)],
         "failures": failures,
+        "claimAdjustments": claim_adjustments + claim_price_adjustments,
         "warning": warning,
         "repriced": repriced,
         "records": {

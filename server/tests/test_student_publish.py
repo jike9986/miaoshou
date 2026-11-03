@@ -485,12 +485,14 @@ def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db
     monkeypatch.setattr(publish_service, "_load_carrier_payloads", lambda *_args: [{}, {}, {}])
     monkeypatch.setattr(publish_service.carrier_service, "harvest_from_payloads",
                         lambda *_args: None)
-    monkeypatch.setattr(publish_service.carrier_service, "collect_carriers",
-                        lambda *_args, **_kwargs: [91, 92, 93])
-    monkeypatch.setattr(publish_service.carrier_service, "fill_carriers",
+    monkeypatch.setattr(publish_service.carrier_service, "collect_and_fill_carriers",
                         lambda *_args, **_kwargs: {
+                            "carriers": [91, 92, 93],
                             "saved": [91, 93], "savedSources": [0, 2],
                             "failures": ["92 failed"],
+                            "failureDetails": [{"sourceIndex": 1, "detailId": "92",
+                                                "certain": True, "reason": "92 failed"}],
+                            "priceAdjustments": [],
                         })
     invalidated_accounts = []
     monkeypatch.setattr(collect_box_service, "invalidate_account",

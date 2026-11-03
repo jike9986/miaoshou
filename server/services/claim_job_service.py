@@ -118,6 +118,101 @@ def _assert_job_owner(batch: Batch, operator: Operator | None) -> None:
         raise errors.not_found("任务不存在", batchId=batch.id)
 
 
+def _claim_chunk_outcome(result: Any, chunk: list[dict[str, Any]]) -> tuple[
+        set[str], dict[str, str], bool]:
+    """Resolve one completed publish response without guessing on unknown results."""
+    if not isinstance(result, dict):
+        return set(), {}, False
+    claimed = result.get("claimedWarehouseIds")
+    if not isinstance(claimed, list):
+        return set(), {}, False
+
+    expected = [str(item.get("warehouseId") or "").strip() for item in chunk]
+    expected_set = set(expected)
+    succeeded = {str(value) for value in claimed if str(value) in expected_set}
+    if (len(succeeded) != len(claimed)
+            or any(str(value) not in expected_set for value in claimed)):
+        return succeeded, {}, False
+
+    missing = expected_set - succeeded
+    messages: dict[str, str] = {}
+    failures = result.get("failures")
+    if isinstance(failures, str):
+        failures = [failures] if failures else []
+    if not isinstance(failures, list):
+        return succeeded, messages, not missing and not failures
+    if not missing:
+        return succeeded, messages, not failures
+    if not failures:
+        return succeeded, messages, False
+
+    has_failure_identity = False
+    has_unmapped_failure = False
+    for failure in failures:
+        if isinstance(failure, dict):
+            reason = str(failure.get("reason") or failure.get("message")
+                         or failure.get("error") or "").strip()
+            stage = str(failure.get("stage") or "").strip().lower()
+            warehouse_id = str(failure.get("warehouseId") or "").strip()
+            source_index = failure.get("sourceIndex")
+            if source_index is not None:
+                if isinstance(source_index, bool) or not isinstance(source_index, int):
+                    return succeeded, messages, False
+                try:
+                    index = int(source_index)
+                except (TypeError, ValueError):
+                    return succeeded, messages, False
+                if index < 0 or index >= len(expected):
+                    return succeeded, messages, False
+                indexed_id = expected[index]
+                if warehouse_id and warehouse_id != indexed_id:
+                    return succeeded, messages, False
+                warehouse_id = warehouse_id or indexed_id
+            has_failure_identity = (
+                has_failure_identity or bool(warehouse_id) or source_index is not None)
+            if (stage in {"collect_box_verify", "claim_result_unknown", "upstream_unknown"}
+                    or any(marker in reason for marker in (
+                        "结果未知", "尚未确认", "勿重复操作", "先检查采集箱"))):
+                return succeeded, messages, False
+            if not reason:
+                return succeeded, messages, False
+            if warehouse_id in succeeded:
+                return succeeded, messages, False
+            if warehouse_id:
+                if warehouse_id not in missing:
+                    return succeeded, messages, False
+                if warehouse_id in messages and messages[warehouse_id] != reason:
+                    return succeeded, messages, False
+                messages[warehouse_id] = reason[:500]
+            else:
+                has_unmapped_failure = True
+            if failure.get("certain") is False:
+                if warehouse_id in messages:
+                    messages[warehouse_id] = (
+                        f"结果未知，请先核对采集箱：{messages[warehouse_id]}")[:500]
+                return succeeded, messages, False
+        elif not str(failure or "").strip():
+            return succeeded, messages, False
+        else:
+            has_unmapped_failure = True
+
+    if missing == messages.keys():
+        return succeeded, messages, not has_unmapped_failure
+
+    if not has_failure_identity and len(missing) == 1 and len(failures) == 1:
+        # Older responses omitted per-item identity. A single missing product
+        # and a single explicit failure still have an unambiguous mapping.
+        legacy_reasons = [
+            str(value.get("reason") or value.get("message") or value.get("error") or "").strip()
+            if isinstance(value, dict) else str(value or "").strip()
+            for value in failures
+        ]
+        legacy_reasons = [reason for reason in legacy_reasons if reason]
+        if legacy_reasons:
+            return succeeded, {next(iter(missing)): legacy_reasons[0][:500]}, True
+    return succeeded, messages, False
+
+
 def get(db: Session, batch_id: str, account_id: int,
         operator: Operator | None = None) -> Batch:
     batch = batch_service.get(db, batch_id)
@@ -224,6 +319,8 @@ def run(batch_id: str) -> None:
                                    exc_info=True)
                 finally:
                     progress_db.close()
+            stop_after_chunk = False
+            unknown_message = "处理失败或结果未知，请先在采集箱核对"
             try:
                 # Recheck live membership/claims immediately before the upstream
                 # side effect; ownership or product claims may change while a job waits.
@@ -246,16 +343,20 @@ def run(batch_id: str) -> None:
                 # resulting ledger rows to the job owner.
                 result = publish_service.publish(
                     db, body, _log_operator_id=batch.operator_id, _claim_progress=report)
-                failures = result.get("failures") or []
-                expected = {str(raw["warehouseId"]) for raw in chunk}
-                succeeded = ({str(value) for value in result.get("claimedWarehouseIds") or []}
-                             & expected)
-                message = str(failures or "未收到认领成功回执")[:500]
+                succeeded, failure_messages, known_outcome = _claim_chunk_outcome(
+                    result, chunk)
+                if not known_outcome:
+                    stop_after_chunk = True
+                    logger.warning(
+                        "Claim job %s batch at %s returned an unknown outcome",
+                        batch_id, start)
                 db.commit()
             except Exception as exc:  # upstream outcome can be unknown; never retry automatically
                 db.rollback()
                 succeeded = set()
-                message = f"处理失败或结果未知，请先在采集箱核对：{exc}"[:500]
+                failure_messages = {}
+                unknown_message = f"处理失败或结果未知，请先在采集箱核对：{exc}"[:500]
+                stop_after_chunk = True
                 logger.warning("Claim job %s batch at %s failed", batch_id, start, exc_info=True)
             db.expire_all()
             batch = batch_service.get(db, batch_id)
@@ -263,14 +364,19 @@ def run(batch_id: str) -> None:
             for item_id in chunk_ids:
                 item = db.get(BatchItem, item_id)
                 item.status = "ok" if item.detail_id in succeeded else "failed"
-                item.message = "认领成功" if item.status == "ok" else message
+                if item.status == "ok":
+                    item.message = "认领成功"
+                else:
+                    item.message = (failure_messages.get(item.detail_id)
+                                    or (unknown_message if stop_after_chunk
+                                        else "认领失败，旧版回执未提供单件原因"))
                 rows.append({"detailId": item.detail_id, "status": item.status,
                              "message": item.message, "at": now_ts()})
             batch.current_index = start + len(chunk)
             batch.results = rows
             batch.updated_at = now_ts()
             db.commit()
-            if len(succeeded) != len(chunk):
+            if stop_after_chunk:
                 break
         batch.status = (
             "failed"

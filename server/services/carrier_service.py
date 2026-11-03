@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -26,6 +28,50 @@ from services import setting_service
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
 logger = logging.getLogger("aohuang.carrier")
+
+_COST_FLOOR_MESSAGE = re.compile(
+    r"本地(?:显示|展示)价\s*([0-9]+(?:\.[0-9]+)?)\s*MYR.*?基础成本.*?[：:]\s*"
+    r"([0-9]+(?:\.[0-9]+)?)\s*MYR")
+
+
+def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouError
+                                   ) -> dict[str, Any] | None:
+    message = str((exc.payload or {}).get("message")
+                  or (exc.payload or {}).get("msg") or exc)
+    if "无法覆盖产品基础成本" not in message:
+        return None
+    match = _COST_FLOOR_MESSAGE.search(message)
+    if not match:
+        return None
+    try:
+        old_price, floor = (Decimal(value) for value in match.groups())
+    except InvalidOperation:
+        return None
+    if floor <= old_price:
+        return None
+    new_price = floor + Decimal("0.01")
+    sku_map = payload.get("skuMap")
+    if not isinstance(sku_map, dict):
+        return None
+    changed: list[str] = []
+    for key, sku in sku_map.items():
+        if not isinstance(sku, dict) or str(sku.get("isDelete", "0")) == "1":
+            continue
+        try:
+            current = Decimal(str(sku.get("price")))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if current != old_price:
+            continue
+        sku["price"] = format(new_price, ".2f")
+        sku["priceIncludeVat"] = format(new_price, ".2f")
+        changed.append(str(key))
+    if not changed:
+        return None
+    return {"oldPrice": format(old_price, ".2f"),
+            "costFloor": format(floor, ".2f"),
+            "newPrice": format(new_price, ".2f"),
+            "skuKeys": changed}
 
 LINK_POOL_KEY = "carrier.links"
 # 妙手对 SKU 货号的硬限制：shopCollectItemInfo.skuMap.*.itemNum ≤ 50 字符。
@@ -782,6 +828,8 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
     saved: list[int] = []
     saved_sources: list[int] = []
     failures: list[str] = []
+    failure_details: list[dict[str, Any]] = []
+    price_adjustments: list[dict[str, Any]] = []
     for index, (detail_id, payload) in enumerate(
             zip(carrier_list, payload_list, strict=True)):
         if progress:
@@ -813,11 +861,17 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             try:
                 client.save_shop(detail_id, shop_id, oss_md5, body)
             except MiaoshouError as exc:
+                price_change = _raise_price_to_reported_floor(body, exc)
+                if price_change is not None:
+                    client.save_shop(detail_id, shop_id, oss_md5, body)
+                    price_adjustments.append({"sourceIndex": index, **price_change})
                 # 载体刚采集完，上游的 ossMd5 还在变（编辑器内容变动）。这不是致命错误：
                 # 重新读一次最新 ossMd5 再保存即可。不重试就会一直卡在
                 # 「该编辑器中产品内容发生变动，为避免覆盖…请重新打开编辑器」。
                 text = str(exc)
-                if "变动" in text or "重新打开" in text or "ossMd5" in text.lower():
+                if (price_change is None
+                        and ("变动" in text or "重新打开" in text
+                             or "ossMd5" in text.lower())):
                     logger.info("载体版本变动，重读 ossMd5 后重试 detailId=%s", detail_id)
                     time.sleep(1.0)
                     fresh = client.shop_detail(detail_id, shop_id)
@@ -826,7 +880,7 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                         raise
                     client.save_shop(detail_id, shop_id, fresh_md5, body)
                     snapshot = fresh
-                else:
+                elif price_change is None:
                     raise
             if verify_readback:
                 # Keep strict readback for workflows that publish immediately.
@@ -849,10 +903,20 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                           "verified": len(saved), "failed": len(failures)})
         except (MiaoshouError, ValueError, errors.AppError) as exc:
             failures.append(f"{detail_id}: {str(exc)[:90]}")
+            uncertain = isinstance(exc, MiaoshouError) and (
+                exc.kind in {"timeout", "unknown", "unreachable"}
+                or (exc.status is not None and exc.status >= 500))
+            failure_details.append({
+                "detailId": str(detail_id),
+                "certain": not uncertain,
+                "reason": str(exc)[:200],
+            })
             if progress:
                 progress({"stage": "verify_failed", "detailId": detail_id,
                           "verified": len(saved), "failed": len(failures)})
     return {"saved": saved, "savedSources": saved_sources, "failures": failures,
+            "failureDetails": failure_details,
+            "priceAdjustments": price_adjustments,
             "warehouseId": warehouse_id}
 
 
@@ -901,6 +965,8 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
     saved_sources: list[int] = []
     failed_sources: list[int] = []
     failures: list[str] = []
+    failure_details: list[dict[str, Any]] = []
+    price_adjustments: list[dict[str, Any]] = []
     created: list[int] = []
     category_trees: dict[str, Mapping[str, Any] | bool] = {}
     while True:
@@ -916,23 +982,43 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
                 category_trees=category_trees)
         except Exception as exc:  # keep draining so the producer cannot block
             failed_sources.append(index)
-            failures.append(f"{detail_id}: {str(exc)[:90]}")
+            reason = str(exc)[:200]
+            failures.append(f"{detail_id}: {reason[:90]}")
+            certain = isinstance(exc, (CarrierError, ValueError, errors.AppError))
+            if isinstance(exc, MiaoshouError):
+                certain = (exc.kind not in {"timeout", "unknown", "unreachable"}
+                           and not (exc.status is not None and exc.status >= 500))
+            failure_details.append({"sourceIndex": index, "detailId": str(detail_id),
+                                   "certain": certain,
+                                   "reason": reason})
             continue
         saved.extend(result["saved"])
         if result["saved"]:
             saved_sources.append(index)
         else:
             failed_sources.append(index)
+        price_adjustments.extend(
+            {**item, "sourceIndex": index}
+            for item in result.get("priceAdjustments") or [])
         failures.extend(result["failures"])
+        for failure in result.get("failureDetails") or []:
+            failure_details.append({**failure, "sourceIndex": index})
 
     producer.join()
     if producer_errors:
         exc = producer_errors[0]
         message = str(exc) if isinstance(exc, CarrierError) else str(exc)[:120]
         failures.append(f"载体创建中断：{message}")
+        failure_details.append({"sourceIndex": len(created), "certain": False,
+                                "reason": f"载体创建中断：{message}"})
     if len(created) < len(payload_list) and not producer_errors:
         failures.append(f"只创建了 {len(created)} 个载体，需要 {len(payload_list)} 个")
+        for index in range(len(created), len(payload_list)):
+            failure_details.append({"sourceIndex": index, "certain": False,
+                                    "reason": "载体创建数量不足，结果需要核对"})
     failed_sources.extend(index for index in range(len(created), len(payload_list)))
     return {"carriers": created, "saved": saved, "savedSources": saved_sources,
             "failedSources": failed_sources, "failures": failures,
+            "failureDetails": failure_details,
+            "priceAdjustments": price_adjustments,
             "warehouseId": warehouse_id}
