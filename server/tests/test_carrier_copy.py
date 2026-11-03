@@ -125,6 +125,7 @@ def test_delayed_copy_receipt_recovers_draft_without_common_box_id(monkeypatch):
     class DelayedReadback(ExistingCommonBox):
         def __init__(self):
             super().__init__()
+            self.box_ids = [900]
             self.list_calls = 0
 
         def claim_common_to_platform(self, items):
@@ -134,8 +135,10 @@ def test_delayed_copy_receipt_recovers_draft_without_common_box_id(monkeypatch):
 
         def collect_box_list(self, **kwargs):
             self.list_calls += 1
-            rows = ([{"collectBoxDetailId": 1001}]
-                    if self.list_calls >= 4 else [])
+            rows = [{"collectBoxDetailId": 900,
+                     "commonCollectBoxDetailId": 42}]
+            if self.list_calls >= 4:
+                rows.append({"collectBoxDetailId": 1001})
             return {"data": {"detailList": rows}}
 
     client = DelayedReadback()

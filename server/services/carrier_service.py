@@ -411,19 +411,21 @@ def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None,
     # Existing copies of this common item are normal and must not short-circuit
     # the scan before newly created IDs later in the page can be observed.
     rows = scan(50)
-    matching = [row for row in rows
-                if common_id is not None
-                and str(row.get("commonCollectBoxDetailId") or "") == str(common_id)]
-    if not matching:
-        # Some TK collect-box responses omit the common-box source ID. In that
-        # case, the pre-copy snapshot still lets us identify a single new draft.
-        matching = [row for row in rows
-                    if not str(row.get("commonCollectBoxDetailId") or "")]
-    for row in matching:
-        value = row.get("collectBoxDetailId") or row.get("detailId")
-        if known_ids is not None and str(value).isdigit() and int(value) in known_ids:
-            continue
-        remember(value)
+    def collect(matching: list[dict[str, Any]]) -> None:
+        for row in matching:
+            value = row.get("collectBoxDetailId") or row.get("detailId")
+            if known_ids is not None and str(value).isdigit() and int(value) in known_ids:
+                continue
+            remember(value)
+
+    collect([row for row in rows
+             if common_id is not None
+             and str(row.get("commonCollectBoxDetailId") or "") == str(common_id)])
+    if not ids:
+        # Some TK collect-box responses omit the common-box source ID. The
+        # pre-copy snapshot keeps this fallback limited to newly visible drafts.
+        collect([row for row in rows
+                 if not str(row.get("commonCollectBoxDetailId") or "")])
     return ids
 
 
