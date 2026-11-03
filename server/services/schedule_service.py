@@ -670,17 +670,15 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
                   template: str = "", claim_only: bool = False,
                   operator_id: int | None = None
                   ) -> list[dict[str, Any]]:
-    """挑出本轮要处理的商品：该账号、未发布、按 saved_at 倒序，最多 per_run 件。
+    """挑出本轮要处理的商品，按 saved_at 倒序，最多 per_run 件。
 
-    已发布过的（按 detailId 与 warehouseKey 双重判重）不再取；数量不足时少取，
-    不报错（少跑可补救，错跑不可撤销）。
+    学员按本人认领和目标账号的发布记录选共享成品，不按成品来源账号或全局
+    发布状态过滤。已发布过的不再取；数量不足时少取，不报错。
     """
     from models.product import Product
     from models.product_claim import ProductClaim
 
     query = db.query(Product).filter(Product.deleted_at.is_(None))
-    if account_id is not None:
-        query = query.filter(Product.account_id == account_id)
     operator = (operator_service.get(db, operator_id)
                 if operator_id is not None else None)
     if (operator is not None
@@ -689,14 +687,20 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
             raise errors.AppError(errors.FORBIDDEN,
                                   "学员定时任务只能发布已认领的成品商品",
                                   status=403)
+        _assert_operator_account_access(db, account_id, operator)
         # Shared warehouse products are visible to all students, but each student
         # may schedule only the products they personally claimed.
         claimed_ids = (db.query(ProductClaim.product_id)
                        .filter(ProductClaim.owner_operator_id == operator.id,
                                ProductClaim.status == "claimed"))
-        query = query.filter(Product.id.in_(claimed_ids))
-    if not claim_only:
-        query = query.filter(Product.status != "published")
+        query = query.filter(Product.id.in_(claimed_ids),
+                             Product.automation_result.is_(False),
+                             Product.status != "archived")
+    else:
+        if account_id is not None:
+            query = query.filter(Product.account_id == account_id)
+        if not claim_only:
+            query = query.filter(Product.status != "published")
     published = _published_identities(db, account_id, operator_id)
     # 分页扫完全部候选，而不是只取最近 count*4 件。
     # 只取一页时，若最近那批都已发布（很常见：连着几天跑过），本轮就取到 0 件，

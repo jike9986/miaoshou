@@ -28,13 +28,15 @@ def list_collect_box(
     shopId: str | None = None,
     site: str | None = None,
     sort: str = "default",
+    refresh: bool = False,
     accountId: str | None = None,
     credentials: CredentialsHeader = None,
 ) -> dict[str, Any]:
     account = account_service.resolve_account(db, accountId, credentials)
     return collect_box_service.list_items(
         db, account, page=page, page_size=pageSize, status=status,
-        keyword=keyword or "", shop_id=shopId, site=site, sort=sort)
+        keyword=keyword or "", shop_id=shopId, site=site, sort=sort,
+        force_refresh=refresh)
 
 
 @router.get("/{detail_id}", summary="采集箱单件详情（含 ossMd5 / SKU / 诊断）")

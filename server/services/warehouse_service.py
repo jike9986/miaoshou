@@ -32,7 +32,6 @@ from core.utils import (
     product_key,
 )
 from models.account import Account
-from models.account_binding import AccountBinding
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.category import Category
 from models.group import Group
@@ -102,7 +101,8 @@ def serialize(product: Product, *, account_name: str = "",
               member_view: bool = False,
               account_claim: dict[str, Any] | None = None,
               publish_log: PublishLog | None = None,
-              published_shop_ids: list[str] | None = None) -> dict[str, Any]:
+              published_shop_ids: list[str] | None = None,
+              has_successful_publish: bool = False) -> dict[str, Any]:
     images = product.images if isinstance(product.images, list) else []
     quality_review_status, quality_review_reasons = _quality_review_summary(product)
     is_claimed = (bool(account_claim) if account_claim is not None else
@@ -158,8 +158,8 @@ def serialize(product: Product, *, account_name: str = "",
         "salesLast30": int(product.sales_last_30 or 0),
         "stock": int(product.stock or 0),
         "status": (
-            "published" if member_view and publish_log is not None
-            and publish_log.status == "success" else
+            "published" if member_view and (has_successful_publish or
+                (publish_log is not None and publish_log.status == "success")) else
             ("archived" if member_view and product.status == "archived" else
              ("claimed" if member_view and is_claimed else
               ("ready" if member_view else (product.status or "ready"))))
@@ -360,14 +360,10 @@ def _assert_member_account_access(db: Session, account_id: int | None,
 
 def _owned_account_ids(db: Session, operator_id: int):
     """Return accounts visible to one student, with legacy fallback scoped safely."""
-    accounts = db.query(Account.id, Account.owner_operator_id).all()
-    bindings = db.query(AccountBinding.account_id, AccountBinding.operator_id).all()
-    bound_account_ids = {account_id for account_id, _ in bindings}
-    own_bound_ids = {account_id for account_id, owner_id in bindings
-                     if owner_id == operator_id}
-    return [account_id for account_id, legacy_owner_id in accounts
-            if account_id in own_bound_ids
-            or (account_id not in bound_account_ids and legacy_owner_id == operator_id)]
+    from services import account_service
+
+    return [account_id for (account_id,) in db.query(Account.id).all()
+            if account_service.has_account_access(db, account_id, operator_id)]
 
 
 def _source_owned_product_ids(db: Session, operator_id: int):
@@ -449,8 +445,10 @@ def _successful_operator_publish_shops(
                     PublishLog.status == "success").all())
     shops: dict[int, set[str]] = {}
     for product_id, shop_id in rows:
-        if product_id is not None and shop_id:
-            shops.setdefault(product_id, set()).add(str(shop_id))
+        if product_id is not None:
+            published_shops = shops.setdefault(product_id, set())
+            if shop_id:
+                published_shops.add(str(shop_id))
     return {product_id: sorted(shop_ids) for product_id, shop_ids in shops.items()}
 
 
@@ -577,10 +575,12 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         if text.isdigit():
             query = query.filter(Product.account_id == int(text))
     if status:
+        owned_accounts = _owned_account_ids(db, int(operator_id)) if member_view else []
         if member_view and status == "published":
             own_success = db.query(PublishLog.id).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
+                PublishLog.account_id.in_(owned_accounts),
                 PublishLog.status == "success",
             ).exists()
             query = query.filter(own_success)
@@ -597,6 +597,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
             own_success = db.query(PublishLog.id).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
+                PublishLog.account_id.in_(owned_accounts),
                 PublishLog.status == "success",
             ).exists()
             query = query.filter(own_claim, ~own_success)
@@ -604,6 +605,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
             own_success = db.query(PublishLog.id).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
+                PublishLog.account_id.in_(owned_accounts),
                 PublishLog.status == "success",
             ).exists()
             own_claim = db.query(ProductClaim.id).filter(
@@ -656,7 +658,8 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                                             if isinstance(row.collected, dict)
                                             and row.collected.get(key)), {})
                                       if account_claim_keys is not None else None),
-                       published_shop_ids=successful_publish_shops.get(row.id, []))
+                       published_shop_ids=successful_publish_shops.get(row.id, []),
+                       has_successful_publish=row.id in successful_publish_shops)
              for row in rows]
     # stats 按当前列表的 account_id 过滤：多账号共用时，
     # 「已认领」显示的是当前账号的数字，不是全账号加总。
@@ -1031,11 +1034,15 @@ def detail(db: Session, ident: Any, *, include_payload: bool = False,
     member_view = _is_member(db, operator_id)
     own_publish_log = (_latest_operator_publish_logs(
         db, operator_id, [product.id]).get(product.id) if member_view else None)
+    successful_publish_shops = (_successful_operator_publish_shops(
+        db, operator_id, [product.id]) if member_view else {})
     body = serialize(product, account_name=names.get(product.account_id or 0, ""),
                      include_payload=include_payload,
                      operator_name=operators.get(product.operator_id or 0, ""),
                      claim=claim, operator_id=operator_id,
-                     member_view=member_view, publish_log=own_publish_log)
+                     member_view=member_view, publish_log=own_publish_log,
+                     published_shop_ids=successful_publish_shops.get(product.id, []),
+                     has_successful_publish=product.id in successful_publish_shops)
     history_query = db.query(PublishLog).filter(PublishLog.product_id == product.id)
     if member_view:
         history_query = history_query.filter(

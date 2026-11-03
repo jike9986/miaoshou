@@ -8,11 +8,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
+import hmac
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from core import errors
+from core.config import get_settings
 from core.constants import (
     COLLECT_BOX_MAX_ITEMS,
     COLLECT_BOX_PAGE_MAX,
@@ -39,10 +42,10 @@ from services.miaoshou import MiaoshouError
 VALID_STATUS = {"notPublished": "notPublished", "published": "published", "all": "all"}
 
 # --- 缓存策略 ---------------------------------------------------------------
-# 上游结果默认缓存 60 秒：短到「认领/删除」立刻能看到，长到连点几次采集箱
-# 不会次次回源。要改就设 AOHUANG_COLLECT_BOX_CACHE_TTL（秒）。
+# 上游结果默认缓存 10 秒：连点几次采集箱不会次次回源，同时限制新商品的
+# 最长自然延迟。手动刷新会绕过此缓存。要改就设 AOHUANG_COLLECT_BOX_CACHE_TTL（秒）。
 COLLECT_BOX_CACHE_TTL_ENV = "AOHUANG_COLLECT_BOX_CACHE_TTL"
-COLLECT_BOX_CACHE_TTL_DEFAULT = 60.0
+COLLECT_BOX_CACHE_TTL_DEFAULT = 10.0
 # 上游翻页最多 10 次（原有约束），缓存表按「账号 × 参数组合」存，256 条足够
 COLLECT_BOX_CACHE_MAX_ENTRIES = 256
 
@@ -63,7 +66,20 @@ def cache_ttl() -> float:
 
 
 def account_cache_prefix(account: Account) -> str:
-    return f"acct:{getattr(account, 'id', 0)}:"
+    """Scope snapshots to both the account row and the active credentials.
+
+    Shared-mode requests use transient account objects with id=0, so the row id
+    alone would let unrelated AppKeys reuse the same upstream snapshot. The
+    credential tuple is keyed with the installation secret and never appears
+    in the cache key or logs.
+    """
+    secret = get_settings().local_secret().encode("utf-8")
+    credential_material = (
+        f"{getattr(account, 'app_key', '') or ''}\0"
+        f"{getattr(account, 'app_secret_enc', '') or ''}"
+    ).encode("utf-8")
+    fingerprint = hmac.new(secret, credential_material, hashlib.sha256).hexdigest()
+    return f"acct:{getattr(account, 'id', 0)}:{fingerprint}:"
 
 
 def invalidate_account(account: Account) -> int:
@@ -255,7 +271,8 @@ def _scan_upstream(account: Account, *, page: int, page_size: int, status: str,
 
 def list_items(db: Session, account: Account, *, page: int = 1, page_size: int = 20,
                status: str = "notPublished", keyword: str = "", shop_id: str | None = None,
-               site: str | None = None, sort: str = "default") -> dict[str, Any]:
+               site: str | None = None, sort: str = "default",
+               force_refresh: bool = False) -> dict[str, Any]:
     """GET /collect-box。pageSize 上限 COLLECT_BOX_PAGE_MAX（默认 100）。
 
     妙手上游单次只给 20 条，这里按页向上游翻直到凑够调用方要的条数。
@@ -282,6 +299,7 @@ def list_items(db: Session, account: Account, *, page: int = 1, page_size: int =
             lambda: _scan_upstream(account, page=page, page_size=page_size, status=status,
                                    keyword=keyword, shop_id=shop_id, site=site),
             ttl=cache_ttl(),
+            force_refresh=force_refresh,
             stale_on=MiaoshouError,
         )
     except MiaoshouError as exc:

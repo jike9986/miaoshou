@@ -20,7 +20,7 @@
     from services.cache import get_cache, ttl_from_env
 
     store = get_cache("collect_box", max_entries=256)
-    result = store.fetch(key, load, ttl=ttl_from_env("AOHUANG_COLLECT_BOX_CACHE_TTL", 60.0),
+    result = store.fetch(key, load, ttl=ttl_from_env("AOHUANG_COLLECT_BOX_CACHE_TTL", 10.0),
                          stale_on=(MiaoshouError,))
 """
 from __future__ import annotations
@@ -193,6 +193,7 @@ class TTLCache:
 
     # --- 组合：读缓存 → 回源 → 写缓存 -----------------------------------
     def fetch(self, key: str, load: Callable[[], Any], *, ttl: float | None = None,
+              force_refresh: bool = False,
               stale_on: tuple[type[BaseException], ...] | type[BaseException] = (Exception,),
               ) -> FetchResult:
         """读缓存；没有再调 ``load()``；成功才写缓存。
@@ -202,7 +203,7 @@ class TTLCache:
         错误映射。
         """
         entry = self.lookup(key)
-        if entry is not None and entry.is_fresh():
+        if entry is not None and entry.is_fresh() and not force_refresh:
             return FetchResult(value=entry.value, cached=True)
         try:
             value = load()
