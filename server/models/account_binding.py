@@ -22,6 +22,5 @@ class AccountBinding(Base):
 
     __table_args__ = (
         UniqueConstraint("account_id", "operator_id", name="uq_account_binding_pair"),
-        UniqueConstraint("operator_id", name="uq_account_binding_operator"),
         Index("ix_account_bindings_account", "account_id"),
     )

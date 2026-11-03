@@ -323,10 +323,12 @@ def warehouse_detail(
     operator: OperatorDep,
     credentials: CredentialsHeader = None,
     includePayload: str | None = None,
+    claimAccountId: str | None = None,
 ) -> dict[str, Any]:
     include = parse_bool(includePayload, "includePayload", False)
     return warehouse_service.detail(db, ident, include_payload=include,
-                                    operator_id=operator.id)
+                                    operator_id=operator.id,
+                                    claim_account_id=claimAccountId)
 
 
 @router.post("/{ident}/claim", summary="认领成品商品",

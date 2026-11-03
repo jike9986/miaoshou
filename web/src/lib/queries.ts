@@ -343,6 +343,40 @@ export function useConnectAccount(): UseMutationResult<AuthConnectResult, Error,
   });
 }
 
+/** Switch an existing visible account without creating or changing a binding. */
+export function useSelectAccount(): UseMutationResult<AuthConnectResult, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (accountId) => api.post<AuthConnectResult, { accountId: string }>(
+      "/auth/select", { accountId }),
+    onMutate: () => getOperatorSessionEpoch(),
+    onSuccess: async (result, _accountId, startedEpoch) => {
+      if (startedEpoch !== getOperatorSessionEpoch()) return;
+      await client.cancelQueries({ queryKey: queryKeys.auth.all });
+      if (startedEpoch !== getOperatorSessionEpoch()) return;
+      client.setQueryData<AuthStatus>(queryKeys.auth.status(), (previous) => previous ? {
+        ...previous,
+        connected: result.connected,
+        accountId: result.accountId,
+        connectionName: result.connectionName,
+        appIdHint: result.appIdHint,
+        accounts: previous.accounts.map((account) => ({
+          ...account,
+          isDefault: account.id === result.accountId,
+        })),
+      } : previous);
+      for (const queryKey of [
+        queryKeys.auth.all, queryKeys.shops.all, queryKeys.warehouse.all,
+        queryKeys.collectBox.all, queryKeys.categories.all, queryKeys.batch.all,
+        queryKeys.automationRuns.all, queryKeys.publishLogs.all, queryKeys.schedules.all,
+        queryKeys.imageJobs.all, ["claim-jobs"], ["system", "templates"],
+      ]) {
+        void client.invalidateQueries({ queryKey });
+      }
+    },
+  });
+}
+
 /* ================================================================== *
  * §4 成品仓库
  * ================================================================== */
@@ -448,7 +482,7 @@ export function useProductDetail(
     queryKey: queryKeys.warehouse.detail(accountId, id ?? "none", includePayload),
     queryFn: () =>
       api.get<ProductDetailResponse>(`/warehouse/${encodeURIComponent(id ?? "")}`, {
-        query: compactQuery({ includePayload: includePayload ? true : undefined, accountId }),
+        query: compactQuery({ includePayload: includePayload ? true : undefined, claimAccountId: accountId }),
       }),
     enabled: Boolean(id),
   });

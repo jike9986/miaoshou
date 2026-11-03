@@ -1141,6 +1141,15 @@ export interface BatchSettings {
   save?: boolean;
   processImages?: boolean;
   mainImageCount?: number;
+  /** 认领任务当前组的准备与校验进度；最终成功数以 Batch.results 为准。 */
+  progress?: {
+    stage: string;
+    offset: number;
+    total: number;
+    groupSize: number;
+    verified?: number;
+    failed?: number;
+  };
 }
 
 export interface Batch {
@@ -1370,6 +1379,8 @@ export interface Operator {
   builtin?: boolean;
   /** 老师可见的学员妙手账号绑定摘要，不包含密钥明文。 */
   miaoshouBinding?: MiaoshouBindingSummary | null;
+  /** 老师可见的全部学员妙手账号绑定摘要。 */
+  miaoshouBindings?: MiaoshouBindingSummary[];
 }
 
 export interface MiaoshouBindingSummary {

@@ -64,6 +64,17 @@ def _product(db, suffix: str, account: Account, *, detail_id: str = "12345",
     return row
 
 
+def _mark_operator_collected(product: Product, operator_id: int,
+                             account_id: int, *, detail_id: str | None = None) -> None:
+    state = dict(product.collected or {})
+    state[f"operator:{operator_id}:account:{account_id}"] = {
+        "at": 1_800_000_000,
+        "detailId": detail_id or product.detail_id,
+        "shopId": product.shop_id,
+    }
+    product.collected = state
+
+
 def _automation_run(db, suffix: str, operator, account: Account,
                     product: Product, *, publish_status: str) -> AutomationRunItem:
     run = AutomationRun(
@@ -149,6 +160,54 @@ def test_collect_box_claim_uses_stable_account_id_for_warehouse_status(
     assert {row["id"] for row in visible["items"]} == {str(product.id)}
 
 
+def test_collect_box_claim_failure_does_not_mark_product_collected(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-failure-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    product = Product(
+        warehouse_key="12345:123", account_id=account.id,
+        detail_id="12345", shop_id="123", shop_name="Source shop",
+        title="Finished title", status="ready", claimed=False,
+        collected={}, payload={},
+    )
+    db.add(product)
+    db.flush()
+
+    class FakeClient:
+        def shop_detail(self, detail_id, shop_id):
+            assert (detail_id, shop_id) == ("12345", "123")
+            return {"data": {}}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collect_box_service, "account_client",
+                        lambda _account: FakeClient())
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda _db, _account, shop_id: {"name": f"Shop {shop_id}"})
+    monkeypatch.setattr(collect_box_service.product_service, "detail_block",
+                        lambda _snapshot: {"info": {"title": "source"}})
+    monkeypatch.setattr(collect_box_service.carrier_service, "collect_carriers",
+                        lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(collect_box_service.carrier_service, "fill_carriers",
+                        lambda *_args, **_kwargs: {
+                            "saved": [], "savedSources": [],
+                            "failures": ["carrier import failed"],
+                        })
+
+    result = collect_box_service.claim(
+        db, account, detail_id="12345", shop_id="123", target_shop_id="456")
+
+    assert result["claimed"] is False
+    assert result["count"] == 0
+    assert result["failures"] == ["carrier import failed"]
+    assert product.collected == {}
+    assert product.claimed is False
+
+
 def test_shared_miaoshou_account_claim_state_is_per_member(publish_db):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]
@@ -173,6 +232,7 @@ def test_shared_miaoshou_account_claim_state_is_per_member(publish_db):
             "at": 1_800_000_000, "detailId": product.detail_id,
         },
     }
+    _mark_operator_collected(product, first.id, shared_account.id)
     db.flush()
     warehouse_service.claim_product(db, product.id, first.id)
     db.flush()
@@ -209,6 +269,72 @@ def test_shared_miaoshou_account_claim_state_is_per_member(publish_db):
     assert teacher_list["stats"]["totalClaimed"] == 1
 
 
+def test_member_claim_requires_verified_account_scoped_collect_marker(publish_db):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, first_account = _identity(db, f"verified-claim-{suffix}")
+    other_member, _token = operator_service.create(
+        db, f"verified-claim-other-{suffix}", role=operator_service.ROLE_MEMBER)
+    db.add(AccountBinding(account_id=first_account.id, operator_id=member.id))
+    db.add(AccountBinding(account_id=first_account.id, operator_id=other_member.id))
+    product = _product(db, f"verified-claim-product-{suffix}", first_account)
+    product.claimed = True
+    product.collected = {
+        f"account:{first_account.id}": {
+            "at": 1_800_000_000, "detailId": product.detail_id,
+        },
+    }
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=member.id))
+    db.flush()
+
+    legacy = warehouse_service.list_products(
+        db, operator_id=member.id, claim_account_id=first_account.id)
+    legacy_item = next(item for item in legacy["items"] if item["id"] == str(product.id))
+    assert legacy_item["claimed"] is False
+    assert legacy_item["status"] == "ready"
+    assert legacy_item["collected"] == {}
+    assert legacy["stats"]["totalClaimed"] == 0
+    assert warehouse_service.list_products(
+        db, operator_id=member.id, claim_account_id=first_account.id,
+        claimed=True)["items"] == []
+    legacy_detail = warehouse_service.detail(
+        db, product.id, operator_id=member.id, claim_account_id=first_account.id)
+    assert legacy_detail["product"]["claimed"] is False
+    assert legacy_detail["product"]["collected"] == {}
+
+    _mark_operator_collected(product, member.id, first_account.id)
+    db.flush()
+    first_account_view = warehouse_service.list_products(
+        db, operator_id=member.id, claim_account_id=first_account.id,
+        claimed=True, status="claimed")
+    all_accounts_view = warehouse_service.list_products(db, operator_id=member.id)
+    assert {item["id"] for item in first_account_view["items"]} == {str(product.id)}
+    assert first_account_view["stats"]["totalClaimed"] == 1
+    assert next(item for item in all_accounts_view["items"]
+                if item["id"] == str(product.id))["claimed"] is True
+    other_member_view = warehouse_service.list_products(db, operator_id=other_member.id)
+    other_member_item = next(item for item in other_member_view["items"]
+                             if item["id"] == str(product.id))
+    assert other_member_item["claimed"] is False
+    assert other_member_item["collected"] == {}
+    assert other_member_view["stats"]["totalClaimed"] == 0
+
+    db.query(AccountBinding).filter_by(
+        account_id=first_account.id, operator_id=member.id).delete()
+    db.flush()
+    no_longer_accessible = warehouse_service.list_products(db, operator_id=member.id)
+    item = next(item for item in no_longer_accessible["items"]
+                if item["id"] == str(product.id))
+    assert item["claimed"] is False
+    assert item["collected"] == {}
+    assert no_longer_accessible["stats"]["totalClaimed"] == 0
+    with pytest.raises(errors.AppError) as exc:
+        warehouse_service.detail(
+            db, product.id, operator_id=member.id,
+            claim_account_id=first_account.id)
+    assert exc.value.status == 403
+
+
 def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db, monkeypatch):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]
@@ -232,6 +358,13 @@ def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db
         def common_box_list(self, **_kwargs):
             return {"data": {"detailList": []}}
 
+        def collect_box_list(self, **kwargs):
+            assert kwargs["status"] == "all"
+            return {"data": {"total": 2, "detailList": [
+                {"detailId": 91, "collectBoxDetailShopList": [{"shopId": 123}]},
+                {"detailId": 93, "collectBoxDetailShopList": [{"shopId": 123}]},
+            ]}}
+
     monkeypatch.setattr(publish_service, "account_client_for",
                         lambda *_args: (first_account, FakeClient()))
     monkeypatch.setattr(publish_service, "require_shop",
@@ -248,11 +381,15 @@ def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db
                             "saved": [91, 93], "savedSources": [0, 2],
                             "failures": ["92 failed"],
                         })
+    invalidated_accounts = []
+    monkeypatch.setattr(collect_box_service, "invalidate_account",
+                        invalidated_accounts.append)
     result = publish_service.publish(db, {"confirm": True, "claimOnly": True, "shopId": "123",
                                           "items": [{"warehouseId": str(p.id)}
                                                     for p in (first, second, third)]},
                                      _log_operator_id=operator.id)
     assert result["claimedWarehouseIds"] == [str(first.id), str(third.id)]
+    assert invalidated_accounts == [first_account]
     key = f"account:{first_account.id}"
     assert first.collected[key]["detailId"] == "91"
     assert key not in second.collected
@@ -478,6 +615,7 @@ def test_warehouse_published_state_requires_final_receipt_and_stays_owner_scoped
     product = _product(db, suffix, account)
     if role == operator_service.ROLE_MEMBER:
         db.add(ProductClaim(product_id=product.id, owner_operator_id=operator.id))
+        _mark_operator_collected(product, operator.id, account.id)
         db.flush()
     client = _stub_guarded_publish(monkeypatch, db, account)
     revision = product.revision
@@ -1003,6 +1141,8 @@ def test_member_publish_status_and_history_are_owner_scoped(publish_db):
     second, second_account = _identity(db, f"second-{suffix}")
     product = _product(db, suffix, account)
     second_product = _product(db, f"second-{suffix}", second_account)
+    _mark_operator_collected(product, first.id, account.id)
+    _mark_operator_collected(second_product, second.id, second_account.id)
     db.add_all([
         ProductClaim(product_id=product.id, owner_operator_id=first.id),
         ProductClaim(product_id=second_product.id, owner_operator_id=second.id),
@@ -1031,7 +1171,7 @@ def test_member_publish_status_and_history_are_owner_scoped(publish_db):
     assert second_item["publishedShopIds"] == []
     second_shared_item = next(item for item in second_list
                               if item["id"] == str(product.id))
-    assert second_shared_item["status"] == "claimed"
+    assert second_shared_item["status"] == "ready"
     assert second_shared_item["publishStatus"] is None
     assert warehouse_service.stats(db, operator_id=first.id)["totalPublished"] == 1
     assert warehouse_service.stats(db, operator_id=second.id)["totalPublished"] == 0

@@ -10,7 +10,7 @@ import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
-import { useAuthStatus, useConnectAccount, useOperators, useShops, useSoftwareLogin, useEmailCodeLogin, useRequestEmailCodeLogin, useSoftwareRegister, useRequestRegistrationCode, useCompletePasswordSetup, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset, useWorkflowDefaults } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useSelectAccount, useOperators, useShops, useSoftwareLogin, useEmailCodeLogin, useRequestEmailCodeLogin, useSoftwareRegister, useRequestRegistrationCode, useCompletePasswordSetup, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset, useWorkflowDefaults } from "@/lib/queries";
 import { setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
 import { normalizeEmailForVerification } from "@/features/auth/emailBinding.mjs";
@@ -39,7 +39,7 @@ import { PageContent, PageHeader } from "@/components/layout";
  * 账号 + 店铺切换（已连接时显示的「账号切换」控件）
  *
  * 左侧账号做成下拉：GET /auth/status 的 accounts 已经有全部已保存账号，
- * 选中即 POST /auth/connect {accountId}，切号后 store 里的店铺会被重置，
+ * 选中即 POST /auth/select {accountId}，仅切换本人上下文，不改变绑定，
  * 下面的店铺下拉会跟着换一批。老版顶部只有一个只读的账号徽章，这里做成可切。
  * ------------------------------------------------------------------ */
 
@@ -54,20 +54,14 @@ export interface AccountSwitcherProps {
 export function AccountSwitcher({ compact = false, disabled = false, className }: AccountSwitcherProps = {}) {
   // 单机模式：本机令牌就能读连接状态，不必先登录软件账号。
   const { data: status } = useAuthStatus(true);
-  const connect = useConnectAccount();
-  const identity = useOperatorIdentity();
-  const { data: operatorData } = useOperators({ enabled: Boolean(identity) });
-  const role = operatorData?.current?.role ?? identity?.role;
-  const canBindForStudent = role === "admin" || role === "teacher";
-  const deploymentQuery = useWorkflowDefaults(identity?.id ?? null, canBindForStudent);
-  const sharedTeacherMode = canBindForStudent && deploymentQuery.data?.sharedMode === true;
+  const selectAccount = useSelectAccount();
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const setCurrentShopId = useSessionStore((state) => state.setCurrentShopId);
   const connected = status?.connected ?? false;
 
   const { data: shopsData } = useShops(status?.accountId, { enabled: connected });
   const shops = shopsData?.shops ?? [];
-  const switchDisabled = disabled || connect.isPending;
+  const switchDisabled = disabled || selectAccount.isPending;
 
   // 首次拿到店铺列表时默认选中第一家有货权的店铺
   useEffect(() => {
@@ -105,29 +99,15 @@ export function AccountSwitcher({ compact = false, disabled = false, className }
           onChange={(accountId) => {
             if (!accountId || accountId === status?.accountId) return;
             const target = (status?.accounts ?? []).find((item) => item.id === accountId);
-            if (canBindForStudent && typeof deploymentQuery.data?.sharedMode !== "boolean") {
-              toast.info(deploymentQuery.isLoading ? "正在读取连接配置，请稍后再试" : "读取连接配置失败，请刷新后重试");
-              return;
-            }
-            if (sharedTeacherMode && !target?.ownerOperatorId) {
-              toast.error("此账号尚未关联学员，请到连接妙手页面选择学员绑定");
-              return;
-            }
-            setCurrentShopId(null);
-            connect.mutate(
+            selectAccount.mutate(
+              accountId,
               {
-                accountId,
-                save: true,
-                autoScan: false,
-                ...(sharedTeacherMode && target?.ownerOperatorId
-                  ? { studentOperatorId: target.ownerOperatorId }
-                  : {}),
-              },
-              {
-                onSuccess: () =>
+                onSuccess: (result) => {
+                  setCurrentShopId(result.shops[0]?.shopId ?? null);
                   toast.success(`已切换到「${target?.name ?? accountId}」`, {
                     description: "正在核对新账号的商品与店铺数据",
-                  }),
+                  });
+                },
                 onError: (error) =>
                   toast.error("切换账号失败", { description: apiErrorMessage(error) }),
               }

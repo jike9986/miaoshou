@@ -1,4 +1,4 @@
-"""Teacher-facing summaries of each student's current Miaoshou binding."""
+"""Teacher-facing summaries of each student's Miaoshou bindings."""
 from __future__ import annotations
 
 from typing import Any
@@ -11,29 +11,30 @@ from models.operator import Operator
 from services import operator_service
 
 
-def student_miaoshou_bindings(db: Session) -> dict[str, dict[str, Any] | None]:
-    """Return each student's masked current binding, including unbound students.
+def student_miaoshou_bindings(db: Session) -> dict[str, list[dict[str, Any]]]:
+    """Return every student's masked Miaoshou binding, including unbound students.
 
     The account binding table is the source of truth for shared connections: a
     single account may therefore appear once for each student who is bound to
-    it. Credential material is deliberately not selected for serialization.
+    it, and one student may have multiple accounts. Credential material is
+    deliberately not selected for serialization.
     """
     rows = (
         db.query(Operator, AccountBinding, Account)
         .outerjoin(AccountBinding, AccountBinding.operator_id == Operator.id)
         .outerjoin(Account, Account.id == AccountBinding.account_id)
-        .order_by(Operator.id.asc())
+        .order_by(Operator.id.asc(), Account.id.asc())
         .all()
     )
 
-    summaries: dict[str, dict[str, Any] | None] = {}
+    summaries: dict[str, list[dict[str, Any]]] = {}
     for operator, binding, account in rows:
         if operator_service.role_of(operator) != operator_service.ROLE_MEMBER:
             continue
 
         bound = binding is not None and account is not None
         if not bound:
-            summaries[str(operator.id)] = None
+            summaries.setdefault(str(operator.id), [])
             continue
 
         # Derive the App ID hint from the raw ID instead of trusting a stored
@@ -41,11 +42,11 @@ def student_miaoshou_bindings(db: Session) -> dict[str, dict[str, Any] | None]:
         # used; encrypted or plaintext credential columns never leave the DB.
         app_id_hint = f"…{(account.app_key or '')[-4:]}" if account.app_key else None
         secret_suffix = (account.secret_hint or "")[-4:]
-        summaries[str(operator.id)] = {
+        summaries.setdefault(str(operator.id), []).append({
             "linked": True,
             "appIdHint": app_id_hint,
             "secretHint": f"…{secret_suffix}" if secret_suffix else None,
             "status": account.status or "unknown",
             "boundAt": binding.bound_at,
-        }
+        })
     return summaries

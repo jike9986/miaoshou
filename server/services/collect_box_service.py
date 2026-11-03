@@ -7,9 +7,10 @@
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
 import hashlib
 import hmac
+import time
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -46,7 +47,7 @@ VALID_STATUS = {"notPublished": "notPublished", "published": "published", "all":
 # 最长自然延迟。手动刷新会绕过此缓存。要改就设 AOHUANG_COLLECT_BOX_CACHE_TTL（秒）。
 COLLECT_BOX_CACHE_TTL_ENV = "AOHUANG_COLLECT_BOX_CACHE_TTL"
 COLLECT_BOX_CACHE_TTL_DEFAULT = 10.0
-# 上游翻页最多 10 次（原有约束），缓存表按「账号 × 参数组合」存，256 条足够
+# 缓存表按「账号 × 参数组合」存，256 条足够
 COLLECT_BOX_CACHE_MAX_ENTRIES = 256
 
 _CACHE: TTLCache | None = None
@@ -77,7 +78,7 @@ def account_cache_prefix(account: Account) -> str:
     credential_material = (
         f"{getattr(account, 'app_key', '') or ''}\0"
         f"{getattr(account, 'app_secret_enc', '') or ''}"
-    ).encode("utf-8")
+    ).encode()
     fingerprint = hmac.new(secret, credential_material, hashlib.sha256).hexdigest()
     return f"acct:{getattr(account, 'id', 0)}:{fingerprint}:"
 
@@ -230,6 +231,48 @@ def listing_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
     return products
 
 
+def verify_items_present(client: Any, detail_ids: set[str] | list[str], shop_id: str,
+                         *, max_pages: int = 50, retries: int = 2,
+                         retry_delay: float = 0.25) -> set[str]:
+    """Return detail IDs confirmed in the target account's collect-box listing.
+
+    Save/claim responses can acknowledge writes before the collect-box list is
+    updated. Only IDs visible under the requested shop count as imported.
+    """
+    expected = {str(value) for value in detail_ids if str(value).isdigit()}
+    if not expected:
+        return set()
+    found: set[str] = set()
+    for attempt in range(max(0, retries) + 1):
+        page_no = 1
+        while expected - found and page_no <= max_pages:
+            response = client.collect_box_list(
+                status="all", page_no=page_no, page_size=COLLECT_BOX_UPSTREAM_PAGE)
+            data = (response or {}).get("data") or {}
+            upstream_rows = data.get("detailList") or []
+            for row in upstream_rows:
+                if not isinstance(row, Mapping):
+                    continue
+                detail_id = str(row.get("collectBoxDetailId") or row.get("detailId") or "")
+                if detail_id not in expected:
+                    continue
+                shops = row.get("collectBoxDetailShopList") or []
+                if not shops and row.get("shopId") not in (None, ""):
+                    shops = [{"shopId": row.get("shopId")}]
+                if any(isinstance(shop, Mapping) and str(shop.get("shopId")) == str(shop_id)
+                       for shop in shops):
+                    found.add(detail_id)
+            total = int(data.get("total") or 0)
+            if (len(upstream_rows) < COLLECT_BOX_UPSTREAM_PAGE
+                    or (total and page_no * COLLECT_BOX_UPSTREAM_PAGE >= total)):
+                break
+            page_no += 1
+        if expected <= found or attempt >= retries:
+            break
+        time.sleep(max(0.0, retry_delay))
+    return found
+
+
 def _scan_upstream(account: Account, *, page: int, page_size: int, status: str,
                    keyword: str, shop_id: str | None, site: str | None
                    ) -> dict[str, Any]:
@@ -237,13 +280,16 @@ def _scan_upstream(account: Account, *, page: int, page_size: int, status: str,
     client = account_client(account)
     try:
         upstream_status = None if status == "all" else status
-        request_page = page
+        # 上游按原始商品分页，listing_rows 还会按店铺展开，因此不能把客户端
+        # 页码直接传过去；筛选后的行必须先跳过前面各页，再取本页。
+        request_page = 1
+        offset = (page - 1) * page_size
+        matched = 0
         items: list[dict[str, Any]] = []
         total = 0
         scanned = 0
-        # 关键词/店铺/站点过滤在服务端做，因此按页向上游翻，直到凑够一页或扫满上限。
-        max_upstream_pages = max(1, min(10, -(-page_size // COLLECT_BOX_UPSTREAM_PAGE)))
-        while request_page <= max_upstream_pages and len(items) < page_size:
+        has_more = False
+        while True:
             response = client.collect_box_list(
                 status=upstream_status, keyword=keyword or "",
                 page_no=request_page, page_size=COLLECT_BOX_UPSTREAM_PAGE)
@@ -258,15 +304,21 @@ def _scan_upstream(account: Account, *, page: int, page_size: int, status: str,
                     continue
                 if keyword and not _matches_keyword(row, keyword):
                     continue
+                matched += 1
+                if matched <= offset:
+                    continue
+                if len(items) >= page_size:
+                    has_more = True
+                    break
                 items.append(row)
             upstream_rows = data.get("detailList") or []
-            if len(upstream_rows) < COLLECT_BOX_UPSTREAM_PAGE:
+            if (has_more or len(upstream_rows) < COLLECT_BOX_UPSTREAM_PAGE
+                    or (total and request_page * COLLECT_BOX_UPSTREAM_PAGE >= total)):
                 break
             request_page += 1
-        items = items[:page_size]
     finally:
         client.close()
-    return {"items": items, "total": total, "scanned": scanned}
+    return {"items": items, "total": total, "scanned": scanned, "hasMore": has_more}
 
 
 def list_items(db: Session, account: Account, *, page: int = 1, page_size: int = 20,
@@ -319,7 +371,7 @@ def list_items(db: Session, account: Account, *, page: int = 1, page_size: int =
         "page": page,
         "pageSize": page_size,
         "total": max(total, len(items)),
-        "hasMore": len(items) >= page_size,
+        "hasMore": bool(snapshot.get("hasMore", len(items) >= page_size)),
         "scannedAt": now_ts(),
         "degraded": bool(outcome.degraded),
         "staleSeconds": int(outcome.stale_seconds),
@@ -479,7 +531,7 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
         invalidate_account(account)
 
         collected: dict[str, Any] = {}
-        if mark_collected:
+        if mark_collected and detail_ids:
             key = product_key(detail_id, shop_id)
             product = (db.query(Product)
                        .filter(Product.account_id == account.id,
@@ -490,7 +542,7 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
                 state = dict(product.collected or {}) if isinstance(product.collected, dict) else {}
                 state[_account_claim_key(account)] = {
                     "at": now_ts(),
-                    "detailId": detail_ids[0] if detail_ids else str(detail_id),
+                    "detailId": detail_ids[0],
                 }
                 product.collected = state
                 product.claimed = True

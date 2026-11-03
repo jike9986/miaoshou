@@ -1004,9 +1004,10 @@ function StudentAccountsPanel() {
         <div className="mb-2 flex items-center gap-2 text-[13px] font-medium text-fg">学员列表 <span className="text-xs font-normal text-fg-muted">{students.length}</span></div>
         {list.isLoading ? <SkeletonRows rows={2} /> : list.isError ? <InlineError onRetry={() => void list.refetch()}>{apiErrorMessage(list.error)}</InlineError> : students.length === 0 ? <p className="py-3 text-[13px] text-fg-muted">还没有学员账号</p> : <ul className="divide-y divide-border-subtle">
           {students.map((student) => {
-            const binding = student.miaoshouBinding;
-            const linked = binding?.linked === true;
-            const status = miaoshouBindingStatus(binding?.status);
+            // New API responses expose every account. Fall back to the
+            // singular field for servers that have not been upgraded yet.
+            const bindings = student.miaoshouBindings ?? (student.miaoshouBinding ? [student.miaoshouBinding] : []);
+            const linked = bindings.length > 0;
             return (
               <li key={student.id} className="flex min-h-11 flex-col gap-2 py-3 sm:flex-row sm:items-center sm:gap-3">
                 <div className="min-w-0 flex-1">
@@ -1015,18 +1016,21 @@ function StudentAccountsPanel() {
                 </div>
                 <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-fg-secondary">
                   <Badge variant={linked ? "success" : "neutral"} size="sm">
-                    {binding === undefined ? "绑定状态不可用" : linked ? "已绑定" : "未绑定"}
+                    {student.miaoshouBindings === undefined && student.miaoshouBinding === undefined
+                      ? "绑定状态不可用"
+                      : linked ? `已绑定${bindings.length > 1 ? `（${bindings.length} 个）` : ""}` : "未绑定"}
                   </Badge>
-                  {linked && binding && (
-                    <>
+                  {bindings.map((binding, index) => {
+                    const status = miaoshouBindingStatus(binding.status);
+                    return <span key={`${binding.appIdHint ?? "binding"}-${binding.boundAt ?? index}`} className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border-subtle px-2 py-1">
                       <span>App ID <span className="font-mono text-fg">{maskCredentialHint(binding.appIdHint) ?? "—"}</span></span>
                       <span>Secret <span className="font-mono text-fg">{maskCredentialHint(binding.secretHint) ?? "—"}</span></span>
                       <Badge variant={status.variant} size="sm">{status.label}</Badge>
                       <span title={`绑定时间 ${formatDate(binding.boundAt)}`}>
                         绑定于 {binding.boundAt === null ? "时间未知" : formatRelative(binding.boundAt)}
                       </span>
-                    </>
-                  )}
+                    </span>;
+                  })}
                 </div>
                 <Button size="sm" variant="secondary" className="self-end sm:self-auto" loading={reset.isPending && reset.variables?.id === student.id} onClick={() => resetNow(student)}>重置密码</Button>
               </li>

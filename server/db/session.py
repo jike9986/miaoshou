@@ -260,6 +260,91 @@ def _ensure_sqlite_publish_log_ownership() -> None:
             index.create(connection, checkfirst=True)
 
 
+def _ensure_sqlite_multi_account_bindings() -> None:
+    """Drop the legacy one-binding-per-student constraint without losing rows."""
+    from sqlalchemy import inspect, text
+    from sqlalchemy.schema import CreateTable
+
+    inspector = inspect(engine)
+    if "account_bindings" not in inspector.get_table_names():
+        return
+    has_single_owner_constraint = any(
+        set(constraint.get("column_names") or []) == {"operator_id"}
+        for constraint in inspector.get_unique_constraints("account_bindings")
+    ) or any(
+        index.get("unique") and set(index.get("column_names") or []) == {"operator_id"}
+        for index in inspector.get_indexes("account_bindings")
+    )
+    if not has_single_owner_constraint:
+        return
+
+    from models.account_binding import AccountBinding
+
+    model_table = AccountBinding.__table__
+    existing_columns = {column["name"] for column in inspector.get_columns("account_bindings")}
+    model_columns = {column.name for column in model_table.columns}
+    unknown_columns = existing_columns - model_columns
+    if unknown_columns:
+        raise RuntimeError(
+            "无法升级 account_bindings：存在当前版本不认识的列，未修改数据："
+            + ", ".join(sorted(unknown_columns))
+        )
+
+    with engine.connect() as connection:
+        unique_names = {
+            str(index["name"]) for index in inspector.get_indexes("account_bindings")
+            if index.get("unique") and set(index.get("column_names") or []) == {"operator_id"}
+        }
+        preserved_indexes = [
+            str(row[1]) for row in connection.exec_driver_sql(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='account_bindings' AND sql IS NOT NULL"
+            ).all() if row[0] not in unique_names and row[1]
+        ]
+        preserved_triggers = [
+            str(row[0]) for row in connection.execute(text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='trigger' AND tbl_name='account_bindings' AND sql IS NOT NULL"
+            )).all() if row[0]
+        ]
+        foreign_keys_before = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    temporary = model_table.to_metadata(Base.metadata, name="account_bindings_multi_upgrade")
+    columns = [column.name for column in model_table.columns if column.name in existing_columns]
+    quoted = ", ".join(f'"{name}"' for name in columns)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
+            try:
+                with connection.begin():
+                    connection.execute(CreateTable(temporary))
+                    connection.execute(text(
+                        f'INSERT INTO "account_bindings_multi_upgrade" ({quoted}) '
+                        f'SELECT {quoted} FROM "account_bindings"'
+                    ))
+                    connection.execute(text('DROP TABLE "account_bindings"'))
+                    connection.execute(text(
+                        'ALTER TABLE "account_bindings_multi_upgrade" '
+                        'RENAME TO "account_bindings"'
+                    ))
+                    for ddl in preserved_indexes + preserved_triggers:
+                        connection.exec_driver_sql(ddl)
+                    for index in model_table.indexes:
+                        index.create(connection, checkfirst=True)
+                    foreign_keys_after = connection.exec_driver_sql(
+                        "PRAGMA foreign_key_check"
+                    ).all()
+                    if foreign_keys_after != foreign_keys_before:
+                        raise RuntimeError(
+                            "无法升级 account_bindings：重建会改变现有外键关系，已回滚"
+                        )
+            finally:
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                connection.commit()
+    finally:
+        Base.metadata.remove(temporary)
+
+
 def _ensure_sqlite_product_key_scope() -> None:
     """Remove the legacy global ``products.warehouse_key`` uniqueness.
 
@@ -481,9 +566,9 @@ def _backfill_sqlite_account_bindings() -> None:
 
     SQLite 启动路径不会执行 Alembic。新版 ``account_bindings`` 表虽然会由
     ``create_all`` 创建，但老库里的 ``accounts.owner_operator_id`` 不会自动
-    复制进去，导致原学员登录后看不到自己已有的妙手账号。只补没有绑定的
-    操作员，保证重复启动幂等；同一旧操作员若意外拥有多个账号，按账号 ID
-    最小的记录保留，符合「一个软件用户只能绑定一个妙手账号」的现行规则。
+    复制进去，导致原学员登录后看不到自己已有的妙手账号。为每个旧账号补一
+    条 ``(account_id, operator_id)`` 关系，保证重复启动幂等；同一学员拥有多
+    个旧账号时全部保留，允许之后在客户端切换账号。
     """
     from sqlalchemy import inspect, text
 
@@ -494,47 +579,43 @@ def _backfill_sqlite_account_bindings() -> None:
     account_columns = {column["name"] for column in inspector.get_columns("accounts")}
     if "owner_operator_id" not in account_columns:
         return
+    has_legacy_fallback_marker = "legacy_owner_fallback_disabled" in account_columns
+    legacy_filter = (
+        "AND COALESCE(a.legacy_owner_fallback_disabled, 0) = 0"
+        if has_legacy_fallback_marker else ""
+    )
 
     with engine.begin() as connection:
         connection.execute(text(
-            """
+            f"""
             INSERT INTO account_bindings
                 (account_id, operator_id, bound_by_operator_id, bound_at)
             SELECT a.id, a.owner_operator_id, a.bound_by_operator_id,
                    COALESCE(a.bound_at, 0.0)
             FROM accounts AS a
-            JOIN (
-                SELECT owner_operator_id, MIN(id) AS account_id
-                FROM accounts
-                WHERE owner_operator_id IS NOT NULL
-                GROUP BY owner_operator_id
-            ) AS first_account
-              ON first_account.account_id = a.id
             WHERE a.owner_operator_id IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM account_bindings AS existing
-                  WHERE existing.operator_id = a.owner_operator_id
-              )
-            ON CONFLICT(operator_id) DO NOTHING
+              {legacy_filter}
+            ON CONFLICT(account_id, operator_id) DO NOTHING
             """
         ))
-        # Keep duplicate legacy credentials and their old owner id intact, but
-        # do not let them re-enter the compatibility fallback after an explicit
-        # binding is removed.
-        connection.execute(text(
-            """
-            UPDATE accounts
-            SET legacy_owner_fallback_disabled = 1
-            WHERE owner_operator_id IS NOT NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM account_bindings AS binding
-                  WHERE binding.operator_id = accounts.owner_operator_id
-                    AND binding.account_id <> accounts.id
-              )
-            """
-        ))
+        if has_legacy_fallback_marker:
+            # Once legacy ownership is materialized as explicit bindings, the
+            # old owner column must not recreate a binding that was later
+            # revoked. Keep the legacy data for rollback/audit, but stop using
+            # it as an authorization fallback.
+            connection.execute(text(
+                """
+                UPDATE accounts
+                SET legacy_owner_fallback_disabled = 1
+                WHERE owner_operator_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM account_bindings AS binding
+                      WHERE binding.account_id = accounts.id
+                        AND binding.operator_id = accounts.owner_operator_id
+                  )
+                """
+            ))
 
 
 def init_db() -> None:
@@ -565,6 +646,7 @@ def init_db() -> None:
     _ensure_sqlite_schedule_ownership_indexes()
     _ensure_sqlite_product_key_scope()
     _ensure_sqlite_publish_log_ownership()
+    _ensure_sqlite_multi_account_bindings()
     _backfill_sqlite_account_bindings()
     _ensure_sqlite_account_app_key_index()
     _seed_settings()

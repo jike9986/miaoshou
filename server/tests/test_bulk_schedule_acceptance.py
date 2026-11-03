@@ -82,6 +82,15 @@ class FakeMiaoshou:
         self.saved.add(int(detail_id))
         return {"success": True}
 
+    def collect_box_list(self, *, page_no=1, page_size=100, **_kwargs):
+        ids = sorted(self.saved)
+        start = (page_no - 1) * page_size
+        rows = [{
+            "collectBoxDetailId": ident,
+            "collectBoxDetailShopList": [{"shopId": "9"}],
+        } for ident in ids[start:start + page_size]]
+        return {"data": {"total": len(ids), "detailList": rows}}
+
     def publish_items(self, detail_ids, shop_ids):
         assert shop_ids == [9]
         self.published.append(list(detail_ids))

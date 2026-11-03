@@ -53,19 +53,25 @@ def test_warehouse_ignores_publish_history_from_inaccessible_accounts(revocation
             assert account_service.has_account_access(db, legacy.id, member.id) is False
             detail = warehouse_service.detail(db, product.id, operator_id=member.id)
             assert detail["publishHistory"] == []
-            assert detail["product"]["status"] == ("claimed" if claimed else "ready")
+            # ProductClaim is a legacy per-user marker. Student claim state is
+            # scoped to the currently bound Miaoshou account and must not leak
+            # from an inaccessible source account.
+            assert detail["product"]["status"] == "ready"
+            assert detail["product"]["claimed"] is False
             assert detail["product"]["publishStatus"] is None
 
             published = warehouse_service.list_products(
                 db, operator_id=member.id, status="published")
             assert published["total"] == 0
             assert published["stats"]["totalPublished"] == 0
-            for status, expected in (("ready", not claimed), ("claimed", claimed)):
-                result = warehouse_service.list_products(db, operator_id=member.id, status=status)
-                assert result["total"] == int(expected)
-                if expected:
-                    assert result["items"][0]["status"] == status
-                    assert result["items"][0]["publishedShopIds"] == []
+            ready = warehouse_service.list_products(
+                db, operator_id=member.id, status="ready")
+            claimed_products = warehouse_service.list_products(
+                db, operator_id=member.id, status="claimed")
+            assert ready["total"] == 1
+            assert ready["items"][0]["status"] == "ready"
+            assert ready["items"][0]["publishedShopIds"] == []
+            assert claimed_products["total"] == 0
     finally:
         engine.dispose()
 

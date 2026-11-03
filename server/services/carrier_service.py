@@ -727,11 +727,20 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                                detail_id, str(payload.get("title") or "")[:40], mismatched)
                 failures.append(
                     f"{detail_id}: 保存后读回不一致（{', '.join(mismatched)}）")
+                if progress:
+                    progress({"stage": "verify_failed", "detailId": detail_id,
+                              "verified": len(saved), "failed": len(failures)})
                 continue
             saved.append(detail_id)
             saved_sources.append(index)
+            if progress:
+                progress({"stage": "verified", "detailId": detail_id,
+                          "verified": len(saved), "failed": len(failures)})
         except (MiaoshouError, ValueError, errors.AppError) as exc:
             failures.append(f"{detail_id}: {str(exc)[:90]}")
+            if progress:
+                progress({"stage": "verify_failed", "detailId": detail_id,
+                          "verified": len(saved), "failed": len(failures)})
         time.sleep(0.25)
     return {"saved": saved, "savedSources": saved_sources, "failures": failures,
             "warehouseId": warehouse_id}

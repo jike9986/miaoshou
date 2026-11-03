@@ -105,7 +105,7 @@ def test_alembic_downgrade_refuses_to_remove_duplicate_owner_protection() -> Non
     engine.dispose()
 
 
-def test_sqlite_startup_migration_keeps_duplicate_rows_blocked_after_unbind(monkeypatch) -> None:
+def test_sqlite_startup_backfills_all_legacy_accounts_and_keeps_unbind_revoked(monkeypatch) -> None:
     engine = sa.create_engine("sqlite://")
     Base.metadata.create_all(engine)
     monkeypatch.setattr(db_session, "engine", engine)
@@ -145,19 +145,21 @@ def test_sqlite_startup_migration_keeps_duplicate_rows_blocked_after_unbind(monk
     db_session._backfill_sqlite_account_bindings()
 
     with make_session() as db:
-        binding = db.query(AccountBinding).filter_by(operator_id=owner_id).one()
-        assert binding.account_id == selected_id
+        bindings = db.query(AccountBinding).filter_by(operator_id=owner_id).all()
+        assert {binding.account_id for binding in bindings} == {selected_id, duplicate_id}
         duplicate = db.get(Account, duplicate_id)
         assert duplicate is not None
         assert duplicate.legacy_owner_fallback_disabled is True
         assert duplicate.owner_operator_id == owner_id
         assert duplicate.app_secret_enc == "encrypted-duplicate"
-        assert account_service.has_account_access(db, duplicate_id, owner_id) is False
+        assert account_service.has_account_access(db, duplicate_id, owner_id) is True
 
-        db.delete(binding)
+        selected_binding = next(row for row in bindings if row.account_id == selected_id)
+        db.delete(selected_binding)
         db.commit()
 
-        assert account_service.has_account_access(db, duplicate_id, owner_id) is False
+        assert account_service.has_account_access(db, selected_id, owner_id) is False
+        assert account_service.has_account_access(db, duplicate_id, owner_id) is True
         assert db.query(Account).filter(Account.owner_operator_id == owner_id).count() == 2
 
     # Startup remains idempotent, including after a binding has been removed.
@@ -166,6 +168,7 @@ def test_sqlite_startup_migration_keeps_duplicate_rows_blocked_after_unbind(monk
         duplicate = db.get(Account, duplicate_id)
         assert duplicate is not None and duplicate.legacy_owner_fallback_disabled is True
         assert db.query(AccountBinding).filter_by(operator_id=owner_id).count() == 1
-        assert account_service.has_account_access(db, duplicate_id, owner_id) is False
+        assert account_service.has_account_access(db, selected_id, owner_id) is False
+        assert account_service.has_account_access(db, duplicate_id, owner_id) is True
 
     engine.dispose()

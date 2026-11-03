@@ -80,3 +80,29 @@ def test_collect_box_cache_isolated_for_transient_accounts_sharing_row_id(
         shop_id=None, site=None, sort="default")
     assert "app-key-a" not in key
     assert "secret-a" not in key
+
+
+def test_collect_box_invalidation_only_reloads_target_account(monkeypatch) -> None:
+    cache = TTLCache("collect-box-invalidate-test", default_ttl=60)
+    monkeypatch.setattr(collect_box_service, "_cache", lambda: cache)
+    monkeypatch.setattr(collect_box_service, "cache_ttl", lambda: 60)
+    monkeypatch.setattr(collect_box_service, "get_settings", lambda: type(
+        "Settings", (), {"local_secret": lambda self: "test-install-secret"})())
+    monkeypatch.setattr(collect_box_service, "_annotate_warehouse", lambda *_args: None)
+    loads: list[int] = []
+
+    def scan(account: Account, **_kwargs):
+        loads.append(account.id)
+        return {"items": [], "total": 0, "scanned": 0, "hasMore": False}
+
+    monkeypatch.setattr(collect_box_service, "_scan_upstream", scan)
+    first_account = Account(id=1, app_key="app-key-a", app_secret_enc="secret-a")
+    second_account = Account(id=2, app_key="app-key-b", app_secret_enc="secret-b")
+    collect_box_service.list_items(object(), first_account)
+    collect_box_service.list_items(object(), second_account)
+
+    assert collect_box_service.invalidate_account(first_account) == 1
+
+    assert not collect_box_service.list_items(object(), first_account)["cached"]
+    assert collect_box_service.list_items(object(), second_account)["cached"]
+    assert loads == [1, 2, 1]

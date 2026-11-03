@@ -483,7 +483,7 @@ def test_member_bootstrap_hides_other_members_accounts_and_batches(client, ident
 
 @pytest.mark.parametrize("role", [operator_service.ROLE_TEACHER, operator_service.ROLE_ADMIN])
 def test_staff_can_bind_own_key_in_shared_mode(client, monkeypatch, role):
-    """Teachers and admins may bind themselves, with the same one-key limit."""
+    """Teachers and admins may bind multiple Miaoshou accounts to themselves."""
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
     from core.config import get_settings as _gs
     real = _gs()
@@ -522,11 +522,12 @@ def test_staff_can_bind_own_key_in_shared_mode(client, monkeypatch, role):
               "autoScan": False},
         headers=_headers(token),
     )
-    assert second.status_code == 409, second.text
+    assert second.status_code == 200, second.text
     db = SessionLocal()
     try:
         bindings = db.query(AccountBinding).filter(AccountBinding.operator_id == owner_id).all()
-        assert [row.account_id for row in bindings] == [int(response.json()["accountId"])]
+        assert {row.account_id for row in bindings} == {
+            int(response.json()["accountId"]), int(second.json()["accountId"])}
     finally:
         db.close()
 
@@ -572,7 +573,7 @@ def test_teacher_can_assign_legacy_unowned_key_to_student(client, identities, mo
     assert response.json()["boundByOperatorId"] == str(identities["teacher_id"])
 
 
-def test_app_key_can_be_bound_to_multiple_students_but_each_student_has_one(
+def test_app_key_and_students_can_have_multiple_bindings(
         client, identities, monkeypatch):
     monkeypatch.setattr(account_service, "MiaoshouClient", FakeMiaoshouClient)
     app_key = f"shared-key-{uuid.uuid4().hex[:8]}"
@@ -669,8 +670,8 @@ def test_app_key_can_be_bound_to_multiple_students_but_each_student_has_one(
     assert "ownerOperatorId" not in duplicate.json()
     assert "boundByOperatorId" not in duplicate.json()
 
-    # Once bound, this student still cannot add a second stored account, even
-    # when they know its exact credentials.
+    # The same student can join a second account by proving its credentials;
+    # accounts remain individually bound and selectable.
     second_key = f"second-shared-key-{uuid.uuid4().hex[:8]}"
     second_secret = "second-shared-secret"
     db = SessionLocal()
@@ -695,7 +696,8 @@ def test_app_key_can_be_bound_to_multiple_students_but_each_student_has_one(
               "appSecret": second_secret, "autoScan": False},
         headers=_headers(extra_token),
     )
-    assert second_binding.status_code == 409, second_binding.text
+    assert second_binding.status_code == 200, second_binding.text
+    assert second_binding.json()["accountId"] == second_account_id
     assert second_secret not in second_binding.text
 
     reconnected = client.post(
@@ -710,10 +712,14 @@ def test_app_key_can_be_bound_to_multiple_students_but_each_student_has_one(
 
     # Learners see the shared account as their own connection, while its
     # ownership and binder metadata remain visible only to global managers.
-    for token in (first_token, extra_token):
+    for token, expected_account_id, visible_account_ids in (
+            (first_token, first_account_id, {first_account_id}),
+            (extra_token, second_account_id,
+             {first_account_id, second_account_id})):
         status = client.get(API + "/auth/status", headers=_headers(token))
         assert status.status_code == 200, status.text
-        assert status.json()["accountId"] == first_account_id
+        assert status.json()["accountId"] == expected_account_id
+        assert {row["id"] for row in status.json()["accounts"]} == visible_account_ids
         assert all("ownerOperatorId" not in row and "boundByOperatorId" not in row
                    for row in status.json()["accounts"])
 
@@ -739,17 +745,18 @@ def test_app_key_can_be_bound_to_multiple_students_but_each_student_has_one(
         }
 
         second_key = f"second-key-{uuid.uuid4().hex[:8]}"
-        with pytest.raises(AppError) as caught:
-            account_service.connect(
-                db,
-                app_id=second_key,
-                app_secret="second-secret",
-                auto_scan=False,
-                owner_operator_id=extra_id,
-                bound_by_operator_id=extra_id,
-            )
-        assert caught.value.status == 409
-        assert "second-secret" not in str(caught.value)
+        second = account_service.connect(
+            db,
+            app_id=second_key,
+            app_secret="second-secret",
+            auto_scan=False,
+            owner_operator_id=extra_id,
+            bound_by_operator_id=extra_id,
+        )
+        db.commit()
+        assert db.query(AccountBinding).filter(
+            AccountBinding.operator_id == extra_id).count() == 3
+        assert str(second["accountId"]) != first_account_id
     finally:
         db.close()
 

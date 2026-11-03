@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from sqlalchemy import or_
@@ -639,7 +639,8 @@ def _find_template(db: Session, name: str | None) -> Mapping[str, Any] | None:
 
 def publish(db: Session, payload: Mapping[str, Any], *,
             operator_id: int | None = None,
-            _log_operator_id: int | None = None) -> dict[str, Any]:
+            _log_operator_id: int | None = None,
+            _claim_progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """POST /publish。发布不可撤销，所有守卫都在这里。
 
     学员可发布本人已认领的成品，或本人匹配自动化任务已核验的处理结果。
@@ -804,6 +805,11 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 target_shop_id=str(target_shop_id),
                 operator_id=log_operator_id)
         if claim_only:
+            # A write with a lost response may still have reached Miaoshou.
+            # Drop the target account's cached snapshot before any upstream call.
+            from services import collect_box_service
+
+            collect_box_service.invalidate_account(account)
             # 认领的本质：把「服务器里存着的商品」分发一份到目标账号/店铺的采集箱。
             # 仓库是本地权威数据源（标题/图片/SKU/价格/重量都在 payload 里），
             # 因此**不依赖上游公共采集箱里是否还有这件商品**：
@@ -847,9 +853,13 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 except Exception as exc:  # noqa: BLE001 - 补不到就让下面报缺料
                     logger.warning("认领前补链接池失败：%s", exc)
                 try:
-                    carriers = carrier_service.collect_carriers(db, client, count=len(entries))
+                    progress_options = ({"progress": _claim_progress}
+                                        if _claim_progress is not None else {})
+                    carriers = carrier_service.collect_carriers(
+                        db, client, count=len(entries), **progress_options)
                     filled = carrier_service.fill_carriers(
-                        client, carriers, payloads, shop_id=int(target_shop_id))
+                        client, carriers, payloads, shop_id=int(target_shop_id),
+                        **progress_options)
                 except carrier_service.CarrierError as exc:
                     raise errors.unprocessable(
                         f"认领需要新建载体并写入商品，但失败了：{exc}") from None
@@ -868,6 +878,34 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                                   str(item.get("reason") or "") for item in failures)[:180])
                     raise errors.unprocessable(reason)
 
+            # A successful save/claim response is not enough: the upstream
+            # collect-box list is the observable result the learner relies on.
+            from services import collect_box_service
+
+            confirmed_ids = collect_box_service.verify_items_present(
+                client, claimed_ids, str(target_shop_id))
+            missing_ids = set(claimed_ids) - confirmed_ids
+            if missing_ids:
+                failures.extend({
+                    "stage": "collect_box_verify",
+                    "detailId": detail_id,
+                    "reason": "已提交，但目标店铺采集箱列表尚未确认到该商品",
+                } for detail_id in sorted(missing_ids))
+                logger.warning("认领回执未出现在目标采集箱 account=%s shop=%s detailIds=%s",
+                               account.id, target_shop_id, sorted(missing_ids))
+            if filled_sources:
+                confirmed_pairs = [
+                    (str(detail_id), source_index)
+                    for detail_id, source_index in zip(
+                        claimed_ids, filled_sources, strict=False)
+                    if str(detail_id) in confirmed_ids
+                ]
+                claimed_ids = [detail_id for detail_id, _ in confirmed_pairs]
+                filled_sources = [source_index for _, source_index in confirmed_pairs]
+            else:
+                claimed_ids = [detail_id for detail_id in claimed_ids
+                               if str(detail_id) in confirmed_ids]
+
             for entry, claimed_detail_id in _pair_entries(
                     entries, [], claimed_ids, saved_sources=filled_sources):
                 product = entry.get("product")
@@ -877,6 +915,10 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                         "at": now_ts(), "detailId": claimed_detail_id,
                         "shopId": str(target_shop_id),
                     }
+                    if log_operator_id is not None:
+                        state[f"operator:{log_operator_id}:account:{account.id}"] = dict(
+                            state[f"account:{account.id}"])
+                        warehouse_service.claim_product(db, product.id, log_operator_id)
                     product.collected = state
                     product.claimed = True
                     product.claimed_at = now_ts()

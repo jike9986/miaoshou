@@ -150,7 +150,7 @@ def test_shared_account_schedules_claim_jobs_and_publish_logs_are_private(
     assert teacher_publish_logs["total"] == 3
 
 
-def test_member_claim_job_requires_owned_claim_or_automation_result(
+def test_member_claim_job_accepts_shared_finished_products_and_owned_automation_results(
         shared_account_operators):
     db, account, first, second, teacher = shared_account_operators
     suffix = uuid.uuid4().hex[:8]
@@ -181,7 +181,7 @@ def test_member_claim_job_requires_owned_claim_or_automation_result(
 
     unclaimed = add_product("unclaimed")
     claimed = add_product("claimed")
-    db.add(ProductClaim(product_id=claimed.id, owner_operator_id=first.id))
+    db.add(ProductClaim(product_id=claimed.id, owner_operator_id=second.id))
     own_result = add_product("own-result", automation_result=True)
     add_automation_owner(own_result, first, "own")
     other_result = add_product("other-result", automation_result=True)
@@ -192,23 +192,23 @@ def test_member_claim_job_requires_owned_claim_or_automation_result(
         return {"confirm": True, "shopId": "7",
                 "items": [{"warehouseId": str(product.id)}]}
 
-    with pytest.raises(errors.AppError) as denied_unclaimed:
-        claim_job_service.create(db, body(unclaimed), account.id, first.id)
-    assert denied_unclaimed.value.status == 403
-
-    student_claim = claim_job_service.create(db, body(claimed), account.id, first.id)
+    # Finished warehouse products are shared. Starting a claim job itself is
+    # the student's claim action; it must not require a prior ProductClaim row.
+    first_shared_job = claim_job_service.create(db, body(unclaimed), account.id, first.id)
+    other_students_claim = claim_job_service.create(db, body(claimed), account.id, first.id)
     student_result = claim_job_service.create(db, body(own_result), account.id, first.id)
     with pytest.raises(errors.AppError) as denied_foreign_result:
         claim_job_service.create(db, body(other_result), account.id, first.id)
     assert denied_foreign_result.value.status == 403
 
     teacher_job = claim_job_service.create(db, body(unclaimed), account.id, teacher.id)
-    assert student_claim.operator_id == first.id
+    assert first_shared_job.operator_id == first.id
+    assert other_students_claim.operator_id == first.id
     assert student_result.operator_id == first.id
     assert teacher_job.operator_id == teacher.id
 
 
-def test_claim_job_rechecks_member_claim_before_upstream_call(
+def test_claim_job_rechecks_member_account_binding_before_upstream_call(
         shared_account_operators, monkeypatch):
     db, account, first, _second, _teacher = shared_account_operators
     suffix = uuid.uuid4().hex[:8]
@@ -218,9 +218,6 @@ def test_claim_job_rechecks_member_claim_before_upstream_call(
     )
     db.add(product)
     db.flush()
-    claim = ProductClaim(product_id=product.id, owner_operator_id=first.id)
-    db.add(claim)
-    db.flush()
     batch = claim_job_service.create(
         db,
         {"confirm": True, "shopId": "7",
@@ -228,7 +225,10 @@ def test_claim_job_rechecks_member_claim_before_upstream_call(
         account.id, first.id,
     )
     batch_id = batch.id
-    db.delete(claim)
+    db.query(AccountBinding).filter(
+        AccountBinding.account_id == account.id,
+        AccountBinding.operator_id == first.id,
+    ).delete(synchronize_session=False)
     db.commit()
 
     calls = []
@@ -249,7 +249,7 @@ def test_claim_job_rechecks_member_claim_before_upstream_call(
     item = db.query(BatchItem).filter(BatchItem.batch_id == batch_id).one()
     assert batch.status == "failed"
     assert item.status == "failed"
-    assert "只能将自己已认领" in item.message
+    assert "无权访问该妙手账号" in item.message
 
 
 def test_claim_job_rejects_own_automation_result_after_source_account_rebinding(

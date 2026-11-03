@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Calculator,
   CheckSquare,
@@ -29,6 +29,8 @@ import { api, ApiError, apiErrorMessage } from "@/lib/api";
 import { LIMITS, toPublishItems } from "@/lib/constants";
 import { listItem } from "@/lib/motion";
 import { useOperatorIdentity } from "@/lib/operator";
+import { getOperatorSessionEpoch, runIfOperatorSessionCurrent } from "@/lib/operatorSessionEpoch.mjs";
+import { queryKeys } from "@/lib/queryKeys";
 import {
   useAuthStatus,
   useBatchDelete,
@@ -40,7 +42,7 @@ import {
   useOperators,
   useWarehouseList,
 } from "@/lib/queries";
-import type { GroupFacet, Product } from "@/lib/types";
+import type { AuthStatus, BatchDetailResponse, BatchListResponse, GroupFacet, Product } from "@/lib/types";
 import { useSessionStore, useWarehouseStore } from "@/features/stores";
 import { Pagination, TextAction } from "@/features/shared";
 import { PageContent, PageHeader } from "@/components/layout";
@@ -79,6 +81,7 @@ import {
   type QualityReviewSnapshot,
 } from "@/features/warehouse/warehouseSelection";
 import { ClaimJobsPanel } from "@/features/warehouse/ClaimJobsPanel";
+import { AccountSwitcher } from "@/features/auth/UnlockPage";
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500, 1000];
 
@@ -113,6 +116,27 @@ export function WarehousePage() {
   const currentShopId = useSessionStore((state) => state.currentShopId);
   const { data: auth } = useAuthStatus();
   const connected = auth?.connected ?? false;
+  const accountId = auth?.accountId ?? null;
+  const operatorId = identity?.id ?? null;
+  // Keep tracking a submitted task when the user returns to the product list.
+  const claimJobs = useQuery({
+    queryKey: queryKeys.claimJobs.list(operatorId, accountId),
+    queryFn: () => api.get<BatchListResponse>("/claim-jobs", { query: { accountId } }),
+    enabled: Boolean(accountId),
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    refetchInterval: (state) => state.state.data?.items.some(
+      (job) => job.status === "pending" || job.status === "running"
+    ) ? 3000 : false,
+  });
+  const claimProgress = claimJobs.data?.items.map(
+    (job) => `${job.id}:${job.currentIndex}:${job.status}`
+  ).join("|");
+  useEffect(() => {
+    if (!claimProgress) return;
+    void queryClient.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.collectBox.all });
+  }, [claimProgress, queryClient]);
   const operatorsQuery = useOperators({
     enabled: !isMember && (tab === "automation" || tab === "products"),
   });
@@ -183,27 +207,9 @@ export function WarehousePage() {
   const [selectedQualityReviewById, setSelectedQualityReviewById] =
     useState<Record<string, QualityReviewSnapshot>>({});
 
-  const claimSharedProduct = useMutation({
-    mutationFn: async (ids: string[]) => {
-      const claimedIds: string[] = [];
-      const failures: string[] = [];
-      for (const id of ids) {
-        try {
-          await api.post(`/warehouse/${encodeURIComponent(id)}/claim`);
-          claimedIds.push(id);
-        } catch (error) {
-          failures.push(apiErrorMessage(error));
-        }
-      }
-      return { claimedIds, failures };
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["warehouse"] });
-    },
-  });
   const claimOnly = useMutation({
     mutationFn: (body: { items: ReturnType<typeof toPublishItems>; shopId: string; accountId: string; claimOnly: boolean; confirm: boolean }) =>
-      api.post("/claim-jobs", body),
+      api.post<BatchDetailResponse>("/claim-jobs", body),
   });
   const selectedIds = query.selected;
   const selectedCount = selectedIds.length;
@@ -379,20 +385,52 @@ export function WarehousePage() {
     });
   }, [selectedIds]);
 
-  const claimSelectedForMember = async (): Promise<void> => {
-    const { claimedIds, failures } = await claimSharedProduct.mutateAsync(memberClaimableIds);
-    setSelectedClaimed((current) => {
-      const next = { ...current };
-      for (const id of claimedIds) next[id] = true;
-      return next;
-    });
-    if (failures.length > 0) {
-      toast.warning(`已认领 ${claimedIds.length} 件，${failures.length} 件失败`, {
-        description: failures[0],
-      });
-    } else {
-      toast.success(`已认领 ${claimedIds.length} 件成品`);
+  const claimSelected = (ids: string[]): void => {
+    if (!connected) {
+      toast.warning("认领需要先连接妙手账号");
+      navigate("/unlock", { state: { from: "/warehouse" } });
+      return;
     }
+    if (!currentShopId || !accountId) {
+      toast.warning("请先选择要认领到的店铺");
+      return;
+    }
+    if (claimOnly.isPending || ids.length === 0) return;
+    const sessionEpoch = getOperatorSessionEpoch();
+    claimOnly.mutate({
+      items: toPublishItems(ids.map((id) => ({ warehouseId: id }))),
+      shopId: currentShopId,
+      accountId,
+      claimOnly: true,
+      confirm: true,
+    }, {
+      onSuccess: (result) => runIfOperatorSessionCurrent(sessionEpoch, () => {
+        const listKey = queryKeys.claimJobs.list(operatorId, accountId);
+        queryClient.setQueryData<BatchListResponse>(listKey, (previous) => {
+          const previousItems = previous?.items ?? [];
+          const exists = previousItems.some((job) => job.id === result.batch.id);
+          return {
+            items: [result.batch, ...previousItems.filter((job) => job.id !== result.batch.id)],
+            total: (previous?.total ?? 0) + (exists ? 0 : 1),
+          };
+        });
+        queryClient.setQueryData(queryKeys.claimJobs.detail(operatorId, accountId, result.batch.id), result);
+        void queryClient.invalidateQueries({ queryKey: listKey, exact: true });
+        // A response from an account switched away from belongs only to its cache.
+        if (queryClient.getQueryData<AuthStatus>(queryKeys.auth.status())?.accountId !== accountId) return;
+        clearWarehouseSelection();
+        const next = new URLSearchParams(searchParams);
+        next.set("tab", "batch");
+        next.set("claimJob", result.batch.id);
+        setSearchParams(next, { replace: true });
+        toast.success(`已创建 ${ids.length} 件商品的认领任务`, {
+          description: "只有成功导入采集箱的商品才会显示已认领。",
+        });
+      }),
+      onError: (error) => runIfOperatorSessionCurrent(sessionEpoch, () => {
+        toast.error("认领任务创建失败", { description: apiErrorMessage(error) });
+      }),
+    });
   };
 
   useEffect(() => {
@@ -484,10 +522,12 @@ export function WarehousePage() {
   const refreshAll = (): void => {
     void listQuery.refetch();
     void groupsQuery.refetch();
+    if (accountId) void claimJobs.refetch();
   };
 
   const headerActions = (
     <>
+      <AccountSwitcher />
       <IconButton
         label="刷新"
         size="md"
@@ -525,7 +565,13 @@ export function WarehousePage() {
             id={tabPanelId("warehouse", "batch")}
             aria-labelledby={tabId("warehouse", "batch")}
           >
-            <ClaimJobsPanel accountId={auth?.accountId ?? null} />
+            <ClaimJobsPanel
+              key={`${operatorId}:${accountId}`}
+              accountId={accountId}
+              operatorId={operatorId}
+              list={claimJobs}
+              focusJobId={searchParams.get("claimJob")}
+            />
           </div>
         )}
 
@@ -847,12 +893,12 @@ export function WarehousePage() {
             }),
           }] : isMember ? [
           ...(memberClaimableIds.length > 0 ? [{
-            label: claimSharedProduct.isPending
+            label: claimOnly.isPending
               ? "正在认领…"
               : `认领成品 ${memberClaimableIds.length} 件`,
             icon: <PackageCheck className="size-3.5" />,
-            disabled: claimSharedProduct.isPending,
-            onClick: () => void claimSelectedForMember(),
+            disabled: claimOnly.isPending,
+            onClick: () => claimSelected(memberClaimableIds),
           }] : []),
           ...(memberPublishableIds.length > 0 ? [{
             label: "发布已认领商品",
@@ -864,36 +910,7 @@ export function WarehousePage() {
             label: claimOnly.isPending ? "正在认领…" : "认领到采集箱",
             icon: <Inbox className="size-3.5" />,
             disabled: claimOnly.isPending,
-            onClick: () => {
-              if (!connected) {
-                toast.warning("认领需要先连接妙手账号");
-                navigate("/unlock", { state: { from: "/warehouse" } });
-                return;
-              }
-              if (!currentShopId || !auth?.accountId) {
-                toast.warning("请先选择要认领到的店铺");
-                return;
-              }
-              if (claimOnly.isPending) return;
-              claimOnly.mutate(
-                {
-                  items: toPublishItems(selectedIds.map((id) => ({ warehouseId: id }))),
-                  shopId: currentShopId,
-                  accountId: auth.accountId,
-                  claimOnly: true,
-                  confirm: true,
-                },
-                {
-                  onSuccess: () => {
-                    clearSelected();
-                    void queryClient.invalidateQueries({ queryKey: ["claim-jobs"] });
-                    toast.success("采集任务已创建，可在批次中查看进度");
-                    setTab("batch");
-                  },
-                  onError: (error) => toast.error(apiErrorMessage(error)),
-                }
-              );
-            },
+            onClick: () => claimSelected(selectedIds),
           },
           {
             label: "创建批次",

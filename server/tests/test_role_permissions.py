@@ -884,6 +884,8 @@ DYNAMIC_WRITE_ROUTES = {
     ("POST", "/api/v1/sync/price-templates"),
     # Binding is available to a member only for their own operator owner id.
     ("POST", "/api/v1/auth/connect"),
+    # Account selection is checked against the member's existing bindings.
+    ("POST", "/api/v1/auth/select"),
     # 这些路由在处理函数内校验当前 OperatorDep 的角色/状态。
     ("POST", "/api/v1/operators/students"),
     ("POST", "/api/v1/operators/{operator_id}/reset-password"),

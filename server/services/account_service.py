@@ -21,7 +21,7 @@ from models.account import Account
 from models.account_binding import AccountBinding
 from models.operator import Operator
 from models.shop import Shop
-from services import crypto, operator_service
+from services import crypto, operator_service, setting_service
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
 
@@ -127,6 +127,13 @@ def require_account(db: Session, account_id: Any = None) -> Account:
 
 def current_account(db: Session) -> Account | None:
     context = request_operator(db)
+    if context is not None:
+        selected_id = setting_service.get(db, f"account.selected.{context[0]}")
+        if isinstance(selected_id, str) and selected_id.isdecimal():
+            selected = db.get(Account, int(selected_id))
+            if (selected is not None and selected.status == "active"
+                    and has_account_access(db, selected.id, context[0])):
+                return selected
     if context is not None and context[1] == "member":
         visible_ids = [row.id for row in db.query(Account.id).filter(
             Account.status == "active").all()
@@ -328,6 +335,34 @@ def require_shop(db: Session, account: Account, shop_id: Any) -> dict[str, Any]:
 
 
 # --- 连接 / 断开 ----------------------------------------------------------
+def select_account(db: Session, account_id: Any) -> dict[str, Any]:
+    """选择有权访问的已有连接；不重绑、不解密凭据、不访问上游。"""
+    account = get_account(db, account_id)
+    if account is None:
+        raise errors.not_found("账号不存在", accountId=str(account_id or ""))
+    if account.status != "active":
+        raise errors.validation("此妙手账号不可用，请先重新连接", field="accountId")
+    context = request_operator(db)
+    if context is None:
+        raise errors.AppError(errors.FORBIDDEN, "请先登录软件账号", status=403)
+    if not has_account_access(db, account.id, context[0]):
+        raise errors.AppError(errors.FORBIDDEN, "无权访问该妙手账号", status=403)
+    setting_service.put(db, f"account.selected.{context[0]}", str(account.id))
+    shops = cached_shops(account)
+    return {
+        "connected": True,
+        "accountId": str(account.id),
+        "connectionName": account.name,
+        "appIdHint": account.app_id_hint,
+        "secretHint": account.secret_hint,
+        "site": account.site,
+        "shopsCount": len(shops),
+        "autoScan": False,
+        "lastVerifiedAt": account.last_verified_at,
+        "shops": shops,
+    }
+
+
 def hint_name(app_id: str) -> str:
     tail = str(app_id or "")[-4:]
     return f"妙手{tail}" if tail else "未命名连接"
@@ -343,20 +378,6 @@ def name_taken(db: Session, name: str, *, exclude_id: int | None = None) -> bool
         if clean_text(row.name).casefold() == wanted:
             return True
     return False
-
-
-def _is_operator_binding_conflict(exc: IntegrityError) -> bool:
-    """Whether a database integrity error is the one-binding-per-user race."""
-    original = exc.orig
-    diagnostic = getattr(original, "diag", None)
-    if getattr(diagnostic, "constraint_name", None) == "uq_account_binding_operator":
-        return True
-    # SQLite does not expose constraint names on IntegrityError. Match the
-    # indexed column tuple specifically, leaving unrelated integrity failures
-    # visible to the caller.
-    message = str(original).casefold()
-    return ("unique constraint failed: account_bindings.operator_id" in message or
-            'unique constraint "uq_account_binding_operator"' in message)
 
 
 def connect(db: Session, *, app_id: str | None, app_secret: str | None,
@@ -381,14 +402,6 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
             if existing is None:
                 raise errors.not_found(
                     f"账号 {account_id} 不存在", accountId=str(account_id))
-
-            current_binding = (db.query(AccountBinding)
-                               .filter(AccountBinding.operator_id == requester.id)
-                               .one_or_none())
-            if (current_binding is not None
-                    and current_binding.account_id != existing.id):
-                raise errors.AppError(
-                    "CONFLICT", "每个学员只能绑定一个妙手账号", status=409)
 
             if has_account_access(db, existing.id, requester.id):
                 try:
@@ -464,15 +477,6 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
                     )
 
 
-    if owner_operator_id is not None:
-        current_binding = (db.query(AccountBinding)
-                           .filter(AccountBinding.operator_id == owner_operator_id)
-                           .one_or_none())
-        if current_binding is not None and (existing is None or
-                                            current_binding.account_id != existing.id):
-            raise errors.AppError(
-                "CONFLICT", "每个学员只能绑定一个妙手账号", status=409)
-
     label = clean_text(name, 60)
     if label and name_taken(db, label, exclude_id=existing.id if existing else None):
         raise errors.unprocessable(f"连接名「{label}」已被使用", field="name")
@@ -546,15 +550,29 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
 
     if owner_operator_id is not None:
         binding = (db.query(AccountBinding)
-                   .filter(AccountBinding.operator_id == owner_operator_id)
+                   .filter(AccountBinding.operator_id == owner_operator_id,
+                           AccountBinding.account_id == account.id)
                    .one_or_none())
         if binding is None:
-            db.add(AccountBinding(account_id=account.id, operator_id=owner_operator_id,
-                                  bound_by_operator_id=bound_by_operator_id,
-                                  bound_at=stamp))
-        elif binding.account_id != account.id:
-            raise errors.AppError(
-                "CONFLICT", "每个学员只能绑定一个妙手账号", status=409)
+            binding = AccountBinding(
+                account_id=account.id,
+                operator_id=owner_operator_id,
+                bound_by_operator_id=bound_by_operator_id,
+                bound_at=stamp,
+            )
+            try:
+                with db.begin_nested():
+                    db.add(binding)
+                    db.flush()
+            except IntegrityError:
+                # Concurrent requests may insert the same pair. Treat only an
+                # already-created pair as idempotent; preserve all other DB errors.
+                exists = db.query(AccountBinding.id).filter(
+                    AccountBinding.account_id == account.id,
+                    AccountBinding.operator_id == owner_operator_id,
+                ).first()
+                if exists is None:
+                    raise
 
     scan: dict[str, Any] = {}
     if auto_scan:
@@ -571,15 +589,7 @@ def connect(db: Session, *, app_id: str | None, app_secret: str | None,
         finally:
             client.close()
 
-    try:
-        db.flush()
-    except IntegrityError as exc:
-        if not _is_operator_binding_conflict(exc):
-            raise
-        db.rollback()
-        raise errors.AppError(
-            "CONFLICT", "每个学员只能绑定一个妙手账号", status=409
-        ) from None
+    db.flush()
     result = {
         "connected": True,
         "accountId": str(account.id),
@@ -652,7 +662,7 @@ def account_summaries(db: Session) -> list[dict[str, Any]]:
                        if has_account_access(db, row.id, context[0])]
         query = query.filter(Account.id.in_(visible_ids or [-1]))
     rows = query.order_by(Account.id.asc()).all()
-    member_current = current_account(db) if member is not None else None
+    selected_account = current_account(db) if context is not None else None
     summaries = []
     for row in rows:
         summary = {
@@ -662,8 +672,8 @@ def account_summaries(db: Session) -> list[dict[str, Any]]:
             "secretHint": row.secret_hint or "",
             "site": row.site or "",
             # Do not reveal which other student's connection is globally current.
-            "isDefault": (row.id == member_current.id if member is not None
-                          and member_current is not None else bool(row.is_default)),
+            "isDefault": (row.id == selected_account.id if context is not None
+                          and selected_account is not None else bool(row.is_default)),
             "status": row.status or "active",
             "lastVerifiedAt": row.last_verified_at,
         }

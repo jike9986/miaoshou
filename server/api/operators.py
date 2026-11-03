@@ -174,8 +174,15 @@ def list_operators(db: DbSession,
         rows = operator_service.list_all(db)
         miaoshou_bindings = operator_binding_service.student_miaoshou_bindings(db)
         for row in rows:
-            row["miaoshouBinding"] = miaoshou_bindings.get(row["id"])
-        current_data["miaoshouBinding"] = miaoshou_bindings.get(str(current.id))
+            bindings = miaoshou_bindings.get(row["id"], [])
+            # Keep the singular field for older clients. New clients should
+            # consume the complete array so a student with multiple accounts
+            # is not silently truncated.
+            row["miaoshouBindings"] = bindings
+            row["miaoshouBinding"] = bindings[0] if bindings else None
+        current_bindings = miaoshou_bindings.get(str(current.id), [])
+        current_data["miaoshouBindings"] = current_bindings
+        current_data["miaoshouBinding"] = current_bindings[0] if current_bindings else None
         if operator_service.is_superadmin(db, current):
             for row in rows:
                 if row["id"] == str(current.id):

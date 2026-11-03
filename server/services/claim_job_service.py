@@ -8,13 +8,13 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from core import errors
+from core.locks import hold_for_session
 from core.utils import new_batch_id, now_ts
 from db.session import SessionLocal
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.batch import Batch, BatchItem
 from models.operator import Operator
 from models.product import Product
-from models.product_claim import ProductClaim
 from services import (
     account_service,
     batch_service,
@@ -41,6 +41,16 @@ def create(db: Session, body: dict[str, Any], account_id: int, operator_id: int 
         raise errors.validation("商品重复或数量超过 5000 件", field="items")
     operator = operator_service.get(db, operator_id) if operator_id is not None else None
     _validate_member_items(db, ids, operator, account_id)
+    hold_for_session(db, [f"claim-create:{account_id}:{operator_id}"], blocking=False,
+                     busy_message="认领任务正在创建，请稍后查看批次")
+    active = db.query(Batch).filter(
+        Batch.account_id == account_id, Batch.operator_id == operator_id,
+        Batch.shop_id == str(body["shopId"]),
+        Batch.status.in_(["pending", "running"])).all()
+    for previous in active:
+        if ((previous.settings or {}).get("kind") == KIND
+                and set(ids).intersection(str(value) for value in previous.detail_ids or [])):
+            raise errors.busy("这些商品已有认领任务，请在批次中查看进度", batchId=previous.id)
     batch = Batch(id=new_batch_id("clm"), status="pending", account_id=account_id,
                   shop_id=str(body["shopId"]), detail_ids=ids, current_index=0,
                   settings={"kind": KIND, "request": body}, results=[], errors=[],
@@ -54,7 +64,7 @@ def create(db: Session, body: dict[str, Any], account_id: int, operator_id: int 
 
 def _validate_member_items(db: Session, warehouse_ids: list[str],
                            operator: Operator | None, account_id: int) -> None:
-    """Members may copy only products they claimed or automation results they own."""
+    """Members may import shared finished products or their own automation results."""
     if operator is None or operator_service.role_of(operator) != operator_service.ROLE_MEMBER:
         return
     if not account_service.has_account_access(db, account_id, operator.id):
@@ -75,13 +85,6 @@ def _validate_member_items(db: Session, warehouse_ids: list[str],
         if missing is not None:
             raise errors.not_found(f"仓库里没有商品 {missing}", id=missing)
 
-        claims = {
-            int(row[0]) for row in db.query(ProductClaim.product_id).filter(
-                ProductClaim.product_id.in_(product_ids),
-                ProductClaim.owner_operator_id == operator.id,
-                ProductClaim.status == "claimed",
-            ).all()
-        }
         owned_automation_results = {
             int(row[0]) for row in db.query(AutomationRunItem.product_id)
             .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
@@ -100,13 +103,6 @@ def _validate_member_items(db: Session, warehouse_ids: list[str],
                 raise errors.AppError(
                     errors.FORBIDDEN,
                     "无权访问其他学员的自动化处理结果", status=403,
-                    details={"warehouseId": ident},
-                )
-            if product.id not in claims:
-                raise errors.AppError(
-                    errors.FORBIDDEN,
-                    "只能将自己已认领的成品或有权访问的自动化结果导入采集箱",
-                    status=403,
                     details={"warehouseId": ident},
                 )
 
@@ -175,11 +171,19 @@ def run(batch_id: str) -> None:
     db = SessionLocal()
     try:
         batch = batch_service.get(db, batch_id)
+        if (batch.settings or {}).get("kind") != KIND:
+            return
+        # Repeated worker delivery must not copy the same batch twice.
+        started = db.query(Batch).filter(
+            Batch.id == batch_id, Batch.status == "pending").update(
+                {Batch.status: "running"}, synchronize_session=False)
+        db.commit()
+        if started != 1:
+            return
+        db.refresh(batch)
         body = dict((batch.settings or {}).get("request") or {})
         source_items = body.get("items") or []
         item_ids = [item.id for item in batch_service.items_of(db, batch_id)]
-        batch.status = "running"
-        db.commit()
         for start in range(0, len(source_items), COPY_BATCH_SIZE):
             chunk = source_items[start:start + COPY_BATCH_SIZE]
             chunk_ids = item_ids[start:start + len(chunk)]
@@ -187,11 +191,39 @@ def run(batch_id: str) -> None:
                 item = db.get(BatchItem, item_id)
                 item.status = "running"
                 item.attempt += 1
+            progress = {"stage": "copying", "offset": start,
+                        "total": len(source_items), "groupSize": len(chunk),
+                        "verified": 0, "failed": 0}
+            batch.settings = {**(batch.settings or {}), "progress": progress}
+            batch.updated_at = now_ts()
             db.commit()
             body["items"] = chunk
             body["accountId"] = str(batch.account_id)
             body["batchId"] = batch.id
             body["forceRebuild"] = True
+            body["claimOnly"] = True
+
+            def report(event: dict[str, Any], _progress: dict[str, Any] = progress) -> None:
+                # Commit progress separately without releasing publish locks.
+                # SQLite allows one writer, so retain its group boundaries.
+                if db.get_bind().dialect.name == "sqlite":
+                    return
+                _progress.update({key: value for key, value in event.items()
+                                  if key in {"stage", "verified", "failed"}})
+                progress_db = SessionLocal()
+                try:
+                    current = progress_db.get(Batch, batch_id)
+                    if current is not None and current.status == "running":
+                        current.settings = {**(current.settings or {}),
+                                            "progress": dict(_progress)}
+                        current.updated_at = now_ts()
+                        progress_db.commit()
+                except Exception:
+                    progress_db.rollback()
+                    logger.warning("Could not persist claim progress for %s", batch_id,
+                                   exc_info=True)
+                finally:
+                    progress_db.close()
             try:
                 # Recheck live membership/claims immediately before the upstream
                 # side effect; ownership or product claims may change while a job waits.
@@ -213,10 +245,11 @@ def run(batch_id: str) -> None:
                 # direct student publish requests, while still attributing the
                 # resulting ledger rows to the job owner.
                 result = publish_service.publish(
-                    db, body, _log_operator_id=batch.operator_id)
+                    db, body, _log_operator_id=batch.operator_id, _claim_progress=report)
                 failures = result.get("failures") or []
                 expected = {str(raw["warehouseId"]) for raw in chunk}
-                succeeded = set(result.get("claimedWarehouseIds") or []) & expected
+                succeeded = ({str(value) for value in result.get("claimedWarehouseIds") or []}
+                             & expected)
                 message = str(failures or "未收到认领成功回执")[:500]
                 db.commit()
             except Exception as exc:  # upstream outcome can be unknown; never retry automatically
@@ -224,6 +257,7 @@ def run(batch_id: str) -> None:
                 succeeded = set()
                 message = f"处理失败或结果未知，请先在采集箱核对：{exc}"[:500]
                 logger.warning("Claim job %s batch at %s failed", batch_id, start, exc_info=True)
+            db.expire_all()
             batch = batch_service.get(db, batch_id)
             rows = list(batch.results or [])
             for item_id in chunk_ids:
@@ -244,9 +278,33 @@ def run(batch_id: str) -> None:
             else "done"
         )
         batch.finished_at = now_ts()
+        batch.settings = {**(batch.settings or {}), "progress": {
+            **(batch.settings or {}).get("progress", {}), "stage": batch.status}}
         db.commit()
     except Exception:
         db.rollback()
         logger.exception("Claim job %s stopped unexpectedly", batch_id)
+        # Preserve confirmed results and pending work. Unknown upstream writes
+        # require manual reconciliation rather than an automatic duplicate copy.
+        try:
+            batch = batch_service.get(db, batch_id)
+            if batch.status == "running":
+                rows = list(batch.results or [])
+                for item in batch_service.items_of(db, batch_id):
+                    if item.status == "running":
+                        item.status = "failed"
+                        item.message = "任务中断，入箱结果未知，请先到采集箱核对"
+                        rows.append({"detailId": item.detail_id, "status": "failed",
+                                     "message": item.message, "at": now_ts()})
+                batch.results = rows
+                batch.current_index = len(rows)
+                batch.status = "failed"
+                batch.errors = [*(batch.errors or []), "任务中断，未处理商品仍为待处理"]
+                batch.finished_at = now_ts()
+                batch.updated_at = now_ts()
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Could not finalize interrupted claim job %s", batch_id)
     finally:
         db.close()

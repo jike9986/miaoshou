@@ -209,6 +209,8 @@ def test_sqlite_init_keeps_create_patch_and_seed_path(monkeypatch) -> None:
                         lambda: calls.append("product_key_scope"))
     monkeypatch.setattr(session_module, "_ensure_sqlite_publish_log_ownership",
                         lambda: calls.append("publish_log_ownership"))
+    monkeypatch.setattr(session_module, "_ensure_sqlite_multi_account_bindings",
+                        lambda: calls.append("multi_account_bindings"))
     monkeypatch.setattr(session_module, "_backfill_sqlite_account_bindings",
                         lambda: calls.append("backfill"))
     monkeypatch.setattr(session_module, "_ensure_sqlite_account_app_key_index",
@@ -220,6 +222,7 @@ def test_sqlite_init_keeps_create_patch_and_seed_path(monkeypatch) -> None:
     assert calls == ["create", "patch", "username_index", "email_index", "schedule_indexes",
                      "product_key_scope",
                      "publish_log_ownership",
+                     "multi_account_bindings",
                      "backfill", "index", "seed"]
 
 
@@ -547,13 +550,17 @@ def test_sqlite_init_backfills_legacy_account_bindings_idempotently(
                 "SELECT account_id, operator_id, bound_by_operator_id, bound_at "
                 "FROM account_bindings ORDER BY operator_id"
             )).all()
-        assert rows == [(1, 10, 20, 123.5), (3, 20, None, 0.0)]
+        assert rows == [
+            (1, 10, 20, 123.5),
+            (2, 10, 20, 456.5),
+            (3, 20, None, 0.0),
+        ]
 
         # A second desktop launch must not duplicate or change existing bindings.
         session_module.init_db()
         with legacy_engine.connect() as connection:
             assert connection.execute(text(
                 "SELECT COUNT(*) FROM account_bindings"
-            )).scalar_one() == 2
+            )).scalar_one() == 3
     finally:
         legacy_engine.dispose()

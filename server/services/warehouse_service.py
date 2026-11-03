@@ -14,7 +14,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -33,6 +33,7 @@ from core.utils import (
 )
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
+from models.batch import Batch
 from models.category import Category
 from models.group import Group
 from models.image_job import ImageJob
@@ -100,6 +101,7 @@ def serialize(product: Product, *, account_name: str = "",
               operator_id: int | None = None,
               member_view: bool = False,
               account_claim: dict[str, Any] | None = None,
+              collected: dict[str, Any] | None = None,
               publish_log: PublishLog | None = None,
               published_shop_ids: list[str] | None = None,
               has_successful_publish: bool = False) -> dict[str, Any]:
@@ -154,7 +156,8 @@ def serialize(product: Product, *, account_name: str = "",
         "claimStatus": ("claimed" if account_claim else None) if account_claim is not None else (
             claim.status if claim else None),
         "legacyClaimed": bool(product.claimed),
-        "collected": product.collected if isinstance(product.collected, dict) else {},
+        "collected": (collected if collected is not None else
+                      (product.collected if isinstance(product.collected, dict) else {})),
         "salesLast30": int(product.sales_last_30 or 0),
         "stock": int(product.stock or 0),
         "status": (
@@ -399,13 +402,88 @@ def _scope_member_products(db: Session, query, operator_id: int | None):
     return query
 
 
+def _claim_account_keys(db: Session, operator_id: int | None,
+                        claim_account_id: Any = None) -> list[str] | None:
+    member_view = _is_member(db, operator_id)
+    if claim_account_id not in (None, ""):
+        text = str(claim_account_id)
+        if not text.isdigit():
+            raise errors.validation("claimAccountId 须为数字", field="claimAccountId")
+        account = db.get(Account, int(text))
+        if account is None:
+            raise errors.not_found("妙手账号不存在", accountId=text)
+        _assert_member_account_access(db, account.id, operator_id)
+        if member_view:
+            return [f"operator:{operator_id}:account:{account.id}"]
+        keys = [f"account:{account.id}"]
+        if (account.name and
+                db.query(Account.id).filter(Account.name == account.name).count() == 1):
+            keys.append(account.name)
+        return keys
+    if member_view:
+        owned_ids = _owned_account_ids(db, int(operator_id))
+        # Accounts with no bindings is a legacy/unconnected context. Keep the
+        # per-student ProductClaim state visible there; once an account is
+        # selected, claim state is account-specific and comes only from a
+        # confirmed collect-box import.
+        if not owned_ids:
+            return None
+        return [f"operator:{operator_id}:account:{ident}" for ident in owned_ids]
+    return None
+
+
+def _claim_expression(keys: list[str] | None):
+    if keys is None:
+        return None
+    return or_(*(and_(Product.collected[key]["detailId"].as_string().is_not(None),
+                      Product.collected[key]["detailId"].as_string() != "")
+                 for key in keys)) if keys else false()
+
+
+def _legacy_member_claim_expression(db: Session, operator_id: int):
+    """Preserve legacy claims only for products not tied to an inaccessible account."""
+    return db.query(ProductClaim.id).filter(
+        ProductClaim.product_id == Product.id,
+        ProductClaim.owner_operator_id == operator_id,
+        Product.account_id.is_(None),
+    ).exists()
+
+
+def _claim_record(product: Product, keys: list[str] | None) -> dict[str, Any] | None:
+    if keys is None:
+        return None
+    collected = product.collected if isinstance(product.collected, dict) else {}
+    return next((value for key in keys if isinstance(value := collected.get(key), dict)
+                 and value.get("detailId") not in (None, "")), {})
+
+
+def _visible_collected(product: Product, keys: list[str] | None) -> dict[str, Any]:
+    collected = product.collected if isinstance(product.collected, dict) else {}
+    if keys is None:
+        return collected
+    return {key: collected[key] for key in keys if key in collected}
+
+
+def _formal_publish_query(db: Session):
+    # 认领日志可能由旧版写成 success，但它不是正式上架回执。
+    marker = PublishLog.detail["claimOnly"].as_boolean()
+    legacy_claim = db.query(Batch.id).filter(
+        Batch.id == PublishLog.batch_id,
+        Batch.settings["kind"].as_string() == "warehouse_claim",
+    ).exists()
+    return db.query(PublishLog).filter(~or_(
+        marker.is_(True), and_(marker.is_(None), legacy_claim)))
+
+
 def _latest_operator_publish_logs(db: Session, operator_id: int | None,
-                                  product_ids: list[int]
+                                  product_ids: list[int],
+                                  account_ids: list[int] | None = None
                                   ) -> dict[int, PublishLog]:
     if operator_id is None or not product_ids:
         return {}
-    owned_accounts = _owned_account_ids(db, operator_id)
-    rows = (db.query(PublishLog)
+    owned_accounts = (_owned_account_ids(db, operator_id)
+                      if account_ids is None else account_ids)
+    rows = (_formal_publish_query(db)
             .filter(PublishLog.operator_id == operator_id,
                     PublishLog.account_id.in_(owned_accounts),
                     PublishLog.product_id.in_(product_ids))
@@ -418,12 +496,14 @@ def _latest_operator_publish_logs(db: Session, operator_id: int | None,
 
 
 def _successful_operator_publish_shops(
-    db: Session, operator_id: int | None, product_ids: list[int]
+    db: Session, operator_id: int | None, product_ids: list[int],
+    account_ids: list[int] | None = None,
 ) -> dict[int, list[str]]:
     if operator_id is None or not product_ids:
         return {}
-    owned_accounts = _owned_account_ids(db, operator_id)
-    rows = (db.query(PublishLog.product_id, PublishLog.shop_id)
+    owned_accounts = (_owned_account_ids(db, operator_id)
+                      if account_ids is None else account_ids)
+    rows = (_formal_publish_query(db).with_entities(PublishLog.product_id, PublishLog.shop_id)
             .filter(PublishLog.operator_id == operator_id,
                     PublishLog.account_id.in_(owned_accounts),
                     PublishLog.product_id.in_(product_ids),
@@ -507,31 +587,10 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                                  reviewed_revision.is_(None),
                                  reviewed_revision != Product.revision))
     member_view = _is_member(db, operator_id)
-    account_claim_keys: list[str] | None = None
-    if claim_account_id not in (None, "") and operator_id is not None:
-        text = str(claim_account_id)
-        if not text.isdigit():
-            raise errors.validation("claimAccountId 须为数字", field="claimAccountId")
-        account = db.query(Account).filter(Account.id == int(text)).one_or_none()
-        if account is None:
-            raise errors.not_found("妙手账号不存在", accountId=text)
-        _assert_member_account_access(db, account.id, operator_id)
-        account_claim_keys = [f"account:{account.id}"]
-        if (account.name and
-                db.query(Account.id).filter(Account.name == account.name).count() == 1):
-            account_claim_keys.append(account.name)
-    account_claim_expr = (or_(*(Product.collected[key].as_string().is_not(None)
-                                for key in account_claim_keys))
-                          if account_claim_keys else None)
-    # `Product.collected` records whether a Miaoshou account collected this
-    # product. A Miaoshou account can be bound to multiple software users, so
-    # it cannot represent an individual member's warehouse claim state.
-    # Keep validating claim_account_id above, but use the member's ProductClaim
-    # records for their status, filters, and counts. Teacher views retain the
-    # account-level collected status below.
-    if member_view:
-        account_claim_expr = None
-        account_claim_keys = None
+    account_claim_keys = _claim_account_keys(db, operator_id, claim_account_id)
+    account_claim_expr = _claim_expression(account_claim_keys)
+    owned_accounts = (([int(claim_account_id)] if claim_account_id not in (None, "") else
+                       _owned_account_ids(db, int(operator_id))) if member_view else [])
     if member_view and account_id not in (None, ""):
         text = str(account_id)
         if not text.isdigit():
@@ -560,45 +619,34 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         if text.isdigit():
             query = query.filter(Product.account_id == int(text))
     if status:
-        owned_accounts = _owned_account_ids(db, int(operator_id)) if member_view else []
         if member_view and status == "published":
-            own_success = db.query(PublishLog.id).filter(
+            own_success = _formal_publish_query(db).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
                 PublishLog.account_id.in_(owned_accounts),
                 PublishLog.status == "success",
             ).exists()
             query = query.filter(own_success)
-        elif account_claim_expr is not None and status == "claimed":
+        elif not member_view and account_claim_expr is not None and status == "claimed":
             query = query.filter(account_claim_expr)
-        elif account_claim_expr is not None and status == "ready":
+        elif not member_view and account_claim_expr is not None and status == "ready":
             query = query.filter(~account_claim_expr, Product.status != "archived")
         elif member_view and status == "claimed":
-            own_claim = db.query(ProductClaim.id).filter(
-                ProductClaim.product_id == Product.id,
-                ProductClaim.owner_operator_id == operator_id,
-                ProductClaim.status == "claimed",
-            ).exists()
-            own_success = db.query(PublishLog.id).filter(
+            own_success = _formal_publish_query(db).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
                 PublishLog.account_id.in_(owned_accounts),
                 PublishLog.status == "success",
             ).exists()
-            query = query.filter(own_claim, ~own_success)
+            query = query.filter(account_claim_expr, ~own_success)
         elif member_view and status == "ready":
-            own_success = db.query(PublishLog.id).filter(
+            own_success = _formal_publish_query(db).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
                 PublishLog.account_id.in_(owned_accounts),
                 PublishLog.status == "success",
             ).exists()
-            own_claim = db.query(ProductClaim.id).filter(
-                ProductClaim.product_id == Product.id,
-                ProductClaim.owner_operator_id == operator_id,
-                ProductClaim.status == "claimed",
-            ).exists()
-            query = query.filter(~own_success, ~own_claim,
+            query = query.filter(~own_success, ~account_claim_expr,
                                  Product.status != "archived")
         else:
             query = query.filter(Product.status == status)
@@ -608,10 +656,11 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         elif operator_id is None:
             query = query.filter(Product.claimed.is_(bool(claimed)))
         else:
-            owned_claim = db.query(ProductClaim.id).filter(
-                ProductClaim.product_id == Product.id,
-                ProductClaim.owner_operator_id == operator_id,
-            ).exists()
+            owned_claim = (_legacy_member_claim_expression(db, operator_id)
+                           if member_view else db.query(ProductClaim.id).filter(
+                               ProductClaim.product_id == Product.id,
+                               ProductClaim.owner_operator_id == operator_id,
+                           ).exists())
             query = query.filter(owned_claim if claimed else ~owned_claim)
     needle = str(q or "").strip()
     if needle:
@@ -627,22 +676,25 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
     operators = operator_names(db)
     claims = {}
     if operator_id is not None and rows:
-        claims = {row.product_id: row for row in db.query(ProductClaim).filter(
+        claim_query = db.query(ProductClaim).filter(
             ProductClaim.owner_operator_id == operator_id,
             ProductClaim.product_id.in_([item.id for item in rows]),
-        ).all()}
+        )
+        if member_view and account_claim_keys is None:
+            legacy_product_ids = [item.id for item in rows if item.account_id is None]
+            claim_query = claim_query.filter(
+                ProductClaim.product_id.in_(legacy_product_ids or [-1]))
+        claims = {row.product_id: row for row in claim_query.all()}
     publish_logs = (_latest_operator_publish_logs(
-        db, operator_id, [item.id for item in rows]) if member_view else {})
+        db, operator_id, [item.id for item in rows], owned_accounts) if member_view else {})
     successful_publish_shops = (_successful_operator_publish_shops(
-        db, operator_id, [item.id for item in rows]) if member_view else {})
+        db, operator_id, [item.id for item in rows], owned_accounts) if member_view else {})
     items = [serialize(row, account_name=names.get(row.account_id or 0, ""),
                        operator_name=operators.get(row.operator_id or 0, ""),
                        claim=claims.get(row.id), operator_id=operator_id,
                        member_view=member_view, publish_log=publish_logs.get(row.id),
-                       account_claim=(next((row.collected.get(key) for key in account_claim_keys
-                                            if isinstance(row.collected, dict)
-                                            and row.collected.get(key)), {})
-                                      if account_claim_keys is not None else None),
+                       account_claim=_claim_record(row, account_claim_keys),
+                       collected=_visible_collected(row, account_claim_keys),
                        published_shop_ids=successful_publish_shops.get(row.id, []),
                        has_successful_publish=row.id in successful_publish_shops)
              for row in rows]
@@ -662,7 +714,8 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         "hasMore": page * page_size < total,
         "facets": facets(db, operator_id=operator_id),
         "stats": stats(db, account_id=stats_account_id, operator_id=operator_id,
-                       account_claim_expr=account_claim_expr),
+                       account_claim_expr=account_claim_expr,
+                       claim_account_id=claim_account_id),
     }
 
 
@@ -896,7 +949,8 @@ def facets(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
 
 
 def stats(db: Session, *, account_id: int | None = None,
-          operator_id: int | None = None, account_claim_expr: Any = None) -> dict[str, Any]:
+          operator_id: int | None = None, account_claim_expr: Any = None,
+          claim_account_id: Any = None) -> dict[str, Any]:
     """仓库统计。传 account_id 时只数当前账号的商品——
     多账号共用一台机器时，「已认领 355 件」是全账号加总，用户分不清哪些是自己的。"""
     base = active_query(db).filter(Product.automation_result.is_(False))
@@ -905,6 +959,9 @@ def stats(db: Session, *, account_id: int | None = None,
         if account_id is not None:
             _assert_member_account_access(db, account_id, operator_id)
         base = _scope_member_products(db, base, operator_id)
+        if account_claim_expr is None:
+            account_claim_expr = _claim_expression(
+                _claim_account_keys(db, operator_id, claim_account_id))
     # 对学员来说 account_id 只是当前发布账号的权限校验；共享成品的
     # 数量、容量和可认领目录不应因来源账号不同而被切掉。
     if account_id is not None and not member_view:
@@ -915,16 +972,19 @@ def stats(db: Session, *, account_id: int | None = None,
         "totalClaimed": (
             base.filter(account_claim_expr).count() if account_claim_expr is not None else
             base.filter(Product.claimed.is_(True)).count() if operator_id is None else
-            base.filter(db.query(ProductClaim.id).filter(
-                ProductClaim.product_id == Product.id,
-                ProductClaim.owner_operator_id == operator_id,
-            ).exists()).count()
+            base.filter(_legacy_member_claim_expression(db, operator_id)
+                        if member_view else db.query(ProductClaim.id).filter(
+                            ProductClaim.product_id == Product.id,
+                            ProductClaim.owner_operator_id == operator_id,
+                        ).exists()).count()
         ),
         "totalPublished": (
-            base.filter(db.query(PublishLog.id).filter(
+            base.filter(_formal_publish_query(db).filter(
                 PublishLog.product_id == Product.id,
                 PublishLog.operator_id == operator_id,
-                PublishLog.account_id.in_(_owned_account_ids(db, operator_id)),
+                PublishLog.account_id.in_([int(claim_account_id)]
+                    if claim_account_id not in (None, "") else
+                    _owned_account_ids(db, operator_id)),
                 PublishLog.status == "success",
             ).exists()).count() if member_view else
             base.filter(Product.status == "published").count()
@@ -1005,34 +1065,42 @@ def admit_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
 
 # --- 详情 -----------------------------------------------------------------
 def detail(db: Session, ident: Any, *, include_payload: bool = False,
-           operator_id: int | None = None) -> dict[str, Any]:
+           operator_id: int | None = None, claim_account_id: Any = None) -> dict[str, Any]:
     product = resolve_product(db, ident)
     _assert_member_product_access(db, product, operator_id)
     names = account_names(db)
     operators = operator_names(db)
+    member_view = _is_member(db, operator_id)
+    account_claim_keys = _claim_account_keys(db, operator_id, claim_account_id)
+    owned_accounts = (([int(claim_account_id)] if claim_account_id not in (None, "") else
+                       _owned_account_ids(db, int(operator_id))) if member_view else [])
     claim = None
-    if operator_id is not None:
-        claim = db.query(ProductClaim).filter(
+    if operator_id is not None and (not member_view or account_claim_keys is None):
+        claim_query = db.query(ProductClaim).filter(
             ProductClaim.product_id == product.id,
             ProductClaim.owner_operator_id == operator_id,
-        ).one_or_none()
-    member_view = _is_member(db, operator_id)
+        )
+        if member_view and account_claim_keys is None and product.account_id is not None:
+            claim_query = None
+        claim = claim_query.one_or_none() if claim_query is not None else None
     own_publish_log = (_latest_operator_publish_logs(
-        db, operator_id, [product.id]).get(product.id) if member_view else None)
+        db, operator_id, [product.id], owned_accounts).get(product.id) if member_view else None)
     successful_publish_shops = (_successful_operator_publish_shops(
-        db, operator_id, [product.id]) if member_view else {})
+        db, operator_id, [product.id], owned_accounts) if member_view else {})
     body = serialize(product, account_name=names.get(product.account_id or 0, ""),
                      include_payload=include_payload,
                      operator_name=operators.get(product.operator_id or 0, ""),
                      claim=claim, operator_id=operator_id,
                      member_view=member_view, publish_log=own_publish_log,
+                      account_claim=_claim_record(product, account_claim_keys),
+                      collected=_visible_collected(product, account_claim_keys),
                      published_shop_ids=successful_publish_shops.get(product.id, []),
                      has_successful_publish=product.id in successful_publish_shops)
-    history_query = db.query(PublishLog).filter(PublishLog.product_id == product.id)
+    history_query = _formal_publish_query(db).filter(PublishLog.product_id == product.id)
     if member_view:
         history_query = history_query.filter(
             PublishLog.operator_id == operator_id,
-            PublishLog.account_id.in_(_owned_account_ids(db, operator_id)),
+            PublishLog.account_id.in_(owned_accounts),
         )
     history = history_query.order_by(
         PublishLog.requested_at.desc()).limit(20).all()

@@ -618,6 +618,24 @@ def _acquire_credential_initialization_lock(db: Any) -> None:
         raise RuntimeError(f"Unsupported database for credential initialization: {dialect}")
 
 
+class SelectAccountRequest(BaseModel):
+    accountId: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/select", summary="切换已有妙手账号",
+             dependencies=[require_permission("account.bind")])
+def select_account(payload: SelectAccountRequest, db: DbSession,
+                   operator: OperatorDep) -> dict[str, Any]:
+    with audit_service.guard(db, operator=operator, action="auth.select",
+                             target_kind="account", target_id=payload.accountId):
+        result = account_service.select_account(db, payload.accountId)
+    db.commit()
+    audit_service.record(db, operator=operator, action="auth.select",
+                         target_kind="account", target_id=payload.accountId)
+    db.commit()
+    return result
+
+
 @router.post("/connect", summary="连接妙手账号",
              dependencies=[require_permission("account.bind")])
 def connect(payload: ConnectRequest, db: DbSession,
@@ -641,9 +659,8 @@ def connect(payload: ConnectRequest, db: DbSession,
             owner = operator_service.get(db, payload.studentOperatorId)
             if operator_service.role_of(owner) != operator_service.ROLE_MEMBER:
                 raise errors.validation("妙手账号只能绑定到学员账号", field="studentOperatorId")
-    # 一个妙手账号可以被多个学员绑定；每个学员只能有一条绑定。
-    # 具体的单绑定约束在 account_service.connect 内再次校验，避免只靠
-    # 请求参数检查造成并发下的重复绑定。
+    # 一个妙手账号可以由多个学员共享；一个学员也可以绑定多个妙手账号。
+    # 数据库只限制同一用户与同一账号之间不能重复创建绑定。
     require_writable(db)
     with audit_service.guard(db, operator=operator, action="auth.connect",
                              target_kind="account",
@@ -659,6 +676,8 @@ def connect(payload: ConnectRequest, db: DbSession,
             owner_operator_id=owner.id,
             bound_by_operator_id=operator.id,
         )
+        if result.get("accountId"):
+            account_service.select_account(db, result["accountId"])
     db.commit()
     account = result.get("account") or {}
     audit_service.record(db, operator=operator, action="auth.connect",

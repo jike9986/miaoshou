@@ -49,9 +49,21 @@ def bindings_setup(client):
         )
         db.add(account)
         db.flush()
+        second_account = Account(
+            name=f"shared-second-{suffix}",
+            app_key=f"second-private-app-key-{suffix}",
+            app_secret_enc=account_service.crypto.encrypt(f"second-private-secret-{suffix}"),
+            secret_hint=f"…{suffix[:4]}",
+            status="invalid",
+            shops="[]",
+        )
+        db.add(second_account)
+        db.flush()
         db.add_all([
             AccountBinding(account_id=account.id, operator_id=first.id,
                            bound_by_operator_id=teacher.id, bound_at=1_800_000_010.0),
+            AccountBinding(account_id=second_account.id, operator_id=first.id,
+                           bound_by_operator_id=teacher.id, bound_at=1_800_000_015.0),
             AccountBinding(account_id=account.id, operator_id=second.id,
                            bound_by_operator_id=teacher.id, bound_at=1_800_000_020.0),
         ])
@@ -67,8 +79,12 @@ def bindings_setup(client):
             "unbound_id": str(unbound.id),
             "app_key": account.app_key,
             "secret": f"private-secret-{suffix}",
+            "second_app_key": second_account.app_key,
+            "second_secret": f"second-private-secret-{suffix}",
             "app_id_hint": f"…{account.app_key[-4:]}",
             "secret_hint": f"…{suffix[-4:]}",
+            "second_app_id_hint": f"…{second_account.app_key[-4:]}",
+            "second_secret_hint": f"…{suffix[:4]}",
         }
     finally:
         db.close()
@@ -87,22 +103,30 @@ def test_teacher_can_see_shared_bindings_and_unbound_students(client, bindings_s
     body = response.json()
     by_id = {row["id"]: row for row in body["operators"]}
 
-    first = by_id[bindings_setup["first_id"]]["miaoshouBinding"]
+    first = by_id[bindings_setup["first_id"]]["miaoshouBindings"]
     second = by_id[bindings_setup["second_id"]]["miaoshouBinding"]
-    unbound = by_id[bindings_setup["unbound_id"]]["miaoshouBinding"]
-    for row in (first, second):
+    unbound = by_id[bindings_setup["unbound_id"]]["miaoshouBindings"]
+    assert len(first) == 2
+    assert first[0]["appIdHint"] == bindings_setup["app_id_hint"]
+    assert first[0]["secretHint"] == bindings_setup["secret_hint"]
+    assert first[0]["status"] == "active"
+    assert first[0]["boundAt"] == 1_800_000_010.0
+    assert first[1]["appIdHint"] == bindings_setup["second_app_id_hint"]
+    assert first[1]["secretHint"] == bindings_setup["second_secret_hint"]
+    assert first[1]["status"] == "invalid"
+    assert first[1]["boundAt"] == 1_800_000_015.0
+    for row in (second,):
         assert row["linked"] is True
         assert row["appIdHint"] == bindings_setup["app_id_hint"]
         assert row["secretHint"] == bindings_setup["secret_hint"]
         assert row["status"] == "active"
-    assert first["boundAt"] == 1_800_000_010.0
-    assert second["boundAt"] == 1_800_000_020.0
-
-    assert unbound is None
+    assert unbound == []
 
     serialized = response.text
     assert bindings_setup["app_key"] not in serialized
     assert bindings_setup["secret"] not in serialized
+    assert bindings_setup["second_app_key"] not in serialized
+    assert bindings_setup["second_secret"] not in serialized
     assert "appSecretEnc" not in serialized
 
 

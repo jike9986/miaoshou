@@ -103,6 +103,13 @@ export const queryKeys = {
     detail: (accountId: string | null | undefined, id: string) =>
       ["batch", "detail", accountId ?? "current", id] as const,
   },
+  claimJobs: {
+    all: ["claim-jobs"] as const,
+    list: (operatorId: string | null, accountId: string | null) =>
+      ["claim-jobs", operatorId ?? "local", accountId, "list"] as const,
+    detail: (operatorId: string | null, accountId: string | null, id: string) =>
+      ["claim-jobs", operatorId ?? "local", accountId, "detail", id] as const,
+  },
   automationRuns: {
     all: ["automation-runs"] as const,
     latest: (accountId: string | null, shopId: string | null) =>
