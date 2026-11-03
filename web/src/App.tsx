@@ -29,6 +29,8 @@ import { SettingsPage } from "@/features/settings/SettingsPage";
 import { useAuthStatus, useVersion } from "@/lib/queries";
 import { useOperatorSession } from "@/features/auth/guard";
 import { hasRuntimeToken } from "@/lib/bootstrap";
+import { resolveApiBase } from "@/lib/api";
+import { shouldShowLocalTokenNotice } from "@/lib/apiTarget";
 import { clearOperator, operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
 import { clearOperatorQueryClients } from "@/lib/operatorQueryClientRegistry.mjs";
 import { resetOperatorSessionUiState } from "@/features/stores";
@@ -74,7 +76,7 @@ function Shell() {
   // 单机模式：不再等「有人登录」才查状态 —— 本机令牌就能查，否则未登录时
   // 侧栏永远显示「妙手未连接」、版本检查也不跑。
   const { data: status } = useAuthStatus(true);
-  const versionQuery = useVersion(true, hasRuntimeToken());
+  const versionQuery = useVersion(true, hasRuntimeToken() || Boolean(operatorIdentity?.token));
   const notifiedVersion = useRef<string | null>(null);
 
   useEffect(() => {
@@ -116,7 +118,9 @@ function Shell() {
     <>
       <TokenNotice />
       <AppShell
-        nav={NAV}
+        nav={operatorIdentity?.role === "member"
+          ? NAV.map((group) => ({ ...group, items: group.items.filter((item) => item.to !== "/automation") }))
+          : NAV}
         brand={{ icon: <BrandMark className="size-4" />, name: "奥皇上品" }}
         account={SHOW_ACCOUNT_UI ? {
           name: operatorLabel,
@@ -138,6 +142,17 @@ function RequireSoftwareLogin() {
   const location = useLocation();
   if (!SHOW_ACCOUNT_UI || identity) return <Outlet />;
   return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+}
+
+function WorkspaceHome() {
+  const identity = useOperatorIdentity();
+  return <Navigate to={identity?.role === "member" ? "/warehouse" : "/automation"} replace />;
+}
+
+/** Match the existing server processing permissions before mounting business queries. */
+function RequireAutomationAccess() {
+  const identity = useOperatorIdentity();
+  return identity?.role === "member" ? <Navigate to="/warehouse" replace /> : <Outlet />;
 }
 
 /** Validate the persisted token before rendering routes that can issue business requests. */
@@ -193,9 +208,14 @@ function NotFoundPage() {
   );
 }
 
-/** 浏览器直开（无 preload 注入 token）时的兜底提示，不是错误，只是说明 */
+/** 本机初始化缺少令牌时提示；远端服务使用软件账号会话。 */
 function TokenNotice() {
-  if (hasRuntimeToken()) return null;
+  const identity = useOperatorIdentity();
+  if (!shouldShowLocalTokenNotice({
+    apiBase: resolveApiBase(),
+    hasRuntimeToken: hasRuntimeToken(),
+    hasSoftwareSession: Boolean(identity?.token),
+  })) return null;
   return (
     <div className="fixed inset-x-0 top-0 z-[70] border-b border-warning-600/20 bg-warning-50 px-6 py-2 text-center text-[13px] leading-5 text-warning-700">
       未拿到本地访问令牌：桌面端由 Electron 注入；浏览器预览请确认后端已在 8812 端口启动后刷新页面。
@@ -213,10 +233,12 @@ export default function App() {
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route path="/" element={<Shell />}>
-              <Route index element={<Navigate to="/automation" replace />} />
+              <Route index element={<WorkspaceHome />} />
               <Route element={<RequireSoftwareLogin />}>
                 <Route path="unlock" element={<UnlockPage />} />
-                <Route path="automation" element={<AutomationPage />} />
+                <Route element={<RequireAutomationAccess />}>
+                  <Route path="automation" element={<AutomationPage />} />
+                </Route>
                 <Route path="warehouse" element={<WarehousePage />} />
                 <Route path="schedules" element={<SchedulesPage />} />
                 <Route path="words" element={<WordsPage />} />

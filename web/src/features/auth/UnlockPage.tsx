@@ -10,7 +10,7 @@ import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
-import { useAuthStatus, useConnectAccount, useOperators, useShops, useSoftwareLogin, useSoftwareRegister, useRequestRegistrationCode, useChangeSoftwarePassword, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset, useWorkflowDefaults } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useOperators, useShops, useSoftwareLogin, useEmailCodeLogin, useRequestEmailCodeLogin, useSoftwareRegister, useRequestRegistrationCode, useCompletePasswordSetup, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset, useWorkflowDefaults } from "@/lib/queries";
 import { setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
 import { normalizeEmailForVerification } from "@/features/auth/emailBinding.mjs";
@@ -46,10 +46,12 @@ import { PageContent, PageHeader } from "@/components/layout";
 export interface AccountSwitcherProps {
   /** 紧凑模式：用在页面工具条里（无外框、字号更小） */
   compact?: boolean;
+  /** 锁定账号与店铺，避免自动化运行时把任务归属切换到其他账号 */
+  disabled?: boolean;
   className?: string;
 }
 
-export function AccountSwitcher({ compact = false, className }: AccountSwitcherProps = {}) {
+export function AccountSwitcher({ compact = false, disabled = false, className }: AccountSwitcherProps = {}) {
   // 单机模式：本机令牌就能读连接状态，不必先登录软件账号。
   const { data: status } = useAuthStatus(true);
   const connect = useConnectAccount();
@@ -65,6 +67,7 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
 
   const { data: shopsData } = useShops(status?.accountId, { enabled: connected });
   const shops = shopsData?.shops ?? [];
+  const switchDisabled = disabled || connect.isPending;
 
   // 首次拿到店铺列表时默认选中第一家有货权的店铺
   useEffect(() => {
@@ -97,6 +100,7 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
         <DropdownSelect
           size="sm"
           className={compact ? "w-[104px]" : "w-[148px]"}
+          disabled={switchDisabled}
           value={status?.accountId ?? null}
           onChange={(accountId) => {
             if (!accountId || accountId === status?.accountId) return;
@@ -122,7 +126,7 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
               {
                 onSuccess: () =>
                   toast.success(`已切换到「${target?.name ?? accountId}」`, {
-                    description: "采集箱与店铺已按新账号刷新",
+                    description: "正在核对新账号的商品与店铺数据",
                   }),
                 onError: (error) =>
                   toast.error("切换账号失败", { description: apiErrorMessage(error) }),
@@ -155,6 +159,7 @@ export function AccountSwitcher({ compact = false, className }: AccountSwitcherP
       <DropdownSelect
         size="sm"
         className={compact ? "w-[148px]" : "w-[188px]"}
+        disabled={switchDisabled}
         value={currentShopId}
         onChange={(shopId) => {
           setCurrentShopId(shopId);
@@ -217,8 +222,9 @@ export function UnlockPage() {
   const accounts = useMemo(() => status?.accounts ?? [], [status?.accounts]);
   const redirectTo = useMemo(() => {
     const state = location.state as { from?: string } | null;
-    return state?.from && state.from !== "/unlock" ? state.from : "/automation";
-  }, [location.state]);
+    const fallback = role === "member" ? "/warehouse" : "/automation";
+    return state?.from && state.from !== "/unlock" ? state.from : fallback;
+  }, [location.state, role]);
 
   // 已连接时自动进入目标页。
   // 但从侧栏主动点「连接妙手」进来（没有 from）时不能弹回 —— 那样用户永远
@@ -519,9 +525,10 @@ export function UnlockPage() {
   );
 }
 
-export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = false, allowRegister = false, showBack = true }: {
+export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowInitialize = false, allowRegister = false, showBack = true }: {
   redirectTo: string;
   onBack: () => void;
+  scrollToTop?: () => void;
   allowInitialize?: boolean;
   allowRegister?: boolean;
   showBack?: boolean;
@@ -533,14 +540,21 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
   const identity = useOperatorIdentity();
   const queryClient = useQueryClient();
   const login = useSoftwareLogin();
+  const emailCodeLogin = useEmailCodeLogin();
+  const requestEmailCodeLogin = useRequestEmailCodeLogin();
   const register = useSoftwareRegister();
   const requestRegistrationCode = useRequestRegistrationCode();
   const initialize = useInitializeSoftwareCredentials();
-  const change = useChangeSoftwarePassword();
+  const completePasswordSetup = useCompletePasswordSetup();
   const requestReset = useRequestPasswordReset();
   const confirmReset = useConfirmPasswordReset();
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [loginMethod, setLoginMethod] = useState<"password" | "email-code">("password");
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginCode, setLoginCode] = useState("");
+  const [loginCodeSent, setLoginCodeSent] = useState(false);
+  const loginCodeInputRef = useRef<HTMLInputElement>(null);
   const identifierInputRef = useRef<HTMLInputElement>(null);
   const passwordInputRef = useRef<HTMLInputElement>(null);
   const [loginFieldErrors, setLoginFieldErrors] = useState<{
@@ -552,9 +566,9 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
   const [registerPassword, setRegisterPassword] = useState("");
   const [registerCode, setRegisterCode] = useState("");
   const [registerCodeSent, setRegisterCodeSent] = useState(false);
-  const [currentPassword, setCurrentPassword] = useState("");
+  const registerCodeInputRef = useRef<HTMLInputElement>(null);
   const [newPassword, setNewPassword] = useState("");
-  const [mustChange, setMustChange] = useState(identity?.mustChangePassword ?? false);
+  const mustChange = identity?.mustChangePassword ?? false;
   const [error, setError] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
   const [registering, setRegistering] = useState(false);
@@ -563,11 +577,17 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
   const [resetCode, setResetCode] = useState("");
   const [resetPassword, setResetPassword] = useState("");
   const [resetSent, setResetSent] = useState(false);
+  const resetCodeInputRef = useRef<HTMLInputElement>(null);
   const registerCooldown = useEmailCodeCooldown();
   const resetCooldown = useEmailCodeCooldown();
+  const loginCooldown = useEmailCodeCooldown();
   const [bootstrapUsername, setBootstrapUsername] = useState("");
   const [bootstrapPassword, setBootstrapPassword] = useState("");
   const navigate = useNavigate();
+
+  useEffect(() => {
+    scrollToTop?.();
+  }, [initializing, loginCodeSent, loginMethod, mustChange, registering, registerCodeSent, resetting, resetSent, scrollToTop]);
 
   const submitLogin = () => {
     if (login.isPending) return;
@@ -582,9 +602,56 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
     login.mutate({ identifier: identifier.trim(), password }, {
       onSuccess: (result) => {
         setOperator({ token: result.token, id: result.operator.id, name: result.operator.name, role: result.operator.role, mustChangePassword: result.mustChangePassword });
-        setMustChange(result.mustChangePassword);
-        setCurrentPassword(password);
         setPassword("");
+        if (!result.mustChangePassword) {
+          void queryClient.invalidateQueries();
+          navigate(redirectTo, { replace: true });
+        }
+      },
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
+  const submitEmailCodeRequest = () => {
+    if (requestEmailCodeLogin.isPending || loginCooldown.remainingSeconds > 0) return;
+    setError(null);
+    const email = normalizeEmailForVerification(loginEmail);
+    if (!email) {
+      setError("请输入有效的邮箱地址");
+      return;
+    }
+    requestEmailCodeLogin.mutate({ email }, {
+      onSuccess: () => {
+        setLoginCodeSent(true);
+        setLoginCode("");
+        loginCooldown.startCooldown(EMAIL_CODE_RESEND_COOLDOWN_SECONDS);
+        window.requestAnimationFrame(() => loginCodeInputRef.current?.focus());
+      },
+      onError: (reason) => {
+        const retryAfter = retryAfterSecondsFromError(reason);
+        if (retryAfter > 0) loginCooldown.startCooldown(retryAfter);
+        setError(apiErrorMessage(reason));
+      },
+    });
+  };
+
+  const submitEmailCodeLogin = () => {
+    if (emailCodeLogin.isPending) return;
+    setError(null);
+    const email = normalizeEmailForVerification(loginEmail);
+    if (!email) {
+      setError("请输入有效的邮箱地址");
+      return;
+    }
+    if (!/^\d{6}$/.test(loginCode.trim())) {
+      setError("请输入 6 位邮箱验证码");
+      return;
+    }
+    emailCodeLogin.mutate({ email, code: loginCode.trim() }, {
+      onSuccess: (result) => {
+        setOperator({ token: result.token, id: result.operator.id, name: result.operator.name,
+          role: result.operator.role, mustChangePassword: result.mustChangePassword });
+        setLoginCode("");
         if (!result.mustChangePassword) {
           void queryClient.invalidateQueries();
           navigate(redirectTo, { replace: true });
@@ -615,6 +682,7 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
         setRegisterCodeSent(true);
         setRegisterCode("");
         registerCooldown.startCooldown(EMAIL_CODE_RESEND_COOLDOWN_SECONDS);
+        window.requestAnimationFrame(() => registerCodeInputRef.current?.focus());
       },
       onError: (reason) => {
         const retryAfter = retryAfterSecondsFromError(reason);
@@ -674,16 +742,16 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
   };
 
   const submitPassword = () => {
+    if (completePasswordSetup.isPending || !identity || !mustChange) return;
     setError(null);
     if (newPassword.length < 8) {
       setError("新密码至少需要 8 个字符");
       return;
     }
-    change.mutate({ currentPassword, newPassword }, {
+    completePasswordSetup.mutate({ newPassword }, {
       onSuccess: (result) => {
         if (identity) setOperator({ token: result.token, id: identity.id, name: identity.name, role: identity.role, mustChangePassword: result.mustChangePassword });
         void queryClient.invalidateQueries();
-        setMustChange(false);
         navigate(redirectTo, { replace: true });
       },
       onError: (reason) => setError(apiErrorMessage(reason)),
@@ -703,6 +771,7 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
         setResetSent(true);
         setResetCode("");
         resetCooldown.startCooldown(EMAIL_CODE_RESEND_COOLDOWN_SECONDS);
+        window.requestAnimationFrame(() => resetCodeInputRef.current?.focus());
       },
       onError: (reason) => {
         const retryAfter = retryAfterSecondsFromError(reason);
@@ -741,16 +810,16 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
   return (
     <Card className="w-full rounded-2xl border-border-subtle bg-surface/95 p-6 shadow-3 backdrop-blur-sm sm:p-7" padding="none">
       <CardTitle className="text-[20px] leading-7">
-        {allowInitialize && initializing ? "首次设置老师账号" : mustChange ? "设置新密码" : registering ? "创建软件账号" : "登录软件账号"}
+        {resetting ? "找回密码" : allowInitialize && initializing ? "首次设置老师账号" : mustChange ? "设置新密码" : registering ? "创建软件账号" : "登录软件账号"}
       </CardTitle>
       <div className="mt-4 flex flex-col gap-4">
         {resetting ? <>
           <p className="text-[13px] leading-5 text-fg-secondary">通过绑定邮箱接收一次性验证码，验证码 15 分钟内有效。</p>
-          <Field label="绑定邮箱" required htmlFor={usernameId}><Input id={usernameId} type="email" autoComplete="email" value={resetEmail} disabled={requestReset.isPending} onChange={(e) => { setResetEmail(e.currentTarget.value); setResetSent(false); setResetCode(""); resetCooldown.startCooldown(0); }} /></Field>
+          <Field label="绑定邮箱" required htmlFor={usernameId}><Input id={usernameId} type="email" autoComplete="email" value={resetEmail} disabled={requestReset.isPending} onChange={(e) => { setResetEmail(e.currentTarget.value); setResetSent(false); setResetCode(""); resetCooldown.startCooldown(0); }} onKeyDown={(e) => { if (e.key === "Enter") submitResetRequest(); }} /></Field>
           {resetSent && <p role="status" className="text-[13px] leading-5 text-fg-secondary">如果该邮箱对应有效账号，系统会尝试发送验证码。请检查收件箱和垃圾邮件；暂未收到时可以重新发送。</p>}
           {!resetSent ? <Button loading={requestReset.isPending} disabled={resetCooldown.remainingSeconds > 0} onClick={submitResetRequest}>{resetCooldown.remainingSeconds > 0 ? `等待 ${resetCooldown.remainingSeconds} 秒后重发` : "发送验证码"}</Button> : <>
-            <Field label="邮箱验证码" required htmlFor={passwordId}><Input id={passwordId} autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={resetCode} onChange={(e) => setResetCode(e.currentTarget.value.replace(/\D/g, "").slice(0, 6))} /></Field>
-            <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={resetPassword} onChange={(e) => setResetPassword(e.currentTarget.value)} /></Field>
+            <Field label="邮箱验证码" required htmlFor={passwordId}><Input ref={resetCodeInputRef} id={passwordId} autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={resetCode} onChange={(e) => setResetCode(e.currentTarget.value.replace(/\D/g, "").slice(0, 6))} onKeyDown={(e) => { if (e.key === "Enter") submitResetConfirm(); }} /></Field>
+            <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={resetPassword} onChange={(e) => setResetPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitResetConfirm(); }} /></Field>
             <div className="flex flex-wrap gap-2"><Button loading={confirmReset.isPending} onClick={submitResetConfirm}>重置密码并登录</Button><Button size="sm" variant="ghost" loading={requestReset.isPending} disabled={resetCooldown.remainingSeconds > 0} onClick={submitResetRequest}>{resetCooldown.remainingSeconds > 0 ? `重新发送（${resetCooldown.remainingSeconds} 秒）` : "重新发送验证码"}</Button></div>
           </>}
           <Button variant="ghost" onClick={() => { setResetting(false); setResetSent(false); setError(null); }}>返回登录</Button>
@@ -761,31 +830,116 @@ export function SoftwareAccountPanel({ redirectTo, onBack, allowInitialize = fal
           <div className="flex flex-wrap gap-2"><Button loading={initialize.isPending} onClick={submitInitialize}>完成首次接管</Button><Button variant="ghost" onClick={() => setInitializing(false)}>返回登录</Button></div>
         </> : mustChange ? <>
           <p className="text-[13px] leading-5 text-fg-secondary">首次登录需要先修改初始密码。</p>
-          <Field label="当前密码" required htmlFor={currentId}><Input id={currentId} type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.currentTarget.value)} /></Field>
           <Field label="新密码" required htmlFor={nextId}><Input id={nextId} type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.currentTarget.value)} /></Field>
-          <Button loading={change.isPending} onClick={submitPassword}>保存新密码</Button>
+          <Button loading={completePasswordSetup.isPending} onClick={submitPassword}>保存新密码</Button>
         </> : registering ? <>
-          <p className="text-[13px] leading-5 text-fg-secondary">验证码 15 分钟内有效。验证邮箱后即可创建账号并绑定妙手账号。</p>
+          <p className="text-[13px] leading-5 text-fg-secondary">验证码 15 分钟内有效。注册成功后会自动登录；登录后可在“连接妙手”中绑定妙手账号。</p>
           <Field label="姓名" required htmlFor={usernameId}><Input id={usernameId} autoComplete="name" value={registerName} onChange={(e) => setRegisterName(e.currentTarget.value)} /></Field>
-          <Field label="邮箱" required htmlFor={currentId}><Input id={currentId} type="email" autoComplete="email" value={registerEmail} disabled={requestRegistrationCode.isPending || registerCodeSent} onChange={(e) => { setRegisterEmail(e.currentTarget.value); setRegisterCodeSent(false); setRegisterCode(""); }} onKeyDown={(e) => { if (e.key === "Enter" && !registerCodeSent) submitRegistrationCode(); }} /></Field>
+          <Field label="邮箱" required htmlFor={currentId}><Input id={currentId} type="email" autoComplete="email" value={registerEmail} disabled={requestRegistrationCode.isPending || registerCodeSent} onChange={(e) => { setRegisterEmail(e.currentTarget.value); setRegisterCodeSent(false); setRegisterCode(""); registerCooldown.startCooldown(0); }} onKeyDown={(e) => { if (e.key === "Enter" && !registerCodeSent) submitRegistrationCode(); }} /></Field>
           {registerCodeSent && <Button size="sm" variant="ghost" disabled={register.isPending || requestRegistrationCode.isPending} onClick={() => { setRegisterCodeSent(false); setRegisterCode(""); setError(null); }}>修改邮箱</Button>}
           <Field label="设置密码" required htmlFor={passwordId}><Input id={passwordId} type="password" autoComplete="new-password" value={registerPassword} onChange={(e) => setRegisterPassword(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
           {registerCodeSent && <>
             <p role="status" className="text-[13px] leading-5 text-fg-secondary">
               验证码已发送至 {normalizeEmailForVerification(registerEmail)}，15 分钟内有效。请检查收件箱和垃圾邮件；重新发送会使之前的验证码失效。
             </p>
-            <Field label="邮箱验证码" required htmlFor={nextId}><Input id={nextId} autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={registerCode} onChange={(e) => setRegisterCode(e.currentTarget.value.replace(/\D/g, "").slice(0, 6))} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
+            <Field label="邮箱验证码" required htmlFor={nextId}><Input ref={registerCodeInputRef} id={nextId} autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={registerCode} onChange={(e) => setRegisterCode(e.currentTarget.value.replace(/\D/g, "").slice(0, 6))} onKeyDown={(e) => { if (e.key === "Enter") submitRegister(); }} /></Field>
           </>}
           {!registerCodeSent ? <Button block size="lg" loading={requestRegistrationCode.isPending} disabled={registerCooldown.remainingSeconds > 0} onClick={submitRegistrationCode}>{registerCooldown.remainingSeconds > 0 ? `等待 ${registerCooldown.remainingSeconds} 秒后重发` : "发送验证码"}</Button> : <div className="flex flex-wrap gap-2"><Button block size="lg" loading={register.isPending} onClick={submitRegister}>完成注册并登录</Button><Button size="sm" variant="ghost" loading={requestRegistrationCode.isPending} disabled={registerCooldown.remainingSeconds > 0} onClick={submitRegistrationCode}>{registerCooldown.remainingSeconds > 0 ? `重新发送（${registerCooldown.remainingSeconds} 秒）` : "重新发送验证码"}</Button></div>}
           <Button size="sm" variant="ghost" onClick={() => { setRegistering(false); setError(null); }}>已有账号，返回登录</Button>
         </> : <>
+          <div role="group" aria-label="登录方式" className="grid grid-cols-2 rounded-lg bg-canvas p-1">
+            <button
+              type="button"
+              aria-pressed={loginMethod === "password"}
+              onClick={() => { setLoginMethod("password"); setError(null); }}
+              className={cn(
+                "min-h-10 rounded-md px-3 text-[13px] font-medium transition-colors duration-fast",
+                loginMethod === "password" ? "bg-surface text-fg shadow-1" : "text-fg-secondary hover:text-fg"
+              )}
+            >
+              密码登录
+            </button>
+            <button
+              type="button"
+              aria-pressed={loginMethod === "email-code"}
+              onClick={() => {
+                setLoginMethod("email-code");
+                if (!loginEmail && identifier.includes("@")) setLoginEmail(identifier.trim());
+                setError(null);
+              }}
+              className={cn(
+                "min-h-10 rounded-md px-3 text-[13px] font-medium transition-colors duration-fast",
+                loginMethod === "email-code" ? "bg-surface text-fg shadow-1" : "text-fg-secondary hover:text-fg"
+              )}
+            >
+              邮箱验证码
+            </button>
+          </div>
+          {loginMethod === "email-code" ? <>
+            <p className="text-[13px] leading-5 text-fg-secondary">使用已验证邮箱接收一次性验证码登录。</p>
+            <Field label="邮箱" required htmlFor={currentId}>
+              <Input
+                id={currentId}
+                type="email"
+                autoComplete="email"
+                value={loginEmail}
+                disabled={requestEmailCodeLogin.isPending || emailCodeLogin.isPending}
+                onChange={(event) => {
+                  setLoginEmail(event.currentTarget.value);
+                  setLoginCodeSent(false);
+                  setLoginCode("");
+                  loginCooldown.startCooldown(0);
+                  setError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !loginCodeSent) submitEmailCodeRequest();
+                }}
+              />
+            </Field>
+            {!loginCodeSent ? (
+              <Button block size="lg" loading={requestEmailCodeLogin.isPending}
+                disabled={loginCooldown.remainingSeconds > 0} onClick={submitEmailCodeRequest}>
+                {loginCooldown.remainingSeconds > 0
+                  ? `等待 ${loginCooldown.remainingSeconds} 秒后重发`
+                  : "发送登录验证码"}
+              </Button>
+            ) : <>
+              <p role="status" className="text-[13px] leading-5 text-fg-secondary">
+                如果该邮箱已验证并绑定账号，验证码会发送到邮箱。请检查收件箱和垃圾邮件，验证码 15 分钟内有效。
+              </p>
+              <Field label="邮箱验证码" required htmlFor={nextId}>
+                <Input
+                  id={nextId}
+                  ref={loginCodeInputRef}
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={loginCode}
+                  onChange={(event) => setLoginCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))}
+                  onKeyDown={(event) => { if (event.key === "Enter") submitEmailCodeLogin(); }}
+                />
+              </Field>
+              <div className="flex flex-col gap-2">
+                <Button block size="lg" loading={emailCodeLogin.isPending} onClick={submitEmailCodeLogin}>
+                  验证并登录
+                </Button>
+                <Button size="sm" variant="ghost" loading={requestEmailCodeLogin.isPending}
+                  disabled={loginCooldown.remainingSeconds > 0} onClick={submitEmailCodeRequest}>
+                  {loginCooldown.remainingSeconds > 0
+                    ? `重新发送（${loginCooldown.remainingSeconds} 秒）`
+                    : "重新发送验证码"}
+                </Button>
+              </div>
+            </>}
+          </> : <>
           <Field label="邮箱或用户名" required htmlFor={usernameId} error={loginFieldErrors.identifier}><Input ref={identifierInputRef} id={usernameId} autoComplete="username" value={identifier} invalid={Boolean(loginFieldErrors.identifier)} onChange={(e) => { setIdentifier(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, identifier: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
           <Field label="密码" required htmlFor={passwordId} error={loginFieldErrors.password}><Input ref={passwordInputRef} id={passwordId} type="password" autoComplete="current-password" value={password} invalid={Boolean(loginFieldErrors.password)} onChange={(e) => { setPassword(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, password: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} /></Field>
           <div className="flex flex-col gap-1">
             <Button block size="lg" loading={login.isPending} iconRight={<ArrowRight className="size-4" />} onClick={submitLogin}>登录</Button>
-            {showBack && !allowInitialize && <Button variant="ghost" onClick={onBack}>返回妙手绑定</Button>}
           </div>
-          <div className="flex items-center justify-between gap-2 border-t border-border-subtle pt-2">
+          </>}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border-subtle pt-2">
+            {showBack && !allowInitialize && <Button size="sm" variant="ghost" onClick={onBack}>返回妙手绑定</Button>}
             <Button size="sm" variant="ghost" onClick={() => { setResetting(true); setError(null); }}>忘记密码</Button>
             {allowRegister && <Button size="sm" variant="ghost" onClick={() => { setRegistering(true); setError(null); }}>创建新账号</Button>}
           </div>

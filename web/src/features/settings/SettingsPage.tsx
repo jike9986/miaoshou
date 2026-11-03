@@ -20,6 +20,7 @@ import { AuditLogPanel } from "@/features/settings/AuditLogPanel";
 import { PublishSettingsPanel } from "@/features/settings/PublishSettingsPanel";
 import { ImageServiceCard } from "@/features/automation/ImageServiceCard";
 import { VersionPanel } from "@/features/settings/VersionPanel";
+import { LocalCachePanel } from "@/features/settings/LocalCachePanel";
 import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 
 export type SettingsTab = "operators" | "processing" | "audit" | "about";
@@ -92,7 +93,12 @@ export function SettingsPage({ initialTab = SHOW_ACCOUNT_UI ? "operators" : "abo
             </div>
           )}
           {activeTab === "audit" && canManage && <AuditLogPanel />}
-          {activeTab === "about" && <VersionPanel />}
+          {activeTab === "about" && (
+            <div className="flex flex-col gap-4">
+              <VersionPanel />
+              <LocalCachePanel />
+            </div>
+          )}
         </div>
       </PageContent>
     </>

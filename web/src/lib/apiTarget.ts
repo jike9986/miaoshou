@@ -15,6 +15,19 @@ function isLoopbackBase(base: string): boolean {
   }
 }
 
+/** Only local development/desktop bootstrap needs an injected machine token. */
+export function shouldShowLocalTokenNotice({
+  apiBase,
+  hasRuntimeToken,
+  hasSoftwareSession,
+}: {
+  apiBase: string;
+  hasRuntimeToken: boolean;
+  hasSoftwareSession: boolean;
+}): boolean {
+  return !hasRuntimeToken && !hasSoftwareSession && (!apiBase || isLoopbackBase(apiBase));
+}
+
 export function allowsLocalBootstrapToken(config: BootstrapTargetConfig): boolean {
   if (config.savedBase || config.legacyBase) return false;
 

@@ -12,9 +12,8 @@ export function VersionPanel() {
   const checkNow = (): void => {
     check.mutate(undefined, {
       onSuccess: (data) => {
-        if (data.updateAvailable) toast.info(`发现新版本 ${data.latest}`);
-        else if (data.ok) toast.success("已是最新版本");
-        else toast.error(data.error ?? "检查更新失败");
+        if (!data.ok) toast.error(data.error ?? "检查更新失败");
+        else if (!data.updateAvailable) toast.success("已是最新版本");
       },
       onError: (error) => toast.error(apiErrorMessage(error)),
     });

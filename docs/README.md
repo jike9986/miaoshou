@@ -50,6 +50,8 @@ tk-desktop/
 | 文档 | 内容 |
 | --- | --- |
 | [architecture.md](architecture.md) | 分层架构、数据模型、设计决策 |
+| [data-residency-and-cache.md](data-residency-and-cache.md) | 服务端持久化与桌面端本机缓存边界 |
+| [account-cache-acceptance-2026-11-03.md](account-cache-acceptance-2026-11-03.md) | 邮件实收、账号及缓存回归、生产部署和实际客户端验收 |
 | [api.md](api.md) | 全部 HTTP 接口 |
 | [migrations.md](migrations.md) | Alembic 用法与迁移分工 |
 | [design-system.md](design-system.md) | 设计令牌与组件规范 |

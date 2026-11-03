@@ -8,8 +8,11 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from "@tanstack/react-query";
+import { useRef } from "react";
 import { api, isApiError, type QueryParams } from "@/lib/api";
-import { queryKeys } from "@/lib/queryKeys";
+import { collectBoxListQueryKey, queryKeys } from "@/lib/queryKeys";
+import { canUseCollectBoxPlaceholder } from "@/lib/collectBoxPlaceholder.mjs";
+import { consumeOneShotRefreshFlag } from "@/lib/oneShotRefreshFlag.mjs";
 import {
   getOperatorSessionEpoch,
   runIfOperatorSessionCurrent,
@@ -146,6 +149,28 @@ export function useSoftwareLogin(): UseMutationResult<
   });
 }
 
+export function useRequestEmailCodeLogin(): UseMutationResult<
+  EmailCodeResponse,
+  Error,
+  EmailCodeRequest
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<EmailCodeResponse, EmailCodeRequest>(
+      "/auth/email-code-login/request", body),
+  });
+}
+
+export function useEmailCodeLogin(): UseMutationResult<
+  SoftwareLoginResponse,
+  Error,
+  EmailCodeConfirmRequest
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<SoftwareLoginResponse, EmailCodeConfirmRequest>(
+      "/auth/email-code-login/confirm", body),
+  });
+}
+
 export function useSoftwareRegister(): UseMutationResult<
   SoftwareLoginResponse,
   Error,
@@ -212,6 +237,19 @@ export function useChangeSoftwarePassword(): UseMutationResult<
       { ok: true; token: string; mustChangePassword: false },
       typeof body
     >("/auth/change-password", body),
+  });
+}
+
+export function useCompletePasswordSetup(): UseMutationResult<
+  { ok: true; token: string; mustChangePassword: false },
+  Error,
+  { newPassword: string }
+> {
+  return useMutation({
+    mutationFn: (body) => api.post<
+      { ok: true; token: string; mustChangePassword: false },
+      typeof body
+    >("/auth/complete-password-setup", body),
   });
 }
 
@@ -364,6 +402,8 @@ export function useWarehouseList(params: WarehouseListParams): UseQueryResult<Wa
       const previousParams = previousQuery?.queryKey[1] as WarehouseListParams | undefined;
       return previousParams?.claimAccountId === (params.claimAccountId ?? null) ? previous : undefined;
     },
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
   });
 }
 
@@ -766,18 +806,17 @@ export interface CollectBoxListParams extends PageParams {
 export function useCollectBoxList(
   params: CollectBoxListParams,
   enabled = true
-): UseQueryResult<CollectBoxPage> {
-  return useQuery({
-    queryKey: queryKeys.collectBox.list({
-      accountId: params.accountId ?? null,
-      page: params.page,
-      pageSize: params.pageSize,
-      status: params.status,
-      keyword: params.keyword ?? "",
-      shopId: params.shopId ?? null,
-    }),
-    queryFn: () =>
-      api.get<CollectBoxPage>("/collect-box", {
+): UseQueryResult<CollectBoxPage> & {
+  refetchFresh: () => ReturnType<UseQueryResult<CollectBoxPage>["refetch"]>;
+} {
+  const queryClient = useQueryClient();
+  const forceRefreshNext = useRef(false);
+  const queryKey = collectBoxListQueryKey(params);
+  const query = useQuery({
+    queryKey,
+    queryFn: () => {
+      const forceRefresh = consumeOneShotRefreshFlag(forceRefreshNext);
+      return api.get<CollectBoxPage>("/collect-box", {
         query: compactQuery({
           page: params.page,
           pageSize: params.pageSize,
@@ -786,15 +825,29 @@ export function useCollectBoxList(
           shopId: params.shopId,
           accountId: params.accountId,
           sort: params.sort,
+          refresh: forceRefresh || undefined,
         }),
         timeoutMs: 60_000,
-      }),
+      });
+    },
+    // A cached list is useful for the first paint, but it must not hide items
+    // added upstream while the user was away from this page.
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
     enabled,
     placeholderData: (previous, previousQuery) => {
-      const previousParams = previousQuery?.queryKey[1] as { accountId?: string | null } | undefined;
-      return previousParams?.accountId === (params.accountId ?? null) ? previous : undefined;
+      const previousParams = previousQuery?.queryKey[1] as Partial<CollectBoxListParams> | undefined;
+      return canUseCollectBoxPlaceholder(previousParams, params) ? previous : undefined;
     },
   });
+  const refetchFresh = async () => {
+    await queryClient.cancelQueries({ queryKey, exact: true });
+    forceRefreshNext.current = true;
+    return query.refetch();
+  };
+  return { ...query, refetchFresh };
 }
 
 export function useCollectBoxDetail(
@@ -1072,15 +1125,9 @@ export function useCheckUpdate(): UseMutationResult<VersionPayload, Error, void>
   return useMutation({
     mutationFn: () => api.post<VersionPayload>("/system/update-check", { refresh: true }),
     onSuccess: (data) => {
-      // 写回缓存必须用与读取**完全相同**的键，否则写进去也没人读。
-      // 原来这里写的是 `["system-version", true]`，而界面上显示的版本号读的是
-      // `useVersion(false)` → 键是 `["system-version", false]`，两个键对不上，
-      // 表现就是「点了检查更新，版本号纹丝不动」，而后端其实已经返回了新版本。
-      //
-      // 两件事都做：先把结果写进**当前显示用的那个键**（false），
-      // 再整族失效一次，把其它 refresh 组合的变体一起刷新。
+      // 手动检查已返回完整结果，两种读取入口直接共用，避免全局监听再查一次。
       client.setQueryData(queryKeys.system.version(false), data);
-      void client.invalidateQueries({ queryKey: queryKeys.system.versionAll });
+      client.setQueryData(queryKeys.system.version(true), data);
     },
   });
 }

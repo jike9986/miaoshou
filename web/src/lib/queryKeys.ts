@@ -132,3 +132,24 @@ export const queryKeys = {
     }) => ["audit-logs", params] as const,
   },
 } as const;
+
+/** Normalize list params before keying so omitted sort shares the default-sort cache. */
+export function collectBoxListQueryKey(params: {
+  accountId?: string | null;
+  page: number;
+  pageSize: number;
+  status: string;
+  keyword?: string;
+  shopId?: string | null;
+  sort?: string;
+}) {
+  return queryKeys.collectBox.list({
+    accountId: params.accountId ?? null,
+    page: params.page,
+    pageSize: params.pageSize,
+    status: params.status,
+    keyword: params.keyword ?? "",
+    shopId: params.shopId ?? null,
+    sort: params.sort ?? "default",
+  });
+}

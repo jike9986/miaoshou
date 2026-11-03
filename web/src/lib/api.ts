@@ -5,7 +5,11 @@ import type { ApiErrorCode, ApiErrorPayload } from "@/lib/types";
 import { clearOperator, operatorToken } from "@/lib/operator";
 import { getSavedApiBase } from "@/lib/serverAddress";
 import { withAuthorizationHeader } from "@/lib/requestAuth";
-import { shouldClearOperatorSession } from "@/lib/operatorAuthExpiry.mjs";
+import {
+  isPublicAuthRequest,
+  requestSessionToken,
+  shouldClearOperatorSession,
+} from "@/lib/operatorAuthExpiry.mjs";
 
 /* ------------------------------------------------------------------ *
  * 运行时配置
@@ -274,24 +278,15 @@ async function request<T, B = unknown>(
 ): Promise<T> {
   const { query, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal, idempotencyKey } = options;
 
-  const isPublicAuthMutation = method === "POST" && [
-    "/auth/login",
-    "/auth/register",
-    "/auth/registration-code/request",
-    "/auth/password-reset/request",
-    "/auth/password-reset/confirm",
-  ].includes(path);
-  const isPublicCredentialStatus = method === "GET" && path === "/auth/credentials-status";
-  const isPublicAuthRequest = isPublicAuthMutation || isPublicCredentialStatus;
+  const isPublicRequest = isPublicAuthRequest(method, path);
   // Only an automatically selected personal token can invalidate the current
   // UI session.  Explicit tokens are used by account-switching tools and a
   // rejected one must never log out the account currently on screen.
-  const sessionToken = !isPublicAuthRequest && options.authToken === undefined
-    ? operatorToken()
-    : null;
-  const defaultToken = isPublicAuthRequest ? null : requestToken(path);
+  const sessionToken = requestSessionToken(
+    method, path, operatorToken(), options.authToken);
+  const defaultToken = isPublicRequest ? null : requestToken(path);
   const authorizationHeaders = withAuthorizationHeader({}, defaultToken, options.authToken);
-  if (!isPublicAuthRequest && !authorizationHeaders.Authorization) {
+  if (!isPublicRequest && !authorizationHeaders.Authorization) {
     throw new ApiError({
       code: "BOOT_MISSING",
       message: API_ERROR_TEXT.BOOT_MISSING ?? "缺少启动参数",

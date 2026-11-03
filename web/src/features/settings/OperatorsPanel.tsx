@@ -45,6 +45,7 @@ import {
   useSetRole,
   useToggleOperator,
   useResetStudentPassword,
+  useChangeSoftwarePassword,
 } from "@/lib/queries";
 import {
   currentOperator,
@@ -494,6 +495,74 @@ export interface OperatorsPanelProps {
   className?: string;
 }
 
+function ChangeSoftwarePasswordDialog({ onClose }: { onClose: () => void }) {
+  const formId = useId();
+  const currentId = useId();
+  const newId = useId();
+  const confirmId = useId();
+  const identity = useOperatorIdentity();
+  const change = useChangeSoftwarePassword();
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = () => {
+    if (change.isPending || !identity) return;
+    setError(null);
+    if (!currentPassword) {
+      setError("请输入当前密码");
+      return;
+    }
+    if (newPassword.length < 8 || newPassword.length > 128) {
+      setError("新密码需要 8–128 个字符");
+      return;
+    }
+    if (newPassword !== confirmation) {
+      setError("两次输入的新密码不一致");
+      return;
+    }
+    change.mutate({ currentPassword, newPassword }, {
+      onSuccess: (result) => {
+        const active = currentOperator();
+        if (!active || active.token !== identity.token) return;
+        setOperator({ ...active, token: result.token, mustChangePassword: result.mustChangePassword });
+        onClose();
+        toast.success("密码已修改", { description: "其他已登录设备需要重新登录。" });
+      },
+      onError: (reason) => setError(apiErrorMessage(reason)),
+    });
+  };
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(next) => { if (!next && !change.isPending) onClose(); }}
+      title="修改登录密码"
+      size="sm"
+      closeOnOverlay={false}
+      footer={<>
+        <Button variant="secondary" disabled={change.isPending} onClick={onClose}>取消</Button>
+        <Button type="submit" form={formId} loading={change.isPending}>保存密码</Button>
+      </>}
+    >
+      <form id={formId} className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+        <Field label="当前密码" required htmlFor={currentId}>
+          <Input id={currentId} type="password" autoComplete="current-password" maxLength={128} disabled={change.isPending} value={currentPassword} onChange={(event) => setCurrentPassword(event.currentTarget.value)} />
+        </Field>
+        <Field label="新密码" required htmlFor={newId} hint="8–128 个字符">
+          <Input id={newId} type="password" autoComplete="new-password" maxLength={128} disabled={change.isPending} value={newPassword} onChange={(event) => setNewPassword(event.currentTarget.value)} />
+        </Field>
+        <Field label="确认新密码" required htmlFor={confirmId}>
+          <Input id={confirmId} type="password" autoComplete="new-password" maxLength={128} disabled={change.isPending} value={confirmation} onChange={(event) => setConfirmation(event.currentTarget.value)} />
+        </Field>
+        <p className="text-xs leading-[18px] text-fg-muted">忘记当前密码时，可退出登录后在登录页通过邮箱验证码找回。</p>
+        {error && <InlineError>{error}</InlineError>}
+      </form>
+    </Dialog>
+  );
+}
+
 export function OperatorsPanel({ className }: OperatorsPanelProps) {
   const operatorsQuery = useOperators();
   const rotate = useRotateOperator();
@@ -503,6 +572,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [switchOpen, setSwitchOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<{ id: string; name: string } | null>(null);
   const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
   const [disableTarget, setDisableTarget] = useState<{ id: string; name: string; enabled: boolean } | null>(
@@ -531,6 +601,18 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
   const accountEmailPanel = identity && me && !me.builtin
     ? <AccountEmailPanel key={me.id} operator={me} />
     : null;
+  const passwordPanel = identity && me && !me.builtin ? (
+    <Card padding="normal">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <CardTitle>登录密码</CardTitle>
+          <p className="mt-1 text-xs leading-[18px] text-fg-muted">管理当前软件账号的登录密码。</p>
+        </div>
+        <Button variant="secondary" icon={<KeyRound />} onClick={() => setPasswordOpen(true)}>修改密码</Button>
+      </div>
+      {passwordOpen && <ChangeSoftwarePasswordDialog onClose={() => setPasswordOpen(false)} />}
+    </Card>
+  ) : null;
 
   if (operatorsQuery.isLoading) return <SkeletonRows rows={4} />;
   if (operatorsQuery.isError) {
@@ -548,9 +630,10 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
             <Badge variant="neutral" size="sm">学员</Badge>
           </div>
           <p className="mt-2 text-xs leading-[18px] text-fg-muted">
-            学员账号和密码由老师管理；如需调整，请联系老师。
+            你可以自行修改登录密码和绑定邮箱；账号权限如需调整，请联系老师。
           </p>
         </Card>
+        {passwordPanel}
         {accountEmailPanel}
       </div>
     );
@@ -600,6 +683,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
 
   return (
     <div className={cn("flex flex-col gap-4", className)}>
+      {passwordPanel}
       {accountEmailPanel}
       <StudentAccountsPanel />
       <details className="group rounded-md border border-border bg-surface">

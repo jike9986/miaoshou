@@ -10,6 +10,10 @@
 import { RefreshCw, SearchX, Unplug } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CollectBoxItem } from "@/lib/types";
+import {
+  getCollectBoxFallbackNotice,
+  shouldShowCollectBoxReadError,
+} from "@/features/automation/collectBoxFallbackNotice.mjs";
 import { RemoteImage } from "@/features/shared/RemoteImage";
 import { Pagination } from "@/features/shared";
 import {
@@ -54,6 +58,7 @@ export interface ProductPickerProps {
   pageSize: number;
   loading: boolean;
   fetching: boolean;
+  degraded: boolean;
   error: unknown;
   visibleCount: number;
   filter: ListFilter;
@@ -81,6 +86,7 @@ export function ProductPicker({
   pageSize,
   loading,
   fetching,
+  degraded,
   error,
   filter,
   selectedKeys,
@@ -98,6 +104,17 @@ export function ProductPicker({
 }: ProductPickerProps) {
   const errorMessage =
     error instanceof Error ? error.message : typeof error === "string" ? error : null;
+  const fallbackNotice = getCollectBoxFallbackNotice({
+    connected,
+    degraded,
+    refreshFailedWithItems: Boolean(errorMessage && items.length > 0),
+  });
+  const showReadError = shouldShowCollectBoxReadError({
+    connected,
+    loading,
+    error: errorMessage,
+    itemCount: items.length,
+  });
   const allVisibleSelected = items.length > 0 && items.every((item) => selectedKeys.has(item.key));
 
   return (
@@ -124,7 +141,9 @@ export function ProductPicker({
           icon={<RefreshCw className="size-3.5" />}
           loading={fetching && !loading}
           loadingText="刷新中"
-          disabled={!connected || disabled}
+          // Keep recovery available after a failed refresh; the selection gate
+          // must lock product actions, not the control that can clear the gate.
+          disabled={!connected || fetching}
           onClick={onRefresh}
         >
           刷新
@@ -173,6 +192,16 @@ export function ProductPicker({
         </div>
       </div>
 
+      {fallbackNotice && (
+        <p
+          role="status"
+          aria-live="polite"
+          className="shrink-0 border-b border-warning-600/20 bg-warning-50 px-3 py-2 text-[12px] leading-4 text-warning-700"
+        >
+          {fallbackNotice}
+        </p>
+      )}
+
       {/* 列表体：只有图片 + 标题 */}
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-2">
         {!connected && (
@@ -190,7 +219,7 @@ export function ProductPicker({
           </div>
         )}
 
-        {connected && !loading && errorMessage && (
+        {showReadError && (
           <ErrorState
             title="采集箱读取失败"
             description={errorMessage}
@@ -219,7 +248,7 @@ export function ProductPicker({
           />
         )}
 
-        {connected && !loading && !errorMessage && items.length > 0 && (
+        {connected && !loading && items.length > 0 && (
           <ul
             className="grid min-w-0 content-start gap-2.5
                        [grid-template-columns:repeat(auto-fill,minmax(128px,1fr))]"

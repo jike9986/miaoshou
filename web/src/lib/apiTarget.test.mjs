@@ -1,6 +1,35 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { allowsLocalBootstrapToken } from "./apiTarget.ts";
+import { allowsLocalBootstrapToken, shouldShowLocalTokenNotice } from "./apiTarget.ts";
+
+test("remote software login does not require a local bootstrap token", () => {
+  for (const hasSoftwareSession of [false, true]) {
+    assert.equal(shouldShowLocalTokenNotice({
+      apiBase: "https://aohuang888.com/miaoshou-platform",
+      hasRuntimeToken: false,
+      hasSoftwareSession,
+    }), false);
+  }
+});
+
+test("a software session also satisfies authentication on a local backend", () => {
+  assert.equal(shouldShowLocalTokenNotice({
+    apiBase: "http://127.0.0.1:8812",
+    hasRuntimeToken: false,
+    hasSoftwareSession: true,
+  }), false);
+});
+
+test("local bootstrap failures remain visible until either token is available", () => {
+  for (const apiBase of ["", "http://127.0.0.1:8812", "http://localhost:8812", "http://[::1]:8812"]) {
+    assert.equal(shouldShowLocalTokenNotice({
+      apiBase, hasRuntimeToken: false, hasSoftwareSession: false,
+    }), true);
+    assert.equal(shouldShowLocalTokenNotice({
+      apiBase, hasRuntimeToken: true, hasSoftwareSession: false,
+    }), false);
+  }
+});
 
 test("allows bootstrap only for the effective trusted loopback target", () => {
   assert.equal(allowsLocalBootstrapToken({}), true);

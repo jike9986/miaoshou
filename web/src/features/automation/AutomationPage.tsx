@@ -69,6 +69,7 @@ import {
 import { ProcessSettings } from "@/features/automation/ProcessSettings";
 import { pendingAutomationPublishAction } from "@/features/automation/automationPublish";
 import { ProductPicker } from "@/features/automation/ProductPicker";
+import { isCollectBoxReadOnly } from "@/features/automation/collectBoxSelectionGate.mjs";
 import { ProgressPanel } from "@/features/automation/ProgressPanel";
 import { AccountSwitcher } from "@/features/auth/UnlockPage";
 import { useSessionStore } from "@/features/stores";
@@ -145,8 +146,15 @@ export function AutomationPage() {
   const items = useMemo<CollectBoxItem[]>(() => listQuery.data?.items ?? [], [listQuery.data?.items]);
   const total = listQuery.data?.total ?? 0;
   const hasMore = listQuery.data?.hasMore ?? false;
+  const listSelectionBusy = isCollectBoxReadOnly({
+    loading: listQuery.isLoading,
+    verified: listQuery.isFetchedAfterMount,
+    placeholder: listQuery.isPlaceholderData,
+    degraded: listQuery.data?.degraded ?? false,
+    failed: listQuery.isError || listQuery.isRefetchError,
+  });
 
-  const refetchList = listQuery.refetch;
+  const refetchList = listQuery.refetchFresh;
 
   /* ---------------- 处理设置 ---------------- */
   // 惰性初始化：先读存档，读不到才用默认值（老版 persistTaskPreferences 的等价物）
@@ -276,6 +284,7 @@ export function AutomationPage() {
   const selectedKeys = useMemo(() => new Set(selection.keys()), [selection]);
 
   const toggleItem = useCallback((item: CollectBoxItem) => {
+    if (listSelectionBusy) return;
     if (!selectedKeys.has(item.key) && selection.size >= MAX_RUN_ITEMS) {
       toast.warning(`一次最多选择 ${MAX_RUN_ITEMS} 件商品`);
       return;
@@ -294,7 +303,7 @@ export function AutomationPage() {
       }
       return next;
     });
-  }, [selectedKeys, selection.size]);
+  }, [listSelectionBusy, selectedKeys, selection.size]);
 
   /* ---------------- 本地处理态 ---------------- */
   const [stages, setStages] = useState<Record<string, ItemStage>>({});
@@ -345,6 +354,23 @@ export function AutomationPage() {
           : null
     : null;
   const stopRef = useRef(false);
+  const selectionScopeRef = useRef(status?.accountId ?? null);
+
+  useLayoutEffect(() => {
+    const nextAccountId = status?.accountId ?? null;
+    if (selectionScopeRef.current === nextAccountId) return;
+    selectionScopeRef.current = nextAccountId;
+    setSelection(new Map());
+    setStages({});
+    setProgress({});
+    setRun(IDLE_RUN);
+    hydratedRunId.current = null;
+    recoveringRunId.current = null;
+    persistentRunId.current = null;
+    persistentItems.current = new Map();
+    startingRunRef.current = false;
+    stopRef.current = false;
+  }, [status?.accountId]);
 
   /* ---------------- 客户端筛选 ---------------- */
   const visibleItems = useMemo(() => {
@@ -484,6 +510,7 @@ export function AutomationPage() {
   }, [latestRunQuery.data?.run, recoverRunMutation, hydrateRun, running]);
 
   const selectVisible = useCallback(() => {
+    if (listSelectionBusy) return;
     const allSelected = visibleItems.length > 0 && visibleItems.every((item) => selection.has(item.key));
     const additions = allSelected ? 0 : visibleItems.filter((item) => !selection.has(item.key)).length;
     const available = Math.max(0, MAX_RUN_ITEMS - selection.size);
@@ -513,7 +540,7 @@ export function AutomationPage() {
       }
       return next;
     });
-  }, [selection, visibleItems]);
+  }, [listSelectionBusy, selection, visibleItems]);
 
   /* ---------------- 真正执行：串行处理入仓 ---------------- */
   const processItem = useProcessCollectItem();
@@ -694,6 +721,10 @@ export function AutomationPage() {
   };
 
   const executeRun = async (): Promise<void> => {
+    if (listSelectionBusy || selectionScopeRef.current !== (status?.accountId ?? null)) {
+      toast.info("采集箱正在加载，请稍后再开始");
+      return;
+    }
     if (!connected) {
       toast.warning("请先连接妙手");
       return;
@@ -1243,7 +1274,7 @@ export function AutomationPage() {
         actions={
           <span className="flex items-center gap-2">
             {/* 账号 / 店铺切换挪到「开始处理」旁边（老版是标题右侧一组） */}
-            <AccountSwitcher compact />
+            <AccountSwitcher compact disabled={running} />
             {running ? (
               <Button variant="danger" icon={<Square />} onClick={stopRun}>
                 停止
@@ -1252,13 +1283,15 @@ export function AutomationPage() {
               <Button
                 variant="primary"
                 icon={<Play />}
-                disabled={!connected || selection.size === 0
+                disabled={!connected || listSelectionBusy || selection.size === 0
                   || (!isResumeSelection && (!somethingEnabled || Boolean(publishConfigIssue)))
                   || preparingRun || latestRunQuery.isLoading || recoverRunMutation.isPending}
                 loading={preparingRun}
                 title={
                   !connected
                     ? "先连接妙手"
+                    : listSelectionBusy
+                      ? "采集箱正在加载，请稍后再开始"
                     : selection.size === 0
                       ? "先勾选要处理的商品"
                     : preparingRun || latestRunQuery.isLoading || recoverRunMutation.isPending
@@ -1316,13 +1349,14 @@ export function AutomationPage() {
                 pageSize={pageSize}
                 loading={listQuery.isLoading}
                 fetching={listQuery.isFetching}
+                degraded={listQuery.data?.degraded ?? false}
                 error={listQuery.error}
                 visibleCount={visibleItems.length}
                 filter={filter}
                 selectedKeys={selectedKeys}
                 stages={stages}
                 progress={progress}
-                disabled={running}
+                disabled={running || listSelectionBusy}
                 onFilterChange={(next) => {
                   setFilter(next);
                   setPage(1);
