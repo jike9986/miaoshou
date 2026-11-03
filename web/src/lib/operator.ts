@@ -1,4 +1,4 @@
-// 操作员身份（多用户协作）—— 本地存储 + 请求头注入源
+// 操作员身份（多用户协作）—— 桌面端加密会话 + 请求头注入源
 //
 // 为什么单独一个模块：
 //   1. `api.ts` 需要在拼请求头时同步读到 token，不能等 React 渲染；
@@ -7,8 +7,8 @@
 //
 // 与妙手 token 的区别（api.md §0.2）：
 //   · 妙手 token 由 Electron preload 注入内存，永不落盘，只代表「这台机器能连后端」；
-//   · 操作员 token 代表「这台机器上现在是谁在操作」，必须持久化，
-//     否则每次重启都要重新贴一遍对方发来的那串字符。
+//   · 操作员 token 代表当前软件用户；桌面端由主进程使用系统加密保存，
+//     浏览器联调仍使用浏览器存储。
 //
 // 未登录时不注入个人身份；运行时本机 token 只由 api.ts 用于首次接管接口。
 
@@ -32,7 +32,7 @@ export const OPERATOR_CHANGE_PASSWORD_KEY = "aohuang.operator.must-change-passwo
 export const LOCAL_OPERATOR_NAME = "本机";
 
 export interface OperatorIdentity {
-  /** token 明文，只存在于本机浏览器存储里 */
+  /** 请求使用的内存 token；桌面端落盘时由系统加密 */
   token: string;
   id: string | null;
   name: string;
@@ -70,9 +70,53 @@ function writeItem(key: string, value: string | null): void {
 
 let cached: OperatorIdentity | null | undefined;
 const listeners = new Set<() => void>();
+let memoryToken: string | null = null;
+let hasMemoryToken = false;
+
+function readToken(): string | null {
+  if (typeof window === "undefined") return null;
+  const vault = window.desktop?.sessionToken;
+  if (!vault) {
+    try {
+      return window.localStorage.getItem(OPERATOR_TOKEN_KEY)?.trim() || null;
+    } catch {
+      return memoryToken;
+    }
+  }
+  if (hasMemoryToken) return memoryToken;
+  let protectedToken: string | null = null;
+  try { protectedToken = vault.read(); } catch { /* Keep the active session in memory. */ }
+  const legacyToken = readItem(OPERATOR_TOKEN_KEY);
+  const token = protectedToken ?? memoryToken ?? legacyToken;
+  if (legacyToken && !protectedToken) {
+    try { vault.write(token); } catch { /* No plaintext persistence fallback. */ }
+  }
+  writeItem(OPERATOR_TOKEN_KEY, null);
+  memoryToken = token;
+  hasMemoryToken = true;
+  return token;
+}
+
+function writeToken(token: string | null): boolean {
+  memoryToken = token;
+  hasMemoryToken = true;
+  const vault = typeof window !== "undefined" ? window.desktop?.sessionToken : undefined;
+  if (!vault) {
+    writeItem(OPERATOR_TOKEN_KEY, token);
+    return true;
+  }
+  try {
+    return vault.write(token);
+  } catch {
+    // Login remains usable in memory when the desktop bridge is unavailable.
+    return false;
+  } finally {
+    writeItem(OPERATOR_TOKEN_KEY, null);
+  }
+}
 
 function readSnapshot(): OperatorIdentity | null {
-  const token = readItem(OPERATOR_TOKEN_KEY);
+  const token = readToken();
   if (!token) return null;
   return {
     token,
@@ -145,7 +189,7 @@ export function setOperator(identity: {
   role?: OperatorIdentity["role"];
   mustChangePassword?: boolean;
 }): void {
-  writeItem(OPERATOR_TOKEN_KEY, identity.token);
+  writeToken(identity.token);
   writeItem(OPERATOR_ID_KEY, identity.id ?? null);
   writeItem(OPERATOR_NAME_KEY, identity.name);
   writeItem(OPERATOR_ROLE_KEY, identity.role ?? null);
@@ -154,13 +198,14 @@ export function setOperator(identity: {
 }
 
 /** 清空本机保存的个人登录身份 */
-export function clearOperator(): void {
-  writeItem(OPERATOR_TOKEN_KEY, null);
+export function clearOperator(): boolean {
+  const cleared = writeToken(null);
   writeItem(OPERATOR_ID_KEY, null);
   writeItem(OPERATOR_NAME_KEY, null);
   writeItem(OPERATOR_ROLE_KEY, null);
   writeItem(OPERATOR_CHANGE_PASSWORD_KEY, null);
   emit();
+  return cleared;
 }
 
 /** React 侧订阅：身份变化会触发重渲染 */

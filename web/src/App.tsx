@@ -110,7 +110,12 @@ function Shell() {
   const logout = (): void => {
     clearOperatorQueryClients();
     resetOperatorSessionUiState();
-    clearOperator();
+    if (!clearOperator()) {
+      toast.error("登录记录清理失败", {
+        description: "当前已退出，请检查电脑存储权限。下次启动时请确认账号身份。",
+        duration: 10000,
+      });
+    }
     navigate("/login", { replace: true });
   };
 

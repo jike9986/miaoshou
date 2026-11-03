@@ -481,37 +481,32 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
 
 
 def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
-                         body: Mapping[str, Any], product: Mapping[str, Any],
-                         original_block: Mapping[str, Any]) -> list[str]:
-    """保存后重新拉一次，返回对不上的字段（空列表＝确实写进去了）。
-
-    只读不断言：读不回来时不做判断，交给上层按成功处理——
-    上游偶发超时不该把一次成功的保存判成失败再重试一遍（会重复扣费/覆盖）。
-    """
+                         body: Mapping[str, Any], product: Mapping[str, Any]) -> list[str]:
+    """保存后重新拉一次；无法核验时阻断发布，不自动重写草稿。"""
     from services import pre_save_check, readback_check
 
     try:
         snapshot = client.shop_detail(detail_id, shop_id)
     except (MiaoshouError, ValueError, errors.AppError):
-        return []
+        return ["readbackUnavailable"]
+    if not isinstance(snapshot, Mapping):
+        return ["readbackUnavailable"]
     data = snapshot.get("data") or {}
+    if not isinstance(data, Mapping):
+        return ["readbackUnavailable"]
+    nested = data.get("data")
     actual = (data.get("shopCollectItemInfo")
               or data.get("siteCollectItemInfo")
               or data.get("collectItemInfo")
-              or (data.get("data") or {}).get("shopCollectItemInfo")
+              or (nested.get("shopCollectItemInfo") if isinstance(nested, Mapping) else None)
               or {})
     if not isinstance(actual, Mapping) or not actual:
-        return []
-    original = (original_block.get("shopCollectItemInfo")
-                or original_block.get("siteCollectItemInfo")
-                or {})
+        return ["readbackUnavailable"]
     coverage = (product.get("translation") or {}).get("coverage") or {}
     payload = dict(body)
     payload.pop("detailId", None)
-    original_map = original if isinstance(original, Mapping) else {}
-    # 有没有按模板定过价：原价和现价对不上就是定过价。
-    # 定过价时 `price` 本来就该和原图不同，只有 originPrice 被改掉才算错。
-    pricing_enabled = _priced(original_map, payload)
+    # 载体原来的商品与仓库成品无关。核验的是本次提交的完整覆盖结果，
+    # 包括已适配的类目、模板售价和成品采购价，不能与载体原值比或忽略。
     # translate_images 只在「notes 已裁成纯详情图串」时才开。
     # 开了就要求 actual["notes"] 恰好等于 detail_images_only(notes)，
     # 而这里送上去的 body 是 adapt_payload 后的完整 notes（含文字描述），
@@ -525,39 +520,13 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
     )
     try:
         issues = readback_check.readback_issues(
-            payload, actual, original_map, coverage,
-            pricing_enabled=pricing_enabled,
+            payload, actual, payload, coverage,
+            pricing_enabled=True,
             translate_images=notes_only_images,
         )
     except (ValueError, TypeError, KeyError, AttributeError):
-        # 比对器自己不熟这个 shape 时不要造假失败
-        return []
-    # 载体写入场景的已知差异，不算失败：
-    #   · categoryCid：cid 是我们按目标站点改成叶子类目的（本地 cid 是父级），
-    #     读回自然是新 cid，与 payload 里改过的值比对口径不同；
-    #   · prices：载体是新建的，价格按目标站点重算，读回与仓库副本的价必然有差。
-    # 这两项若继续判失败，跨店认领永远不可能成功（老版 fill_carriers 也不比对这两项）。
-    ignored = {"categoryCid", "prices"}
-    kept = [item for item in issues if str(item).strip() not in ignored]
-    if len(kept) != len(issues):
-        logger.info("载体读回忽略已知差异 %s（detailId=%s）",
-                    sorted(set(issues) - set(kept)), detail_id)
-    return kept
-
-
-def _priced(original: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
-    """售价与原价不同，说明这份 payload 是按定价模板算过的。"""
-    def number(value: Any) -> float | None:
-        try:
-            return float(str(value).strip())
-        except (TypeError, ValueError):
-            return None
-
-    before = number(original.get("originPrice"))
-    after = number(payload.get("price"))
-    if before is None or after is None:
-        return False
-    return abs(before - after) > 1e-9
+        return ["readbackUnavailable"]
+    return issues
 
 
 def target_warehouse_id(client: MiaoshouClient, shop_id: int) -> str:
@@ -749,7 +718,7 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             # （标题截断、详情图被过滤、翻译没生效）。老版靠读回比对确认，
             # 没有这步就是「看着成功、上架才发现是空的」。
             mismatched = _readback_mismatches(
-                client, detail_id, shop_id, body, payload, snapshot.get("data") or {})
+                client, detail_id, shop_id, body, payload)
             if mismatched:
                 # 读回不一致最常见的原因是「载体还是链接原本的商品」——
                 # 比如用鞋子链接建的载体，覆盖时标题/图片没写进去，读回就还是鞋子。

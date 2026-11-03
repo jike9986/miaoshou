@@ -162,7 +162,7 @@ def test_shared_product_execution_keeps_target_shop_and_owner(shared_warehouse, 
 
     result = schedule_service.execute(db, task)
 
-    assert result["status"] == schedule_service.RUN_OK
+    assert result["status"] == schedule_service.RUN_SUBMITTED
     assert result["selected"] == 1
     assert calls[0][0]["items"] == [{"warehouseId": str(product.id)}]
     assert calls[0][0]["accountId"] == target.id

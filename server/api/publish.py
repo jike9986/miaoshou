@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -15,6 +17,7 @@ from services import (
     automation_run_service,
     operator_service,
     publish_service,
+    schedule_service,
     setting_service,
 )
 
@@ -143,6 +146,41 @@ def publish(payload: PublishRequest, db: DbSession,
     return result
 
 
+def _receipt_created_at(value: Any) -> float | None:
+    """Miaoshou's gmtCreate is a Beijing-time request timestamp, not completion time."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        return moment.replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _current_attempt_receipts(row: Any, candidates: list[Any]) -> list[Any]:
+    requested_at = row.last_requested_at or row.requested_at
+    if requested_at is None or not math.isfinite(requested_at):
+        return []
+    detail = row.detail if isinstance(row.detail, dict) else {}
+    previous_receipt_id = str(detail.get("moveCollectTaskDetailId") or "")
+    receipt_id = (previous_receipt_id
+                  if detail.get("receiptAttemptAt") == requested_at else "")
+    matches = []
+    for candidate in candidates:
+        created_at = _receipt_created_at(candidate.get("gmtCreate"))
+        # Upstream timestamps have second precision. Missing or older evidence
+        # cannot establish that this receipt belongs to the current retry.
+        if created_at is None or created_at < math.floor(requested_at):
+            continue
+        if receipt_id and str(candidate.get("moveCollectTaskDetailId") or "") != receipt_id:
+            continue
+        if (previous_receipt_id and not receipt_id
+                and str(candidate.get("moveCollectTaskDetailId") or "") == previous_receipt_id):
+            continue
+        matches.append(candidate)
+    return matches
+
+
 def _refresh_processing(db: DbSession, account_id: str | None = None, *,
                         page_no: int = 1, page_size: int = PUBLISH_RECORDS_PAGE_SIZE,
                         status: str | None = None,
@@ -179,12 +217,13 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
     query = db.query(PublishLog).filter(
         PublishLog.account_id == account.id,
         PublishLog.status == "processing")
-    if operator_id is not None:
-        query = query.filter(PublishLog.operator_id == operator_id)
-    rows = [row for row in query.all() if not publish_service._is_claim_only_log(db, row)]
+    pending = [row for row in query.all() if not publish_service._is_claim_only_log(db, row)]
+    rows = [row for row in pending if operator_id is None or row.operator_id == operator_id]
     local_by_detail: dict[str, list[Any]] = {}
-    for row in rows:
+    local_by_target: dict[tuple[str, str], list[Any]] = {}
+    for row in pending:
         local_by_detail.setdefault(str(row.detail_id), []).append(row)
+        local_by_target.setdefault((str(row.detail_id), str(row.shop_id)), []).append(row)
     by_detail: dict[str, list[Any]] = {}
     # 上游同一个接口（search_move_collect_list），老版读 moveCollectDetailList、
     # 新版读 detailList。两边都试：读错字段的后果是永远解析出 0 行、
@@ -202,6 +241,10 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
     from core.utils import now_ts
 
     for row in rows:
+        # Several software users may share this key. Filtering the visible
+        # owner first must not hide an ambiguous shared upstream request.
+        if len(local_by_target[(str(row.detail_id), str(row.shop_id))]) != 1:
+            continue
         candidates = by_detail.get(str(row.detail_id), [])
         if not candidates:
             continue
@@ -209,11 +252,13 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
                    if str(candidate.get("shopId") or candidate.get("targetShopId") or "")
                    == str(row.shop_id)]
         if matched:
+            matched = _current_attempt_receipts(row, matched)
             found = matched[0] if len(matched) == 1 else None
         elif (len(candidates) == 1
               and len(local_by_detail[str(row.detail_id)]) == 1
               and not (candidates[0].get("shopId") or candidates[0].get("targetShopId"))):
-            found = candidates[0]
+            matched = _current_attempt_receipts(row, candidates)
+            found = matched[0] if len(matched) == 1 else None
         else:
             found = None
         if found is None:
@@ -222,15 +267,22 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
         # 后面再加一轮回源就会用到错的筛选值。
         remote_status = str(found.get("status") or "").lower()
         if remote_status in ("success", "fail", "cancel", "processing"):
+            receipt_id = found.get("moveCollectTaskDetailId")
+            if receipt_id not in (None, ""):
+                row.detail = {**(row.detail if isinstance(row.detail, dict) else {}),
+                              "moveCollectTaskDetailId": str(receipt_id),
+                              "receiptAttemptAt": row.last_requested_at or row.requested_at}
             row.status = remote_status
             row.reason = str(found.get("reason") or found.get("message") or "")
-            row.platform_item_id = (str(found.get("itemId"))
-                                    if found.get("itemId") not in (None, "") else None)
+            platform_item_id = found.get("platformItemId") or found.get("itemId")
+            row.platform_item_id = (str(platform_item_id)
+                                    if platform_item_id not in (None, "") else None)
             row.finished_at = now_ts() if remote_status != "processing" else None
             updated += 1
             if remote_status in ("success", "fail", "cancel"):
                 publish_service.reconcile_product_publish(db, row)
                 automation_run_service.reconcile_publish_log(db, row)
+                schedule_service.reconcile_publish_log(db, row)
     db.commit()
     return {"updated": updated, "degraded": degraded, "accountId": str(account.id),
             "platformTotal": platform_total}

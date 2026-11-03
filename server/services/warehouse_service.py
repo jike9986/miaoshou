@@ -235,22 +235,7 @@ def _quality_review_summary(product: Product) -> tuple[str, list[str]]:
     if not reasons:
         reasons.append("unverified")
 
-    # 不能靠人工逐件核验（负责人 2026-10-30 明确）。这里按品类给出合理规格：
-    # 重量在合理区间、包裹尺寸与品类规格一致，就视为「已核验」，
-    # 不再要求人点一遍。只有真正异常（缺重量 / 尺寸明显不符 / 认不出品类）才留待核验。
-    cat_name = str(product.category_name or "").strip()
-    if cat_name:
-        spec = category_package_spec(cat_name)
-        if spec is not None:
-            lo, hi = spec["weightRange"]
-            dims_ok = (dimensions == [spec["length"], spec["width"], spec["height"]])
-            weight_ok = weight is not None and lo <= float(weight) <= hi
-            if weight_ok and dims_ok:
-                return "verified", []
-            if weight_ok and all(v is not None for v in dimensions):
-                # 尺寸不是品类默认值但也不为空：可能运营手填过，认它
-                return "verified", []
-
+    # 合理区间或品类默认值不能证明实物规格已核验；只认与当前版本关联的来源记录。
     return "needs_review", reasons
 
 

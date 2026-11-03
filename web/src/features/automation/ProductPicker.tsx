@@ -102,6 +102,7 @@ export function ProductPicker({
   disabled = false,
   className,
 }: ProductPickerProps) {
+  const loadingEmptyItems = (loading || fetching) && items.length === 0;
   const errorMessage =
     error instanceof Error ? error.message : typeof error === "string" ? error : null;
   const fallbackNotice = getCollectBoxFallbackNotice({
@@ -111,7 +112,7 @@ export function ProductPicker({
   });
   const showReadError = shouldShowCollectBoxReadError({
     connected,
-    loading,
+    loading: loadingEmptyItems,
     error: errorMessage,
     itemCount: items.length,
   });
@@ -213,8 +214,8 @@ export function ProductPicker({
           />
         )}
 
-        {connected && loading && (
-          <div className="p-1">
+        {connected && loadingEmptyItems && (
+          <div className="p-1" role="status" aria-label="正在加载采集箱">
             <SkeletonRows rows={6} />
           </div>
         )}
@@ -229,7 +230,7 @@ export function ProductPicker({
           />
         )}
 
-        {connected && !loading && !errorMessage && items.length === 0 && total === 0 && filter === "all" && (
+        {connected && !loadingEmptyItems && !errorMessage && items.length === 0 && total === 0 && filter === "all" && (
           <EmptyState
             icon={<SearchX strokeWidth={1.5} />}
             title="采集箱是空的"
@@ -238,7 +239,7 @@ export function ProductPicker({
           />
         )}
 
-        {connected && !loading && !errorMessage && items.length === 0 && (total > 0 || filter !== "all") && (
+        {connected && !loadingEmptyItems && !errorMessage && items.length === 0 && (total > 0 || filter !== "all") && (
           <EmptyState
             icon={<SearchX strokeWidth={1.5} />}
             title="当前筛选没有结果"
@@ -248,7 +249,7 @@ export function ProductPicker({
           />
         )}
 
-        {connected && !loading && items.length > 0 && (
+        {connected && items.length > 0 && (
           <ul
             className="grid min-w-0 content-start gap-2.5
                        [grid-template-columns:repeat(auto-fill,minmax(128px,1fr))]"

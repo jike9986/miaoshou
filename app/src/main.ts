@@ -1,8 +1,10 @@
-import { app, BrowserWindow, ipcMain, screen, shell } from "electron";
+import { app, BrowserWindow, ipcMain, safeStorage, screen, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import { spawn, ChildProcess } from "node:child_process";
+import { createSessionVault } from "./sessionVault";
 
 // 本机实测结论（决定性实验）：
 //   在 m.js 第一行写日志，然后无参数启动 electron —— 日志文件根本不生成。
@@ -157,6 +159,25 @@ function startServer(): void {
   });
 }
 
+function isTrustedPage(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (isDev) return url.origin === DEV_URL && url.pathname === "/";
+    return url.protocol === "file:" && !url.host
+      && path.resolve(fileURLToPath(url)).toLowerCase()
+        === path.resolve(process.resourcesPath, "web", "index.html").toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+function openWebLink(value: string): void {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" || url.protocol === "http:") void shell.openExternal(value);
+  } catch { /* Ignore malformed external links. */ }
+}
+
 function createWindow(): void {
   // Electron 使用逻辑像素；高缩放或小屏幕下不能把窗口最小尺寸固定得比工作区还大。
   const display = screen.getPrimaryDisplay();
@@ -185,8 +206,17 @@ function createWindow(): void {
   mainWindow.once("ready-to-show", () => mainWindow?.show());
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openWebLink(url);
     return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (!isTrustedPage(url)) {
+      event.preventDefault();
+      openWebLink(url);
+    }
+  });
+  mainWindow.webContents.on("will-redirect", (event, url) => {
+    if (!isTrustedPage(url)) event.preventDefault();
   });
 
   if (isDev) {
@@ -256,6 +286,26 @@ async function loadToken(): Promise<string> {
 ipcMain.handle("app:boot", () => bootInfo);
 ipcMain.on("app:boot-sync", (event) => {
   event.returnValue = bootInfo;
+});
+const sessionVault = createSessionVault(
+  path.join(app.getPath("userData"), "operator-session.v1.json"),
+  () => bootInfo.apiBase,
+  safeStorage,
+);
+ipcMain.on("session:read", (event) => {
+  event.returnValue = event.sender === mainWindow?.webContents
+    && event.senderFrame === mainWindow.webContents.mainFrame
+    && isTrustedPage(event.senderFrame.url) ? sessionVault.read() : null;
+});
+ipcMain.on("session:write", (event, value: unknown) => {
+  if (event.sender !== mainWindow?.webContents
+    || event.senderFrame !== mainWindow.webContents.mainFrame
+    || !isTrustedPage(event.senderFrame.url)
+    || (value !== null && (typeof value !== "string" || value.length > 8192))) {
+    event.returnValue = false;
+    return;
+  }
+  event.returnValue = sessionVault.write(value);
 });
 ipcMain.handle("window:minimize", () => mainWindow?.minimize());
 ipcMain.handle("window:toggle-maximize", () => {

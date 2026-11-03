@@ -11,6 +11,10 @@ contextBridge.exposeInMainWorld("desktop", {
   close: () => ipcRenderer.invoke("window:close"),
   isMaximized: () => ipcRenderer.invoke("window:is-maximized"),
   platform: process.platform,
+  sessionToken: {
+    read: (): string | null => ipcRenderer.sendSync("session:read"),
+    write: (token: string | null): boolean => ipcRenderer.sendSync("session:write", token),
+  },
   // 前端启动参数由主进程给出（含访问令牌），避免在页面里硬编码
   boot: () => ipcRenderer.invoke("app:boot"),
 });

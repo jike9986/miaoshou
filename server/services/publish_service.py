@@ -155,13 +155,14 @@ def _already_published_blocker(db: Session, *, account: Account,
 
 def _require_started_automation_publish(db: Session, *, entries: list[dict[str, Any]],
                                         account: Account, target_shop_id: str,
-                                        operator_id: int | None = None) -> None:
+                                        operator_id: int | None = None
+                                        ) -> dict[int, AutomationRunItem]:
     """Automation results can only publish through a started, matching run item."""
     products = [entry["product"] for entry in entries
                 if isinstance(entry.get("product"), Product)
                 and entry["product"].automation_result]
     if not products:
-        return
+        return {}
     if any(product.account_id != account.id for product in products):
         raise errors.AppError(
             "CONFLICT", "自动化商品必须使用创建该自动化任务的妙手账号发布", status=409)
@@ -182,10 +183,16 @@ def _require_started_automation_publish(db: Session, *, entries: list[dict[str, 
     if operator_id is not None:
         query = query.filter(AutomationRun.owner_operator_id == operator_id)
     rows = query.all()
-    eligible = {
-        item.product_id: run for item, run in rows
-        if isinstance(run.settings, dict) and run.settings.get("publishEnabled") is True
-    }
+    eligible: dict[int, AutomationRun] = {}
+    started_items: dict[int, AutomationRunItem] = {}
+    for item, run in rows:
+        if not isinstance(run.settings, dict) or run.settings.get("publishEnabled") is not True:
+            continue
+        if item.product_id in started_items:
+            raise errors.AppError(
+                "CONFLICT", "商品对应多个正在发布的自动化任务，请先核对任务记录", status=409)
+        eligible[item.product_id] = run
+        started_items[item.product_id] = item
     if product_ids - set(eligible):
         raise errors.AppError(
             "CONFLICT", "自动化商品必须由已启动的匹配自动化任务发布", status=409)
@@ -212,6 +219,7 @@ def _require_started_automation_publish(db: Session, *, entries: list[dict[str, 
             details={"items": unverified_specs,
                      "field": "confirmedProductId, confirmedRevision"},
         )
+    return started_items
 
 
 # --- 记录 -----------------------------------------------------------------
@@ -674,7 +682,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     if log_operator_id is not None:
         operator_name = warehouse_service.operator_names(db).get(int(log_operator_id), "")
     entries = _resolve_items(db, items)
-    _require_started_automation_publish(
+    automation_items = _require_started_automation_publish(
         db, entries=entries, account=account, target_shop_id=target_shop_id,
         operator_id=operator_id)
     claim_only = payload.get("claimOnly") is True
@@ -930,6 +938,15 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                                   target_shop_id),
                               operator_id=log_operator_id)
             row.detail = {**(row.detail or {}), "claimOnly": claim_only}
+            item = automation_items.get(row.product_id)
+            if item is not None and not claim_only:
+                # Persist the exact request identity before contacting upstream.
+                # Losing the HTTP response must not lose the receipt association.
+                row.detail = {**row.detail, "automationRunId": item.run_id,
+                              "automationRunItemId": str(item.id)}
+                item.publish_result = {"batchId": batch_id,
+                                       "publishLogId": str(row.id)}
+                item.updated_at = now_ts()
             logged.append(row)
         db.flush()
         if published and not claim_only:

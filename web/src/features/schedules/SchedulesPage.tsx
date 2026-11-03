@@ -141,7 +141,9 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
         const label =
           result.status === "ok"
             ? "执行完成"
-            : result.status === "partial"
+            : result.status === "submitted"
+              ? "已提交，等待平台回执"
+              : result.status === "partial"
               ? "部分完成"
               : result.status === "empty"
                 ? "没有可处理的商品"
@@ -150,11 +152,12 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
           description:
             result.status === "empty"
               ? result.reason || "仓库里没有可处理的商品"
-              : `计划 ${result.requested} 件 · 成功 ${result.count} 件 · 失败 ${result.failed} 件${
+              : `计划 ${result.requested} 件 · 成功 ${result.count} 件 · 待回执 ${result.submitted ?? 0} 件 · 失败 ${result.failed} 件${
                   result.reason ? ` · ${result.reason}` : ""
                 }`,
         };
         if (result.status === "ok") toast.success(label, options);
+        else if (result.status === "submitted") toast.info(label, options);
         else if (result.status === "failed") toast.error(label, options);
         else toast.warning(label, options);
       },
@@ -425,6 +428,8 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
                               meta={
                                 task.lastResult.status === "ok"
                                   ? { label: "成功", tone: "success", dot: "success" }
+                                  : task.lastResult.status === "submitted"
+                                    ? { label: "待回执", tone: "neutral", dot: "muted" }
                                   : task.lastResult.status === "partial"
                                     ? { label: "部分", tone: "warning", dot: "warning" }
                                     : task.lastResult.status === "empty"
@@ -433,7 +438,7 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "logs" 
                               }
                             />
                             <span className="num">
-                              {task.lastResult.count}/{task.perRun}
+                              成功 {task.lastResult.count} · 待回执 {task.lastResult.submitted ?? 0}
                             </span>
                             <span className="text-fg-muted">{formatRelative(task.lastResult.at)}</span>
                           </p>
@@ -1031,6 +1036,7 @@ function ScheduleHistoryPanel() {
   };
   const statusLabel = (status: string): string => {
     if (status === "ok") return "已发布";
+    if (status === "submitted") return "待回执";
     if (status === "partial") return "部分失败";
     if (status === "failed") return "失败";
     if (status === "empty") return "无商品";
@@ -1087,6 +1093,9 @@ function ScheduleHistoryPanel() {
                     成功
                   </th>
                   <th className="w-[76px] border-b border-border px-3 text-right text-xs font-medium text-fg-muted">
+                    待回执
+                  </th>
+                  <th className="w-[76px] border-b border-border px-3 text-right text-xs font-medium text-fg-muted">
                     失败
                   </th>
                   <th className="border-b border-border px-3 pr-4 text-left text-xs font-medium text-fg-muted">
@@ -1106,6 +1115,7 @@ function ScheduleHistoryPanel() {
                     </td>
                     <td className="px-3 text-right tabular-nums text-fg-muted">{row.selected}</td>
                     <td className="px-3 text-right tabular-nums text-fg-muted">{row.published}</td>
+                    <td className="px-3 text-right tabular-nums text-fg-muted">{row.submitted ?? 0}</td>
                     <td className="px-3 text-right tabular-nums text-fg-muted">{row.failed}</td>
                     <td className="max-w-[360px] truncate px-3 pr-4 text-fg-muted" title={row.reason}>
                       {row.reason || "-"}

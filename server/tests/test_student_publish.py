@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,6 +17,7 @@ from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
 from services import (
     account_service,
+    automation_run_service,
     collect_box_service,
     operator_service,
     publish_service,
@@ -488,6 +490,9 @@ def test_warehouse_published_state_requires_final_receipt_and_stays_owner_scoped
 
     client.publish_records = lambda **_kwargs: {"data": {"detailList": [{
         "detailId": result["published"][0], "shopId": "123", "status": remote_status,
+        "gmtCreate": datetime.fromtimestamp(
+            result["records"]["items"][0]["lastRequestedAt"], timezone(timedelta(hours=8))
+        ).strftime("%Y-%m-%d %H:%M:%S"),
     }]}}
     client.close = lambda: None
     refreshed = publish_api._refresh_processing(db, str(account.id), operator_id=operator.id)
@@ -775,6 +780,75 @@ def test_member_automation_publishes_verified_draft_without_repricing_or_claim(
         product_id=product.id, operator_id=member.id).one()
     assert log.status == "processing"
     assert log.mode == "direct"
+
+
+@pytest.mark.parametrize("interruption", ["lost_response", "client_report", "recovery"])
+def test_automation_lost_publish_response_keeps_exact_receipt_identity(
+        publish_db, monkeypatch, interruption):
+    from services.miaoshou import MiaoshouError
+
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    member, account = _identity(db, suffix)
+    product = _product(db, suffix, account)
+    product.automation_result = True
+    product.operator_id = member.id
+    product.draft_verified_revision = product.revision
+    item = _automation_run(db, suffix, member, account, product, publish_status="running")
+    run = db.get(AutomationRun, item.run_id)
+    run.settings = {**run.settings, "specificationConfirmations": {
+        str(product.id): product.revision,
+    }}
+    upstream = _stub_member_publish(monkeypatch, db, account)
+
+    def timeout(*_args):
+        raise MiaoshouError("response lost", kind="network")
+
+    monkeypatch.setattr(upstream, "publish_items", timeout)
+    with pytest.raises(errors.AppError) as raised:
+        publish_service.publish(db, {
+            "confirm": True, "accountId": str(account.id), "shopId": "123",
+            "items": [{"warehouseId": str(product.id)}],
+        }, operator_id=member.id)
+    assert raised.value.code == errors.UPSTREAM_UNKNOWN_RESULT
+    db.rollback()
+    log = db.query(PublishLog).filter_by(product_id=product.id, operator_id=member.id).one()
+    assert log.status == "processing"
+    assert log.detail["automationRunId"] == run.id
+    assert log.detail["automationRunItemId"] == str(item.id)
+    assert item.publish_result == {"publishLogId": str(log.id), "batchId": log.batch_id}
+    if interruption == "client_report":
+        automation_run_service.finish_publish(
+            db, run, item.id, status="needs_review",
+            result={"batchId": "forged", "publishLogId": "0"})
+    elif interruption == "recovery":
+        automation_run_service.recover(db, run)
+    # A receipt for a different attempt cannot finish this run.
+    original_batch = log.batch_id
+    log.batch_id = "old-attempt"
+    log.status = "success"
+    assert not automation_run_service.reconcile_publish_log(db, log)
+    log.batch_id = original_batch
+    assert automation_run_service.reconcile_publish_log(db, log)
+    assert item.publish_status == "succeeded"
+    assert item.publish_result["publishLogId"] == str(log.id)
+    assert item.publish_result["batchId"] == original_batch
+
+
+def test_automation_ambiguous_running_items_block_before_submission(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    teacher, account = _identity(db, suffix, role=operator_service.ROLE_TEACHER)
+    product = _product(db, suffix, account)
+    product.automation_result = True
+    product.draft_verified_revision = product.revision
+    for tail in ("-a", "-b"):
+        _automation_run(db, suffix + tail, teacher, account, product, publish_status="running")
+    upstream = _stub_member_publish(monkeypatch, db, account)
+    monkeypatch.setattr(upstream, "publish_items", lambda *_args: pytest.fail("ambiguous submit"))
+    with pytest.raises(errors.AppError) as raised:
+        publish_service.publish(db, _publish_payload(product, account), operator_id=teacher.id)
+    assert raised.value.status == 409
 
 
 @pytest.mark.parametrize("own_run_status", [None, "queued"])

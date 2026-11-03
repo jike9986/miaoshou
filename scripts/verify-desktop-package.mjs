@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL, URL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const unpacked = path.join(root, "release", "win-unpacked");
@@ -36,9 +36,12 @@ function compareWeb(directory, relative = "") {
 compareWeb(web);
 
 const handlers = new Map();
+const synchronousHandlers = new Map();
+const navigationHandlers = new Map();
 let loadedFile;
 let startup;
 let windowOptions;
+let window;
 const testData = path.join(root, "_build_tmp", "package-verification-profile");
 const app = {
   isPackaged: true,
@@ -50,19 +53,37 @@ const app = {
   whenReady: () => ({ then(callback) { startup = Promise.resolve().then(callback); return startup; } }),
 };
 class BrowserWindow {
-  constructor(options) { windowOptions = options; this.webContents = { setWindowOpenHandler() {} }; }
+  constructor(options) {
+    window = this;
+    windowOptions = options;
+    this.webContents = { mainFrame: { url: "about:blank" },
+      setWindowOpenHandler() {}, on: (event, handler) => navigationHandlers.set(event, handler) };
+  }
   once() {}
-  loadFile(file, options) { loadedFile = { file, options }; return Promise.resolve(); }
+  loadFile(file, options) {
+    loadedFile = { file, options };
+    this.webContents.mainFrame.url = pathToFileURL(file).href;
+    return Promise.resolve();
+  }
 }
 const nativeRequire = createRequire(import.meta.url);
 const context = {
   require(name) {
     if (name === "electron") return {
       app, BrowserWindow,
-      ipcMain: { handle: (key, handler) => handlers.set(key, handler), on() {} },
+      ipcMain: { handle: (key, handler) => handlers.set(key, handler),
+        on: (key, handler) => synchronousHandlers.set(key, handler) },
       screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 853, height: 480 }, workArea: { x: 0, y: 24 } }) },
-      shell: {},
+      shell: { openExternal() {} },
+      safeStorage: { isEncryptionAvailable: () => false },
     };
+    if (name === "./sessionVault") {
+      const module = { exports: {} };
+      vm.runInNewContext(asar.extractFile(archive, "dist/sessionVault.js").toString(), {
+        exports: module.exports, require: nativeRequire, Buffer,
+      }, { filename: "packaged-sessionVault.js" });
+      return module.exports;
+    }
     if (name === "node:child_process") return { spawn() { throw new Error("Packaged client started a local backend"); } };
     return nativeRequire(name);
   },
@@ -74,6 +95,7 @@ const context = {
     AOHUANG_REMOTE_CLIENT_TOKEN: "legacy-test-token-must-be-ignored",
   } },
   console,
+  URL,
   setTimeout,
 };
 vm.runInNewContext(asar.extractFile(archive, "dist/main.js").toString(), context, { filename: "packaged-main.js" });
@@ -89,4 +111,38 @@ assert.equal(windowOptions.height, 480);
 assert.ok(windowOptions.minWidth <= 853 && windowOptions.minHeight <= 480);
 assert.equal(windowOptions.x, 0);
 assert.equal(windowOptions.y, 24);
+const sessionEvent = () => {
+  let writes = 0;
+  let result;
+  return {
+    sender: window.webContents, senderFrame: window.webContents.mainFrame,
+    get returnValue() { return result; },
+    set returnValue(value) {
+      assert.equal(writes++, 0, "Synchronous IPC must send exactly one reply");
+      result = value;
+    },
+  };
+};
+let event = sessionEvent();
+synchronousHandlers.get("session:write")(event, "package-verification-only");
+event = sessionEvent();
+synchronousHandlers.get("session:read")(event);
+assert.equal(event.returnValue, "package-verification-only");
+const trustedUrl = window.webContents.mainFrame.url;
+for (const url of ["https://example.invalid/", "data:text/html,untrusted", pathToFileURL(path.join(resources, "web", "other.html")).href]) {
+  window.webContents.mainFrame.url = url;
+  event = sessionEvent();
+  synchronousHandlers.get("session:read")(event);
+  assert.equal(event.returnValue, null, "Untrusted page could read a session");
+  event = sessionEvent();
+  synchronousHandlers.get("session:write")(event, "untrusted");
+  assert.equal(event.returnValue, false, "Untrusted page could replace a session");
+  let prevented = false;
+  navigationHandlers.get("will-navigate")({ preventDefault() { prevented = true; } }, url);
+  assert.equal(prevented, true, "Untrusted navigation was allowed");
+}
+window.webContents.mainFrame.url = trustedUrl;
+event = sessionEvent();
+synchronousHandlers.get("session:write")(event, null);
+assert.equal(event.returnValue, true, "Trusted logout could not clear its session");
 console.log(`Desktop package verified: v${boot.version}, ${checkedFiles} current web files, HTTPS software login, no shared token or local backend, small work area respected.`);

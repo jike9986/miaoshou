@@ -511,9 +511,15 @@ def finish_publish(db: Session, run: AutomationRun, item_id: Any, *, status: str
         raise errors.AppError("CONFLICT", "该商品不处于可记录发布结果的状态",
                               status=409)
     previous_status = row.publish_status
+    previous_result = row.publish_result if isinstance(row.publish_result, dict) else {}
     row.publish_status = status
     row.publish_reason = str(reason or "")[:2000]
     row.publish_result = dict(result or {})
+    # A server-bound publish identity survives a missing response and cannot be
+    # replaced by the client's subsequently reported (possibly empty) result.
+    if previous_result.get("publishLogId"):
+        for key in ("publishLogId", "batchId"):
+            row.publish_result[key] = previous_result.get(key)
     process_result = row.process_result if isinstance(row.process_result, dict) else {}
     image_result = process_result.get("images")
     has_image_job = (db.query(ImageJob.id).filter(
@@ -651,14 +657,26 @@ def reconcile_publish_log(db: Session, log: PublishLog) -> bool:
              .filter(AutomationRun.account_id == log.account_id,
                      AutomationRun.shop_id == log.shop_id,
                      AutomationRunItem.product_id == log.product_id,
-                     AutomationRunItem.publish_status == "needs_review"))
+                     AutomationRunItem.publish_status.in_(("running", "needs_review", "failed"))))
     if log.operator_id is not None:
         query = query.filter(AutomationRun.owner_operator_id == log.operator_id)
     matched = []
+    identity = log.detail if isinstance(log.detail, dict) else {}
     for item in query.all():
         result = item.publish_result if isinstance(item.publish_result, dict) else {}
-        if result.get("batchId") == log.batch_id:
-            matched.append(item)
+        if result.get("batchId") != log.batch_id:
+            continue
+        if identity.get("automationRunItemId"):
+            if (str(item.id) != str(identity["automationRunItemId"])
+                    or item.run_id != identity.get("automationRunId")
+                    or str(result.get("publishLogId")) != str(log.id)):
+                continue
+        elif item.publish_status != "needs_review":
+            # Legacy records without a server-bound identity remain conservative.
+            continue
+        if result.get("publishLogId") not in (None, str(log.id)):
+            continue
+        matched.append(item)
     if len(matched) != 1:
         return False
 

@@ -67,7 +67,10 @@ import {
   toast,
 } from "@/components/ui";
 import { ProcessSettings } from "@/features/automation/ProcessSettings";
-import { automationImagesPending, pendingAutomationPublishAction } from "@/features/automation/automationPublish";
+import {
+  automationImagesPending, automationPublishOutcome, pendingAutomationPublishAction,
+  retainAutomationSelection,
+} from "@/features/automation/automationPublish";
 import { ProductPicker } from "@/features/automation/ProductPicker";
 import { isCollectBoxReadOnly } from "@/features/automation/collectBoxSelectionGate.mjs";
 import { ProgressPanel } from "@/features/automation/ProgressPanel";
@@ -356,11 +359,19 @@ export function AutomationPage() {
     : null;
   const stopRef = useRef(false);
   const selectionScopeRef = useRef(status?.accountId ?? null);
+  const selectionOperatorRef = useRef(operatorId);
+  const executionScopeRef = useRef(0);
 
   useLayoutEffect(() => {
     const nextAccountId = status?.accountId ?? null;
-    if (selectionScopeRef.current === nextAccountId) return;
+    if (selectionScopeRef.current === nextAccountId && selectionOperatorRef.current === operatorId) return;
     selectionScopeRef.current = nextAccountId;
+    selectionOperatorRef.current = operatorId;
+    executionScopeRef.current += 1;
+    stopRef.current = true;
+    specificationResolver.current?.(null);
+    specificationResolver.current = null;
+    setSpecificationPrompt(null);
     setSelection(new Map());
     setStages({});
     setProgress({});
@@ -370,8 +381,15 @@ export function AutomationPage() {
     persistentRunId.current = null;
     persistentItems.current = new Map();
     startingRunRef.current = false;
-    stopRef.current = false;
-  }, [status?.accountId]);
+    setPreparingRun(false);
+  }, [status?.accountId, operatorId]);
+
+  useLayoutEffect(() => () => {
+    executionScopeRef.current += 1;
+    stopRef.current = true;
+    specificationResolver.current?.(null);
+    specificationResolver.current = null;
+  }, []);
 
   /* ---------------- 客户端筛选 ---------------- */
   const visibleItems = useMemo(() => {
@@ -397,18 +415,23 @@ export function AutomationPage() {
     }
   }, [filter, items, selectedKeys, stages]);
 
-  const hydrateRun = useCallback((saved: AutomationRunRecord) => {
+  const hydrateRun = useCallback((saved: AutomationRunRecord, keepOtherSelections = false) => {
     if (hydratedRunId.current === saved.id) return;
     hydratedRunId.current = saved.id;
     persistentRunId.current = saved.id;
     persistentItems.current = new Map(saved.items.map((item) => [item.key, item.id]));
-    const nextSelection = new Map(saved.items.filter((item) => item.processStatus === "queued"
-      || pendingAutomationPublishAction(item) !== null).map((item) => [item.key, {
+    const nextSelection = new Map(saved.items.filter(retainAutomationSelection).map((item) => [item.key, {
       key: item.key, detailId: item.detailId, shopId: item.shopId, title: item.title,
     }]));
-    setSelection(nextSelection);
+    setSelection((current) => {
+      if (!keepOtherSelections) return nextSelection;
+      const next = new Map(current);
+      for (const item of saved.items) next.delete(item.key);
+      for (const [key, entry] of nextSelection) next.set(key, entry);
+      return next;
+    });
     const savedSettings = saved.settings;
-    updateSettings((current) => ({
+    if (!keepOtherSelections) updateSettings((current) => ({
       ...current,
       ...Object.fromEntries(Object.entries(savedSettings).filter(([key, value]) =>
         key in current && typeof value === typeof current[key as keyof AutomationSettings])),
@@ -422,7 +445,7 @@ export function AutomationPage() {
     let imageDone = 0;
     let textDone = 0;
     for (const item of saved.items) {
-      const stage: ItemStage = item.processStatus === "failed" ? "failed"
+      const stage: ItemStage = item.processStatus === "failed" || item.publishStatus === "failed" ? "failed"
         : item.processStatus === "needs_review" || item.publishStatus === "needs_review" || item.publishStatus === "running" ? "needs_review"
           : item.processStatus === "running" ? "needs_review"
             : item.processStatus === "succeeded" ? "done"
@@ -441,7 +464,7 @@ export function AutomationPage() {
           && (images.completed === true || images.submitted > 0) && images.failed === 0),
         imageFailures: images?.failed ?? 0,
       };
-      const reason = item.processReason || item.publishReason;
+      const reason = item.publishReason || item.processReason;
       if (stage === "failed" || stage === "needs_review") failures.push({
         key: item.key, title: item.title, detailId: item.detailId,
         reason: reason || (stage === "needs_review" ? "处理状态未知，请核对妙手记录后再继续。" : "处理失败"),
@@ -464,12 +487,14 @@ export function AutomationPage() {
     });
     // 恢复历史运行时，图片翻译可能是后台异步跑完的：这里按「真实图片任务数」
     // 对齐一次进度（计划数不是 9+9+9 的上限，而是实际提交翻译的张数）。
+    const scope = executionScopeRef.current;
     void (async () => {
       const apiBase = resolveApiBase();
       const token = resolveToken();
       let total = 0, ready = 0, failedJobs = 0;
       let hasDurableImages = false;
       for (const item of saved.items) {
+        if (scope !== executionScopeRef.current || persistentRunId.current !== saved.id) return;
         const images = item.processResult.images;
         if (typeof images?.completed === "boolean") {
           hasDurableImages = true;
@@ -496,7 +521,8 @@ export function AutomationPage() {
           }
         } catch { /* 忽略 */ }
       }
-      if (total > 0 || hasDurableImages) {
+      if (scope === executionScopeRef.current && persistentRunId.current === saved.id
+        && (total > 0 || hasDurableImages)) {
         setRun((prev) => ({ ...prev, imageDone: ready, imagePlanned: total, imageFailed: failedJobs }));
       }
     })();
@@ -510,11 +536,14 @@ export function AutomationPage() {
       return;
     }
     recoveringRunId.current = saved.id;
+    const scope = executionScopeRef.current;
     void (async () => {
       try {
         const recovered = (await recoverRunMutation.mutateAsync(saved.id)).run;
+        if (scope !== executionScopeRef.current) return;
         hydrateRun(recovered);
       } catch {
+        if (scope !== executionScopeRef.current) return;
         hydrateRun(saved);
       }
       recoveringRunId.current = null;
@@ -590,9 +619,10 @@ export function AutomationPage() {
   const startOrResumePublish = async (
     input: { runId: string; itemId: string; productId: string; title: string; resume: boolean },
   ): Promise<"started" | "skipped" | "stopped"> => {
+    const scope = executionScopeRef.current;
     let confirmation: AutomationPublishConfirmation | undefined;
     while (true) {
-      if (stopRef.current) return "stopped";
+      if (scope !== executionScopeRef.current || stopRef.current) return "stopped";
       try {
         const request = {
           runId: input.runId,
@@ -601,12 +631,14 @@ export function AutomationPage() {
         };
         if (input.resume) await resumePublishMutation.mutateAsync(request);
         else await startPublishMutation.mutateAsync(request);
+        if (scope !== executionScopeRef.current) return "stopped";
         if (stopRef.current) {
           await recordStoppedPublish({ runId: input.runId, itemId: input.itemId });
           return "stopped";
         }
         return "started";
       } catch (error) {
+        if (scope !== executionScopeRef.current) return "stopped";
         if (stopRef.current) {
           await recordStoppedPublish({ runId: input.runId, itemId: input.itemId });
           return "stopped";
@@ -629,6 +661,7 @@ export function AutomationPage() {
   const resumePublishTargets = async (
     targets: SelectionEntry[], saved: AutomationRunRecord,
   ): Promise<void> => {
+    const scope = executionScopeRef.current;
     const failures: RunFailure[] = [];
     let submitted = 0;
     setRun({
@@ -637,8 +670,9 @@ export function AutomationPage() {
       stage: "检查图片并续发…", failures: [], failedKeys: [],
     });
     const targetKeys = new Set(targets.map((target) => target.key));
-    const retryableKeys = new Set(targetKeys);
+    const retainedKeys = new Set(targetKeys);
     for (const [index, target] of targets.entries()) {
+      if (scope !== executionScopeRef.current) return;
       if (stopRef.current) break;
       const item = saved.items.find((candidate) => candidate.key === target.key);
       if (!item) continue;
@@ -652,6 +686,7 @@ export function AutomationPage() {
       try {
         if (action === "retry") {
           await retryPublishMutation.mutateAsync({ runId: saved.id, itemId: item.id });
+          if (scope !== executionScopeRef.current) return;
         }
         const resume = action === "resume";
         const started = await startOrResumePublish({
@@ -661,15 +696,16 @@ export function AutomationPage() {
           title: target.title || item.title || target.detailId,
           resume,
         });
+        if (scope !== executionScopeRef.current) return;
         if (started === "stopped" || stopRef.current) {
           if (started === "started") {
             await recordStoppedPublish({ runId: saved.id, itemId: item.id });
+            if (scope !== executionScopeRef.current) return;
           }
           setPublishQueued(target.key);
           break;
         }
         if (started === "skipped") {
-          retryableKeys.add(target.key);
           setPublishQueued(target.key);
           failures.push({
             key: target.key,
@@ -686,7 +722,6 @@ export function AutomationPage() {
           continue;
         }
         resumed = true;
-        retryableKeys.delete(target.key);
         const response = await publish.mutateAsync({
           items: [{ warehouseId: String(item.productId) }],
           accountId: saved.accountId,
@@ -694,34 +729,29 @@ export function AutomationPage() {
           confirm: true,
           claimOnly: false,
         });
+        if (scope !== executionScopeRef.current) return;
         submitted += response.published.length;
+        const outcome = automationPublishOutcome(response);
         await recordPublishMutation.mutateAsync({
           runId: saved.id,
           itemId: item.id,
-          status: response.published.length > 0 ? "needs_review"
-            : response.failures.length > 0 ? "failed" : "needs_review",
-          reason: response.failures.map((failure) => failure.reason).filter(Boolean).join("；")
-            || (response.published.length > 0
-              ? "妙手已受理续发，等待最终发布回执。"
-              : "妙手未返回可核实的发布结果，请核对发布记录。"),
+          status: outcome.status,
+          reason: outcome.reason,
           result: {
             batchId: response.batchId,
             published: response.published,
             failures: response.failures,
           },
         });
-        if (response.published.length > 0 || response.failures.length > 0) {
-          failures.push({
-            key: target.key,
-            title: target.title || "",
-            detailId: target.detailId,
-            reason: response.published.length > 0
-              ? "妙手已受理续发，最终状态以发布记录回执为准。"
-              : response.failures.map((failure) => failure.reason).filter(Boolean).join("；")
-                || "发布未完成，请核对发布记录。",
-          });
-        }
+        if (scope !== executionScopeRef.current) return;
+        if (outcome.accepted) retainedKeys.delete(target.key);
+        setStages((previous) => ({ ...previous, [target.key]: outcome.status }));
+        failures.push({
+          key: target.key, title: target.title || "", detailId: target.detailId,
+          reason: outcome.reason,
+        });
       } catch (error) {
+        if (scope !== executionScopeRef.current) return;
         const reason = apiErrorMessage(error);
         if (resumed) {
           try {
@@ -729,9 +759,10 @@ export function AutomationPage() {
               runId: saved.id, itemId: item.id, status: "needs_review", reason,
             });
           } catch { /* Recovery keeps ambiguous publish submissions from being retried. */ }
+          if (scope !== executionScopeRef.current) return;
+          setStages((previous) => ({ ...previous, [target.key]: "needs_review" }));
         }
         if (!resumed) {
-          retryableKeys.add(target.key);
           setPublishQueued(target.key);
         }
         failures.push({ key: target.key, title: target.title || "", detailId: target.detailId, reason });
@@ -743,15 +774,16 @@ export function AutomationPage() {
         failures: [...failures],
       }));
     }
+    if (scope !== executionScopeRef.current) return;
     setRun((prev) => ({
       ...prev, phase: stopRef.current ? "stopped" : "done", endedAt: Date.now(),
       stage: stopRef.current ? "已停止，未发布商品已保留"
         : submitted > 0 ? `已提交续发 ${submitted} 件，等待妙手回执`
         : failures.length > 0 ? `${failures.length} 项需检查` : "续发完成",
     }));
-    // 仅移除已尝试提交的项目；规格确认时跳过或启动前失败的项目仍可重试。
+    // 仅移除已明确受理的项目；失败和未知结果仍选中，但未知状态不会自动重发。
     setSelection((current) => new Map([...current].filter(([key]) =>
-      !targetKeys.has(key) || retryableKeys.has(key))));
+      !targetKeys.has(key) || retainedKeys.has(key))));
     if (failures.length > 0) {
       toast.warning(`续发完成，${failures.length} 项需要检查`, {
         description: failures.map((failure) => failure.reason).join("；"),
@@ -764,6 +796,7 @@ export function AutomationPage() {
   };
 
   const executeRun = async (): Promise<void> => {
+    const scope = executionScopeRef.current;
     if (listSelectionBusy || selectionScopeRef.current !== (status?.accountId ?? null)) {
       toast.info("采集箱正在加载，请稍后再开始");
       return;
@@ -815,9 +848,10 @@ export function AutomationPage() {
       if (targets.some((target) => {
         const item = previous.get(target.key);
         return item?.publishStatus === "needs_review"
-          || item?.publishStatus === "running";
+          || item?.publishStatus === "running"
+          || item?.publishStatus === "failed";
       })) {
-        toast.warning("所选商品发布状态待核对，请先核对妙手发布记录");
+        toast.warning("请先刷新发布回执；只有妙手确认失败或取消后才能重试，避免重复上架");
         return;
       }
       // 处理已成功且没有待发布动作的，不允许重复处理（避免重复加重量）。
@@ -859,7 +893,9 @@ export function AutomationPage() {
           settings: { ...settings },
           items: targets.map(({ key, detailId, shopId, title }) => ({ key, detailId, shopId, title })),
         })).run;
+        if (scope !== executionScopeRef.current) return;
       } catch (error) {
+        if (scope !== executionScopeRef.current) return;
         toast.error(`无法保存任务：${apiErrorMessage(error)}`);
         return;
       }
@@ -907,12 +943,13 @@ export function AutomationPage() {
     let publishSubmitted = 0;
     const failedKeys: string[] = [];
     const failures: RunFailure[] = [];
-    const skippedPublishKeys = new Set<string>();
+    const retainedKeys = new Set<string>();
     // 后台异步翻译的商品 id：文字/价格已成功，图片在后台跑，结束后轮询进度
     const queuedImageProducts: string[] = [];
     const queuedImageKeys = new Set<string>();
 
     for (const target of targets) {
+      if (scope !== executionScopeRef.current) return;
       if (stopRef.current) {
         setRun((prev) => ({
           ...prev,
@@ -940,6 +977,7 @@ export function AutomationPage() {
         const itemId = persistentItems.current.get(target.key);
         if (!runId || !itemId) throw new Error("任务记录缺少商品明细，已停止以免丢失执行状态");
         await startRunItemMutation.mutateAsync({ runId, itemId });
+        if (scope !== executionScopeRef.current) return;
         // 串行 await：一件处理完再下一件，避免后端并发写库
         const result = await processItem.mutateAsync({
           detailId: target.detailId,
@@ -963,6 +1001,7 @@ export function AutomationPage() {
             allowImageReview: true,
           },
         });
+        if (scope !== executionScopeRef.current) return;
         processResponseReceived = true;
         if (runSettings.publishEnabled && (
           result.saved !== true
@@ -988,6 +1027,7 @@ export function AutomationPage() {
             draftVerified: result.product?.draftVerified,
           },
         });
+        if (scope !== executionScopeRef.current) return;
         // 只有真的提交了翻译任务才算「图片处理完成」。
         // 之前这里加的是商品自带图片数，勾不勾「图片」数字都涨，等于假数据。
         if (automationImagesPending(result.images) && result.product?.id) {
@@ -1052,6 +1092,7 @@ export function AutomationPage() {
               } catch {
                 // 恢复接口会把“处理成功、发布仍排队”的项目转为待核对。
               }
+              if (scope !== executionScopeRef.current) return;
             } else {
               setRun((prev) => ({ ...prev, stage: `正式发布：${target.title || target.detailId}` }));
               try {
@@ -1062,16 +1103,18 @@ export function AutomationPage() {
                   title: target.title || target.detailId,
                   resume: false,
                 });
+                if (scope !== executionScopeRef.current) return;
                 if (started === "stopped" || stopRef.current) {
                   if (started === "started") await recordStoppedPublish({ runId, itemId });
-                  skippedPublishKeys.add(target.key);
+                  if (scope !== executionScopeRef.current) return;
+                  retainedKeys.add(target.key);
                   setPublishQueued(target.key);
                   done += 1;
                   break;
                 }
                 if (started === "skipped") {
                   publishIssues += 1;
-                  skippedPublishKeys.add(target.key);
+                  retainedKeys.add(target.key);
                   setPublishQueued(target.key);
                   failures.push({
                     key: target.key,
@@ -1096,58 +1139,58 @@ export function AutomationPage() {
                   confirm: true,
                   claimOnly: false,
                 });
+                if (scope !== executionScopeRef.current) return;
                 publishSubmitted += response.published.length;
-                const accepted = response.published.length > 0;
+                const outcome = automationPublishOutcome(response);
+                if (!outcome.accepted) retainedKeys.add(target.key);
                 await recordPublishMutation.mutateAsync({
                   runId, itemId,
-                  status: accepted ? "needs_review" : response.failures.length > 0 ? "failed" : "needs_review",
-                  reason: response.failures.map((item) => item.reason).filter(Boolean).join("；")
-                    || (accepted ? "妙手已受理，等待最终发布回执。" : "妙手未返回可核实的发布结果，请核对发布记录。"),
+                  status: outcome.status,
+                  reason: outcome.reason,
                   result: {
                     batchId: response.batchId,
                     published: response.published,
                     failures: response.failures,
                   },
                 });
-                if (accepted || response.failures.length > 0) {
-                  setStages((prev) => ({
-                    ...prev,
-                    [target.key]: accepted ? "needs_review" : "failed",
-                  }));
-                }
-                if (accepted || response.failures.length > 0) {
-                  publishIssues += 1;
-                  failures.push({
-                    key: target.key,
-                    title: (target.title || "") + (accepted ? "（等待发布回执）" : "（发布失败）"),
-                    detailId: target.detailId,
-                    reason: accepted
-                      ? "妙手已受理发布请求，最终状态以发布记录回执为准。"
-                      : response.failures.map((item) => item.reason).filter(Boolean).join("；")
-                        || "妙手没有返回已提交商品明细，请到发布记录核对。",
-                  });
-                }
+                if (scope !== executionScopeRef.current) return;
+                setStages((prev) => ({ ...prev, [target.key]: outcome.status }));
+                publishIssues += 1;
+                failures.push({
+                  key: target.key,
+                  title: (target.title || "") + (outcome.accepted ? "（等待发布回执）"
+                    : outcome.status === "failed" ? "（发布失败）" : "（发布待核对）"),
+                  detailId: target.detailId,
+                  reason: outcome.reason,
+                });
               } catch (publishError) {
+                if (scope !== executionScopeRef.current) return;
+                retainedKeys.add(target.key);
                 const reason = apiErrorMessage(publishError);
                 try {
                   await recordPublishMutation.mutateAsync({ runId, itemId, status: "needs_review", reason });
                 } catch { /* 保留服务端 running 状态，页面恢复时会转成待核对 */ }
+                if (scope !== executionScopeRef.current) return;
+                setStages((previous) => ({ ...previous, [target.key]: "needs_review" }));
                 publishIssues += 1;
                 failures.push({
                   key: target.key,
-                  title: (target.title || "") + "（发布失败）",
+                  title: (target.title || "") + "（发布待核对）",
                   detailId: target.detailId,
                   reason,
                 });
               }
             }
           } else {
+            retainedKeys.add(target.key);
             const reason = "商品处理结果缺少仓库商品 ID，无法确认发布目标。";
             try {
               await recordPublishMutation.mutateAsync({ runId, itemId, status: "needs_review", reason });
             } catch {
               // 下次打开时由恢复接口关闭未开始的发布项。
             }
+            if (scope !== executionScopeRef.current) return;
+            setStages((previous) => ({ ...previous, [target.key]: "needs_review" }));
             publishIssues += 1;
             failures.push({
               key: target.key,
@@ -1158,6 +1201,8 @@ export function AutomationPage() {
           }
         }
       } catch (error) {
+        if (scope !== executionScopeRef.current) return;
+        retainedKeys.add(target.key);
         const uncertain = processResponseReceived;
         if (uncertain) {
           setRun((prev) => ({ ...prev, needsReview: (prev.needsReview ?? 0) + 1 }));
@@ -1174,6 +1219,7 @@ export function AutomationPage() {
               runId, itemId, status: uncertain ? "needs_review" : "failed", reason,
             });
           } catch { /* 遗留 running 项在下次打开时会进入待核对 */ }
+          if (scope !== executionScopeRef.current) return;
         }
         // 留住明细：toast 三秒就没了，失败原因必须能在页面上回看
         failures.push({
@@ -1197,6 +1243,7 @@ export function AutomationPage() {
       }));
     }
 
+    if (scope !== executionScopeRef.current) return;
     if (stopRef.current) {
       setRun((prev) => ({
         ...prev, phase: "stopped", done, failed, imageDone, textDone,
@@ -1215,6 +1262,7 @@ export function AutomationPage() {
           imagesRun = (await api.get<{ run: AutomationRunRecord }>(
             `/automation-runs/${encodeURIComponent(durableRun.id)}`,
           )).run;
+          if (scope !== executionScopeRef.current) return;
           const imageItems = imagesRun.items.filter((item) => queuedIds.has(item.productId ?? ""));
           let ready = 0, total = 0, failedJobs = 0;
           for (const item of imageItems) {
@@ -1242,8 +1290,10 @@ export function AutomationPage() {
           if (imageItems.length === queuedIds.size
             && imageItems.every((item) => item.processResult.images?.completed === true)) break;
         } catch { /* 单次查询失败保留待核对状态，下轮再试。 */ }
+        if (scope !== executionScopeRef.current) return;
         await new Promise((resolve) => setTimeout(resolve, 4000));
       }
+      if (scope !== executionScopeRef.current) return;
       void queryClient.invalidateQueries({ queryKey: queryKeys.automationRuns.all });
       if (stopRef.current) {
         setRun((prev) => ({ ...prev, phase: "stopped", stage: "已停止，后台图片结果会保留", endedAt: Date.now() }));
@@ -1258,7 +1308,7 @@ export function AutomationPage() {
         const reason = item?.processReason || item?.processResult.images?.reason
           || "图片处理或草稿核验尚未完成，结果已保留，请稍后核对后继续。";
         publishIssues += 1;
-        skippedPublishKeys.add(target.key);
+        retainedKeys.add(target.key);
         failures.push({ key: target.key, title: target.title, detailId: target.detailId, reason });
         setStages((prev) => ({ ...prev, [target.key]: "needs_review" }));
       }
@@ -1269,10 +1319,10 @@ export function AutomationPage() {
             && pendingAutomationPublishAction(item) !== null));
         if (readyTargets.length > 0) {
           await resumePublishTargets(readyTargets, imagesRun);
-          const retainedKeys = new Set([...failedKeys, ...failures.map((failure) => failure.key),
-            ...skippedPublishKeys]);
+          if (scope !== executionScopeRef.current) return;
+          const retainedAfterImages = new Set([...failedKeys, ...retainedKeys]);
           setSelection((current) => new Map([...current].filter(([key]) =>
-            queuedImageKeys.has(key) || retainedKeys.has(key)
+            queuedImageKeys.has(key) || retainedAfterImages.has(key)
               || !targets.some((target) => target.key === key))));
           setRun((prev) => ({
             ...prev, total: targets.length, done, failed, imageDone, imageFailed: imageFailures,
@@ -1306,7 +1356,7 @@ export function AutomationPage() {
     setSelection((prev) => {
       const next = new Map(prev);
       for (const target of targets) {
-        if (!skippedPublishKeys.has(target.key) && !failedKeys.includes(target.key)) next.delete(target.key);
+        if (!retainedKeys.has(target.key) && !failedKeys.includes(target.key)) next.delete(target.key);
       }
       return next;
     });
@@ -1341,18 +1391,24 @@ export function AutomationPage() {
 
   const startRun = async (): Promise<void> => {
     if (startingRunRef.current) return;
+    const scope = executionScopeRef.current;
     startingRunRef.current = true;
     setPreparingRun(true);
     try {
       await executeRun();
     } finally {
-      startingRunRef.current = false;
-      setPreparingRun(false);
+      if (scope === executionScopeRef.current) {
+        startingRunRef.current = false;
+        setPreparingRun(false);
+      }
     }
   };
 
   const stopRun = (): void => {
     stopRef.current = true;
+    specificationResolver.current?.(null);
+    specificationResolver.current = null;
+    setSpecificationPrompt(null);
     setRun((prev) => ({ ...prev, stage: "停止中，等待当前这件完成…" }));
   };
 
@@ -1362,7 +1418,8 @@ export function AutomationPage() {
   const [templateDialog, setTemplateDialog] = useState<"none" | "pick" | "edit">("none");
   const templatesOpen = templateDialog === "pick";
   const setTemplatesOpen = (open: boolean): void => setTemplateDialog(open ? "pick" : "none");
-  const hasPublishNeedsReview = savedRun?.items.some((item) => item.publishStatus === "needs_review") ?? false;
+  const hasPublishNeedsReview = savedRun?.items.some((item) =>
+    ["needs_review", "running", "failed"].includes(item.publishStatus)) ?? false;
   const isResumeSelection = selection.size > 0 && [...selection.keys()].every((key) =>
     savedRun?.items.some((item) => item.key === key && pendingAutomationPublishAction(item) !== null));
 
@@ -1518,33 +1575,26 @@ export function AutomationPage() {
                     size="sm"
                     icon={<RefreshCw className={cn(refreshPublishLogsMutation.isPending && "animate-spin")} />}
                     loading={refreshPublishLogsMutation.isPending}
+                    disabled={running || preparingRun}
                     loadingText="刷新中"
                     onClick={() => {
+                      const scope = executionScopeRef.current;
                       void (async () => {
                         try {
                           const result = await refreshPublishLogsMutation.mutateAsync();
+                          if (scope !== executionScopeRef.current) return;
                           const refreshed = await latestRunQuery.refetch();
+                          if (scope !== executionScopeRef.current) return;
                           const recovered = refreshed.data?.run;
-                          const retryable = recovered?.items.filter((item) =>
-                            pendingAutomationPublishAction(item) === "retry") ?? [];
-                          if (retryable.length > 0) {
-                            setSelection((current) => {
-                              const next = new Map(current);
-                              for (const item of retryable) {
-                                next.set(item.key, {
-                                  key: item.key,
-                                  detailId: item.detailId,
-                                  shopId: item.shopId,
-                                  title: item.title,
-                                });
-                              }
-                              return next;
-                            });
+                          if (recovered) {
+                            hydratedRunId.current = null;
+                            hydrateRun(recovered, true);
                           }
                           if (result.degraded) toast.warning("暂时无法读取妙手发布记录");
                           else if (result.updated > 0) toast.success(`已更新 ${result.updated} 条发布回执`);
                           else toast.info("暂未匹配到最终回执，商品仍需核对");
                         } catch (error) {
+                          if (scope !== executionScopeRef.current) return;
                           toast.warning(apiErrorMessage(error));
                         }
                       })();

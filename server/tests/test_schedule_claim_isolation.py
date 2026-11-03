@@ -98,7 +98,7 @@ def test_member_schedule_publish_carries_owner_for_publish_guards(
 
     result = schedule_service.execute(db, task, with_results=True)
 
-    assert result["status"] == schedule_service.RUN_OK
+    assert result["status"] == schedule_service.RUN_SUBMITTED
     assert calls[0][0]["items"] == [{"warehouseId": str(products[0].id)}]
     assert calls[0][1] == {
         "operator_id": first.id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -922,6 +923,9 @@ def test_publish_receipt_updates_only_matching_automation_item(
                 return {"data": {"detailList": [{
                     "detailId": detail_id, "status": remote_status,
                     "itemId": "50001", "reason": "platform rejected",
+                    "gmtCreate": datetime.fromtimestamp(
+                        log.last_requested_at or log.requested_at, timezone(timedelta(hours=8))
+                    ).strftime("%Y-%m-%d %H:%M:%S"),
                 }]}}
 
             def close(self):
@@ -1008,7 +1012,10 @@ def test_publish_receipt_does_not_cross_match_same_detail_across_shops(
         db.add_all(logs)
         db.commit()
 
-        platform_row = {"detailId": detail_id, "status": "success"}
+        platform_row = {"detailId": detail_id, "status": "success",
+                        "gmtCreate": datetime.fromtimestamp(
+                            max(log.requested_at for log in logs), timezone(timedelta(hours=8))
+                        ).strftime("%Y-%m-%d %H:%M:%S")}
         if remote_shop_id is not None:
             platform_row["shopId"] = remote_shop_id
 

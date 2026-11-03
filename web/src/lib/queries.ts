@@ -1405,6 +1405,7 @@ export interface ScheduleLogItem {
   requested: number;
   selected: number;
   published: number;
+  submitted?: number;
   failed: number;
   at: number;
 }

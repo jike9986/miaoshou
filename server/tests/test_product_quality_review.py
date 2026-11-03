@@ -208,6 +208,17 @@ def test_quality_summary_reports_only_known_reason_codes(payload, reasons):
     assert actual_reasons == reasons
 
 
+@pytest.mark.parametrize("dimensions", [(33, 22, 12), (18, 12, 7), (30, 20, 10)])
+def test_plausible_category_specs_without_evidence_remain_unverified(dimensions):
+    product = Product(category_name="运动鞋", revision=1, quality_review=None,
+                      payload=dict(weight=0.6, **dict(zip(
+                          ("packageLength", "packageWidth", "packageHeight"), dimensions,
+                          strict=True))))
+    status, reasons = warehouse_service._quality_review_summary(product)
+    assert status == "needs_review"
+    assert reasons == (["default_dimensions"] if dimensions == (30, 20, 10) else ["unverified"])
+
+
 def test_member_cannot_write_quality_review(client, credentials, quality_product):
     product_id, revision, _key = quality_product
     response = client.patch(

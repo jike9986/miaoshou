@@ -12,6 +12,10 @@ declare global {
     close: () => Promise<void>;
     isMaximized: () => Promise<boolean>;
     platform: string;
+    sessionToken?: {
+      read: () => string | null;
+      write: (token: string | null) => boolean;
+    };
   }
 
   /**

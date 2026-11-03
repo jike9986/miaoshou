@@ -374,7 +374,10 @@ def record_log(db: Session, task: Schedule, summary: Mapping[str, Any],
         selected=int(summary.get("selected") or 0),
         published=int(summary.get("published") or 0),
         failed=int(summary.get("failed") or 0),
-        summary=json.dumps(summary, ensure_ascii=False, default=str)[:20000],
+        # The history table exposes aggregate fields only. Keep the receipt
+        # identities intact rather than slicing JSON in the middle of a string.
+        summary=json.dumps({key: value for key, value in summary.items()
+                            if key != "results"}, ensure_ascii=False, default=str),
         at=float(moment.timestamp()) if moment else now_ts(),
     )
     db.add(entry)
@@ -436,6 +439,7 @@ def list_logs(db: Session, *, task_id: str = "", account_id: Any = None,
             "selected": row.selected,
             "published": row.published,
             "failed": row.failed,
+            "submitted": _log_summary(row.summary).get("submitted", 0),
             "at": row.at,
         } for row in rows],
         "total": total,
@@ -761,6 +765,7 @@ def _published_identities(db: Session, account_id: int | None,
 # --- 执行摘要（run_due 与手动执行共用） -----------------------------------
 RUN_EMPTY = "empty"      # 选中 0 件
 RUN_OK = "ok"            # 选中全部发布成功
+RUN_SUBMITTED = "submitted"  # 已提交，等待平台最终回执
 RUN_PARTIAL = "partial"  # 部分成功
 RUN_FAILED = "failed"    # 全失败或抛异常
 
@@ -775,12 +780,15 @@ def _count(value: Any) -> int:
         return 0
 
 
-def run_status(*, selected: int, published: int, failed: int, error: str = "") -> str:
-    """四态判定（纯函数）：empty / ok / partial / failed。"""
+def run_status(*, selected: int, published: int, failed: int, submitted: int = 0,
+               error: str = "") -> str:
+    """Accepted submissions stay distinct from final successful receipts."""
     if error:
         return RUN_FAILED
     if int(selected) <= 0:
         return RUN_EMPTY
+    if int(submitted) > 0:
+        return RUN_PARTIAL if int(failed) > 0 else RUN_SUBMITTED
     if int(published) <= 0:
         return RUN_FAILED
     if int(failed) > 0 or int(published) < int(selected):
@@ -789,7 +797,7 @@ def run_status(*, selected: int, published: int, failed: int, error: str = "") -
 
 
 def _default_reason(status: str, *, requested: int, selected: int,
-                    published: int, failed: int,
+                    published: int, failed: int, submitted: int = 0,
                     account_has_products: bool | None = None,
                     warehouse_empty: bool | None = None) -> str:
     if status == RUN_EMPTY:
@@ -802,14 +810,16 @@ def _default_reason(status: str, *, requested: int, selected: int,
         return "这个账号在仓库里没有可发布的新商品（都已发布过）"
     if status == RUN_OK:
         return ""
+    if status == RUN_SUBMITTED:
+        return f"已提交 {submitted} 件，等待平台回执；请在发布记录中刷新核对"
     if status == RUN_PARTIAL:
         return (f"计划 {requested} 件，实际选中 {selected} 件，"
-                f"成功 {published} 件，失败 {failed} 件")
+                f"成功 {published} 件，待回执 {submitted} 件，失败 {failed} 件")
     return f"选中 {selected} 件全部发布失败"
 
 
 def summarize(*, task_id: str, requested: int, selected: int, published: int,
-              failures: int = 0, reason: str = "",
+              failures: int = 0, submitted: int = 0, reason: str = "",
               results: list[dict[str, Any]] | None = None,
               error: str = "",
               account_has_products: bool | None = None,
@@ -818,7 +828,8 @@ def summarize(*, task_id: str, requested: int, selected: int, published: int,
 
     requested = 计划的 perRun（本轮最多取多少件，不是必须发满）；
     selected  = 实际选中的件数；
-    failed    = 实际失败数。failures 与 (selected - published) 是同一批失败件的两种
+    submitted = 已提交、尚无最终回执的件数，不算成功或失败；
+    failed    = 实际失败数。failures 与未成功且未提交的差额是同一批失败件的两种
                 口径，取两者最大值而不是相加，否则「2 选 1 成 1 败」会被算成 2 件失败；
                 上限不超过 selected；抛异常时按选中的件全部失败计。
                 绝不用 len(items) 当失败数。
@@ -826,18 +837,20 @@ def summarize(*, task_id: str, requested: int, selected: int, published: int,
     requested = max(int(requested), 0)
     selected = max(int(selected), 0)
     published = min(max(int(published), 0), selected)
+    submitted = min(max(int(submitted), 0), selected - published)
     if error:
         failed = selected
         status = run_status(selected=selected, published=published, failed=failed,
                             error=error)
         reason = reason or error
     else:
-        raw_failed = max(int(failures), selected - published, 0)
+        raw_failed = max(int(failures), selected - published - submitted, 0)
         failed = min(raw_failed, selected) if selected else 0
-        status = run_status(selected=selected, published=published, failed=failed)
+        status = run_status(selected=selected, published=published, failed=failed,
+                            submitted=submitted)
         if not reason:
             reason = _default_reason(status, requested=requested, selected=selected,
-                                     published=published, failed=failed,
+                                     published=published, failed=failed, submitted=submitted,
                                      account_has_products=account_has_products,
                                      warehouse_empty=warehouse_empty)
     return {
@@ -846,6 +859,7 @@ def summarize(*, task_id: str, requested: int, selected: int, published: int,
         "requested": requested,
         "selected": selected,
         "published": published,
+        "submitted": submitted,
         "failed": failed,
         "count": published,  # 兼容旧前端字段
         "reason": reason,
@@ -862,14 +876,110 @@ def _results_of(outcome: Mapping[str, Any]) -> list[dict[str, Any]]:
     for item in items or []:
         if not isinstance(item, Mapping):
             continue
-        rows.append({"detailId": item.get("detailId"), "status": "published",
-                     "title": item.get("title")})
+        rows.append({"logId": item.get("logId"), "detailId": item.get("detailId"),
+                     "status": item.get("status") or "processing",
+                     "title": item.get("title"), "reason": item.get("reason") or ""})
     for failure in outcome.get("failures") or []:
         if not isinstance(failure, Mapping):
             continue
         rows.append({"detailId": failure.get("detailId"), "status": "failed",
                      "reason": failure.get("reason")})
     return rows
+
+
+def _log_summary(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _publish_summary(outcome: Mapping[str, Any], *, task: Schedule, requested: int,
+                     selected: int, batch_id: str, with_results: bool) -> dict[str, Any]:
+    records = outcome.get("records")
+    items = records.get("items") if isinstance(records, Mapping) else []
+    items = [item for item in items or [] if isinstance(item, Mapping)]
+    claim_only = bool(task.claim_only)
+    published = (_count(outcome.get("claimed")) if claim_only else
+                 sum(item.get("status") == "success" for item in items))
+    submitted = (0 if claim_only else
+                 sum(item.get("status") == "processing" for item in items)
+                 if items else _count(outcome.get("published")))
+    failures = _count(outcome.get("failures"))
+    summary = summarize(
+        task_id=str(task.id), requested=requested, selected=selected,
+        published=published, submitted=submitted,
+        failures=failures + sum(item.get("status") in {"fail", "cancel"} for item in items),
+        results=_results_of(outcome) if with_results else [])
+    if not claim_only:
+        summary.update({
+            "batchId": batch_id,
+            "submissionFailures": failures,
+            "publishStatuses": {str(item["logId"]): str(item.get("status") or "processing")
+                                for item in items if item.get("logId") is not None},
+        })
+    return summary
+
+
+def _apply_receipt(summary: dict[str, Any], log: Any) -> dict[str, Any] | None:
+    statuses = summary.get("publishStatuses")
+    if (summary.get("batchId") != log.batch_id or not isinstance(statuses, dict)
+            or str(log.id) not in statuses):
+        return None
+    statuses = {**statuses, str(log.id): log.status}
+    result = summarize(
+        task_id=str(summary.get("taskId") or ""), requested=int(summary.get("requested") or 0),
+        selected=int(summary.get("selected") or 0),
+        published=sum(status == "success" for status in statuses.values()),
+        submitted=sum(status == "processing" for status in statuses.values()),
+        failures=int(summary.get("submissionFailures") or 0)
+        + sum(status in {"fail", "cancel"} for status in statuses.values()),
+        results=[{**item, "status": log.status, "reason": str(log.reason or "")}
+                 if str(item.get("logId")) == str(log.id) else item
+                 for item in summary.get("results") or []],
+    )
+    return {**summary, **result, "at": summary.get("at"), "publishStatuses": statuses}
+
+
+def reconcile_publish_log(db: Session, log: Any) -> bool:
+    """Update only the schedule execution identified by this exact final receipt.
+
+    Each execution has its own batch ID. A later retry may reuse a PublishLog
+    row, but must not rewrite an older execution's history or its owner's data.
+    """
+    if log.status not in {"success", "fail", "cancel"} or not log.schedule_id:
+        return False
+    from models.schedule_log import ScheduleLog
+
+    changed = False
+    rows = (db.query(ScheduleLog).filter(
+        ScheduleLog.task_id == log.schedule_id,
+        ScheduleLog.account_id == log.account_id,
+        ScheduleLog.owner_operator_id == log.operator_id,
+    ).order_by(ScheduleLog.at.desc()).limit(LOG_RETAIN).all())
+    for row in rows:
+        result = _apply_receipt(_log_summary(row.summary), log)
+        if result is None:
+            continue
+        row.status = result["status"]
+        row.reason = str(result["reason"])[:500]
+        row.published = result["published"]
+        row.failed = result["failed"]
+        row.summary = json.dumps(result, ensure_ascii=False, default=str)
+        changed = True
+        break
+    task = db.query(Schedule).filter(
+        Schedule.id == log.schedule_id,
+        Schedule.account_id == log.account_id,
+        Schedule.owner_operator_id == log.operator_id,
+    ).one_or_none()
+    if task is not None and isinstance(task.last_result, dict):
+        result = _apply_receipt(task.last_result, log)
+        if result is not None:
+            task.last_result = result
+            changed = True
+    return changed
 
 
 def _store(db: Session, task: Schedule, summary: dict[str, Any],
@@ -949,6 +1059,7 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
     requested = int(task.per_run or 10)
     selected = 0
     member_owner = False
+    batch_id = f"sched-{uuid.uuid4().hex[:20]}"
     try:
         # 先把店铺核一遍：店铺在妙手里被删/换绑后，shopId 会失效，
         # 不校验就会在批次中途失败（前几件已发出、后几件全错），
@@ -1013,20 +1124,34 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
             "template": task.template_name or None,
             "claimOnly": bool(task.claim_only),
             "items": [{"warehouseId": str(item["id"])} for item in items],
-            "batchId": f"sched-{task.id}",
+            "batchId": batch_id,
             "scheduleId": str(task.id),
         }, operator_id=task.owner_operator_id,
             _log_operator_id=task.owner_operator_id)
-        published = _count(outcome.get("published"))
-        if not published and bool(task.claim_only):
-            # 认领模式没有 published，成功数是 claimed
-            published = _count(outcome.get("claimed"))
-        summary = summarize(task_id=str(task.id), requested=requested,
-                            selected=selected, published=published,
-                            failures=_count(outcome.get("failures")),
-                            results=(_results_of(outcome) if with_results else []))
+        summary = _publish_summary(
+            outcome, task=task, requested=requested, selected=selected,
+            batch_id=batch_id, with_results=with_results)
         return _store(db, task, summary, moment=moment)
     except errors.AppError as exc:
+        if exc.code == errors.UPSTREAM_UNKNOWN_RESULT:
+            # The publish service commits its ledger before contacting the
+            # platform. A lost response is pending, never a safe automatic retry.
+            from models.publish_log import PublishLog
+
+            rows = db.query(PublishLog).filter(
+                PublishLog.account_id == task.account_id,
+                PublishLog.operator_id == task.owner_operator_id,
+                PublishLog.schedule_id == str(task.id),
+                PublishLog.batch_id == batch_id,
+            ).all()
+            if rows:
+                outcome = {"published": [row.detail_id for row in rows], "records": {
+                    "items": [publish_service.serialize_log(row) for row in rows]}}
+                summary = _publish_summary(
+                    outcome, task=task, requested=requested, selected=selected,
+                    batch_id=batch_id, with_results=with_results)
+                summary["reason"] = exc.message
+                return _store(db, task, summary, moment=moment)
         summary = summarize(task_id=str(task.id), requested=requested,
                             selected=selected, published=0, error=exc.message)
         summary["errorType"] = type(exc).__name__

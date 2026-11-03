@@ -69,7 +69,9 @@ export function ProgressPanel({
     run.phase === "running"
       ? { label: "运行中", tone: "info" as const, dot: "info" as const, breathe: true }
       : run.phase === "done"
-        ? { label: "已完成", tone: "success" as const, dot: "success" as const }
+        ? run.failed > 0 || run.failures.length > 0 || (run.needsReview ?? 0) > 0
+          ? { label: "需检查", tone: "warning" as const, dot: "warning" as const }
+          : { label: "已完成", tone: "success" as const, dot: "success" as const }
         : run.phase === "stopped"
           ? { label: "已停止", tone: "warning" as const, dot: "warning" as const }
           : { label: "等待开始", tone: "neutral" as const, dot: "neutral" as const };
@@ -169,10 +171,12 @@ export function ProgressPanel({
         </p>
       )}
 
-      {run.failed > 0 && (
+      {(run.failed > 0 || run.failures.length > 0) && (
         <div className="mt-3 border-t border-border-subtle pt-3">
           <p className="rounded-md border border-warning-600/20 bg-warning-50 px-2.5 py-1.5 text-2xs leading-4 text-warning-700">
-            本批失败 {formatCount(run.failed)} 件
+            {run.failed > 0
+              ? `本批失败 ${formatCount(run.failed)} 件`
+              : `本批需检查 ${formatCount(run.failures.length)} 项`}
           </p>
           {run.failures.length > 0 && (
             <ul className="mt-2 flex max-h-36 flex-col gap-1 overflow-y-auto">
