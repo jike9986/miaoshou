@@ -64,13 +64,18 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
       {list.data?.items.length === 0 && <p className="text-sm text-fg-muted">当前妙手账号暂无认领任务。选中仓库商品后，点击认领即可在这里查看进度。</p>}
       {list.data?.items.map((job) => {
         const total = job.detailIds.length;
-        const done = Math.min(total, job.currentIndex);
-        const succeeded = job.results.filter((row) => row.status === "ok").length;
-        const failed = job.results.filter((row) => row.status === "failed").length;
-        const pending = Math.max(0, total - done);
         const active = job.status === "pending" || job.status === "running";
-        const failureMessage = job.results.find((row) => row.status === "failed")?.message;
         const progress = job.settings.progress;
+        const progressDone = active && typeof progress?.processed === "number"
+          ? progress.offset + progress.processed
+          : job.currentIndex;
+        const done = Math.min(total, progressDone);
+        const completedSuccesses = job.results.filter((row) => row.status === "ok").length;
+        const completedFailures = job.results.filter((row) => row.status === "failed").length;
+        const succeeded = completedSuccesses + (active ? progress?.verified ?? 0 : 0);
+        const failed = completedFailures + (active ? progress?.failed ?? 0 : 0);
+        const pending = Math.max(0, total - done);
+        const failureMessage = job.results.find((row) => row.status === "failed")?.message;
         return (
           <Card key={job.id} className="p-4">
             <div className="flex flex-wrap items-center gap-3 text-sm">
@@ -100,8 +105,11 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
               <p className="mt-2 text-sm text-fg-muted" role="status">
                 {stageLabels[progress.stage] ?? "正在处理当前组"}
                 {progress.groupSize > 0 && `（第 ${progress.offset + 1}–${Math.min(total, progress.offset + progress.groupSize)} 件）`}
-                {typeof progress.verified === "number" && ` · 本组读回核验 ${progress.verified} 件`}
-                。最终导入结果以成功、失败明细为准。
+                {typeof progress.processed === "number" && ` · 本组已处理 ${progress.processed}/${progress.groupSize}`}
+                {typeof progress.verified === "number" && ` · 成功 ${progress.verified} 件`}
+                {typeof progress.failed === "number" && ` · 失败 ${progress.failed} 件`}
+                {progress.warehouseId && ` · 当前商品 ${progress.warehouseId}`}
+                。
               </p>
             ) : active && done === 0 && <p className="mt-2 text-sm text-fg-muted">正在准备并导入商品，进度会在每批完成后更新。</p>}
             {job.status === "failed" && (

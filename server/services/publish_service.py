@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from html import escape, unescape
@@ -636,6 +637,42 @@ def _limit_claim_images(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return limited
 
 
+def _fill_claim_package_dimensions(
+        payloads: list[dict[str, Any]], entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use existing category package estimates only on claim-draft copies."""
+    adjustments: list[dict[str, Any]] = []
+    dimension_fields = (
+        ("packageLength", "length"),
+        ("packageWidth", "width"),
+        ("packageHeight", "height"),
+    )
+    for payload, entry in zip(payloads, entries, strict=True):
+        category = product_service.category_label(payload)
+        spec = warehouse_service.category_package_spec(category)
+        if not spec:
+            continue
+        changed: dict[str, float] = {}
+        for field, spec_key in dimension_fields:
+            try:
+                value = float(payload.get(field))
+            except (TypeError, ValueError):
+                value = 0
+            if not math.isfinite(value) or value <= 0:
+                payload[field] = float(spec[spec_key])
+                changed[field] = payload[field]
+        if changed:
+            adjustments.append({
+                "warehouseId": entry.get("warehouseId"),
+                "stage": "package_dimensions",
+                "source": "category_default_estimate",
+                "verified": False,
+                "packageDimensions": {
+                    field: payload.get(field) for field, _ in dimension_fields
+                },
+            })
+    return adjustments
+
+
 def _ensure_claim_description(payload: dict[str, Any]) -> bool:
     """Keep image-only source HTML valid by adding the existing product title."""
     notes = payload.get("notes")
@@ -1063,6 +1100,8 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                             "source": "title",
                         })
                 payloads = _limit_claim_images(source_payloads)
+                claim_adjustments.extend(
+                    _fill_claim_package_dimensions(payloads, entries))
                 for index, item in enumerate(payloads):
                     sku_change = _dedupe_exact_duplicate_claim_colors(item)
                     renamed_colors = _disambiguate_duplicate_claim_colors(item)
@@ -1100,8 +1139,19 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 except Exception as exc:  # noqa: BLE001 - 补不到就让下面报缺料
                     logger.warning("认领前补链接池失败：%s", exc)
                 try:
-                    progress_options = ({"progress": _claim_progress}
-                                        if _claim_progress is not None else {})
+                    if _claim_progress is not None:
+                        def report_claim_progress(event: dict[str, Any]) -> None:
+                            enriched = dict(event)
+                            source_index = enriched.get("sourceIndex")
+                            if (isinstance(source_index, int)
+                                    and 0 <= source_index < len(entries)):
+                                enriched["warehouseId"] = entries[source_index].get(
+                                    "warehouseId")
+                            _claim_progress(enriched)
+
+                        progress_options = {"progress": report_claim_progress}
+                    else:
+                        progress_options = {}
                     filled = carrier_service.collect_and_fill_carriers(
                         db, client, payloads=payloads,
                         shop_id=int(target_shop_id), **progress_options)
@@ -1273,6 +1323,15 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                                   target_shop_id),
                               operator_id=log_operator_id)
             row.detail = {**(row.detail or {}), "claimOnly": claim_only}
+            if claim_only and entry.get("warehouseId") not in (None, ""):
+                warehouse_id = str(entry["warehouseId"])
+                applied_adjustments = [
+                    adjustment for adjustment in claim_adjustments
+                    if str(adjustment.get("warehouseId") or "") == warehouse_id
+                ]
+                if applied_adjustments:
+                    row.detail = {**row.detail,
+                                  "claimAdjustments": applied_adjustments}
             item = automation_items.get(row.product_id)
             if item is not None and not claim_only:
                 # Persist the exact request identity before contacting upstream.

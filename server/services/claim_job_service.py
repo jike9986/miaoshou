@@ -288,7 +288,7 @@ def run(batch_id: str) -> None:
                 item.attempt += 1
             progress = {"stage": "copying", "offset": start,
                         "total": len(source_items), "groupSize": len(chunk),
-                        "verified": 0, "failed": 0}
+                        "processed": 0, "verified": 0, "failed": 0}
             batch.settings = {**(batch.settings or {}), "progress": progress}
             batch.updated_at = now_ts()
             db.commit()
@@ -304,7 +304,8 @@ def run(batch_id: str) -> None:
                 if db.get_bind().dialect.name == "sqlite":
                     return
                 _progress.update({key: value for key, value in event.items()
-                                  if key in {"stage", "verified", "failed"}})
+                                  if key in {"stage", "processed", "verified", "failed",
+                                             "warehouseId"}})
                 progress_db = SessionLocal()
                 try:
                     current = progress_db.get(Batch, batch_id)

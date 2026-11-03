@@ -1151,8 +1151,10 @@ export interface BatchSettings {
     offset: number;
     total: number;
     groupSize: number;
+    processed?: number;
     verified?: number;
     failed?: number;
+    warehouseId?: string;
   };
 }
 

@@ -1027,10 +1027,23 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
             break
         index, detail_id = item
         created.append(detail_id)
+
+        def report_item_progress(event: dict[str, Any], *,
+                                 source_index: int = index) -> None:
+            report({
+                **event,
+                "sourceIndex": source_index,
+                "processed": len(saved) + len(failed_sources),
+                "total": len(payload_list),
+                "verified": len(saved),
+                "failed": len(failed_sources),
+            })
+
         try:
             result = fill_carriers(
                 client, [detail_id], [payload_list[index]], shop_id=shop_id,
-                progress=report, verify_readback=False, warehouse_id=warehouse_id,
+                progress=report_item_progress, verify_readback=False,
+                warehouse_id=warehouse_id,
                 category_trees=category_trees)
         except Exception as exc:  # keep draining so the producer cannot block
             failed_sources.append(index)
@@ -1043,6 +1056,16 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
             failure_details.append({"sourceIndex": index, "detailId": str(detail_id),
                                    "certain": certain,
                                    "reason": reason})
+            report({
+                "stage": "verify_failed",
+                "sourceIndex": index,
+                "processed": len(saved) + len(failed_sources),
+                "total": len(payload_list),
+                "verified": len(saved),
+                "failed": len(failed_sources),
+                "detailId": str(detail_id),
+                "message": reason,
+            })
             continue
         saved.extend(result["saved"])
         if result["saved"]:
@@ -1055,6 +1078,17 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
         failures.extend(result["failures"])
         for failure in result.get("failureDetails") or []:
             failure_details.append({**failure, "sourceIndex": index})
+        report({
+            "stage": "verified" if result["saved"] else "verify_failed",
+            "sourceIndex": index,
+            "processed": len(saved) + len(failed_sources),
+            "total": len(payload_list),
+            "verified": len(saved),
+            "failed": len(failed_sources),
+            "detailId": str(detail_id),
+            "message": "" if result["saved"] else (
+                str((result.get("failures") or ["载体写入失败"])[0])[:200]),
+        })
 
     producer.join()
     if producer_errors:

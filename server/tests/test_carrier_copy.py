@@ -75,6 +75,39 @@ def test_fill_can_skip_readback_for_claim_only_workflow(monkeypatch):
     assert len(client.saves) == 1
 
 
+def test_collect_and_fill_reports_cumulative_item_progress(monkeypatch):
+    def collect(_db, _client, *, count, progress, on_carrier):
+        for detail_id in range(100, 100 + count):
+            on_carrier(detail_id)
+
+    def fill(_client, carriers, _payloads, *, progress, **_kwargs):
+        detail_id = carriers[0]
+        progress({"stage": "fill", "detailId": detail_id})
+        if detail_id == 100:
+            return {"saved": [detail_id], "savedSources": [0], "failures": [],
+                    "failureDetails": [], "priceAdjustments": []}
+        return {"saved": [], "savedSources": [], "failures": ["尺寸缺失"],
+                "failureDetails": [{"detailId": str(detail_id), "certain": True,
+                                    "reason": "尺寸缺失"}],
+                "priceAdjustments": []}
+
+    monkeypatch.setattr(carrier_service, "target_warehouse_id", lambda *_: "w1")
+    monkeypatch.setattr(carrier_service, "collect_carriers", collect)
+    monkeypatch.setattr(carrier_service, "fill_carriers", fill)
+    events = []
+
+    result = carrier_service.collect_and_fill_carriers(
+        None, object(), payloads=[{}, {}], shop_id=9, progress=events.append)
+
+    completed = [event for event in events
+                 if event.get("stage") in {"verified", "verify_failed"}]
+    assert [(event["processed"], event["verified"], event["failed"])
+            for event in completed] == [(1, 1, 0), (2, 1, 1)]
+    assert [event["sourceIndex"] for event in completed] == [0, 1]
+    assert result["saved"] == [100]
+    assert result["failedSources"] == [1]
+
+
 def test_claim_image_limits_apply_to_copy_without_mutating_warehouse_payload():
     from services.pre_save_check import extract_detail_image_urls
 
@@ -108,6 +141,46 @@ def test_claim_image_limit_discards_blank_main_image_entries():
     [limited] = publish_service._limit_claim_images([payload])
 
     assert limited["imgUrls"] == ["a.jpg", *[f"{index}.jpg" for index in range(1, 9)]]
+
+
+@pytest.mark.parametrize(("category", "expected"), [
+    ("运动鞋", (33.0, 22.0, 12.0)),
+    ("轮滑鞋与溜冰鞋", (35.0, 24.0, 14.0)),
+    ("运动服饰", (30.0, 24.0, 6.0)),
+])
+def test_claim_uses_unverified_category_package_estimates_on_copy(
+        category, expected):
+    original = {"categoryName": category}
+    [claim_payload] = publish_service._limit_claim_images([original])
+
+    adjustments = publish_service._fill_claim_package_dimensions(
+        [claim_payload], [{"warehouseId": "20"}])
+
+    assert tuple(claim_payload[key] for key in (
+        "packageLength", "packageWidth", "packageHeight")) == expected
+    assert original == {"categoryName": category}
+    assert adjustments == [{
+        "warehouseId": "20",
+        "stage": "package_dimensions",
+        "source": "category_default_estimate",
+        "verified": False,
+        "packageDimensions": {
+            "packageLength": expected[0],
+            "packageWidth": expected[1],
+            "packageHeight": expected[2],
+        },
+    }]
+
+
+def test_claim_package_estimate_preserves_existing_measurements():
+    payload = {"categoryName": "运动鞋", "packageLength": 40,
+               "packageWidth": 21, "packageHeight": None}
+
+    publish_service._fill_claim_package_dimensions(
+        [payload], [{"warehouseId": "20"}])
+
+    assert (payload["packageLength"], payload["packageWidth"],
+            payload["packageHeight"]) == (40, 21, 12.0)
 
 
 def test_claim_uses_consistent_sku_weight_only_for_missing_product_weight():
