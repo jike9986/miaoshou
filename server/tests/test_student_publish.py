@@ -208,6 +208,56 @@ def test_collect_box_claim_failure_does_not_mark_product_collected(
     assert product.claimed is False
 
 
+def test_cross_shop_batch_claim_uses_one_carrier_pipeline(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-batch-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    products = [
+        Product(warehouse_key=f"{detail_id}:123", account_id=account.id,
+                detail_id=str(detail_id), shop_id="123", shop_name="Source",
+                title=f"Finished {detail_id}", status="ready", claimed=False,
+                collected={}, payload={"title": f"Finished {detail_id}"})
+        for detail_id in (101, 102)
+    ]
+    db.add_all(products)
+    db.flush()
+
+    class FakeClient:
+        def shop_detail(self, detail_id, shop_id):
+            assert shop_id == "123"
+            return {"detailId": detail_id}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collect_box_service, "account_client",
+                        lambda _account: FakeClient())
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda _db, _account, shop_id: {"name": f"Shop {shop_id}"})
+    monkeypatch.setattr(collect_box_service.product_service, "detail_block",
+                        lambda _snapshot: {"info": {"title": "source"}})
+
+    def pipeline(_db, _client, *, payloads, shop_id):
+        assert shop_id == 456
+        assert payloads == [{"title": "Finished 101"}, {"title": "Finished 102"}]
+        return {"saved": [9001, 9002], "savedSources": [0, 1],
+                "failedSources": [], "failures": []}
+
+    monkeypatch.setattr(collect_box_service.carrier_service,
+                        "collect_and_fill_carriers", pipeline)
+    results = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123"), ("102", "123")],
+        target_shop_id="456")
+
+    assert [row["detailIds"] for row in results] == [["9001"], ["9002"]]
+    assert all(row["claimed"] for row in results)
+    assert all(row.claimed is True for row in products)
+    assert products[0].collected[f"account:{account.id}"]["detailId"] == "9001"
+    assert products[1].collected[f"account:{account.id}"]["detailId"] == "9002"
+
+
 def test_shared_miaoshou_account_claim_state_is_per_member(publish_db):
     db = publish_db
     suffix = uuid.uuid4().hex[:8]

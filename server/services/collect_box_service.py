@@ -518,7 +518,8 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
                     info = {**info, **stored.payload}
                 carriers = carrier_service.collect_carriers(db, client, count=1)
                 filled = carrier_service.fill_carriers(
-                    client, carriers, [info], shop_id=int(target_shop_id))
+                    client, carriers, [info], shop_id=int(target_shop_id),
+                    verify_readback=False)
                 detail_ids = [str(value) for value in filled["saved"]]
                 failures.extend(filled["failures"])
         except MiaoshouError as exc:
@@ -567,6 +568,113 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
             "failures": failures,
             "collected": collected,
         }
+
+
+def claim_carrier_batch(db: Session, account: Account, *,
+                        items: list[tuple[str, str]],
+                        target_shop_id: str) -> list[dict[str, Any]]:
+    """Batch cross-shop claims; each new carrier is covered as soon as it exists."""
+    if not str(target_shop_id or "").strip().isdigit():
+        raise errors.validation("请选择认领到哪个店铺", field="targetShopId")
+    normalized = [(str(detail_id), str(shop_id)) for detail_id, shop_id in items]
+    if not normalized or any(not detail.isdigit() or not shop.isdigit()
+                             for detail, shop in normalized):
+        raise errors.validation("商品明细或来源店铺无效")
+    if len({product_key(detail, shop) for detail, shop in normalized}) != len(normalized):
+        raise errors.validation("批次中包含重复商品")
+    if any(shop == str(target_shop_id) for _, shop in normalized):
+        raise errors.validation("批量流水认领只支持跨店商品")
+
+    target_shop = require_shop(db, account, target_shop_id)
+    keys = [product_key(detail, shop) for detail, shop in normalized]
+    with session_lock(db, keys, blocking=False,
+                      busy_message="部分商品正在被别人认领，请稍后重试"):
+        for key in keys:
+            _recent_claim_blocker(db, account, key)
+
+        products = (db.query(Product)
+                    .filter(Product.account_id == account.id,
+                            Product.warehouse_key.in_(keys),
+                            Product.deleted_at.is_(None))
+                    .all())
+        by_key = {row.warehouse_key: row for row in products}
+        source_shops = {shop_id: require_shop(db, account, shop_id)
+                        for _, shop_id in normalized}
+        client = account_client(account)
+        payloads: list[dict[str, Any]] = []
+        payload_indexes: list[int] = []
+        errors_by_index: dict[int, str] = {}
+        try:
+            for index, (detail_id, shop_id) in enumerate(normalized):
+                try:
+                    snapshot = client.shop_detail(detail_id, shop_id)
+                    info = product_service.detail_block(snapshot)["info"]
+                    if not info:
+                        raise errors.not_found(f"上游查无明细 {detail_id}",
+                                               detailId=detail_id)
+                except MiaoshouError as exc:
+                    errors_by_index[index] = str(exc)[:120]
+                    continue
+                stored = by_key.get(product_key(detail_id, shop_id))
+                if stored is not None and isinstance(stored.payload, dict) and stored.payload:
+                    info = {**info, **stored.payload}
+                payload_indexes.append(index)
+                payloads.append(info)
+
+            if payloads:
+                filled = carrier_service.collect_and_fill_carriers(
+                    db, client, payloads=payloads, shop_id=int(target_shop_id))
+            else:
+                filled = {"saved": [], "savedSources": [], "failedSources": [],
+                          "failures": []}
+        except MiaoshouError as exc:
+            raise map_upstream_error(exc) from None
+        finally:
+            client.close()
+
+        detail_by_source = {
+            payload_indexes[source_index]: str(detail_id)
+            for source_index, detail_id in zip(
+                filled.get("savedSources", []), filled.get("saved", []), strict=True)
+        }
+        for source_index in filled.get("failedSources", []):
+            original_index = payload_indexes[source_index]
+            errors_by_index.setdefault(
+                original_index,
+                next(iter(filled.get("failures", [])), "载体覆盖失败"))
+
+        results: list[dict[str, Any]] = []
+        stamp = now_ts()
+        for index, (detail_id, shop_id) in enumerate(normalized):
+            target_detail_id = detail_by_source.get(index)
+            product = by_key.get(product_key(detail_id, shop_id))
+            collected: dict[str, Any] = {}
+            if target_detail_id and product:
+                state = dict(product.collected or {}) if isinstance(product.collected, dict) else {}
+                collected = {"at": stamp, "detailId": target_detail_id}
+                state[_account_claim_key(account)] = collected
+                product.collected = state
+                product.claimed = True
+                product.claimed_at = stamp
+                product.claimed_shop_id = str(target_shop_id)
+                warehouse_service.bump_revision(product)
+            results.append({
+                "claimed": target_detail_id is not None and index not in errors_by_index,
+                "detailId": detail_id,
+                "fromShopId": shop_id,
+                "targetShopId": str(target_shop_id),
+                "targetShopName": target_shop.get("name") or "",
+                "sourceShopName": source_shops[shop_id].get("name") or "",
+                "mode": "carrier",
+                "count": 1 if target_detail_id else 0,
+                "detailIds": [target_detail_id] if target_detail_id else [],
+                "failures": ([errors_by_index[index]] if index in errors_by_index else []),
+                "collected": collected,
+            })
+        if any(item["claimed"] for item in results):
+            invalidate_account(account)
+        db.flush()
+        return results
 
 
 def release(db: Session, account: Account, *, detail_id: str, shop_id: str,

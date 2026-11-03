@@ -11,6 +11,8 @@ detailId 只在账号内唯一，所以跨店铺发布不能引用原商品。�
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
@@ -446,6 +448,7 @@ def _collect_box_snapshot(client: MiaoshouClient) -> set[int] | None:
 
 def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                      progress: Callable[[dict[str, Any]], None] | None = None,
+                     on_carrier: Callable[[int], None] | None = None,
                      max_rounds: int = 8) -> list[int]:
     """优先复制公共采集箱已有商品，返回上游明确确认的新草稿 ID。"""
     if count < 1:
@@ -514,7 +517,7 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
             progress({"stage": "claim", "commonId": common_id, "copies": copies})
         before_ids = _collect_box_snapshot(client)
         new_ids: list[int] = []
-        for copy_index in range(copies):
+        for _ in range(copies):
             try:
                 claimed = client.claim_common_to_platform([(common_id, "tiktok", 1)])
             except MiaoshouError as exc:
@@ -542,8 +545,8 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                                    commonId=common_id, available=len(details) + len(new_ids),
                                    required=count)
             new_ids.append(detail_id)
-            if copy_index + 1 < copies:
-                time.sleep(0.7)
+            if on_carrier:
+                on_carrier(detail_id)
         if url:
             mark(db, url, ok=True)
         before = len(details)
@@ -630,7 +633,8 @@ def target_warehouse_id(client: MiaoshouClient, shop_id: int) -> str:
 
 
 def resolve_leaf_cid(client: MiaoshouClient, cid: Any, site: str = "MY",
-                     name_hint: str = "") -> Any:
+                     name_hint: str = "",
+                     tree: Mapping[str, Any] | bool | None = None) -> Any:
     """把「父级类目 cid」换成可用的叶子类目 cid。
 
     妙手保存商品只接受叶子类目（isLastLevel=1）。采集回来的商品常常带的是
@@ -642,10 +646,13 @@ def resolve_leaf_cid(client: MiaoshouClient, cid: Any, site: str = "MY",
     text = str(cid or "").strip()
     if not text:
         return cid
-    try:
-        tree = client.category_tree(site)
-    except Exception as exc:  # noqa: BLE001 - 拿不到类目树就别改，让上游自己报
-        logger.warning("查类目树失败，保持原 cid=%s：%s", text, exc)
+    if tree is None:
+        try:
+            tree = client.category_tree(site)
+        except Exception as exc:  # noqa: BLE001 - 拿不到类目树就别改，让上游自己报
+            logger.warning("查类目树失败，保持原 cid=%s：%s", text, exc)
+            return cid
+    if tree is False:
         return cid
 
     flat: list[dict[str, Any]] = []
@@ -745,7 +752,10 @@ def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
 
 def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                   payloads: Iterable[Mapping[str, Any]], *, shop_id: int,
-                  progress: Callable[[dict[str, Any]], None] | None = None
+                  progress: Callable[[dict[str, Any]], None] | None = None,
+                  verify_readback: bool = True,
+                  warehouse_id: str | None = None,
+                  category_trees: dict[str, Mapping[str, Any] | bool] | None = None,
                   ) -> dict[str, Any]:
     """用成品 payload 覆盖每个载体；每个载体先重读拿自己的 ossMd5。"""
     carrier_list = list(carriers)
@@ -753,7 +763,7 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
     if len(carrier_list) != len(payload_list):
         raise CarrierError("载体数量与商品数量不一致",
                            carriers=len(carrier_list), payloads=len(payload_list))
-    warehouse_id = target_warehouse_id(client, shop_id)
+    warehouse_id = warehouse_id or target_warehouse_id(client, shop_id)
     if progress:
         progress({"stage": "warehouse", "shopId": shop_id, "warehouseId": warehouse_id})
     saved: list[int] = []
@@ -770,10 +780,20 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             if not oss_md5:
                 raise CarrierError("载体缺少 ossMd5", detailId=str(detail_id))
             # 每个商品的 cid 可能不同，逐个解析成目标站点可用的叶子类目
+            site = str(payload.get("site") or "MY")
+            cached_tree = None
+            if category_trees is not None:
+                if site not in category_trees:
+                    try:
+                        category_trees[site] = client.category_tree(site)
+                    except Exception as exc:  # noqa: BLE001 - preserve current cid on lookup failure
+                        logger.warning("查类目树失败，保持商品类目：%s", exc)
+                        category_trees[site] = False
+                cached_tree = category_trees[site]
             leaf_cid = resolve_leaf_cid(
-                client, payload.get("cid"),
-                site=str(payload.get("site") or "MY"),
-                name_hint=str(payload.get("categoryNameCn") or payload.get("categoryName") or ""))
+                client, payload.get("cid"), site=site,
+                name_hint=str(payload.get("categoryNameCn") or payload.get("categoryName") or ""),
+                tree=cached_tree)
             body = adapt_payload(payload, shop_id=shop_id, warehouse_id=warehouse_id,
                                  leaf_cid=leaf_cid)
             body["detailId"] = detail_id
@@ -795,23 +815,20 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                     snapshot = fresh
                 else:
                     raise
-            # 保存接口返回 200 不等于真的存进去了：平台会静默丢字段
-            # （标题截断、详情图被过滤、翻译没生效）。老版靠读回比对确认，
-            # 没有这步就是「看着成功、上架才发现是空的」。
-            mismatched = _readback_mismatches(
-                client, detail_id, shop_id, body, payload)
-            if mismatched:
-                # 读回不一致最常见的原因是「载体还是链接原本的商品」——
-                # 比如用鞋子链接建的载体，覆盖时标题/图片没写进去，读回就还是鞋子。
-                # 日志要把差异字段打出来，否则只看到「认领失败」无从判断。
-                logger.warning("载体覆盖后读回不一致 detailId=%s 目标标题=%r 差异=%s",
-                               detail_id, str(payload.get("title") or "")[:40], mismatched)
-                failures.append(
-                    f"{detail_id}: 保存后读回不一致（{', '.join(mismatched)}）")
-                if progress:
-                    progress({"stage": "verify_failed", "detailId": detail_id,
-                              "verified": len(saved), "failed": len(failures)})
-                continue
+            if verify_readback:
+                # Keep strict readback for workflows that publish immediately.
+                mismatched = _readback_mismatches(
+                    client, detail_id, shop_id, body, payload)
+                if mismatched:
+                    logger.warning(
+                        "载体覆盖后读回不一致 detailId=%s 目标标题=%r 差异=%s",
+                        detail_id, str(payload.get("title") or "")[:40], mismatched)
+                    failures.append(
+                        f"{detail_id}: 保存后读回不一致（{', '.join(mismatched)}）")
+                    if progress:
+                        progress({"stage": "verify_failed", "detailId": detail_id,
+                                  "verified": len(saved), "failed": len(failures)})
+                    continue
             saved.append(detail_id)
             saved_sources.append(index)
             if progress:
@@ -822,6 +839,87 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             if progress:
                 progress({"stage": "verify_failed", "detailId": detail_id,
                           "verified": len(saved), "failed": len(failures)})
-        time.sleep(0.25)
     return {"saved": saved, "savedSources": saved_sources, "failures": failures,
+            "warehouseId": warehouse_id}
+
+
+def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
+                              payloads: Iterable[Mapping[str, Any]], shop_id: int,
+                              progress: Callable[[dict[str, Any]], None] | None = None
+                              ) -> dict[str, Any]:
+    """Create carriers while the consumer covers each one as soon as it arrives."""
+    payload_list = list(payloads)
+    if not payload_list:
+        raise CarrierError("需要至少 1 个成品商品", required=1)
+
+    warehouse_id = target_warehouse_id(client, shop_id)
+    if progress:
+        progress({"stage": "warehouse", "shopId": shop_id,
+                  "warehouseId": warehouse_id})
+
+    ready: queue.Queue[tuple[int, int] | None] = queue.Queue(maxsize=1)
+    producer_errors: list[Exception] = []
+    progress_lock = threading.Lock()
+    carrier_index = 0
+
+    def report(event: dict[str, Any]) -> None:
+        if progress:
+            with progress_lock:
+                progress(event)
+
+    def publish_carrier(detail_id: int) -> None:
+        nonlocal carrier_index
+        index = carrier_index
+        carrier_index += 1
+        ready.put((index, detail_id))
+
+    def create() -> None:
+        try:
+            collect_carriers(db, client, count=len(payload_list),
+                             progress=report, on_carrier=publish_carrier)
+        except Exception as exc:  # surfaced after any already-created carriers are covered
+            producer_errors.append(exc)
+        finally:
+            ready.put(None)
+
+    producer = threading.Thread(target=create, name="carrier-producer", daemon=True)
+    producer.start()
+    saved: list[int] = []
+    saved_sources: list[int] = []
+    failed_sources: list[int] = []
+    failures: list[str] = []
+    created: list[int] = []
+    category_trees: dict[str, Mapping[str, Any] | bool] = {}
+    while True:
+        item = ready.get()
+        if item is None:
+            break
+        index, detail_id = item
+        created.append(detail_id)
+        try:
+            result = fill_carriers(
+                client, [detail_id], [payload_list[index]], shop_id=shop_id,
+                progress=report, verify_readback=False, warehouse_id=warehouse_id,
+                category_trees=category_trees)
+        except Exception as exc:  # keep draining so the producer cannot block
+            failed_sources.append(index)
+            failures.append(f"{detail_id}: {str(exc)[:90]}")
+            continue
+        saved.extend(result["saved"])
+        if result["saved"]:
+            saved_sources.append(index)
+        else:
+            failed_sources.append(index)
+        failures.extend(result["failures"])
+
+    producer.join()
+    if producer_errors:
+        exc = producer_errors[0]
+        message = str(exc) if isinstance(exc, CarrierError) else str(exc)[:120]
+        failures.append(f"载体创建中断：{message}")
+    if len(created) < len(payload_list) and not producer_errors:
+        failures.append(f"只创建了 {len(created)} 个载体，需要 {len(payload_list)} 个")
+    failed_sources.extend(index for index in range(len(created), len(payload_list)))
+    return {"carriers": created, "saved": saved, "savedSources": saved_sources,
+            "failedSources": failed_sources, "failures": failures,
             "warehouseId": warehouse_id}

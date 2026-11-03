@@ -428,6 +428,50 @@ def claim_batch(payload: BatchClaimRequest, db: DbSession,
         }
     if not str(payload.targetShopId or "").strip():
         raise errors.validation("请选择认领到哪个店铺", field="targetShopId")
+    parsed_keys = [str(key).split(":") for key in payload.keys[:50]]
+    if (account is not None
+            and len(parsed_keys) == min(len(payload.keys), 50)
+            and all(len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit()
+                    for parts in parsed_keys)
+            and all(parts[1] != str(payload.targetShopId) for parts in parsed_keys)):
+        try:
+            results = collect_box_service.claim_carrier_batch(
+                db, account,
+                items=[(parts[0], parts[1]) for parts in parsed_keys],
+                target_shop_id=payload.targetShopId)
+        except errors.AppError as exc:
+            db.rollback()
+            failures = [{"key": key, "code": exc.code, "reason": exc.message}
+                        for key in payload.keys[:50]]
+            for parts, key in zip(parsed_keys, payload.keys[:50], strict=True):
+                audit_service.record(
+                    db, operator=operator, action="warehouse.claim", target_kind="product",
+                    target_id=str(key)[:64], account_id=account_id,
+                    shop_id=parts[1], result="failed",
+                    message=f"{exc.code}: {exc.message}")
+            db.commit()
+            return {"claimed": 0, "requested": len(payload.keys),
+                    "targetShopId": payload.targetShopId,
+                    "results": [], "failures": failures}
+        failures = []
+        for key, parts, result in zip(payload.keys[:50], parsed_keys, results, strict=True):
+            if result["claimed"]:
+                audit_service.record(
+                    db, operator=operator, action="warehouse.claim", target_kind="product",
+                    target_id=str(key)[:64], account_id=account_id, shop_id=parts[1],
+                    detail={"targetShopId": payload.targetShopId})
+            else:
+                reason = "; ".join(result.get("failures") or ["载体覆盖失败"])
+                failures.append({"key": key, "reason": reason})
+                audit_service.record(
+                    db, operator=operator, action="warehouse.claim", target_kind="product",
+                    target_id=str(key)[:64], account_id=account_id, shop_id=parts[1],
+                    result="failed", message=reason)
+        db.commit()
+        return {"claimed": sum(1 for item in results if item["claimed"]),
+                "requested": len(payload.keys), "targetShopId": payload.targetShopId,
+                "results": results, "failures": failures}
+
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     for key in payload.keys[:50]:
