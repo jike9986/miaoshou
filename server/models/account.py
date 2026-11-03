@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.utils import now_ts
@@ -20,7 +20,7 @@ class Account(Base):
     # Duplicate legacy owner rows excluded during binding migration must never
     # regain access through the pre-binding compatibility fallback.
     legacy_owner_fallback_disabled: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false", nullable=False)
+        Boolean, default=False, server_default=false(), nullable=False)
     bound_by_operator_id: Mapped[int | None] = mapped_column(
         ForeignKey("operators.id", ondelete="SET NULL"))
     bound_at: Mapped[float | None] = mapped_column(Float)

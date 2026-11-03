@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Float, Index, Integer, String, and_, func
+from sqlalchemy import Boolean, Float, Index, Integer, String, and_, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.utils import now_ts
@@ -31,7 +31,7 @@ class Operator(Base):
     email: Mapped[str | None] = mapped_column(String(254))
     # Only mailboxes verified with a one-time code may be used for recovery.
     email_verified: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false", nullable=False)
+        Boolean, default=False, server_default=false(), nullable=False)
     password_hash: Mapped[str | None] = mapped_column(String(256))
     must_change_password: Mapped[bool] = mapped_column(
         default=False, server_default="0", nullable=False)
