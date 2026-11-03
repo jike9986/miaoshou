@@ -252,6 +252,49 @@ def test_claim_job_rechecks_member_claim_before_upstream_call(
     assert "只能将自己已认领" in item.message
 
 
+def test_claim_job_rejects_own_automation_result_after_source_account_rebinding(
+        shared_account_operators):
+    db, source, first, _second, _teacher = shared_account_operators
+    suffix = uuid.uuid4().hex[:8]
+    product = Product(
+        warehouse_key=f"revoked-result-{suffix}:7", account_id=source.id,
+        detail_id=f"revoked-result-{suffix}", shop_id="7", title="private result",
+        automation_result=True,
+    )
+    db.add(product)
+    db.flush()
+    run = AutomationRun(
+        id=f"revoked-result-run-{suffix}", owner_operator_id=first.id,
+        account_id=source.id, shop_id="7", status="done", settings={},
+    )
+    db.add(run)
+    db.flush()
+    db.add(AutomationRunItem(
+        run_id=run.id, key=product.warehouse_key, detail_id=product.detail_id,
+        source_shop_id=product.shop_id, product_id=product.id,
+        process_status="succeeded",
+    ))
+    target = Account(name=f"new-target-{suffix}", app_key=f"new-key-{suffix}")
+    db.add(target)
+    db.flush()
+    binding = db.query(AccountBinding).filter_by(
+        account_id=source.id, operator_id=first.id).one()
+    binding.account_id = target.id
+    db.commit()
+
+    with pytest.raises(errors.AppError) as revoked_source:
+        claim_job_service.create(
+            db, {"confirm": True, "shopId": "7",
+                 "items": [{"warehouseId": str(product.id)}]},
+            target.id, first.id,
+        )
+
+    assert revoked_source.value.status == 403
+    assert "无权访问其他学员的自动化处理结果" in revoked_source.value.message
+    assert db.query(Batch).filter_by(
+        account_id=target.id, operator_id=first.id).count() == 0
+
+
 def test_claim_job_rechecks_automation_result_owner_before_upstream_call(
         shared_account_operators, monkeypatch):
     db, account, first, second, _teacher = shared_account_operators

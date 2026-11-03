@@ -92,7 +92,10 @@ def _validate_member_items(db: Session, warehouse_ids: list[str],
         for ident in id_chunk:
             product = products[ident]
             if product.automation_result:
-                if product.id in owned_automation_results:
+                if (product.id in owned_automation_results
+                        and product.account_id is not None
+                        and account_service.has_account_access(
+                            db, product.account_id, operator.id)):
                     continue
                 raise errors.AppError(
                     errors.FORBIDDEN,
