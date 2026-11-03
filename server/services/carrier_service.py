@@ -338,7 +338,8 @@ def claimed_detail_ids(response: Mapping[str, Any]) -> list[int]:
     return found
 
 
-def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None) -> list[int]:
+def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None,
+                   known_ids: set[int] | None = None) -> list[int]:
     """兜底：认领接口没给 detailId 时，回头从采集箱列表里把新草稿捞出来。
 
     老版 carrier._fresh_box_ids 干的就是这件事。认领成功但响应体缺
@@ -369,21 +370,17 @@ def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None) -> list
             return []
         return found
 
-    # 主路径：只认挂着这个公共箱 id 的行
-    rows = scan(20)
-    if common_id is not None:
-        for row in rows:
-            if str(row.get("commonCollectBoxDetailId")) == str(common_id):
-                remember(row.get("collectBoxDetailId") or row.get("detailId"))
-    if ids:
-        return ids
-    # 兜底：整页再扫一次（上游常把 20 条的上限悄悄截断，page_size=50 才给全）
+    # Use the larger page size before deciding whether any rows were found.
+    # Existing copies of this common item are normal and must not short-circuit
+    # the scan before newly created IDs later in the page can be observed.
     for row in scan(50):
         row_common = str(row.get("commonCollectBoxDetailId") or "")
-        # 行上带了别的公共箱 id 就不是这次认领的产物；没带 id 的行无法区分，一律留下
         if common_id is not None and row_common != str(common_id):
             continue
-        remember(row.get("collectBoxDetailId") or row.get("detailId"))
+        value = row.get("collectBoxDetailId") or row.get("detailId")
+        if known_ids is not None and str(value).isdigit() and int(value) in known_ids:
+            continue
+        remember(value)
     return ids
 
 
@@ -493,8 +490,7 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
             # The upstream may create all requested drafts but return only part of
             # their IDs. Recover only IDs that appeared after this request and are
             # tied to the same common-box source; never infer success from old rows.
-            readback = [detail_id for detail_id in _fresh_box_ids(client, common_id)
-                        if detail_id not in before_ids]
+            readback = _fresh_box_ids(client, common_id, before_ids)
             if len(readback) == copies and set(new_ids).issubset(readback):
                 new_ids = readback
         if not new_ids:
