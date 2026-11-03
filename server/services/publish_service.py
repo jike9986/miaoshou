@@ -855,11 +855,10 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 try:
                     progress_options = ({"progress": _claim_progress}
                                         if _claim_progress is not None else {})
-                    carriers = carrier_service.collect_carriers(
-                        db, client, count=len(entries), **progress_options)
-                    filled = carrier_service.fill_carriers(
-                        client, carriers, payloads, shop_id=int(target_shop_id),
-                        **progress_options)
+                    filled = carrier_service.collect_and_fill_carriers(
+                        db, client, payloads=payloads,
+                        shop_id=int(target_shop_id), **progress_options)
+                    carriers = filled.get("carriers") or []
                 except carrier_service.CarrierError as exc:
                     raise errors.unprocessable(
                         f"认领需要新建载体并写入商品，但失败了：{exc}") from None
