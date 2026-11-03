@@ -1,18 +1,23 @@
 # 奥皇上品 · 桌面端
 
-妙手 ERP 商品采集 / 批量改价 / 图片处理 / 定时发布的 Windows 桌面工具，
-单文件夹装全部：Electron 壳 + React 前端 + FastAPI 后端 + SQLite 本地库。
+妙手 ERP 自动化上品 / 成品仓库 / 批量改价 / 图片处理 / 定时发布的 Windows 桌面工具。
+正式客户端由 Electron 壳和 React 前端组成，默认通过 HTTPS 连接中心服务；
+软件账号、妙手凭据、认领与发布记录保存在服务端 PostgreSQL，客户端只保存界面缓存和系统加密的登录会话。
+开发环境仍支持 FastAPI + SQLite 本地运行。
+
+当前交付为 **0.1.8**：[下载安装程序](https://aohuang888.com/miaoshou-downloads/AohuangShangpin-0.1.8-Setup.exe)，
+功能、安装与验证边界见 [交付验收记录](docs/release-0.1.8-acceptance-2026-11-03.md)。
 
 ## 技术栈
 
 | 层 | 选型 |
 | --- | --- |
-| 桌面壳 | Electron 31 + electron-builder（NSIS 安装程序） |
+| 桌面壳 | Electron 31 + electron-builder 目录包 + Inno Setup 安装程序 |
 | 前端 | React 18 + TypeScript + Vite 5 + Tailwind CSS + shadcn/ui (Radix) |
 | 数据请求 / 状态 | TanStack Query + Zustand |
 | 表格 / 图标 / 提示 | TanStack Table / lucide-react / sonner |
 | 后端 | FastAPI + Pydantic v2 + SQLAlchemy 2.0 |
-| 数据库 | SQLite（WAL 模式，本地优先） |
+| 数据库 | PostgreSQL（正式中心服务）；SQLite WAL（本地开发） |
 | 迁移 | Alembic（`server/migrations/`） |
 | 包管理 | pnpm 9 workspace（`app` / `web` 两个包） |
 | 运行时 | Python 3.11+ / Node 20+ |
@@ -89,27 +94,24 @@ cd server && python -m uvicorn main:app --reload --port 8812
 
 ## 打包与部署
 
-顺序不能换 —— 前端产物要先进 `resources\web`，后端 exe 要先存在，
-electron-builder 才能把它们打进安装包。
+生产构建先检查版本和代码，再构建前端 / Electron、生成目录包并验证登录启动，
+最后由 Inno Setup 生成支持选择目录的安装程序。正式客户端不打包本地后端或共享登录令牌。
 
 ```powershell
-# 1. 结束占用文件的进程（否则 exe/asar 被锁，复制静默失败）
-#    scripts\deploy.ps1 内部会做
-
-# 2. 完整打包（静态检查 → 前端 → PyInstaller → Electron → NSIS）
+# 1. 完整打包（需要 Inno Setup 6）
 pwsh -File scripts\build.ps1
 
-# 3. 部署到 C:\AohuangDesktop
-#    先删空 resources\web 再整体覆盖，避免新旧 hash 的 js 并存
-pwsh -File scripts\deploy.ps1
+# 2. 运行 release\奥皇上品-<版本>-安装程序.exe 安装或覆盖升级
 ```
 
-`build.ps1` 的 6 个阶段：静态检查（pyflakes + tsc + 回归）→ 前端 →
-PyInstaller → Electron 主进程 → electron-builder → 产物校验。
-
-`deploy.ps1` 只覆盖程序目录，**永远不碰 `userdata\`**（用户数据）。
+`scripts/deploy.ps1` 保留用于开发环境覆盖部署；正式交付使用安装程序。
+覆盖升级应先备份并保留用户数据，不能用删除数据目录的方式解决版本问题。
 
 ## 数据目录
+
+正式客户端的商品列表缓存按软件用户与妙手账号划分；登录会话由 Electron `safeStorage`
+加密写入 `userData/operator-session.v1.json`，系统加密不可用时只保留内存会话。
+妙手 key、软件账号及业务记录不依赖这些客户端缓存。以下为本地开发后端的数据目录约定：
 
 | 项 | 值 |
 | --- | --- |
