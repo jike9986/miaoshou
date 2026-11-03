@@ -101,6 +101,50 @@ def test_claim_image_limits_apply_to_copy_without_mutating_warehouse_payload():
     assert claim_payload["skuMap"] == original["skuMap"]
 
 
+def test_claim_image_limit_discards_blank_main_image_entries():
+    payload = {"imgUrls": ["", " ", "a.jpg", "a.jpg", *[
+        f"{index}.jpg" for index in range(1, 10)]]}
+
+    [limited] = publish_service._limit_claim_images([payload])
+
+    assert limited["imgUrls"] == ["a.jpg", *[f"{index}.jpg" for index in range(1, 9)]]
+
+
+def test_claim_uses_consistent_sku_weight_only_for_missing_product_weight():
+    payload = {"weight": None, "skuMap": {
+        "sku-a": {"weight": 0.8, "isDelete": "0"},
+        "sku-b": {"weight": "0.8", "isDelete": "0"},
+    }}
+
+    adapted = carrier_service.adapt_payload(
+        payload, shop_id=9, warehouse_id="w1")
+
+    assert adapted["weight"] == 0.8
+    assert payload["weight"] is None
+
+
+def test_claim_does_not_infer_product_weight_from_inconsistent_skus():
+    payload = {"weight": None, "skuMap": {
+        "sku-a": {"weight": 0.8, "isDelete": "0"},
+        "sku-b": {"weight": 0.9, "isDelete": "0"},
+    }}
+
+    adapted = carrier_service.adapt_payload(
+        payload, shop_id=9, warehouse_id="w1")
+
+    assert adapted["weight"] is None
+
+
+def test_claim_description_uses_existing_title_when_notes_are_image_only():
+    payload = {"title": "Plain & simple", "notes": "<p> </p><img src='a.jpg'>"}
+
+    changed = publish_service._ensure_claim_description(payload)
+
+    assert changed is True
+    assert payload["notes"].startswith("<p>Plain &amp; simple</p>")
+    assert "<img src='a.jpg'>" in payload["notes"]
+
+
 def test_claim_deduplicates_repeated_color_only_when_sku_rows_match_except_item_num():
     payload = {"skuPropertyList": [{"attrName": "warna", "attrValueList": [
         {"attrValueId": "white-a", "attrValue": "Putih"},
@@ -136,7 +180,7 @@ def test_claim_keeps_repeated_color_when_sku_data_differs():
     assert set(payload["skuMap"]) == {"white-a;size-s", "white-b;size-s"}
 
 
-def test_claim_keeps_repeated_color_when_variant_images_differ():
+def test_claim_deduplicates_repeated_color_when_only_images_and_item_nums_differ():
     payload = {"skuPropertyList": [{"attrName": "warna", "attrValueList": [
         {"attrValueId": "white-a", "attrValue": "Putih", "imgUrl": "a.jpg"},
         {"attrValueId": "white-b", "attrValue": " putih ", "imgUrl": "b.jpg"},
@@ -147,9 +191,10 @@ def test_claim_keeps_repeated_color_when_variant_images_differ():
 
     result = publish_service._dedupe_exact_duplicate_claim_colors(payload)
 
-    assert result is None
-    assert len(payload["skuPropertyList"][0]["attrValueList"]) == 2
-    assert set(payload["skuMap"]) == {"white-a;size-s", "white-b;size-s"}
+    assert result == {"removedColorValues": 1, "removedSkuVariants": 1}
+    assert payload["skuPropertyList"][0]["attrValueList"] == [
+        {"attrValueId": "white-a", "attrValue": "Putih", "imgUrl": "a.jpg"}]
+    assert set(payload["skuMap"]) == {"white-a;size-s"}
 
 
 def test_reported_cost_floor_raises_only_active_matching_skus_once():
@@ -174,10 +219,19 @@ def test_reported_cost_floor_raises_only_active_matching_skus_once():
     assert payload["skuMap"]["deleted"]["price"] == "9.19"
 
 
-def test_fill_retries_explicit_cost_floor_rejection_once():
-    message = ("产品设置的本地展示价9.19MYR，无法覆盖产品基础成本"
+def test_reported_cost_floor_equal_to_price_still_adds_one_cent():
+    message = ("产品设置的本地展示价9.66MYR，无法覆盖产品基础成本"
                "(跨境物流运费+关税+增值税)：9.66MYR")
+    payload = {"skuMap": {"sku-a": {"price": "9.66"}}}
 
+    adjustment = carrier_service._raise_price_to_reported_floor(
+        payload, MiaoshouError(message, payload={"message": message}))
+
+    assert adjustment["newPrice"] == "9.67"
+    assert payload["skuMap"]["sku-a"]["price"] == "9.67"
+
+
+def test_fill_retries_increasing_reported_cost_floors_with_small_increments():
     class Client:
         def __init__(self):
             self.saved_bodies = []
@@ -186,8 +240,13 @@ def test_fill_retries_explicit_cost_floor_rejection_once():
             return {"data": {"ossMd5": "version"}}
 
         def save_shop(self, _detail_id, _shop_id, _md5, body):
-            self.saved_bodies.append(body)
-            if len(self.saved_bodies) == 1:
+            self.saved_bodies.append(body["skuMap"]["sku-a"]["price"])
+            floors = {1: "9.66", 2: "9.70"}
+            floor = floors.get(len(self.saved_bodies))
+            if floor:
+                price = body["skuMap"]["sku-a"]["price"]
+                message = (f"产品设置的本地展示价{price}MYR，无法覆盖产品基础成本"
+                           f"(跨境物流运费+关税+增值税)：{floor}MYR")
                 raise MiaoshouError(message, payload={"message": message})
 
     client = Client()
@@ -198,12 +257,41 @@ def test_fill_retries_explicit_cost_floor_rejection_once():
         shop_id=9, warehouse_id="w1", verify_readback=False)
 
     assert result["saved"] == [1]
-    assert len(client.saved_bodies) == 2
-    assert client.saved_bodies[1]["skuMap"]["sku-a"]["price"] == "9.67"
-    assert result["priceAdjustments"] == [{
-        "sourceIndex": 0, "oldPrice": "9.19", "costFloor": "9.66",
-        "newPrice": "9.67", "skuKeys": ["sku-a"],
-    }]
+    assert len(client.saved_bodies) == 3
+    assert client.saved_bodies == ["9.19", "9.67", "9.71"]
+    assert result["priceAdjustments"] == [
+        {"sourceIndex": 0, "oldPrice": "9.19", "costFloor": "9.66",
+         "newPrice": "9.67", "skuKeys": ["sku-a"]},
+        {"sourceIndex": 0, "oldPrice": "9.67", "costFloor": "9.70",
+         "newPrice": "9.71", "skuKeys": ["sku-a"]},
+    ]
+
+
+def test_fill_stops_after_bounded_cost_floor_retries():
+    class Client:
+        def __init__(self):
+            self.saved_bodies = []
+
+        def shop_detail(self, *_args):
+            return {"data": {"ossMd5": "version"}}
+
+        def save_shop(self, _detail_id, _shop_id, _md5, body):
+            self.saved_bodies.append(body["skuMap"]["sku-a"]["price"])
+            price = body["skuMap"]["sku-a"]["price"]
+            floor = float(price) + 1
+            message = (f"产品设置的本地展示价{price}MYR，无法覆盖产品基础成本"
+                       f"(跨境物流运费+关税+增值税)：{floor:.2f}MYR")
+            raise MiaoshouError(message, payload={"message": message})
+
+    client = Client()
+    result = carrier_service.fill_carriers(
+        client, [1], [{"title": "a", "skuMap": {
+            "sku-a": {"price": "9.19", "priceIncludeVat": "9.19"}}}],
+        shop_id=9, warehouse_id="w1", verify_readback=False)
+
+    assert result["saved"] == []
+    assert len(client.saved_bodies) == carrier_service.MAX_COST_FLOOR_RETRIES + 1
+    assert result["failureDetails"][0]["certain"] is True
 
 
 def test_fill_reports_item_level_known_and_unknown_failures():

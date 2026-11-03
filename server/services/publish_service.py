@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Iterable, Mapping
+from html import escape, unescape
 from typing import Any
 
 from sqlalchemy import or_
@@ -604,10 +605,9 @@ def _limit_claim_images(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
             unique_main = []
             for image in main:
                 url = str(image or "").strip()
-                if url and url in seen_images:
+                if not url or url in seen_images:
                     continue
-                if url:
-                    seen_images.add(url)
+                seen_images.add(url)
                 unique_main.append(image)
             payload["imgUrls"] = unique_main[:MAIN_IMAGE_LIMIT]
             seen_images = {str(image or "").strip()
@@ -634,6 +634,20 @@ def _limit_claim_images(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
             payload["notes"] = _DETAIL_IMG_TAG.sub(keep_detail_image, notes)
         limited.append(payload)
     return limited
+
+
+def _ensure_claim_description(payload: dict[str, Any]) -> bool:
+    """Keep image-only source HTML valid by adding the existing product title."""
+    notes = payload.get("notes")
+    notes = notes if isinstance(notes, str) else ""
+    text = unescape(re.sub(r"<[^>]*>", "", notes)).strip()
+    if text:
+        return False
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        return False
+    payload["notes"] = f"<p>{escape(title)}</p>{notes}"
+    return True
 
 
 def _dedupe_exact_duplicate_claim_colors(payload: dict[str, Any]) -> dict[str, int] | None:
@@ -670,7 +684,8 @@ def _dedupe_exact_duplicate_claim_colors(payload: dict[str, Any]) -> dict[str, i
         normalized_values = []
         for value in group:
             normalized = {key: item for key, item in value.items()
-                          if key not in {"attrValueId", "attrValue"}}
+                          if key not in {"attrValueId", "attrValue", "imgUrl",
+                                         "supplementarySkuImageUrls"}}
             normalized["attrValue"] = str(value.get("attrValue") or "").strip().casefold()
             normalized_values.append(normalized)
         if any(value != normalized_values[0] for value in normalized_values[1:]):
@@ -977,8 +992,15 @@ def publish(db: Session, payload: Mapping[str, Any], *,
 
             if need_rebuild or (not claimed_ids and entries):
                 # 用本地 payload 在目标店铺新建载体并写入商品内容。
-                payloads = _limit_claim_images(
-                    _load_carrier_payloads(db, entries, account, client))
+                source_payloads = _load_carrier_payloads(db, entries, account, client)
+                for index, item in enumerate(source_payloads):
+                    if _ensure_claim_description(item):
+                        claim_adjustments.append({
+                            "warehouseId": entries[index].get("warehouseId"),
+                            "stage": "description",
+                            "source": "title",
+                        })
+                payloads = _limit_claim_images(source_payloads)
                 for index, item in enumerate(payloads):
                     sku_change = _dedupe_exact_duplicate_claim_colors(item)
                     if sku_change:

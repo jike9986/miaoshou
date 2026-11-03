@@ -32,6 +32,7 @@ logger = logging.getLogger("aohuang.carrier")
 _COST_FLOOR_MESSAGE = re.compile(
     r"本地(?:显示|展示)价\s*([0-9]+(?:\.[0-9]+)?)\s*MYR.*?基础成本.*?[：:]\s*"
     r"([0-9]+(?:\.[0-9]+)?)\s*MYR")
+MAX_COST_FLOOR_RETRIES = 3
 
 
 def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouError
@@ -47,7 +48,7 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
         old_price, floor = (Decimal(value) for value in match.groups())
     except InvalidOperation:
         return None
-    if floor <= old_price:
+    if floor < old_price:
         return None
     new_price = floor + Decimal("0.01")
     sku_map = payload.get("skuMap")
@@ -773,6 +774,25 @@ def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
         body["cid"] = leaf_cid
     skus = body.get("skuMap") or {}
     if isinstance(skus, dict):
+        if body.get("weight") in (None, ""):
+            sku_weights: set[Decimal] = set()
+            complete_weights = True
+            active_skus = 0
+            for sku in skus.values():
+                if not isinstance(sku, dict) or str(sku.get("isDelete", "0")) == "1":
+                    continue
+                active_skus += 1
+                try:
+                    sku_weight = Decimal(str(sku.get("weight")))
+                except (InvalidOperation, TypeError, ValueError):
+                    complete_weights = False
+                    break
+                if not sku_weight.is_finite() or sku_weight <= 0:
+                    complete_weights = False
+                    break
+                sku_weights.add(sku_weight)
+            if complete_weights and active_skus and len(sku_weights) == 1:
+                body["weight"] = float(next(iter(sku_weights)))
         for sku in skus.values():
             if not isinstance(sku, dict):
                 continue
@@ -858,29 +878,36 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             body = adapt_payload(payload, shop_id=shop_id, warehouse_id=warehouse_id,
                                  leaf_cid=leaf_cid)
             body["detailId"] = detail_id
-            try:
-                client.save_shop(detail_id, shop_id, oss_md5, body)
-            except MiaoshouError as exc:
-                price_change = _raise_price_to_reported_floor(body, exc)
-                if price_change is not None:
+            cost_floor_retries = 0
+            version_refresh_used = False
+            while True:
+                try:
                     client.save_shop(detail_id, shop_id, oss_md5, body)
-                    price_adjustments.append({"sourceIndex": index, **price_change})
-                # 载体刚采集完，上游的 ossMd5 还在变（编辑器内容变动）。这不是致命错误：
-                # 重新读一次最新 ossMd5 再保存即可。不重试就会一直卡在
-                # 「该编辑器中产品内容发生变动，为避免覆盖…请重新打开编辑器」。
-                text = str(exc)
-                if (price_change is None
-                        and ("变动" in text or "重新打开" in text
-                             or "ossMd5" in text.lower())):
-                    logger.info("载体版本变动，重读 ossMd5 后重试 detailId=%s", detail_id)
-                    time.sleep(1.0)
-                    fresh = client.shop_detail(detail_id, shop_id)
-                    fresh_md5 = (fresh.get("data") or {}).get("ossMd5")
-                    if not fresh_md5:
-                        raise
-                    client.save_shop(detail_id, shop_id, fresh_md5, body)
-                    snapshot = fresh
-                elif price_change is None:
+                    break
+                except MiaoshouError as exc:
+                    price_change = None
+                    if cost_floor_retries < MAX_COST_FLOOR_RETRIES:
+                        price_change = _raise_price_to_reported_floor(body, exc)
+                    if price_change is not None:
+                        price_adjustments.append({"sourceIndex": index, **price_change})
+                        cost_floor_retries += 1
+                        continue
+                    # A new carrier may still be receiving upstream edits. Refresh
+                    # ossMd5 once for this explicit conflict only.
+                    text = str(exc)
+                    is_version_conflict = (
+                        "变动" in text or "重新打开" in text or "ossMd5" in text.lower())
+                    if is_version_conflict and not version_refresh_used:
+                        logger.info("载体版本变动，重读 ossMd5 后重试 detailId=%s", detail_id)
+                        time.sleep(1.0)
+                        fresh = client.shop_detail(detail_id, shop_id)
+                        fresh_md5 = (fresh.get("data") or {}).get("ossMd5")
+                        if not fresh_md5:
+                            raise
+                        snapshot = fresh
+                        oss_md5 = fresh_md5
+                        version_refresh_used = True
+                        continue
                     raise
             if verify_readback:
                 # Keep strict readback for workflows that publish immediately.
