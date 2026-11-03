@@ -673,6 +673,34 @@ def _fill_claim_package_dimensions(
     return adjustments
 
 
+def _fill_claim_size_chart(
+        payloads: list[dict[str, Any]], entries: list[dict[str, Any]],
+        default_url: str) -> list[dict[str, Any]]:
+    default_chart = warehouse_service.normalize_size_chart_url(default_url)
+    adjustments: list[dict[str, Any]] = []
+    for payload, entry in zip(payloads, entries, strict=True):
+        try:
+            chart = warehouse_service.normalize_size_chart_url(
+                payload.get("sizeChart"))
+        except errors.AppError:
+            chart = ""
+        source = "product_payload" if chart else "workflow_setting"
+        chart = chart or default_chart
+        if not chart:
+            continue
+        if (payload.get("sizeChart") == chart
+                and payload.get("sizeChartType") == "image"):
+            continue
+        payload["sizeChart"] = chart
+        payload["sizeChartType"] = "image"
+        adjustments.append({
+            "warehouseId": entry.get("warehouseId"),
+            "stage": "size_chart",
+            "source": source,
+        })
+    return adjustments
+
+
 def _ensure_claim_description(payload: dict[str, Any]) -> bool:
     """Keep image-only source HTML valid by adding the existing product title."""
     notes = payload.get("notes")
@@ -1102,6 +1130,11 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 payloads = _limit_claim_images(source_payloads)
                 claim_adjustments.extend(
                     _fill_claim_package_dimensions(payloads, entries))
+                configured_size_chart = warehouse_service.normalize_size_chart_url(
+                    warehouse_service._workflow_setting(
+                        db, "sizeChartUrl", "", log_operator_id))
+                claim_adjustments.extend(
+                    _fill_claim_size_chart(payloads, entries, configured_size_chart))
                 for index, item in enumerate(payloads):
                     sku_change = _dedupe_exact_duplicate_claim_colors(item)
                     renamed_colors = _disambiguate_duplicate_claim_colors(item)

@@ -183,6 +183,24 @@ def test_claim_package_estimate_preserves_existing_measurements():
             payload["packageHeight"]) == (40, 21, 12.0)
 
 
+def test_claim_adds_configured_size_chart_to_copy_and_preserves_valid_source():
+    configured = "https://assets.example/default-size-chart.png"
+    source = "https://assets.example/product-size-chart.png"
+    payloads = [{}, {"sizeChart": source, "sizeChartType": "image"}]
+
+    adjustments = publish_service._fill_claim_size_chart(
+        payloads, [{"warehouseId": "20"}, {"warehouseId": "21"}], configured)
+
+    assert payloads[0]["sizeChart"] == configured
+    assert payloads[0]["sizeChartType"] == "image"
+    assert payloads[1]["sizeChart"] == source
+    assert payloads[1]["sizeChartType"] == "image"
+    assert adjustments == [{
+        "warehouseId": "20", "stage": "size_chart",
+        "source": "workflow_setting",
+    }]
+
+
 def test_claim_uses_consistent_sku_weight_only_for_missing_product_weight():
     payload = {"weight": None, "skuMap": {
         "sku-a": {"weight": 0.8, "isDelete": "0"},
