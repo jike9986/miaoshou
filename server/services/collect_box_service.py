@@ -30,6 +30,7 @@ from core.utils import (
     product_key,
 )
 from models.product import Product
+from models.publish_log import PublishLog
 from services import carrier_service, product_service, warehouse_service
 from services.account_service import (
     Account,
@@ -112,6 +113,28 @@ def _account_claim_key(account: Account) -> str:
     while old rows are being migrated naturally.
     """
     return f"account:{int(account.id)}"
+
+
+def _operator_claim_key(account: Account, operator_id: int) -> str:
+    return f"operator:{int(operator_id)}:account:{int(account.id)}"
+
+
+def _record_carrier_claim(db: Session, account: Account, product: Product | None, *,
+                          detail_id: str, shop_id: str, operator_id: int | None,
+                          claimed_at: float) -> None:
+    if product is None:
+        return
+    state = dict(product.collected or {}) if isinstance(product.collected, dict) else {}
+    marker = {"at": claimed_at, "detailId": detail_id, "shopId": shop_id}
+    state[_account_claim_key(account)] = marker
+    if operator_id is not None:
+        state[_operator_claim_key(account, operator_id)] = marker
+        warehouse_service.claim_product(db, product.id, operator_id)
+    product.collected = state
+    product.claimed = True
+    product.claimed_at = claimed_at
+    product.claimed_shop_id = shop_id
+    warehouse_service.bump_revision(product)
 
 
 def _recent_claim_blocker(db: Session, account: Account, key: str) -> None:
@@ -572,7 +595,8 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
 
 def claim_carrier_batch(db: Session, account: Account, *,
                         items: list[tuple[str, str]],
-                        target_shop_id: str) -> list[dict[str, Any]]:
+                        target_shop_id: str,
+                        operator_id: int | None = None) -> list[dict[str, Any]]:
     """Batch cross-shop claims; each new carrier is covered as soon as it exists."""
     if not str(target_shop_id or "").strip().isdigit():
         raise errors.validation("请选择认领到哪个店铺", field="targetShopId")
@@ -589,23 +613,95 @@ def claim_carrier_batch(db: Session, account: Account, *,
     keys = [product_key(detail, shop) for detail, shop in normalized]
     with session_lock(db, keys, blocking=False,
                       busy_message="部分商品正在被别人认领，请稍后重试"):
-        for key in keys:
-            _recent_claim_blocker(db, account, key)
-
         products = (db.query(Product)
                     .filter(Product.account_id == account.id,
                             Product.warehouse_key.in_(keys),
                             Product.deleted_at.is_(None))
                     .all())
         by_key = {row.warehouse_key: row for row in products}
-        source_shops = {shop_id: require_shop(db, account, shop_id)
-                        for _, shop_id in normalized}
         client = account_client(account)
-        payloads: list[dict[str, Any]] = []
-        payload_indexes: list[int] = []
-        errors_by_index: dict[int, str] = {}
         try:
+            pending_by_index: dict[int, tuple[PublishLog, list[str]]] = {}
+            owner_filter = (PublishLog.operator_id.is_(None) if operator_id is None
+                            else PublishLog.operator_id == operator_id)
+            for index, (detail_id, _shop_id) in enumerate(normalized):
+                log = (db.query(PublishLog)
+                       .filter(PublishLog.account_id == account.id,
+                               owner_filter,
+                               PublishLog.detail_id == detail_id,
+                               PublishLog.shop_id == str(target_shop_id))
+                       .order_by(PublishLog.id.desc()).first())
+                detail = log.detail if log and isinstance(log.detail, dict) else {}
+                carrier_claim = detail.get("carrierClaim")
+                if not isinstance(carrier_claim, dict):
+                    continue
+                target_ids = [str(value) for value in carrier_claim.get("targetDetailIds", [])
+                              if str(value).isdigit()]
+                if carrier_claim.get("status") == "confirmed":
+                    raise errors.AppError(
+                        errors.ALREADY_CLAIMED,
+                        "该商品已认领到此店铺",
+                        status=409,
+                        details={"detailId": detail_id,
+                                 "shopId": str(target_shop_id),
+                                 "targetDetailIds": target_ids},
+                    )
+                if log.status == "processing" and not target_ids:
+                    raise errors.busy(
+                        "上次认领结果未返回载体 ID，请先检查目标采集箱；不能重复认领",
+                        detailId=detail_id, targetShopId=str(target_shop_id))
+                if target_ids and log.status in {"processing", "fail", "success"}:
+                    pending_by_index[index] = (log, target_ids)
+                elif log.status == "success":
+                    raise errors.busy(
+                        "上次认领记录缺少载体 ID，请先人工核对目标采集箱",
+                        detailId=detail_id, targetShopId=str(target_shop_id))
+
+            reconciled_by_index: dict[int, str] = {}
+            if pending_by_index:
+                pending_ids = sorted({value for _, ids in pending_by_index.values()
+                                      for value in ids})
+                confirmed_pending = verify_items_present(
+                    client, pending_ids, str(target_shop_id))
+                stamp = now_ts()
+                for index, (log, target_ids) in pending_by_index.items():
+                    if not target_ids or not set(target_ids).issubset(confirmed_pending):
+                        raise errors.busy(
+                            "上次认领结果仍未在目标采集箱确认，请稍后刷新核对；不能重复认领",
+                            detailId=normalized[index][0],
+                            targetShopId=str(target_shop_id),
+                            targetDetailIds=target_ids)
+                    detail = dict(log.detail or {})
+                    carrier_claim = dict(detail.get("carrierClaim") or {})
+                    covered_ids = {str(value) for value in
+                                   carrier_claim.get("coveredDetailIds", [])}
+                    if set(target_ids).issubset(covered_ids):
+                        carrier_claim.update({"status": "confirmed",
+                                              "confirmedAt": stamp})
+                        log.detail = {**detail, "carrierClaim": carrier_claim}
+                        log.status = "success"
+                        log.reason = "认领已在目标采集箱确认"
+                        log.finished_at = stamp
+                        reconciled_by_index[index] = target_ids[0]
+                        _record_carrier_claim(
+                            db, account, by_key.get(product_key(*normalized[index])),
+                            detail_id=target_ids[0], shop_id=str(target_shop_id),
+                            operator_id=operator_id, claimed_at=stamp)
+
+            source_shops = {shop_id: require_shop(db, account, shop_id)
+                            for _, shop_id in normalized}
+            payloads: list[dict[str, Any]] = []
+            payload_indexes: list[int] = []
+            errors_by_index: dict[int, str] = {}
             for index, (detail_id, shop_id) in enumerate(normalized):
+                if index in reconciled_by_index:
+                    continue
+                stored = by_key.get(product_key(detail_id, shop_id))
+                stored_payload = _stored_claim_payload(stored)
+                if _claim_payload_is_complete(stored_payload):
+                    payload_indexes.append(index)
+                    payloads.append(stored_payload)
+                    continue
                 try:
                     snapshot = client.shop_detail(detail_id, shop_id)
                     info = product_service.detail_block(snapshot)["info"]
@@ -615,49 +711,317 @@ def claim_carrier_batch(db: Session, account: Account, *,
                 except MiaoshouError as exc:
                     errors_by_index[index] = str(exc)[:120]
                     continue
-                stored = by_key.get(product_key(detail_id, shop_id))
-                if stored is not None and isinstance(stored.payload, dict) and stored.payload:
-                    info = {**info, **stored.payload}
+                if stored_payload:
+                    info = {**info, **stored_payload}
                 payload_indexes.append(index)
                 payloads.append(info)
 
             if payloads:
-                filled = carrier_service.collect_and_fill_carriers(
-                    db, client, payloads=payloads, shop_id=int(target_shop_id))
+                from services import publish_service
+
+                claim_entries = []
+                for source_index, payload in zip(payload_indexes, payloads, strict=True):
+                    detail_id, shop_id = normalized[source_index]
+                    stored = by_key.get(product_key(detail_id, shop_id))
+                    claim_entries.append({
+                        "warehouseId": str(stored.id if stored is not None else detail_id),
+                        "payload": payload,
+                    })
+                payloads, adjustments = publish_service.prepare_claim_payloads(
+                    db, payloads, claim_entries, operator_id=operator_id)
+                stamp = now_ts()
+                for source_index in payload_indexes:
+                    detail_id, source_shop_id = normalized[source_index]
+                    product = by_key.get(product_key(detail_id, source_shop_id))
+                    warehouse_key = (product.warehouse_key if product is not None
+                                     else product_key(detail_id, source_shop_id))
+                    existing = (db.query(PublishLog)
+                                .filter(PublishLog.account_id == account.id,
+                                        owner_filter,
+                                        PublishLog.detail_id == detail_id,
+                                        PublishLog.shop_id == str(target_shop_id))
+                                .order_by(PublishLog.id.desc()).first())
+                    existing_detail = (existing.detail if existing is not None
+                                       and isinstance(existing.detail, dict) else {})
+                    if (existing is not None
+                            and not isinstance(existing_detail.get("carrierClaim"), dict)):
+                        raise errors.busy(
+                            "该商品在目标店铺已有发布记录，已阻止覆盖原记录",
+                            detailId=detail_id, targetShopId=str(target_shop_id))
+                    if existing is None:
+                        existing = PublishLog(
+                            account_id=account.id, operator_id=operator_id,
+                            product_id=product.id if product is not None else None,
+                            detail_id=detail_id, shop_id=str(target_shop_id),
+                            warehouse_key=warehouse_key, mode="carrier",
+                            status="processing", requested_at=stamp,
+                            last_requested_at=stamp, attempts=1)
+                        db.add(existing)
+                    else:
+                        existing.product_id = product.id if product is not None else None
+                        existing.warehouse_key = warehouse_key
+                        existing.mode = "carrier"
+                        existing.status = "processing"
+                        existing.requested_at = existing.requested_at or stamp
+                        existing.last_requested_at = stamp
+                        existing.attempts = int(existing.attempts or 0) + 1
+                        existing.finished_at = None
+                    previous_ids = (pending_by_index[source_index][1]
+                                    if source_index in pending_by_index else [])
+                    item_adjustments = [item for item in adjustments
+                                        if str(item.get("warehouseId") or "") ==
+                                        str(product.id if product is not None else detail_id)]
+                    existing.detail = {
+                        "claimOnly": True,
+                        "carrierClaim": {
+                            "status": "pending",
+                            "sourceShopId": source_shop_id,
+                            "targetShopId": str(target_shop_id),
+                            "targetDetailIds": previous_ids,
+                            "coveredDetailIds": [],
+                            "adjustments": item_adjustments,
+                        },
+                    }
+                    existing.reason = "认领结果待采集箱核对，请勿重复认领"
+                db.flush()
+                db.commit()
+                invalidate_account(account)
+
+                def persist_carrier_progress(event: dict[str, Any]) -> None:
+                    stage = event.get("stage")
+                    if stage not in {"carrier_created", "saved", "verified"}:
+                        return
+                    source_index = event.get("sourceIndex")
+                    detail_id = str(event.get("detailId") or "")
+                    if (not isinstance(source_index, int)
+                            or not 0 <= source_index < len(payload_indexes)
+                            or not detail_id.isdigit()):
+                        return
+                    original_index = payload_indexes[source_index]
+                    original_detail, _source_shop = normalized[original_index]
+                    row = (db.query(PublishLog)
+                           .filter(PublishLog.account_id == account.id,
+                                   owner_filter,
+                                   PublishLog.detail_id == original_detail,
+                                   PublishLog.shop_id == str(target_shop_id),
+                                   PublishLog.status == "processing")
+                           .order_by(PublishLog.id.desc()).first())
+                    if row is None:
+                        return
+                    detail = dict(row.detail or {})
+                    carrier_claim = dict(detail.get("carrierClaim") or {})
+                    target_ids = [str(value) for value in
+                                  carrier_claim.get("targetDetailIds", [])]
+                    if detail_id not in target_ids:
+                        target_ids.append(detail_id)
+                    carrier_claim["targetDetailIds"] = target_ids
+                    if stage in {"saved", "verified"}:
+                        covered_ids = [str(value) for value in
+                                       carrier_claim.get("coveredDetailIds", [])]
+                        if detail_id not in covered_ids:
+                            covered_ids.append(detail_id)
+                        carrier_claim["coveredDetailIds"] = covered_ids
+                    row.detail = {**detail, "carrierClaim": carrier_claim}
+                    db.commit()
+
+                filled = {"carriers": [], "saved": [], "savedSources": [],
+                          "failedSources": [], "failures": [],
+                          "failureDetails": [], "priceAdjustments": []}
+
+                def merge_filled(result: dict[str, Any], positions: list[int]) -> None:
+                    local_saved_sources = result.get("savedSources") or []
+                    for detail_value, local_source in zip(
+                            result.get("saved") or [], local_saved_sources, strict=True):
+                        filled["saved"].append(detail_value)
+                        filled["savedSources"].append(positions[local_source])
+                    saved_set = set(local_saved_sources)
+                    failed_sources = result.get("failedSources")
+                    if failed_sources is None:
+                        failed_sources = [i for i in range(len(positions))
+                                          if i not in saved_set]
+                    filled["failedSources"].extend(
+                        positions[i] for i in failed_sources)
+                    filled["failures"].extend(result.get("failures") or [])
+                    for failure in result.get("failureDetails") or []:
+                        mapped = dict(failure)
+                        local_source = mapped.get("sourceIndex")
+                        if isinstance(local_source, int) and 0 <= local_source < len(positions):
+                            mapped["sourceIndex"] = positions[local_source]
+                        filled["failureDetails"].append(mapped)
+                    for adjustment in result.get("priceAdjustments") or []:
+                        mapped = dict(adjustment)
+                        local_source = mapped.get("sourceIndex")
+                        if isinstance(local_source, int) and 0 <= local_source < len(positions):
+                            mapped["sourceIndex"] = positions[local_source]
+                        filled["priceAdjustments"].append(mapped)
+
+                recovery_positions = [local_index for local_index, original_index
+                                      in enumerate(payload_indexes)
+                                      if original_index in pending_by_index]
+                new_positions = [local_index for local_index, original_index
+                                 in enumerate(payload_indexes)
+                                 if original_index not in pending_by_index]
+                try:
+                    if recovery_positions:
+                        recovery_ids = []
+                        for local_index in recovery_positions:
+                            original_index = payload_indexes[local_index]
+                            target_ids = pending_by_index[original_index][1]
+                            if len(target_ids) != 1:
+                                raise errors.busy(
+                                    "上次操作产生多个载体，请先人工核对，不能继续复制",
+                                    detailId=normalized[original_index][0],
+                                    targetDetailIds=target_ids)
+                            recovery_ids.append(int(target_ids[0]))
+                        recovered = carrier_service.fill_carriers(
+                            client, recovery_ids,
+                            [payloads[i] for i in recovery_positions],
+                            shop_id=int(target_shop_id), verify_readback=False)
+                        recovery_position_by_id = {
+                            str(detail_id): position
+                            for detail_id, position in zip(
+                                recovery_ids, recovery_positions, strict=True)
+                        }
+                        for failure in recovered.get("failureDetails") or []:
+                            if ("sourceIndex" not in failure
+                                    and str(failure.get("detailId") or "")
+                                    in recovery_position_by_id):
+                                failure["sourceIndex"] = recovery_position_by_id[
+                                    str(failure["detailId"])]
+                        merge_filled(recovered, recovery_positions)
+                    if new_positions:
+                        def remap_new_progress(event: dict[str, Any]) -> None:
+                            local_source = event.get("sourceIndex")
+                            if (isinstance(local_source, int)
+                                    and 0 <= local_source < len(new_positions)):
+                                persist_carrier_progress({
+                                    **event, "sourceIndex": new_positions[local_source]})
+
+                        created = carrier_service.collect_and_fill_carriers(
+                            db, client, payloads=[payloads[i] for i in new_positions],
+                            shop_id=int(target_shop_id), progress=remap_new_progress,
+                            verify_readback=False)
+                        merge_filled(created, new_positions)
+                finally:
+                    invalidate_account(account)
             else:
                 filled = {"saved": [], "savedSources": [], "failedSources": [],
-                          "failures": []}
+                          "failures": [], "failureDetails": []}
         except MiaoshouError as exc:
-            raise map_upstream_error(exc) from None
-        finally:
             client.close()
+            raise map_upstream_error(exc) from None
+        except Exception:
+            client.close()
+            raise
 
-        detail_by_source = {
+        for failure in filled.get("failureDetails") or []:
+            source_index = failure.get("sourceIndex")
+            if not isinstance(source_index, int) or not 0 <= source_index < len(payload_indexes):
+                continue
+            original_index = payload_indexes[source_index]
+            errors_by_index.setdefault(
+                original_index, str(failure.get("reason") or "载体覆盖失败")[:120])
+        for source_index in filled.get("failedSources", []):
+            original_index = payload_indexes[source_index]
+            if original_index not in errors_by_index:
+                failures = filled.get("failures") or []
+                reason = failures[0] if len(failures) == 1 else "载体覆盖失败，单件原因未返回"
+                errors_by_index[original_index] = str(reason)[:120]
+
+        saved_by_source = {
             payload_indexes[source_index]: str(detail_id)
             for source_index, detail_id in zip(
                 filled.get("savedSources", []), filled.get("saved", []), strict=True)
         }
-        for source_index in filled.get("failedSources", []):
-            original_index = payload_indexes[source_index]
-            errors_by_index.setdefault(
-                original_index,
-                next(iter(filled.get("failures", [])), "载体覆盖失败"))
+        for source_index, detail_id in saved_by_source.items():
+            detail_id_source, source_shop_id = normalized[source_index]
+            log = (db.query(PublishLog)
+                   .filter(PublishLog.account_id == account.id,
+                           PublishLog.detail_id == detail_id_source,
+                           PublishLog.shop_id == str(target_shop_id),
+                           owner_filter)
+                   .order_by(PublishLog.id.desc()).first())
+            if log is not None:
+                detail = dict(log.detail or {})
+                carrier_claim = dict(detail.get("carrierClaim") or {})
+                carrier_claim.update({"sourceShopId": source_shop_id,
+                                      "targetDetailIds": [detail_id],
+                                      "coveredDetailIds": [detail_id]})
+                log.detail = {**detail, "carrierClaim": carrier_claim}
+        if saved_by_source:
+            db.commit()
+        try:
+            try:
+                confirmed_ids = verify_items_present(
+                    client, list(saved_by_source.values()), str(target_shop_id))
+                verification_error = ""
+            except MiaoshouError as exc:
+                confirmed_ids = set()
+                verification_error = str(exc)[:80]
+            detail_by_source = {}
+            for source_index, detail_id in saved_by_source.items():
+                if detail_id in confirmed_ids:
+                    detail_by_source[source_index] = detail_id
+                    original_index = source_index
+                    detail_id_source, _source_shop_id = normalized[original_index]
+                    log = (db.query(PublishLog)
+                           .filter(PublishLog.account_id == account.id,
+                                   PublishLog.detail_id == detail_id_source,
+                                   PublishLog.shop_id == str(target_shop_id),
+                                   owner_filter)
+                           .order_by(PublishLog.id.desc()).first())
+                    if log is not None:
+                        detail = dict(log.detail or {})
+                        carrier_claim = dict(detail.get("carrierClaim") or {})
+                        carrier_claim.update({"status": "confirmed",
+                                              "confirmedAt": now_ts()})
+                        log.detail = {**detail, "carrierClaim": carrier_claim}
+                        log.status = "success"
+                        log.reason = "认领已在目标采集箱确认"
+                        log.finished_at = now_ts()
+                else:
+                    reason = (f"保存回执已返回，但采集箱核对失败：{verification_error}；"
+                              if verification_error else "已保存但采集箱列表暂未确认；")
+                    errors_by_index.setdefault(
+                        source_index,
+                        reason + "请先刷新采集箱核对，勿重复认领")
+        finally:
+            client.close()
 
         results: list[dict[str, Any]] = []
         stamp = now_ts()
         for index, (detail_id, shop_id) in enumerate(normalized):
-            target_detail_id = detail_by_source.get(index)
+            target_detail_id = detail_by_source.get(
+                index, reconciled_by_index.get(index))
             product = by_key.get(product_key(detail_id, shop_id))
             collected: dict[str, Any] = {}
             if target_detail_id and product:
-                state = dict(product.collected or {}) if isinstance(product.collected, dict) else {}
-                collected = {"at": stamp, "detailId": target_detail_id}
-                state[_account_claim_key(account)] = collected
-                product.collected = state
-                product.claimed = True
-                product.claimed_at = stamp
-                product.claimed_shop_id = str(target_shop_id)
-                warehouse_service.bump_revision(product)
+                collected = {"at": stamp, "detailId": target_detail_id,
+                             "shopId": str(target_shop_id)}
+                _record_carrier_claim(
+                    db, account, product, detail_id=target_detail_id,
+                    shop_id=str(target_shop_id), operator_id=operator_id,
+                    claimed_at=stamp)
+            if not target_detail_id and index in payload_indexes:
+                source_index = payload_indexes.index(index)
+                failure = next((item for item in (filled.get("failureDetails") or [])
+                                if item.get("sourceIndex") == source_index), None)
+                if failure and failure.get("certain") is True:
+                    detail_id_source, _source_shop_id = normalized[index]
+                    log = (db.query(PublishLog)
+                           .filter(PublishLog.account_id == account.id,
+                                   PublishLog.detail_id == detail_id_source,
+                                   PublishLog.shop_id == str(target_shop_id),
+                                   owner_filter)
+                           .order_by(PublishLog.id.desc()).first())
+                    if log is not None:
+                        log.status = "fail"
+                        log.reason = str(failure.get("reason") or "载体覆盖失败")[:200]
+                        log.finished_at = now_ts()
+                        detail = dict(log.detail or {})
+                        carrier_claim = dict(detail.get("carrierClaim") or {})
+                        carrier_claim.update({"status": "failed"})
+                        log.detail = {**detail, "carrierClaim": carrier_claim}
             results.append({
                 "claimed": target_detail_id is not None and index not in errors_by_index,
                 "detailId": detail_id,
@@ -671,10 +1035,37 @@ def claim_carrier_batch(db: Session, account: Account, *,
                 "failures": ([errors_by_index[index]] if index in errors_by_index else []),
                 "collected": collected,
             })
-        if any(item["claimed"] for item in results):
-            invalidate_account(account)
+        invalidate_account(account)
         db.flush()
         return results
+
+
+def _stored_claim_payload(product: Product | None) -> dict[str, Any]:
+    """Use the warehouse snapshot as the source when rebuilding a finished item."""
+    if product is None or not isinstance(product.payload, dict) or not product.payload:
+        return {}
+    payload = dict(product.payload)
+    for key, value in (("title", product.title), ("site", product.site),
+                       ("cid", product.cid), ("imgUrls", product.images),
+                       ("skuPropertyList", product.sku_properties)):
+        if not payload.get(key) and value:
+            payload[key] = value
+    return payload
+
+
+def _claim_payload_is_complete(payload: Mapping[str, Any]) -> bool:
+    """A stored finished snapshot can stand in for a deleted upstream source."""
+    if not all(str(payload.get(key) or "").strip()
+               for key in ("title", "site", "cid")):
+        return False
+    images = payload.get("imgUrls")
+    if not isinstance(images, list) or not any(str(value or "").strip() for value in images):
+        return False
+    sku_map = payload.get("skuMap")
+    if not isinstance(sku_map, Mapping):
+        return False
+    return any(isinstance(sku, Mapping) and str(sku.get("isDelete", "0")) != "1"
+               for sku in sku_map.values())
 
 
 def release(db: Session, account: Account, *, detail_id: str, shop_id: str,

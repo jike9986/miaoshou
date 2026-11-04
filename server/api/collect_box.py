@@ -438,7 +438,8 @@ def claim_batch(payload: BatchClaimRequest, db: DbSession,
             results = collect_box_service.claim_carrier_batch(
                 db, account,
                 items=[(parts[0], parts[1]) for parts in parsed_keys],
-                target_shop_id=payload.targetShopId)
+                target_shop_id=payload.targetShopId,
+                operator_id=operator.id)
         except errors.AppError as exc:
             db.rollback()
             failures = [{"key": key, "code": exc.code, "reason": exc.message}

@@ -29,9 +29,11 @@ from services.miaoshou import MiaoshouClient, MiaoshouError
 
 logger = logging.getLogger("aohuang.carrier")
 
-_COST_FLOOR_MESSAGE = re.compile(
-    r"本地(?:显示|展示)价\s*([0-9]+(?:\.[0-9]+)?)\s*MYR.*?基础成本.*?[：:]\s*"
-    r"([0-9]+(?:\.[0-9]+)?)\s*MYR")
+_COST_FLOOR_PRICE = re.compile(
+    r"(?:本地(?:显示|展示)价|售价展示(?:价)?)[^0-9]{0,16}"
+    r"([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
+_COST_FLOOR_VALUE = re.compile(
+    r"基础成本.*?([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
 MAX_COST_FLOOR_RETRIES = 12
 SEASON_VALUE_IDS = {
     "musim bunga": "1001161",
@@ -48,11 +50,13 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
                   or (exc.payload or {}).get("msg") or exc)
     if "无法覆盖产品基础成本" not in message:
         return None
-    match = _COST_FLOOR_MESSAGE.search(message)
-    if not match:
+    old_match = _COST_FLOOR_PRICE.search(message)
+    floor_match = _COST_FLOOR_VALUE.search(message)
+    if old_match is None or floor_match is None:
         return None
     try:
-        old_price, floor = (Decimal(value) for value in match.groups())
+        old_price = Decimal(old_match.group(1))
+        floor = Decimal(floor_match.group(1))
     except InvalidOperation:
         return None
     if old_price <= 0 or floor < old_price:
@@ -883,7 +887,8 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
     for index, (detail_id, payload) in enumerate(
             zip(carrier_list, payload_list, strict=True)):
         if progress:
-            progress({"stage": "fill", "detailId": detail_id})
+            progress({"stage": "fill" if verify_readback else "saving",
+                      "detailId": detail_id})
         try:
             snapshot = client.shop_detail(detail_id, shop_id)
             block = snapshot.get("data") or {}
@@ -956,8 +961,10 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             saved.append(detail_id)
             saved_sources.append(index)
             if progress:
-                progress({"stage": "verified", "detailId": detail_id,
-                          "verified": len(saved), "failed": len(failures)})
+                progress({"stage": "verified" if verify_readback else "saved",
+                          "detailId": detail_id,
+                          "verified" if verify_readback else "saved": len(saved),
+                          "failed": len(failures)})
         except (MiaoshouError, ValueError, errors.AppError) as exc:
             failures.append(f"{detail_id}: {str(exc)[:90]}")
             uncertain = isinstance(exc, MiaoshouError) and (
@@ -979,7 +986,8 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
 
 def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
                               payloads: Iterable[Mapping[str, Any]], shop_id: int,
-                              progress: Callable[[dict[str, Any]], None] | None = None
+                              progress: Callable[[dict[str, Any]], None] | None = None,
+                              verify_readback: bool = False,
                               ) -> dict[str, Any]:
     """Create carriers while the consumer covers each one as soon as it arrives."""
     payload_list = list(payloads)
@@ -1032,6 +1040,9 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
             break
         index, detail_id = item
         created.append(detail_id)
+        report({"stage": "carrier_created", "sourceIndex": index,
+                "detailId": str(detail_id), "total": len(payload_list),
+                "created": len(created)})
 
         def report_item_progress(event: dict[str, Any], *,
                                  source_index: int = index) -> None:
@@ -1047,7 +1058,7 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
         try:
             result = fill_carriers(
                 client, [detail_id], [payload_list[index]], shop_id=shop_id,
-                progress=report_item_progress, verify_readback=False,
+                progress=report_item_progress, verify_readback=verify_readback,
                 warehouse_id=warehouse_id,
                 category_trees=category_trees)
         except Exception as exc:  # keep draining so the producer cannot block
@@ -1084,11 +1095,12 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
         for failure in result.get("failureDetails") or []:
             failure_details.append({**failure, "sourceIndex": index})
         report({
-            "stage": "verified" if result["saved"] else "verify_failed",
+            "stage": ("verified" if verify_readback else "saved")
+            if result["saved"] else "verify_failed",
             "sourceIndex": index,
             "processed": len(saved) + len(failed_sources),
             "total": len(payload_list),
-            "verified": len(saved),
+            "verified" if verify_readback else "saved": len(saved),
             "failed": len(failed_sources),
             "detailId": str(detail_id),
             "message": "" if result["saved"] else (

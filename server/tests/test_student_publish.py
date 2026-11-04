@@ -229,6 +229,12 @@ def test_cross_shop_batch_claim_uses_one_carrier_pipeline(publish_db, monkeypatc
             assert shop_id == "123"
             return {"detailId": detail_id}
 
+        def collect_box_list(self, **_kwargs):
+            return {"data": {"detailList": [
+                {"detailId": 9001, "collectBoxDetailShopList": [{"shopId": "456"}]},
+                {"detailId": 9002, "collectBoxDetailShopList": [{"shopId": "456"}]},
+            ], "total": 2}}
+
         def close(self):
             return None
 
@@ -239,9 +245,12 @@ def test_cross_shop_batch_claim_uses_one_carrier_pipeline(publish_db, monkeypatc
     monkeypatch.setattr(collect_box_service.product_service, "detail_block",
                         lambda _snapshot: {"info": {"title": "source"}})
 
-    def pipeline(_db, _client, *, payloads, shop_id):
+    def pipeline(_db, _client, *, payloads, shop_id, **_kwargs):
         assert shop_id == 456
-        assert payloads == [{"title": "Finished 101"}, {"title": "Finished 102"}]
+        assert [(item["title"], item["notes"]) for item in payloads] == [
+            ("Finished 101", "<p>Finished 101</p>"),
+            ("Finished 102", "<p>Finished 102</p>"),
+        ]
         return {"saved": [9001, 9002], "savedSources": [0, 1],
                 "failedSources": [], "failures": []}
 
@@ -256,6 +265,483 @@ def test_cross_shop_batch_claim_uses_one_carrier_pipeline(publish_db, monkeypatc
     assert all(row.claimed is True for row in products)
     assert products[0].collected[f"account:{account.id}"]["detailId"] == "9001"
     assert products[1].collected[f"account:{account.id}"]["detailId"] == "9002"
+
+
+def test_cross_shop_batch_keeps_client_open_for_collect_box_confirmation(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-client-life-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    product = Product(
+        warehouse_key="101:123", account_id=account.id,
+        detail_id="101", shop_id="123", shop_name="Source", site="MY", cid="7001",
+        title="Finished 101", status="ready", claimed=False, collected={},
+        images=["https://images.test/main.jpg"],
+        payload={
+            "title": "Finished 101", "site": "MY", "cid": "7001",
+            "imgUrls": ["https://images.test/main.jpg"],
+            "skuMap": {"sku-1": {"price": "10", "isDelete": "0"}},
+        },
+    )
+    db.add(product)
+    db.flush()
+
+    class FakeClient:
+        closed = False
+
+        def shop_detail(self, *_args):
+            pytest.fail("complete warehouse snapshot should not fetch source detail")
+
+        def collect_box_list(self, **_kwargs):
+            assert not self.closed, "client closed before readback verification"
+            return {"data": {"detailList": [
+                {"collectBoxDetailId": 9001,
+                 "collectBoxDetailShopList": [{"shopId": "456"}]},
+            ], "total": 1}}
+
+        def close(self):
+            self.closed = True
+
+    client = FakeClient()
+    monkeypatch.setattr(collect_box_service, "account_client", lambda _account: client)
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda *_args: {"name": "Target"})
+    monkeypatch.setattr(collect_box_service.carrier_service,
+                        "collect_and_fill_carriers",
+                        lambda *_args, **_kwargs: {
+                            "saved": [9001], "savedSources": [0],
+                            "failedSources": [], "failures": [],
+                        })
+
+    results = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123")], target_shop_id="456")
+
+    assert results[0]["claimed"] is True
+    assert client.closed is True
+
+
+def test_cross_shop_batch_persists_unconfirmed_carrier_and_blocks_duplicate_copy(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-pending-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    product = Product(
+        warehouse_key="101:123", account_id=account.id,
+        detail_id="101", shop_id="123", shop_name="Source", site="MY", cid="7001",
+        title="Finished 101", status="ready", claimed=False, collected={},
+        images=["https://images.test/main.jpg"],
+        payload={
+            "title": "Finished 101", "site": "MY", "cid": "7001",
+            "imgUrls": ["https://images.test/main.jpg"],
+            "skuMap": {"sku-1": {"price": "10", "isDelete": "0"}},
+        },
+    )
+    db.add(product)
+    db.flush()
+    clients = []
+    pipeline_calls = []
+
+    class FakeClient:
+        closed = False
+
+        def collect_box_list(self, **_kwargs):
+            assert not self.closed
+            return {"data": {"detailList": [], "total": 0}}
+
+        def close(self):
+            self.closed = True
+
+    def make_client(_account):
+        client = FakeClient()
+        clients.append(client)
+        return client
+
+    def pipeline(*_args, **_kwargs):
+        pipeline_calls.append(True)
+        return {"saved": [9001], "savedSources": [0],
+                "failedSources": [], "failures": []}
+
+    monkeypatch.setattr(collect_box_service, "account_client", make_client)
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda *_args: {"name": "Target"})
+    monkeypatch.setattr(collect_box_service.carrier_service,
+                        "collect_and_fill_carriers", pipeline)
+
+    first = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123")], target_shop_id="456")
+
+    assert first[0]["claimed"] is False
+    assert product.claimed is False
+    log = db.query(PublishLog).filter_by(
+        account_id=account.id, detail_id="101", shop_id="456").one()
+    assert log.status == "processing"
+    assert log.detail["carrierClaim"]["status"] == "pending"
+    assert log.detail["carrierClaim"]["targetDetailIds"] == ["9001"]
+
+    with pytest.raises(errors.AppError) as raised:
+        collect_box_service.claim_carrier_batch(
+            db, account, items=[("101", "123")], target_shop_id="456")
+
+    assert raised.value.status == 409
+    assert len(pipeline_calls) == 1
+    assert len(clients) == 2
+    assert all(client.closed for client in clients)
+
+
+def test_cross_shop_batch_recovers_existing_carrier_instead_of_copying_again(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-recover-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    product = Product(
+        warehouse_key="101:123", account_id=account.id,
+        detail_id="101", shop_id="123", shop_name="Source", site="MY", cid="7001",
+        title="Finished 101", status="ready", claimed=False, collected={},
+        images=["https://images.test/main.jpg"],
+        payload={
+            "title": "Finished 101", "site": "MY", "cid": "7001",
+            "imgUrls": ["https://images.test/main.jpg"],
+            "skuMap": {"sku-1": {"price": "10", "isDelete": "0"}},
+        },
+    )
+    db.add(product)
+    db.flush()
+    log = PublishLog(
+        account_id=account.id, detail_id="101", shop_id="456",
+        warehouse_key=product.warehouse_key, status="processing",
+        detail={"claimOnly": True, "carrierClaim": {
+            "status": "pending", "sourceShopId": "123",
+            "targetShopId": "456", "targetDetailIds": ["9001"],
+            "coveredDetailIds": [],
+        }},
+    )
+    db.add(log)
+    db.flush()
+
+    class FakeClient:
+        def collect_box_list(self, **_kwargs):
+            return {"data": {"detailList": [
+                {"detailId": 9001,
+                 "collectBoxDetailShopList": [{"shopId": "456"}]},
+            ], "total": 1}}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collect_box_service, "account_client",
+                        lambda _account: FakeClient())
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda *_args: {"name": "Target"})
+    covered = []
+
+    def fill(_client, carriers, payloads, *, shop_id, verify_readback):
+        assert carriers == [9001]
+        assert payloads[0]["title"] == product.payload["title"]
+        assert shop_id == 456
+        assert verify_readback is False
+        covered.append(carriers[0])
+        return {"saved": carriers, "savedSources": [0], "failures": [],
+                "failureDetails": [], "priceAdjustments": []}
+
+    monkeypatch.setattr(collect_box_service.carrier_service, "fill_carriers", fill)
+    monkeypatch.setattr(
+        collect_box_service.carrier_service, "collect_and_fill_carriers",
+        lambda *_args, **_kwargs: pytest.fail("recovery must reuse the existing carrier"))
+
+    results = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123")], target_shop_id="456")
+
+    assert covered == [9001]
+    assert results[0]["claimed"] is True
+    assert results[0]["detailIds"] == ["9001"]
+    assert log.status == "success"
+    assert log.detail["carrierClaim"]["coveredDetailIds"] == ["9001"]
+
+
+def test_shared_product_can_be_claimed_once_by_each_member_but_not_twice(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-shared-{suffix}", shops="[]")
+    first = Operator(name=f"claim-first-{suffix}", token=f"first-{suffix}",
+                     role=operator_service.ROLE_MEMBER, enabled=True, is_admin=False)
+    second = Operator(name=f"claim-second-{suffix}", token=f"second-{suffix}",
+                      role=operator_service.ROLE_MEMBER, enabled=True, is_admin=False)
+    db.add_all([account, first, second])
+    db.flush()
+    product = Product(
+        warehouse_key="101:123", account_id=account.id,
+        detail_id="101", shop_id="123", shop_name="Source", site="MY", cid="7001",
+        title="Finished 101", status="ready", claimed=False, collected={},
+        images=["https://images.test/main.jpg"],
+        payload={
+            "title": "Finished 101", "site": "MY", "cid": "7001",
+            "imgUrls": ["https://images.test/main.jpg"],
+            "skuMap": {"sku-1": {"price": "10", "isDelete": "0"}},
+        },
+    )
+    db.add(product)
+    db.flush()
+
+    class FakeClient:
+        def collect_box_list(self, **_kwargs):
+            return {"data": {"detailList": [
+                {"detailId": 9001,
+                 "collectBoxDetailShopList": [{"shopId": "456"}]},
+                {"detailId": 9002,
+                 "collectBoxDetailShopList": [{"shopId": "456"}]},
+            ], "total": 2}}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collect_box_service, "account_client",
+                        lambda _account: FakeClient())
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda *_args: {"name": "Target"})
+    pipeline_calls = []
+
+    def pipeline(_db, _client, *, payloads, progress, **_kwargs):
+        detail_id = 9001 + len(pipeline_calls)
+        pipeline_calls.append(detail_id)
+        progress({"stage": "carrier_created", "sourceIndex": 0,
+                  "detailId": str(detail_id)})
+        progress({"stage": "verified", "sourceIndex": 0,
+                  "detailId": str(detail_id)})
+        return {"carriers": [detail_id], "saved": [detail_id],
+                "savedSources": [0], "failedSources": [], "failures": [],
+                "failureDetails": [], "priceAdjustments": []}
+
+    monkeypatch.setattr(collect_box_service.carrier_service,
+                        "collect_and_fill_carriers", pipeline)
+    first_result = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123")], target_shop_id="456",
+        operator_id=first.id)
+    second_result = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123")], target_shop_id="456",
+        operator_id=second.id)
+
+    assert first_result[0]["claimed"] is True
+    assert second_result[0]["claimed"] is True
+    assert product.collected[f"operator:{first.id}:account:{account.id}"]["detailId"] == "9001"
+    assert product.collected[f"operator:{second.id}:account:{account.id}"]["detailId"] == "9002"
+    assert db.query(ProductClaim).filter_by(
+        product_id=product.id, owner_operator_id=first.id).one().status == "claimed"
+    assert db.query(ProductClaim).filter_by(
+        product_id=product.id, owner_operator_id=second.id).one().status == "claimed"
+
+    with pytest.raises(errors.AppError) as raised:
+        collect_box_service.claim_carrier_batch(
+            db, account, items=[("101", "123")], target_shop_id="456",
+            operator_id=first.id)
+    assert raised.value.status == 409
+    assert len(pipeline_calls) == 2
+
+
+def test_cross_shop_batch_uses_complete_warehouse_snapshot_when_source_is_gone(
+        publish_db, monkeypatch):
+    from services.miaoshou import MiaoshouError
+
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-snapshot-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    product = Product(
+        warehouse_key="101:123", account_id=account.id,
+        detail_id="101", shop_id="123", shop_name="Source", site="MY", cid="7001",
+        title="Finished 101", status="ready", claimed=False, collected={},
+        images=["https://images.test/main.jpg"],
+        payload={
+            "title": "Finished 101", "site": "MY", "cid": "7001",
+            "imgUrls": ["https://images.test/main.jpg"],
+            "skuMap": {"sku-1": {"price": "10", "isDelete": "0"}},
+        },
+    )
+    db.add(product)
+    db.flush()
+    reads = []
+
+    class FakeClient:
+        def shop_detail(self, detail_id, shop_id):
+            reads.append((detail_id, shop_id))
+            raise MiaoshouError("商品已从采集箱删除")
+
+        def collect_box_list(self, **_kwargs):
+            return {"data": {"detailList": [
+                {"detailId": 9001, "collectBoxDetailShopList": [{"shopId": "456"}]},
+            ], "total": 1}}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collect_box_service, "account_client",
+                        lambda _account: FakeClient())
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda _db, _account, shop_id: {"name": f"Shop {shop_id}"})
+
+    def pipeline(_db, _client, *, payloads, shop_id, **_kwargs):
+        assert shop_id == 456
+        assert payloads[0]["title"] == product.payload["title"]
+        assert payloads[0]["notes"] == "<p>Finished 101</p>"
+        assert payloads[0]["skuMap"] == product.payload["skuMap"]
+        return {"saved": [9001], "savedSources": [0],
+                "failedSources": [], "failures": []}
+
+    monkeypatch.setattr(collect_box_service.carrier_service,
+                        "collect_and_fill_carriers", pipeline)
+    results = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123")], target_shop_id="456")
+
+    assert reads == []
+    assert results[0]["claimed"] is True
+    assert results[0]["detailIds"] == ["9001"]
+
+
+def test_cross_shop_batch_prepares_copy_and_requires_collect_box_confirmation(
+        publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-normalize-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    payload = {
+        "title": "Finished item",
+        "site": "MY",
+        "cid": "7001",
+        "imgUrls": [f"https://images.test/main-{index}.jpg" for index in range(10)]
+        + ["https://images.test/main-0.jpg"],
+        "notes": "".join(
+            f'<img src="https://images.test/detail-{index}.jpg">' for index in range(31)),
+        "skuPropertyList": [{"attrName": "Warna", "attrValueList": [
+            {"attrValueId": "white-a", "attrValue": "Putih"},
+            {"attrValueId": "white-b", "attrValue": "putih"},
+        ]}],
+        "skuMap": {
+            "white-a": {"price": "10.00", "stock": 4, "itemNum": "A"},
+            "white-b": {"price": "10.00", "stock": 4, "itemNum": "B"},
+        },
+    }
+    product = Product(
+        warehouse_key="101:123", account_id=account.id,
+        detail_id="101", shop_id="123", shop_name="Source", site="MY", cid="7001",
+        title="Finished item", status="ready", claimed=False, collected={},
+        images=payload["imgUrls"], payload=payload,
+    )
+    other_payload = {**payload, "title": "Finished item 2"}
+    other = Product(
+        warehouse_key="102:123", account_id=account.id,
+        detail_id="102", shop_id="123", shop_name="Source", site="MY", cid="7001",
+        title="Finished item 2", status="ready", claimed=False, collected={},
+        images=other_payload["imgUrls"], payload=other_payload,
+    )
+    db.add_all([product, other])
+    db.flush()
+
+    class FakeClient:
+        def shop_detail(self, *_args):
+            pytest.fail("complete warehouse snapshot should not need source detail")
+
+        def collect_box_list(self, **_kwargs):
+            return {"data": {"detailList": [
+                {"detailId": 9001, "collectBoxDetailShopList": [{"shopId": "456"}]},
+            ], "total": 1}}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collect_box_service, "account_client",
+                        lambda _account: FakeClient())
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda _db, _account, shop_id: {"name": f"Shop {shop_id}"})
+    received = []
+
+    def pipeline(_db, _client, *, payloads, shop_id, **_kwargs):
+        assert shop_id == 456
+        assert _kwargs["verify_readback"] is False
+        received.extend(payloads)
+        return {"saved": [9001, 9002], "savedSources": [0, 1],
+                "failedSources": [], "failures": []}
+
+    monkeypatch.setattr(collect_box_service.carrier_service,
+                        "collect_and_fill_carriers", pipeline)
+    results = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123"), ("102", "123")],
+        target_shop_id="456")
+
+    assert len(received[0]["imgUrls"]) == 9
+    assert len(set(received[0]["imgUrls"])) == 9
+    from services.pre_save_check import extract_detail_image_urls
+    assert len(extract_detail_image_urls(received[0]["notes"])) == 30
+    assert [value["attrValue"] for value in
+            received[0]["skuPropertyList"][0]["attrValueList"]] == [
+                "Putih", "putih (2)"]
+    assert set(received[0]["skuMap"]) == {"white-a", "white-b"}
+    assert product.payload == payload
+    assert results[0]["claimed"] is True
+    assert results[1]["claimed"] is False
+    assert results[1]["detailIds"] == []
+    assert "勿重复认领" in results[1]["failures"][0]
+    assert product.claimed is True
+    assert other.claimed is False
+
+
+def test_cross_shop_batch_keeps_failure_reasons_per_source(publish_db, monkeypatch):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    account = Account(name=f"claim-errors-{suffix}", shops="[]")
+    db.add(account)
+    db.flush()
+    products = [
+        Product(warehouse_key=f"{detail_id}:123", account_id=account.id,
+                detail_id=str(detail_id), shop_id="123", shop_name="Source",
+                title=f"Finished {detail_id}", status="ready", claimed=False,
+                collected={}, payload={"title": f"Finished {detail_id}"})
+        for detail_id in (101, 102)
+    ]
+    db.add_all(products)
+    db.flush()
+
+    class FakeClient:
+        def shop_detail(self, detail_id, shop_id):
+            return {"detailId": detail_id}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collect_box_service, "account_client",
+                        lambda _account: FakeClient())
+    monkeypatch.setattr(collect_box_service, "require_shop",
+                        lambda _db, _account, shop_id: {"name": f"Shop {shop_id}"})
+    invalidations = []
+    monkeypatch.setattr(collect_box_service, "invalidate_account", invalidations.append)
+    monkeypatch.setattr(collect_box_service.product_service, "detail_block",
+                        lambda _snapshot: {"info": {"title": "source"}})
+    monkeypatch.setattr(collect_box_service.carrier_service,
+                        "collect_and_fill_carriers",
+                        lambda *_args, **_kwargs: {
+                            "saved": [], "savedSources": [], "failedSources": [0, 1],
+                            "failures": ["first reason", "second reason"],
+                            "failureDetails": [
+                                {"sourceIndex": 0, "reason": "图片数量超限"},
+                                {"sourceIndex": 1, "reason": "SKU颜色重名"},
+                            ],
+                        })
+
+    results = collect_box_service.claim_carrier_batch(
+        db, account, items=[("101", "123"), ("102", "123")],
+        target_shop_id="456")
+
+    assert results[0]["failures"] == ["图片数量超限"]
+    assert results[1]["failures"] == ["SKU颜色重名"]
+    assert all(product.claimed is False for product in products)
+    assert len(invalidations) >= 3
 
 
 def test_shared_miaoshou_account_claim_state_is_per_member(publish_db):
@@ -485,15 +971,21 @@ def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db
     monkeypatch.setattr(publish_service, "_load_carrier_payloads", lambda *_args: [{}, {}, {}])
     monkeypatch.setattr(publish_service.carrier_service, "harvest_from_payloads",
                         lambda *_args: None)
+    readback_flags = []
+
+    def create_and_fill(*_args, **kwargs):
+        readback_flags.append(kwargs["verify_readback"])
+        return {
+            "carriers": [91, 92, 93],
+            "saved": [91, 93], "savedSources": [0, 2],
+            "failures": ["92 failed"],
+            "failureDetails": [{"sourceIndex": 1, "detailId": "92",
+                                "certain": True, "reason": "92 failed"}],
+            "priceAdjustments": [],
+        }
+
     monkeypatch.setattr(publish_service.carrier_service, "collect_and_fill_carriers",
-                        lambda *_args, **_kwargs: {
-                            "carriers": [91, 92, 93],
-                            "saved": [91, 93], "savedSources": [0, 2],
-                            "failures": ["92 failed"],
-                            "failureDetails": [{"sourceIndex": 1, "detailId": "92",
-                                                "certain": True, "reason": "92 failed"}],
-                            "priceAdjustments": [],
-                        })
+                        create_and_fill)
     invalidated_accounts = []
     monkeypatch.setattr(collect_box_service, "invalidate_account",
                         invalidated_accounts.append)
@@ -502,6 +994,7 @@ def test_client_claim_tracks_successful_carriers_per_miaoshou_account(publish_db
                                                     for p in (first, second, third)]},
                                      _log_operator_id=operator.id)
     assert result["claimedWarehouseIds"] == [str(first.id), str(third.id)]
+    assert readback_flags == [False]
     assert invalidated_accounts == [first_account]
     key = f"account:{first_account.id}"
     assert first.collected[key]["detailId"] == "91"
@@ -883,6 +1376,33 @@ def test_claim_only_logs_do_not_block_formal_publish_but_explicit_publish_does(
             db, account=account, keys=["12345:123"], operator_id=operator.id)
 
 
+def test_successful_claim_log_does_not_block_formal_publish(publish_db):
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, account = _identity(db, suffix)
+    product = _product(db, f"claim-log-blocker-{suffix}", account)
+    log = PublishLog(
+        account_id=account.id, product_id=product.id, operator_id=operator.id,
+        detail_id=product.detail_id, shop_id="456",
+        warehouse_key=product.warehouse_key, status="success",
+        detail={"claimOnly": True, "carrierClaim": {"status": "confirmed"}},
+    )
+    db.add(log)
+    db.flush()
+    entries = [{"product": product, "detailId": str(product.detail_id)}]
+
+    publish_service._already_published_blocker(
+        db, account=account, entries=entries, target_shop_id="456",
+        operator_id=operator.id)
+
+    log.detail = {"claimOnly": False}
+    db.flush()
+    with pytest.raises(errors.AppError):
+        publish_service._already_published_blocker(
+            db, account=account, entries=entries, target_shop_id="456",
+            operator_id=operator.id)
+
+
 def test_member_can_publish_claimed_product_with_template_without_mutating_shared_product(
     publish_db, monkeypatch,
 ):
@@ -909,6 +1429,73 @@ def test_member_can_publish_claimed_product_with_template_without_mutating_share
     assert product.claimed_shop_id is None
     log = db.query(PublishLog).filter(PublishLog.product_id == product.id).one()
     assert log.operator_id == operator.id
+
+
+def test_prepare_claim_payloads_does_not_mutate_source_and_uses_operator_settings(
+        publish_db, monkeypatch):
+    from copy import deepcopy
+
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, _account = _identity(db, suffix)
+    payload = {"title": "Finished item", "notes": "", "imgUrls": [], "skuMap": {}}
+    original = deepcopy(payload)
+    scoped_operators = []
+
+    def workflow_setting(_db, key, fallback, scoped_operator_id=None):
+        assert key == "sizeChartUrl"
+        scoped_operators.append(scoped_operator_id)
+        return fallback
+
+    monkeypatch.setattr(warehouse_service, "_workflow_setting", workflow_setting)
+    prepared, _adjustments = publish_service.prepare_claim_payloads(
+        db, [payload], [{"warehouseId": "product-1", "payload": payload}],
+        operator_id=operator.id)
+
+    assert payload == original
+    assert prepared[0] is not payload
+    assert prepared[0]["notes"] == "<p>Finished item</p>"
+    assert scoped_operators == [operator.id]
+
+
+def test_prepare_claim_payloads_preserves_duplicate_color_sku_rows(
+        publish_db, monkeypatch):
+    from copy import deepcopy
+
+    db = publish_db
+    suffix = uuid.uuid4().hex[:8]
+    operator, _account = _identity(db, suffix)
+    payload = {
+        "title": "Finished item",
+        "notes": "<p>Details</p>",
+        "skuPropertyList": [{"attrName": "Warna", "attrValueList": [
+            {"attrValueId": "white-a", "attrValue": "Putih"},
+            {"attrValueId": "white-b", "attrValue": " putih "},
+        ]}],
+        "skuMap": {
+            "white-a;size-s": {"price": "10.00", "stock": 4, "itemNum": "A-S"},
+            "white-a;size-m": {"price": "12.00", "stock": 3, "itemNum": "A-M"},
+            "white-b;size-s": {"price": "10.00", "stock": 4, "itemNum": "B-S"},
+            "white-b;size-m": {"price": "12.00", "stock": 3, "itemNum": "B-M"},
+        },
+    }
+    original = deepcopy(payload)
+    monkeypatch.setattr(warehouse_service, "_workflow_setting",
+                        lambda _db, _key, fallback, _operator_id=None: fallback)
+
+    prepared, adjustments = publish_service.prepare_claim_payloads(
+        db, [payload], [{"warehouseId": "product-1", "payload": payload}],
+        operator_id=operator.id)
+
+    sku_adjustment = next(item for item in adjustments if item["stage"] == "sku")
+    assert sku_adjustment["renamedColorValues"] == 1
+    assert [row["attrValueId"] for row in prepared[0]["skuPropertyList"][0]["attrValueList"]] == [
+        "white-a", "white-b"]
+    assert [row["attrValue"] for row in prepared[0]["skuPropertyList"][0]["attrValueList"]] == [
+        "Putih", "putih (2)"]
+    assert set(prepared[0]["skuMap"]) == {
+        "white-a;size-s", "white-a;size-m", "white-b;size-s", "white-b;size-m"}
+    assert payload == original
 
 
 def test_shared_account_publish_ledgers_and_duplicate_guards_are_owner_scoped(

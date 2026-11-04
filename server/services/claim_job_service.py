@@ -304,7 +304,7 @@ def run(batch_id: str) -> None:
                 if db.get_bind().dialect.name == "sqlite":
                     return
                 _progress.update({key: value for key, value in event.items()
-                                  if key in {"stage", "processed", "verified", "failed",
+                                  if key in {"stage", "processed", "verified", "saved", "failed",
                                              "warehouseId"}})
                 progress_db = SessionLocal()
                 try:

@@ -13,6 +13,8 @@ const labels: Record<string, string> = {
 };
 
 const stageLabels: Record<string, string> = {
+  saving: "\u6b63\u5728\u5199\u5165\u5546\u54c1",
+  saved: "\u5546\u54c1\u5185\u5bb9\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u786e\u8ba4\u91c7\u96c6\u7bb1",
   copying: "正在批量复制采集箱载体",
   reuse: "正在准备可复用的采集箱载体",
   collect: "正在获取采集箱载体",

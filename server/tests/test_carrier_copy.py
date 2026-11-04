@@ -100,9 +100,10 @@ def test_collect_and_fill_reports_cumulative_item_progress(monkeypatch):
         None, object(), payloads=[{}, {}], shop_id=9, progress=events.append)
 
     completed = [event for event in events
-                 if event.get("stage") in {"verified", "verify_failed"}]
-    assert [(event["processed"], event["verified"], event["failed"])
-            for event in completed] == [(1, 1, 0), (2, 1, 1)]
+                 if event.get("stage") in {"saved", "verified", "verify_failed"}]
+    assert [(event["processed"], event.get("saved", event.get("verified")),
+             event["failed"]) for event in completed] == [(1, 1, 0), (2, 1, 1)]
+    assert [event["stage"] for event in completed] == ["saved", "verify_failed"]
     assert [event["sourceIndex"] for event in completed] == [0, 1]
     assert result["saved"] == [100]
     assert result["failedSources"] == [1]
@@ -379,6 +380,19 @@ def test_reported_cost_floor_raises_only_active_matching_skus_once():
         "originPrice": "2.40", "isDelete": "0"}
     assert payload["skuMap"]["other"]["price"] == "12.00"
     assert payload["skuMap"]["deleted"]["price"] == "9.19"
+
+
+def test_reported_cost_floor_accepts_miaoshou_sales_display_wording():
+    message = ("商品设置的售价展示价9.67MYR，无法覆盖产品基础成本"
+               "(跨境物流运费+关税+增值税)：9.70MYR")
+    payload = {"skuMap": {"sku-a": {"price": "9.67", "originPrice": "2.40"}}}
+
+    adjustment = carrier_service._raise_price_to_reported_floor(
+        payload, MiaoshouError(message, payload={"message": message}))
+
+    assert adjustment == {"oldPrice": "9.67", "costFloor": "9.70",
+                          "newPrice": "9.71", "skuKeys": ["sku-a"]}
+    assert payload["skuMap"]["sku-a"]["price"] == "9.71"
 
 
 def test_reported_cost_floor_equal_to_price_still_adds_one_cent():

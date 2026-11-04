@@ -148,7 +148,8 @@ def _already_published_blocker(db: Session, *, account: Account,
         clauses.append(PublishLog.warehouse_key.in_(raw_keys))
     if not clauses:
         return
-    rows = query.filter(or_(*clauses)).all()
+    rows = [row for row in query.filter(or_(*clauses)).all()
+            if not _is_claim_only_log(db, row)]
     if rows:
         row = rows[0]
         raise errors.AppError(
@@ -859,6 +860,63 @@ def _trim_long_claim_size_values(payload: dict[str, Any]) -> int:
     return changed
 
 
+def prepare_claim_payloads(
+        db: Session, payloads: list[dict[str, Any]], entries: list[dict[str, Any]],
+        *, operator_id: int | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Normalize claim drafts without mutating the warehouse source snapshots."""
+    from copy import deepcopy
+
+    if len(payloads) != len(entries):
+        raise ValueError("认领商品与仓库条目数量不一致")
+
+    source_payloads = payloads
+    payloads = [deepcopy(payload) for payload in source_payloads]
+    adjustments: list[dict[str, Any]] = []
+    for index, payload in enumerate(payloads):
+        if _ensure_claim_description(payload):
+            adjustments.append({
+                "warehouseId": entries[index].get("warehouseId"),
+                "stage": "description",
+                "source": "title",
+            })
+
+    prepared = _limit_claim_images(payloads)
+    adjustments.extend(_fill_claim_package_dimensions(prepared, entries))
+    configured_size_chart = warehouse_service.normalize_size_chart_url(
+        warehouse_service._workflow_setting(
+            db, "sizeChartUrl", "", operator_id))
+    adjustments.extend(_fill_claim_size_chart(
+        prepared, entries, configured_size_chart))
+
+    from services.pre_save_check import extract_detail_image_urls
+
+    for index, item in enumerate(prepared):
+        renamed_colors = _disambiguate_duplicate_claim_colors(item)
+        trimmed_sizes = _trim_long_claim_size_values(item)
+        if renamed_colors or trimmed_sizes:
+            adjustments.append({
+                "warehouseId": entries[index].get("warehouseId"),
+                "stage": "sku",
+                "renamedColorValues": renamed_colors,
+                "trimmedSizeValues": trimmed_sizes,
+            })
+        original = entries[index].get("payload") or source_payloads[index]
+        main_before = len(original.get("imgUrls") or [])
+        main_after = len(item.get("imgUrls") or [])
+        detail_before = len(extract_detail_image_urls(original.get("notes")))
+        detail_after = len(extract_detail_image_urls(item.get("notes")))
+        if main_before != main_after or detail_before != detail_after:
+            adjustments.append({
+                "warehouseId": entries[index].get("warehouseId"),
+                "stage": "images",
+                "mainImagesBefore": main_before,
+                "mainImagesAfter": main_after,
+                "detailImagesBefore": detail_before,
+                "detailImagesAfter": detail_after,
+            })
+    return prepared, adjustments
+
+
 def _repricing(payloads: list[dict[str, Any]], entries: list[dict[str, Any]],
                template: Mapping[str, Any] | None, rate: Any
                ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1120,48 +1178,9 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             if need_rebuild or (not claimed_ids and entries):
                 # 用本地 payload 在目标店铺新建载体并写入商品内容。
                 source_payloads = _load_carrier_payloads(db, entries, account, client)
-                for index, item in enumerate(source_payloads):
-                    if _ensure_claim_description(item):
-                        claim_adjustments.append({
-                            "warehouseId": entries[index].get("warehouseId"),
-                            "stage": "description",
-                            "source": "title",
-                        })
-                payloads = _limit_claim_images(source_payloads)
-                claim_adjustments.extend(
-                    _fill_claim_package_dimensions(payloads, entries))
-                configured_size_chart = warehouse_service.normalize_size_chart_url(
-                    warehouse_service._workflow_setting(
-                        db, "sizeChartUrl", "", log_operator_id))
-                claim_adjustments.extend(
-                    _fill_claim_size_chart(payloads, entries, configured_size_chart))
-                for index, item in enumerate(payloads):
-                    sku_change = _dedupe_exact_duplicate_claim_colors(item)
-                    renamed_colors = _disambiguate_duplicate_claim_colors(item)
-                    trimmed_sizes = _trim_long_claim_size_values(item)
-                    if sku_change or renamed_colors or trimmed_sizes:
-                        claim_adjustments.append({
-                            "warehouseId": entries[index].get("warehouseId"),
-                            "stage": "sku",
-                            **(sku_change or {}),
-                            "renamedColorValues": renamed_colors,
-                            "trimmedSizeValues": trimmed_sizes,
-                        })
-                    original = entries[index].get("payload") or {}
-                    main_before = len(original.get("imgUrls") or [])
-                    main_after = len(item.get("imgUrls") or [])
-                    from services.pre_save_check import extract_detail_image_urls
-                    detail_before = len(extract_detail_image_urls(original.get("notes")))
-                    detail_after = len(extract_detail_image_urls(item.get("notes")))
-                    if main_before != main_after or detail_before != detail_after:
-                        claim_adjustments.append({
-                            "warehouseId": entries[index].get("warehouseId"),
-                            "stage": "images",
-                            "mainImagesBefore": main_before,
-                            "mainImagesAfter": main_after,
-                            "detailImagesBefore": detail_before,
-                            "detailImagesAfter": detail_after,
-                        })
+                payloads, adjustments = prepare_claim_payloads(
+                    db, source_payloads, entries, operator_id=log_operator_id)
+                claim_adjustments.extend(adjustments)
                 carrier_service.harvest_from_payloads(db, payloads)
                 try:
                     listing = client.common_box_list(page_no=1, page_size=20)
@@ -1187,7 +1206,9 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                         progress_options = {}
                     filled = carrier_service.collect_and_fill_carriers(
                         db, client, payloads=payloads,
-                        shop_id=int(target_shop_id), **progress_options)
+                        shop_id=int(target_shop_id),
+                        verify_readback=not claim_only,
+                        **progress_options)
                     carriers = filled.get("carriers") or []
                 except carrier_service.CarrierError as exc:
                     raise errors.unprocessable(
@@ -1227,7 +1248,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                         if item.get("certain") is True
                         and str(item.get("detailId") or "").isdigit()
                     ]
-                    if rebuilt and rejected_carriers:
+                    if rejected_carriers:
                         try:
                             client.delete_collect_box(rejected_carriers)
                         except Exception as exc:  # noqa: BLE001 - retain original failures
@@ -1238,13 +1259,12 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                         failures.append({"stage": "carrier", "certain": False,
                                          "reason": str(reason)[:200]})
                 if not rebuilt:
-                    try:
-                        client.delete_collect_box([int(v) for v in carriers])
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("清理失败载体出错（%s）：%s", carriers, exc)
-                    reason = ("用本地商品数据新建载体并写入时失败"
-                              if not failures else "认领失败（临时载体已删除）：" + "；".join(
-                                  str(item.get("reason") or "") for item in failures)[:180])
+                    reason = "用本地商品数据新建载体并写入时失败"
+                    if failures:
+                        reason += "：" + "；".join(
+                            str(item.get("reason") or "") for item in failures)[:180]
+                    if any(item.get("certain") is not True for item in failures):
+                        reason += "；部分结果未知，请先检查采集箱，勿重复认领"
                     raise errors.unprocessable(reason)
 
             # A successful save/claim response is not enough: the upstream

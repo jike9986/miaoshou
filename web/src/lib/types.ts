@@ -1153,6 +1153,7 @@ export interface BatchSettings {
     groupSize: number;
     processed?: number;
     verified?: number;
+    saved?: number;
     failed?: number;
     warehouseId?: string;
   };
