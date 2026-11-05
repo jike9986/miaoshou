@@ -947,6 +947,9 @@ def facets(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
             .with_entities(Product.group_id, Product.group_name, Product.cid,
                            Product.category_id, Product.category_name)
             .all())
+    # 「全部」chip 的数字：facets 本来就按当前身份的全量算，与筛选条件无关，
+    # 直接复用 rows 的长度，不必再查一次库。
+    overall = len(rows)
     custom = custom_categories(db)
     custom_names = {item["name"] for item in custom}
     groups = {row.id: row for row in db.query(Group).all()}
@@ -1026,7 +1029,8 @@ def facets(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
          "count": count}
         for acc_id, count in sorted(account_counts.items(), key=lambda item: -item[1])
     ]
-    return {"categories": category_list, "groups": group_list, "accounts": account_list}
+    return {"categories": category_list, "groups": group_list, "accounts": account_list,
+            "total": overall}
 
 
 def stats(db: Session, *, account_id: int | None = None,

@@ -44,10 +44,9 @@ import {
 } from "@/lib/queries";
 import type { AuthStatus, BatchDetailResponse, BatchListResponse, GroupFacet, Product } from "@/lib/types";
 import { useSessionStore, useWarehouseStore } from "@/features/stores";
-import { Pagination, TextAction } from "@/features/shared";
+import { Pagination } from "@/features/shared";
 import { PageContent, PageHeader } from "@/components/layout";
 import {
-  Badge,
   BulkActionBar,
   Button,
   Card,
@@ -679,7 +678,7 @@ export function WarehousePage() {
                 count: group.count,
               })) ?? []}
               active={category}
-              total={total}
+              total={facets?.total ?? total}
               loading={listQuery.isLoading}
               manageable={!isMember}
               onSelect={(filter) => query.setCategory(filter)}
@@ -794,31 +793,6 @@ export function WarehousePage() {
                 </Button>
               </div>
             </div>
-
-            {(query.claimed !== null || (isTeacher && query.qualityStatus !== null) || category.kind !== "all") && (
-              <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-                <span>当前筛选：</span>
-                {query.claimed !== null && (
-                  <Badge variant="neutral">{query.claimed ? "已认领" : "未认领"}</Badge>
-                )}
-                {isTeacher && query.qualityStatus !== null && (
-                  <Badge variant={query.qualityStatus === "verified" ? "success" : "warning"}>
-                    {query.qualityStatus === "verified" ? "规格已核验" : "规格待核验"}
-                  </Badge>
-                )}
-                {category.kind !== "all" && <Badge variant="brand">{category.name}</Badge>}
-                <TextAction
-                  onClick={() => {
-                    query.setClaimed(null);
-                    query.setQualityStatus(null);
-                    query.setCategory({ kind: "all" });
-                    query.setStatus(null);
-                  }}
-                >
-                  清除筛选
-                </TextAction>
-              </div>
-            )}
 
             {/* 列表主体 */}
             {listQuery.isLoading && <SkeletonCardGrid count={query.pageSize > 24 ? 12 : 8} />}

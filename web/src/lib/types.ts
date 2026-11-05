@@ -493,6 +493,8 @@ export interface WarehouseFacets {
   categories: CategoryFacet[];
   groups: GroupFacet[];
   accounts: AccountFacet[];
+  /** 当前身份可见的全部商品数（与筛选条件无关，供「全部」chip 使用） */
+  total?: number;
 }
 
 export interface WarehouseStats {
