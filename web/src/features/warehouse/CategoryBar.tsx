@@ -16,6 +16,12 @@ export interface CategoryBarProps {
   onSelect: (filter: WarehouseCategoryFilter) => void;
   onCreateGroup: () => void;
   onDeleteGroup: (group: GroupFacet) => void;
+  /**
+   * 是否可管理分类（新建 / 删除分组）。
+   * 学员只有 `warehouse` 权限，后端 `/groups` 写接口要 `process` 权限，
+   * 所以学员看得到、点得动分类筛选，但不显示「+ 分类」和删除按钮。
+   */
+  manageable?: boolean;
 }
 
 interface ChipProps {
@@ -84,6 +90,7 @@ export function CategoryBar({
   onSelect,
   onCreateGroup,
   onDeleteGroup,
+  manageable = true,
 }: CategoryBarProps) {
   const allActive = active.kind === "all";
 
@@ -157,17 +164,19 @@ export function CategoryBar({
                     ? onSelect({ kind: "all" })
                     : onSelect({ kind: "group", groupId: group.id, name: group.name })
                 }
-                onRemove={() => onDeleteGroup(group)}
+                onRemove={manageable ? () => onDeleteGroup(group) : undefined}
               />
             );
           })}
       </div>
 
-      <div className="flex shrink-0 items-center gap-1">
-        <Button variant="secondary" size="sm" icon={<Plus />} onClick={onCreateGroup}>
-          分类
-        </Button>
-      </div>
+      {manageable && (
+        <div className="flex shrink-0 items-center gap-1">
+          <Button variant="secondary" size="sm" icon={<Plus />} onClick={onCreateGroup}>
+            分类
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

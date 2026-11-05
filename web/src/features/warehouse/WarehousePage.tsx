@@ -670,7 +670,7 @@ export function WarehousePage() {
             className="contents"
           >
             {/* 分类栏 */}
-            {!isMember && <CategoryBar
+            <CategoryBar
               categories={facets?.categories ?? []}
               groups={facets?.groups ?? groupsQuery.data?.groups.map((group) => ({
                 id: group.id,
@@ -681,6 +681,7 @@ export function WarehousePage() {
               active={category}
               total={total}
               loading={listQuery.isLoading}
+              manageable={!isMember}
               onSelect={(filter) => query.setCategory(filter)}
               onCreateGroup={() => {
                 setGroupName("");
@@ -688,7 +689,7 @@ export function WarehousePage() {
                 setCreateOpen(true);
               }}
               onDeleteGroup={(group) => setDeleteGroupTarget(group)}
-            />}
+            />
 
             {/* 工具栏 */}
             <div className="flex flex-wrap items-center gap-2">
