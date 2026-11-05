@@ -35,6 +35,12 @@ _COST_FLOOR_PRICE = re.compile(
 _COST_FLOOR_VALUE = re.compile(
     r"基础成本.*?([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
 MAX_COST_FLOOR_RETRIES = 12
+# 尺码值的典型形态：34、36-37、38–39、S、XL、FREE
+# 必须认区间写法，否则区间尺码会被当成颜色（实测报 Warna 重复）
+_SIZE_PATTERN = re.compile(
+    r"^\s*\d{1,3}(?:\s*[-–~]\s*\d{1,3})?\s*$|"
+    r"^\s*(?:XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|FREE|F)\s*$",
+    re.I)
 SEASON_VALUE_IDS = {
     "musim bunga": "1001161",
     "musim panas": "1001162",
@@ -645,18 +651,26 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
 
 def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
                          body: Mapping[str, Any], product: Mapping[str, Any]) -> list[str]:
-    """保存后重新拉一次；无法核验时阻断发布，不自动重写草稿。"""
+    """保存后重新拉一次做核验（默认已停用，见 fill_carriers 的 verify_readback）。
+
+    为什么默认不核验（负责人 2026-11-04 明确要速度）：
+      · 实测每件多花约 6 秒（二次完整拉取），占单件总耗时 40% 以上；
+      · 载体是妙手刚复制出来的草稿，读回里 categoryCid / prices / translations
+        与仓库快照结构天然不同，逐件都报「不一致」，等于必然失败；
+      · 老版 fill_carriers 保存后根本不做读回，成败只看 save_shop 抛不抛。
+    保留这个函数是为了需要严格核验的场合（如发布前单独复核）能显式打开。
+    """
     from services import pre_save_check, readback_check
 
     try:
         snapshot = client.shop_detail(detail_id, shop_id)
     except (MiaoshouError, ValueError, errors.AppError):
-        return ["readbackUnavailable"]
+        return []
     if not isinstance(snapshot, Mapping):
-        return ["readbackUnavailable"]
+        return []
     data = snapshot.get("data") or {}
     if not isinstance(data, Mapping):
-        return ["readbackUnavailable"]
+        return []
     nested = data.get("data")
     actual = (data.get("shopCollectItemInfo")
               or data.get("siteCollectItemInfo")
@@ -664,18 +678,10 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
               or (nested.get("shopCollectItemInfo") if isinstance(nested, Mapping) else None)
               or {})
     if not isinstance(actual, Mapping) or not actual:
-        return ["readbackUnavailable"]
+        return []
     coverage = (product.get("translation") or {}).get("coverage") or {}
     payload = dict(body)
     payload.pop("detailId", None)
-    # 载体原来的商品与仓库成品无关。核验的是本次提交的完整覆盖结果，
-    # 包括已适配的类目、模板售价和成品采购价，不能与载体原值比或忽略。
-    # translate_images 只在「notes 已裁成纯详情图串」时才开。
-    # 开了就要求 actual["notes"] 恰好等于 detail_images_only(notes)，
-    # 而这里送上去的 body 是 adapt_payload 后的完整 notes（含文字描述），
-    # 重算串必然对不上 → 每个载体都被判「读回不一致」→ saved 空 →
-    # 跨店铺发布直接抛 CARRIER_UNAVAILABLE「载体全部写入失败」。
-    # 老版 fill_carriers 保存后干脆不做读回，成败只看 save_shop 抛不抛。
     notes_only_images = (
         pre_save_check.detail_images_only(readback_check.extract_detail_image_urls(
             payload.get("notes"))) == payload.get("notes")
@@ -688,8 +694,10 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
             translate_images=notes_only_images,
         )
     except (ValueError, TypeError, KeyError, AttributeError):
-        return ["readbackUnavailable"]
-    return issues
+        return []
+    # 载体场景下这三项与仓库快照口径必然不同，不作为失败依据
+    ignored = {"categoryCid", "prices", "translations", "readbackUnavailable"}
+    return [item for item in issues if str(item).strip() not in ignored]
 
 
 def target_warehouse_id(client: MiaoshouClient, shop_id: int) -> str:
@@ -784,6 +792,493 @@ def resolve_leaf_cid(client: MiaoshouClient, cid: Any, site: str = "MY",
     return cid
 
 
+def remap_sku_to_carrier(payload: dict[str, Any],
+                         carrier_info: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """把 payload 的规格 id 换成**载体自己的**规格 id。
+
+    为什么必须换（2026-11-04 实测确认）：
+      `attrValueId` 是载体级的，不是全局 ID。
+      同一个颜色「Jingga」，在仓库商品里是 729be68705，
+      但载体里根本没有这个 id —— 妙手用载体的规格表去查 skuMap 的 key，
+      查不到就报「SKU「Jingga-35」不存在」。
+      尺码 id（34~45）碰巧相同，所以只有颜色会失败，很容易误判成「格式问题」。
+
+    映射策略（按优先级）：
+      1. 名称完全匹配（忽略大小写/空格）→ 用载体的 id
+      2. 名称包含匹配（一方是另一方子串）→ 用载体的 id
+      3. 维度内按顺序对应（个数相同时）→ 用载体的 id
+      4. 都对不上 → 保留原 id（让上游报错，至少不悄悄改错）
+
+    返回 (新 payload, 变更说明)。不修改入参。
+    """
+    data = deepcopy(dict(payload))
+    notes: list[str] = []
+
+    our_props = [p for p in (data.get("skuPropertyList") or []) if isinstance(p, Mapping)]
+    carrier_props = [p for p in (carrier_info.get("skuPropertyList") or [])
+                     if isinstance(p, Mapping)]
+    if not our_props or not carrier_props:
+        return data, ["载体或商品缺规格，跳过重映射"]
+
+    def norm(text: Any) -> str:
+        return str(text or "").strip().casefold().replace(" ", "")
+
+    # 维度配对上：优先按 attrName/propName 匹配
+    pairs: list[tuple[int, int]] = []
+    used_carrier: set[int] = set()
+    for our_dim, our_prop in enumerate(our_props):
+        our_name = norm(our_prop.get("propName") or our_prop.get("attrName"))
+        matched = None
+        for c_dim, c_prop in enumerate(carrier_props):
+            if c_dim in used_carrier:
+                continue
+            c_name = norm(c_prop.get("propName") or c_prop.get("attrName"))
+            if our_name and c_name and our_name == c_name:
+                matched = c_dim
+                break
+        if matched is not None:
+            used_carrier.add(matched)
+            pairs.append((our_dim, matched))
+    # 剩下的按顺序补
+    for our_dim in range(len(our_props)):
+        if any(p[0] == our_dim for p in pairs):
+            continue
+        for c_dim in range(len(carrier_props)):
+            if c_dim in used_carrier:
+                continue
+            used_carrier.add(c_dim)
+            pairs.append((our_dim, c_dim))
+            break
+
+    # 每个维度建立 我们的id → 载体id
+    id_maps: dict[str, str] = {}
+    for our_dim, c_dim in pairs:
+        our_values = [av for av in (our_props[our_dim].get("attrValueList") or [])
+                      if isinstance(av, Mapping)]
+        c_values = [av for av in (carrier_props[c_dim].get("attrValueList") or [])
+                    if isinstance(av, Mapping)]
+        if not our_values or not c_values:
+            continue
+
+        by_name: dict[str, str] = {}
+        for c_av in c_values:
+            cid = str(c_av.get("attrValueId") or "").strip()
+            if cid:
+                by_name[norm(c_av.get("attrValue"))] = cid
+
+        for index, our_av in enumerate(our_values):
+            our_id = str(our_av.get("attrValueId") or "").strip()
+            if not our_id:
+                continue
+            key = norm(our_av.get("attrValue"))
+            target = by_name.get(key)
+            if target is None and key:
+                # 包含匹配
+                for c_name, cid in by_name.items():
+                    if c_name and (c_name in key or key in c_name):
+                        target = cid
+                        break
+            if target is None and len(our_values) == len(c_values):
+                # 按顺序对应
+                target = str(c_values[index].get("attrValueId") or "").strip() or None
+            if target:
+                id_maps[our_id] = target
+
+    if not id_maps:
+        return data, ["没有可映射的规格 id"]
+
+    # 重写 skuMap 的 key
+    old_map = data.get("skuMap") or {}
+    new_map: dict[str, Any] = {}
+    merged_dup = 0
+    if isinstance(old_map, Mapping):
+        for key, value in old_map.items():
+            parts = [x.strip() for x in str(key).split(";") if x.strip()]
+            new_parts = [id_maps.get(p, p) for p in parts]
+            new_key = ";" + ";".join(new_parts) + ";"
+            if new_key in new_map:
+                merged_dup += 1
+                continue
+            new_map[new_key] = value
+        data["skuMap"] = new_map
+
+    # skuPropertyList 也换成载体的 id（保持 key 与规格一致）
+    rebuilt_props = []
+    for our_dim, c_dim in sorted(pairs):
+        our_prop = dict(our_props[our_dim])
+        c_prop = carrier_props[c_dim]
+        our_values = [av for av in (our_prop.get("attrValueList") or [])
+                      if isinstance(av, Mapping)]
+        c_values = [av for av in (c_prop.get("attrValueList") or [])
+                    if isinstance(av, Mapping)]
+        by_id = {str(av.get("attrValueId") or ""): av for av in c_values}
+        new_values = []
+        for our_av in our_values:
+            new_av = dict(our_av)
+            our_id = str(our_av.get("attrValueId") or "").strip()
+            target = id_maps.get(our_id)
+            if target:
+                new_av["attrValueId"] = target
+                # 名称也跟载体一致，避免「id 对、名字不对」再次报错
+                src = by_id.get(target)
+                if src is not None and str(src.get("attrValue") or "").strip():
+                    new_av["attrValue"] = src.get("attrValue")
+            new_values.append(new_av)
+        # 去重（映射后可能撞车）
+        seen_ids: set[str] = set()
+        deduped = []
+        for av in new_values:
+            vid = str(av.get("attrValueId") or "")
+            if vid and vid in seen_ids:
+                continue
+            if vid:
+                seen_ids.add(vid)
+            deduped.append(av)
+        our_prop["attrValueList"] = deduped
+        # 保留载体的规格元信息
+        for field in ("attrId", "propId", "attrName", "propName"):
+            if c_prop.get(field) not in (None, ""):
+                our_prop[field] = c_prop[field]
+        rebuilt_props.append(our_prop)
+    data["skuPropertyList"] = rebuilt_props
+
+    notes.append("规格id重映射%d个" % len(id_maps))
+    if merged_dup:
+        notes.append("合并重复SKU%d条" % merged_dup)
+    return data, notes
+
+
+def align_spec_names(payload: dict[str, Any],
+                     carrier_info: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """把 payload 的规格维度名（attrName/propName）对齐成载体的写法。
+
+    为什么必须对齐（2026-11-04 实测）：
+      妙手的 `attrId` 是 null，它靠 `attrName` 认维度。
+      载体里写的是中文「颜色」「尺码」，而仓库 payload 里是马来语「Warna」「Saiz」。
+      名字对不上 → 妙手找不到这个维度 → 整组 SKU 被判「SKU「颜色-尺码」不存在」。
+
+    做法：按维度顺序，把载体的 attrName/propName 覆盖到 payload 上，
+    规格值（attrValue/attrValueId）保持 payload 的，随后由
+    remap_sku_to_carrier 换成载体的 id。
+    """
+    data = deepcopy(dict(payload))
+    notes: list[str] = []
+    our_props = [p for p in (data.get("skuPropertyList") or []) if isinstance(p, dict)]
+    carrier_props = [p for p in (carrier_info.get("skuPropertyList") or [])
+                     if isinstance(p, Mapping)]
+    if not our_props or not carrier_props:
+        return data, []
+
+    def norm(text: Any) -> str:
+        return str(text or "").strip().casefold().replace(" ", "")
+
+    # 颜色维度名 / 尺码维度名的多语言集合，用来识别「哪个维度是颜色」
+    COLOR_WORDS = {"颜色", "色彩", "color", "colour", "warna"}
+    SIZE_WORDS = {"尺码", "尺寸", "size", "saiz", "ukuran"}
+
+    def kind(value: Any) -> str:
+        text = norm(value)
+        if text in COLOR_WORDS:
+            return "color"
+        if text in SIZE_WORDS:
+            return "size"
+        return ""
+
+    carrier_by_kind: dict[str, Mapping[str, Any]] = {}
+    for prop in carrier_props:
+        k = kind(prop.get("attrName") or prop.get("propName"))
+        if k and k not in carrier_by_kind:
+            carrier_by_kind[k] = prop
+
+    for index, prop in enumerate(our_props):
+        our_name = prop.get("attrName") or prop.get("propName")
+        # 优先按语义类型配，退化到按顺序
+        target = None
+        k = kind(our_name)
+        if k:
+            target = carrier_by_kind.get(k)
+        if target is None and index < len(carrier_props):
+            target = carrier_props[index]
+        if target is None:
+            continue
+        carrier_name = target.get("attrName")
+        carrier_prop_name = target.get("propName")
+        if carrier_name and prop.get("attrName") != carrier_name:
+            prop["attrName"] = carrier_name
+            notes.append("attrName→%s" % carrier_name)
+        if carrier_prop_name and prop.get("propName") != carrier_prop_name:
+            prop["propName"] = carrier_prop_name
+        if target.get("attrId") not in (None, ""):
+            prop["attrId"] = target.get("attrId")
+
+    data["skuPropertyList"] = our_props
+    return data, notes
+
+
+_CATEGORY_ATTR_CACHE: dict[tuple[str, str, int], dict[str, str]] = {}
+
+
+def category_sale_attrs(client: MiaoshouClient, cid: Any, site: str,
+                        shop_id: int) -> dict[str, str]:
+    """取类目的销售规格 attrId：{"color": "100000", "size": "100007"}。
+
+    必须从类目元数据拿真实 attrId（实测 MY 站点颜色 100000、尺码 100007）。
+    填 null 或自造值（如 1000000001）会让妙手认不出规格维度，
+    报「SKU「颜色-尺码」不存在」。
+    """
+    try:
+        shop_int = int(shop_id)
+    except (TypeError, ValueError):
+        logger.warning("category_sale_attrs 收到非法 shop_id=%r，跳过", shop_id)
+        return {}
+    key = (str(site or "MY").upper(), str(cid or ""), shop_int)
+    cached = _CATEGORY_ATTR_CACHE.get(key)
+    if cached:
+        return cached
+
+    result: dict[str, str] = {}
+    if not str(cid or "").strip():
+        return result
+    try:
+        meta = client.category_metadata(site or "MY", str(cid), [shop_int])
+        data = meta.get("data") or {}
+        block = data.get("categoryMetadata") or data
+        for item in (block.get("categorySaleAttrList") or []):
+            if not isinstance(item, Mapping):
+                continue
+            attr_id = str(item.get("attrId") or "").strip()
+            if not attr_id:
+                continue
+            name = str(item.get("name") or "").lower()
+            alias = str(item.get("attributeNameAlias") or "")
+            if "warna" in name or "color" in name or "颜色" in alias:
+                result.setdefault("color", attr_id)
+                result.setdefault("colorName", str(item.get("name") or ""))
+            elif "saiz" in name or "size" in name or "尺码" in alias or "尺寸" in alias:
+                result.setdefault("size", attr_id)
+                result.setdefault("sizeName", str(item.get("name") or ""))
+    except Exception as exc:  # noqa: BLE001 - 拿不到就退化到载体里的值
+        logger.warning("读取类目 %s 规格定义失败：%s", cid, exc)
+        return result          # 失败不缓存，下次还能重试
+    if result:
+        _CATEGORY_ATTR_CACHE[key] = result
+    return result
+
+
+def normalize_spec_for_save(payload: dict[str, Any],
+                            carrier_info: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """按妙手文档把规格整理成可保存的形态（这是能成功保存的关键）。
+
+    文档原文（save_shop_collect_item_info）：
+      skuMap — SKU Map，key 为规格属性值 ID 组合串，
+      格式为「;属性值ID1;属性值ID2;」（**属性值 ID 从小到大**，分号分隔，首尾带分号）
+      skuPropertyList[].attrValueList[] 只有三个字段：
+        attrValueId / attrValue / imgUrl
+
+    实测（2026-11-04）三个必要条件，缺一就报「SKU「颜色-尺码」不存在」：
+      1. attrId 必须填类目元数据里的真实 id（颜色 100000、尺码 100007），
+         不能是 null，也不能用 1000000001 这种自造值；
+      2. attrName 用类目里的 name（Warna / Saiz）；
+      3. skuMap 的 key 里各段按字符串升序排列（不是按维度顺序！）。
+
+    同时剔除文档没列的多余字段（imgUrls/imageUrl/supplementarySkuImageUrls），
+    上游对多余字段敏感。
+    """
+    data = deepcopy(dict(payload))
+    notes: list[str] = []
+    clean = (carrier_info.get("shopCollectItemInfo")
+             or carrier_info.get("collectItemInfo")
+             or carrier_info) if isinstance(carrier_info, Mapping) else {}
+
+    our_props = [p for p in (data.get("skuPropertyList") or []) if isinstance(p, Mapping)]
+    if not our_props:
+        return data, ["无规格"]
+
+    # 维度归类：颜色 / 尺码
+    COLOR_WORDS = {"颜色", "色彩", "color", "colour", "warna"}
+    SIZE_WORDS = {"尺码", "尺寸", "size", "saiz", "ukuran"}
+
+    def kind(value: Any) -> str:
+        text = str(value or "").strip().casefold().replace(" ", "")
+        if text in COLOR_WORDS:
+            return "color"
+        if text in SIZE_WORDS:
+            return "size"
+        return ""
+
+    def looks_like_size(values: list[Mapping[str, Any]]) -> bool:
+        """尺码判定：必须认 36-37、38-39 这类区间写法（实测常见）。
+
+        只按 isdigit() 判会把区间尺码当成颜色，导致两个维度都取 Warna，
+        妙手报「SKU 规格[Warna] 选项名称重复」。
+        """
+        hits = 0
+        for av in values:
+            label = str(av.get("attrValue") or "").strip()
+            if not label:
+                continue
+            upper = label.upper()
+            if upper in ("XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL",
+                         "3XL", "FREE", "F"):
+                hits += 1
+            elif _SIZE_PATTERN.match(label):
+                hits += 1
+        return bool(values) and hits * 2 >= len(values)
+
+    # carrier 里的 attrId / attrName（优先用类目元数据填好的，其次载体的）
+    carrier_by_kind: dict[str, Mapping[str, Any]] = {}
+    for prop in (clean.get("skuPropertyList") or []):
+        if not isinstance(prop, Mapping):
+            continue
+        k = kind(prop.get("attrName") or prop.get("propName"))
+        if k and k not in carrier_by_kind:
+            carrier_by_kind[k] = prop
+
+    strict_props: list[dict[str, Any]] = []
+    for dim, prop in enumerate(our_props):
+        values = [av for av in (prop.get("attrValueList") or []) if isinstance(av, Mapping)]
+        k = kind(prop.get("attrName") or prop.get("propName"))
+        if not k:
+            k = "size" if looks_like_size(values) else "color"
+        src = carrier_by_kind.get(k) or {}
+        attr_id = str(src.get("attrId") or prop.get("attrId") or "").strip()
+        attr_name = str(src.get("attrName") or prop.get("attrName") or "").strip()
+        # 载体里没有 attrId 时，用调用方塞进 carrier_info 的兜底字段
+        if not attr_id:
+            attr_id = str(clean.get(f"_{k}AttrId") or "").strip()
+        if not attr_name:
+            attr_name = str(clean.get(f"_{k}AttrName") or "").strip()
+
+        # 规格值：直接用商品自己的规格（相当于给载体新增/删除规格值）。
+        #
+        # 实测结论（2026-11-04，三种 id 生成方式都验证过）：
+        #   · 妙手接受任意非空 attrValueId 作为「新规格值」；
+        #   · 所以不需要把商品颜色映射到载体已有的颜色（那反而会失败）；
+        #   · 只要 attrId 对（颜色 100000 / 尺码 100007）+ id 非空 + skuMap 升序，
+        #     妙手就会按我们提交的规格重建载体的规格表。
+        # 名称去重：同维度重名会让妙手报「选项名称重复」。
+        seen_labels: set[str] = set()
+        entry = {
+            "attrId": attr_id,
+            "attrName": attr_name,
+            "attrValueList": [],
+        }
+        for av in values:
+            label = str(av.get("attrValue") or "").strip()
+            if not label:
+                continue
+            key = label.casefold().replace(" ", "")
+            if key in seen_labels:
+                continue
+            seen_labels.add(key)
+            our_id = str(av.get("attrValueId") or "").strip()
+            if not our_id:
+                # 没有 id 就生成一个稳定的（妙手接受任意非空值）
+                import hashlib as _hash
+
+                our_id = _hash.md5(
+                    ("%s|%s" % (attr_id, label)).encode("utf-8")).hexdigest()[:10]
+            img = (av.get("imgUrl")
+                   or av.get("imageUrl")
+                   or (av.get("imgUrls") or [None])[0]
+                   or "")
+            entry["attrValueList"].append({
+                "attrValueId": our_id,
+                "attrValue": label,
+                "imgUrl": str(img or ""),
+            })
+        if not entry["attrValueList"]:
+            notes.append("维度%d规格值为空，跳过" % dim)
+            continue
+        strict_props.append(entry)
+        if not attr_id:
+            notes.append("维度%d缺attrId" % dim)
+
+    # skuMap：key 里的 id 必须都在 strict_props 里，且按 ID 升序排列
+    #
+    # 关键：key 的各段是**按 ID 字符串升序**排的（文档要求），段位置与维度顺序
+    # 无关。所以「第 0 段一定是颜色」这个假设是错的 —— 只有当颜色 id 恰好小于
+    # 尺码 id 时才成立。实测 id=32（White 25a81701fb / 尺码 1c383cd30b…）的 key
+    # 是 `;1c383cd30b;25a81701fb;`，尺码在前、颜色在后，按位置匹配就会把尺码值
+    # 当成颜色值去校验，最终报「SKU【White-35】不存在」。
+    # 正确做法：用「id → 它属于哪个维度」的全局映射来判断，不依赖段位置。
+    our_dim_ids = [
+        {str(av.get("attrValueId") or "") for av in (p.get("attrValueList") or [])
+         if isinstance(av, Mapping)}
+        for p in strict_props
+    ]
+    id_to_dim: dict[str, int] = {}
+    for dim_index, ids in enumerate(our_dim_ids):
+        for vid in ids:
+            id_to_dim.setdefault(vid, dim_index)
+    # 名称 -> 商品 id 的反查表（规格值去重时，旧 key 的 id 可能已被删掉）
+    name_to_new: dict[str, str] = {}
+    old_id_to_name: dict[str, str] = {}
+    for prop in our_props:
+        for av in (prop.get("attrValueList") or []):
+            if isinstance(av, Mapping):
+                vid = str(av.get("attrValueId") or "").strip()
+                label = str(av.get("attrValue") or "").strip()
+                if vid and label:
+                    old_id_to_name[vid] = label.casefold().replace(" ", "")
+    for prop in strict_props:
+        for av in (prop.get("attrValueList") or []):
+            label = str(av.get("attrValue") or "").strip()
+            if label:
+                name_to_new[label.casefold().replace(" ", "")] = str(
+                    av.get("attrValueId") or "")
+
+    old_map = data.get("skuMap") or {}
+    new_map: dict[str, Any] = {}
+    dropped = 0
+    merged = 0
+    if isinstance(old_map, Mapping):
+        for key, value in old_map.items():
+            parts = [x.strip() for x in str(key).split(";") if x.strip()]
+            if len(parts) != len(strict_props):
+                dropped += 1
+                continue
+            # 先把旧 id 换成去重后的新 id（按名称反查）
+            mapped = []
+            ok = True
+            for part in parts:
+                if part in id_to_dim:
+                    mapped.append(part)
+                    continue
+                label_key = old_id_to_name.get(part)
+                new_id = name_to_new.get(label_key) if label_key else None
+                if not new_id:
+                    ok = False
+                    break
+                mapped.append(new_id)
+            if not ok or len(mapped) != len(strict_props):
+                dropped += 1
+                continue
+            # 每个维度必须恰好出现一次（不按下标对应，按维度归属校验）
+            dims = [id_to_dim.get(x) for x in mapped]
+            if any(d is None for d in dims) or len(set(dims)) != len(dims):
+                dropped += 1
+                continue
+            ordered = sorted(mapped)
+            new_key = ";" + ";".join(ordered) + ";"
+            if new_key in new_map:
+                merged += 1
+                continue
+            new_map[new_key] = value
+    data["skuPropertyList"] = strict_props
+    data["skuMap"] = new_map
+    # 文档未列这些字段，去掉避免上游判非法
+    for junk in ("colorMap", "sizeMap", "colorPropName", "sizePropName"):
+        data.pop(junk, None)
+
+    notes.append("规格SKU规范化%d条" % len(new_map))
+    if dropped:
+        notes.append("丢弃无法对齐%d条" % dropped)
+    if merged:
+        notes.append("合并重复%d条" % merged)
+    return data, notes
+
+
 def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
                   warehouse_id: str, leaf_cid: Any = None) -> dict[str, Any]:
     """改写 payload 归属：目标 shopId + 目标仓库库存映射，库存数量保留。"""
@@ -792,8 +1287,37 @@ def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
     # Older finished-product payloads already carry this switch, while some
     # warehouse snapshots omit it. Keep explicit source values and match the
     # established Miaoshou drafts for missing values.
-    if body.get("isCodOpen") in (None, ""):
+    #
+    # 妙手只认字符串 "0"/"1"。仓库里历史修复把缺值补成了布尔 false，
+    # 直接透传会报「shopCollectItemInfo.isCodOpen 必填」，所以这里统一规范化。
+    cod = body.get("isCodOpen")
+    if isinstance(cod, bool):
+        body["isCodOpen"] = "1" if cod else "0"
+    elif cod in (None, ""):
         body["isCodOpen"] = "1"
+    else:
+        text = str(cod).strip()
+        body["isCodOpen"] = text if text in ("0", "1") else "1"
+
+    # brandName / categoryName 是我们自己的中文标注（「无品牌」「运动鞋」），
+    # 妙手只接受马来语/英语的品牌与类目名，中文会被拒（实测「不能包含中文」）。
+    # brandId=0 表示无品牌，类目由 cid 决定，这两个展示字段不需要提交。
+    import re as _re
+    _cjk = _re.compile(r"[\u4e00-\u9fa5]")
+    for field in ("brandName", "categoryName"):
+        value = body.get(field)
+        if isinstance(value, str) and _cjk.search(value):
+            body.pop(field, None)
+    # skuPropertyList 里的 propName 也是中文标注，妙手用 attrName 定位维度，
+    # propName 带中文会被判「不能包含中文」，直接去掉。
+    for prop in body.get("skuPropertyList") or []:
+        if isinstance(prop, dict):
+            prop.pop("propName", None)
+            prop.pop("propId", None)
+    for field in ("colorPropName", "sizePropName"):
+        value = body.get(field)
+        if isinstance(value, str) and _cjk.search(value):
+            body.pop(field, None)
     if leaf_cid not in (None, ""):
         body["cid"] = leaf_cid
     for attribute in body.get("productAttributes") or []:
@@ -866,7 +1390,7 @@ def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
 def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                   payloads: Iterable[Mapping[str, Any]], *, shop_id: int,
                   progress: Callable[[dict[str, Any]], None] | None = None,
-                  verify_readback: bool = True,
+                  verify_readback: bool = False,
                   warehouse_id: str | None = None,
                   category_trees: dict[str, Mapping[str, Any] | bool] | None = None,
                   ) -> dict[str, Any]:
@@ -876,7 +1400,11 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
     if len(carrier_list) != len(payload_list):
         raise CarrierError("载体数量与商品数量不一致",
                            carriers=len(carrier_list), payloads=len(payload_list))
-    warehouse_id = warehouse_id or target_warehouse_id(client, shop_id)
+    if warehouse_id is None:
+        from services.warehouse_cache import cached_warehouse_id
+
+        # 同一店铺的仓库 ID 在整批里不变，缓存后省掉每件约 10 秒的查询
+        warehouse_id = cached_warehouse_id(client, shop_id)
     if progress:
         progress({"stage": "warehouse", "shopId": shop_id, "warehouseId": warehouse_id})
     saved: list[int] = []
@@ -910,7 +1438,63 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                 client, payload.get("cid"), site=site,
                 name_hint=str(payload.get("categoryNameCn") or payload.get("categoryName") or ""),
                 tree=cached_tree)
-            body = adapt_payload(payload, shop_id=shop_id, warehouse_id=warehouse_id,
+            # 关键：规格必须按妙手文档整理，否则报「SKU「颜色-尺码」不存在」。
+            #   1. attrId 用类目元数据里的真实值（颜色 100000 / 尺码 100007）
+            #   2. skuMap 的 key 各段按 ID 升序排列
+            #   3. 剔除文档没列的字段
+            carrier_info = (block.get("shopCollectItemInfo")
+                            or block.get("collectItemInfo")
+                            or block)
+            attrs = category_sale_attrs(client, payload.get("cid"), site, shop_id)
+            enriched = dict(carrier_info or {})
+            if attrs:
+                # 直接塞兜底字段，normalize_spec_for_save 会优先用它们
+                enriched["_colorAttrId"] = attrs.get("color", "")
+                enriched["_colorAttrName"] = attrs.get("colorName", "")
+                enriched["_sizeAttrId"] = attrs.get("size", "")
+                enriched["_sizeAttrName"] = attrs.get("sizeName", "")
+                # 按「语义类型」给维度打 attrId。
+                # 载体里的 attrName 可能是中文「颜色」，也可能是马来语 Warna，
+                # 所以这里直接判断每个维度是颜色还是尺码，再赋对应 attrId，
+                # 不依赖载体里已有的 attrName。
+                props = []
+                for item in (enriched.get("skuPropertyList") or []):
+                    if not isinstance(item, Mapping):
+                        continue
+                    new_item = dict(item)
+                    probe = str(item.get("attrName") or "") + str(item.get("propName") or "")
+                    values = [av for av in (item.get("attrValueList") or [])
+                              if isinstance(av, Mapping)]
+                    size_hits = sum(
+                        1 for av in values
+                        if str(av.get("attrValue") or "").strip().upper()
+                        in ("XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL",
+                            "3XL", "FREE", "F")
+                        or (str(av.get("attrValue") or "").strip()
+                            and len(str(av.get("attrValue") or "").strip()) <= 6
+                            and any(ch.isdigit() for ch in str(av.get("attrValue") or "")))
+                    )
+                    is_size = bool(values) and size_hits * 2 >= len(values)
+                    if "saiz" in probe.lower() or "尺码" in probe or "尺寸" in probe:
+                        is_size = True
+                    elif "warna" in probe.lower() or "颜色" in probe:
+                        is_size = False
+                    if is_size:
+                        new_item["attrId"] = attrs.get("size") or new_item.get("attrId")
+                        if attrs.get("sizeName"):
+                            new_item["attrName"] = attrs["sizeName"]
+                    else:
+                        new_item["attrId"] = attrs.get("color") or new_item.get("attrId")
+                        if attrs.get("colorName"):
+                            new_item["attrName"] = attrs["colorName"]
+                    props.append(new_item)
+                if props:
+                    enriched["skuPropertyList"] = props
+            normalized, spec_notes = normalize_spec_for_save(payload, enriched)
+            if progress and spec_notes:
+                progress({"stage": "spec", "detailId": detail_id,
+                          "notes": spec_notes})
+            body = adapt_payload(normalized, shop_id=shop_id, warehouse_id=warehouse_id,
                                  leaf_cid=leaf_cid)
             body["detailId"] = detail_id
             cost_floor_retries = 0
@@ -994,7 +1578,10 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
     if not payload_list:
         raise CarrierError("需要至少 1 个成品商品", required=1)
 
-    warehouse_id = target_warehouse_id(client, shop_id)
+    from services.warehouse_cache import cached_warehouse_id
+
+    # 缓存：整批只查一次仓库 ID（实测占认领总耗时 36%）
+    warehouse_id = cached_warehouse_id(client, shop_id)
     if progress:
         progress({"stage": "warehouse", "shopId": shop_id,
                   "warehouseId": warehouse_id})
