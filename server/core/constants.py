@@ -117,6 +117,10 @@ MIAOSHOU_COLLECT_PAGE_SIZE = 20
 UPSTREAM_PACE_SECONDS = 1.5
 UPSTREAM_RATE_LIMIT_RETRIES = 5
 UPSTREAM_RATE_LIMIT_BACKOFF = 1.5
+# 妙手网关的瞬时失败（「下游服务响应超时」「下游服务繁忙」）：
+# HTTP 200 + result=fail，隔一两秒重试就好，不该判成商品数据问题。
+GATEWAY_RETRIES = 3
+GATEWAY_RETRY_BACKOFF = 1.2
 
 # 系统
 HEALTH_INTERVAL_MS = 200          # 前端/Electron 探活轮询间隔

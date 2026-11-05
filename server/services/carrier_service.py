@@ -35,6 +35,10 @@ _COST_FLOOR_PRICE = re.compile(
 _COST_FLOOR_VALUE = re.compile(
     r"基础成本.*?([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
 MAX_COST_FLOOR_RETRIES = 12
+# 新建载体的 ossMd5 会被上游连续改写几轮。只重读 1 次在 70 件实测里会漏
+# （2026-11-05，id=26/80 首轮就是这么失败的）。按 CLAIM_STANDARD 第 4 节
+# 重试 MAX_VERSION_REFRESH 轮，每轮重新读一次 md5。
+MAX_VERSION_REFRESH = 5
 # 尺码值的典型形态：34、36-37、38–39、S、XL、FREE
 # 必须认区间写法，否则区间尺码会被当成颜色（实测报 Warna 重复）
 _SIZE_PATTERN = re.compile(
@@ -1498,7 +1502,7 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                                  leaf_cid=leaf_cid)
             body["detailId"] = detail_id
             cost_floor_retries = 0
-            version_refresh_used = False
+            version_refresh_count = 0
             while True:
                 try:
                     client.save_shop(detail_id, shop_id, oss_md5, body)
@@ -1512,20 +1516,22 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                         cost_floor_retries += 1
                         continue
                     # A new carrier may still be receiving upstream edits. Refresh
-                    # ossMd5 once for this explicit conflict only.
+                    # ossMd5 and retry for this explicit conflict only.
                     text = str(exc)
                     is_version_conflict = (
                         "变动" in text or "重新打开" in text or "ossMd5" in text.lower())
-                    if is_version_conflict and not version_refresh_used:
-                        logger.info("载体版本变动，重读 ossMd5 后重试 detailId=%s", detail_id)
-                        time.sleep(1.0)
+                    if (is_version_conflict
+                            and version_refresh_count < MAX_VERSION_REFRESH):
+                        version_refresh_count += 1
+                        logger.info("载体版本变动，重读 ossMd5 后重试 detailId=%s（第 %d/%d 轮）",
+                                    detail_id, version_refresh_count, MAX_VERSION_REFRESH)
+                        time.sleep(1.2)
                         fresh = client.shop_detail(detail_id, shop_id)
                         fresh_md5 = (fresh.get("data") or {}).get("ossMd5")
                         if not fresh_md5:
                             raise
                         snapshot = fresh
                         oss_md5 = fresh_md5
-                        version_refresh_used = True
                         continue
                     raise
             if verify_readback:

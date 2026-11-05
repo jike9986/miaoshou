@@ -28,6 +28,8 @@ from core.constants import (
     MIAOSHOU_COLLECT_PAGE_SIZE,
     MIAOSHOU_SHOP_PAGE_SIZE,
     PUBLISH_MAX_ITEMS,
+    GATEWAY_RETRIES,
+    GATEWAY_RETRY_BACKOFF,
     UPSTREAM_PACE_SECONDS,
     UPSTREAM_RATE_LIMIT_BACKOFF,
     UPSTREAM_RATE_LIMIT_RETRIES,
@@ -302,22 +304,37 @@ class MiaoshouClient:
         result_flag = str(data.get("result", "")).lower()
         if result_flag not in {"success", "ok"} and code not in {"0", "200", "success", ""}:
             message = str(data.get("message") or data.get("msg") or "妙手接口返回失败")
-            kind = "rate_limit" if _is_rate_limit(code, message) else "error"
+            if _is_rate_limit(code, message):
+                kind = "rate_limit"
+            elif _is_transient_gateway(message):
+                kind = "gateway"
+            else:
+                kind = "error"
             raise MiaoshouError(f"妙手接口失败 [{code}]：{message}", code=code,
                                 payload=data, kind=kind)
         return data
 
     def post(self, path: str, body: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """带限流重试的上游调用（重试 5 次，逐步退避）。"""
+        """带上游重试的调用：限流退避 5 轮，网关瞬时失败短退避 3 轮。
+
+        读写都走这里。网关失败重试是安全的 —— 它发生在妙手自己的下游处理里，
+        不是我们的写请求丢了响应（那种会被标成 kind=unknown，由调用方核对，
+        不会在这里自动重放）。
+        """
         last: MiaoshouError | None = None
         for attempt in range(UPSTREAM_RATE_LIMIT_RETRIES):
             try:
                 return self._post_once(path, body)
             except MiaoshouError as exc:
-                if exc.kind != "rate_limit":
-                    raise
-                last = exc
-                time.sleep(UPSTREAM_RATE_LIMIT_BACKOFF * (attempt + 1))
+                if exc.kind == "rate_limit":
+                    last = exc
+                    time.sleep(UPSTREAM_RATE_LIMIT_BACKOFF * (attempt + 1))
+                    continue
+                if exc.kind == "gateway" and attempt < GATEWAY_RETRIES:
+                    last = exc
+                    time.sleep(GATEWAY_RETRY_BACKOFF * (attempt + 1))
+                    continue
+                raise
         assert last is not None
         raise last
 
@@ -634,3 +651,16 @@ def _is_rate_limit(code: str, message: str) -> bool:
     text = f"{code} {message}".lower()
     return ("ratelimit" in text or "rate_limit" in text or "qps" in text
             or "频率" in message or "限流" in message or "too many" in text)
+
+
+def _is_transient_gateway(message: str) -> bool:
+    """妙手网关的瞬时失败：HTTP 200 但 result=fail，重试一次就好。
+
+    实测（2026-11-05，70 件认领）：「下游服务响应超时」「下游服务繁忙」
+    会随机命中单次调用，隔一两秒重试必成功。它不是限流（不该走退避 5 轮），
+    也不是业务错误（不该判成数据问题让用户去改商品）。
+    """
+    text = str(message or "")
+    return any(marker in text for marker in (
+        "下游服务响应超时", "下游服务繁忙", "下游服务超时",
+        "系统繁忙", "服务暂不可用", "gateway timeout"));
