@@ -152,7 +152,7 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
     frequency = str(pick("frequency") or "daily").strip()
     if frequency not in FREQUENCIES:
         # 中文界面里弹英文枚举，用户不知道要填什么
-        raise errors.validation("频率只能是每天 / 每周 / 每月 / 指定日期",
+        raise errors.validation("频率只能是仅一次 / 每天 / 每周 / 每月 / 日期区间",
                                 field="frequency", value=frequency)
 
     per_run_raw = pick("perRun")
@@ -197,6 +197,9 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
         raise errors.validation("每月发布需要选择至少一个日期", field="dayOfMonth")
 
     start_date = end_date = ""
+    if frequency == "once":
+        # 仅一次：必须指定 startDate
+        start_date = valid_date(pick("startDate"), "startDate", "执行日期")
     if frequency == "range":
         start_date = valid_date(pick("startDate"), "startDate", "开始日期")
         end_date = valid_date(pick("endDate"), "endDate", "结束日期")
@@ -208,6 +211,27 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
             raise errors.unprocessable(
                 f"指定日期最多 {SCHEDULE_MAX_RANGE_DAYS} 天，当前是 {span} 天",
                 startDate=start_date, endDate=end_date, span=span)
+
+    # 时间不能早于当前时刻（负责人 2026-11-06 明确）。
+    # 今天这一轮已经错过，建完立刻显示「已逾期」只会让人困惑。
+    # 局部更新（PATCH）只在改了时间/日期时才校验，避免旧任务改名字被拦。
+    _now = datetime.now()
+    _today_iso = _now.date().isoformat()
+    _now_hm = _now.strftime("%H:%M")
+    _check_time = (not partial) or ("time" in raw) or ("startDate" in raw)
+    if _check_time:
+        if frequency == "once" and start_date and start_date < _today_iso:
+            raise errors.validation("执行日期不能早于今天", field="startDate",
+                                    value=start_date)
+        if frequency == "range" and start_date and start_date < _today_iso:
+            raise errors.validation("开始日期不能早于今天", field="startDate",
+                                    value=start_date)
+        if frequency == "once" and start_date == _today_iso and time_text < _now_hm:
+            raise errors.validation(
+                f"执行时间不能早于当前时间 {_now_hm}", field="time", value=time_text)
+        if frequency in ("daily", "weekly", "monthly") and time_text < _now_hm:
+            raise errors.validation(
+                f"执行时间不能早于当前时间 {_now_hm}", field="time", value=time_text)
 
     name = clean_text(pick("name") or "", 120)
     if len(name) > 120:
@@ -243,6 +267,10 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
 # --- 到期判断（纯函数） ---------------------------------------------------
 def is_scheduled_day(task: Mapping[str, Any], day: date) -> bool:
     frequency = task.get("frequency")
+    if frequency == "once":
+        # 仅一次：只在 startDate 那天跑
+        return bool(str(task.get("startDate") or "")) \
+            and day.isoformat() == str(task.get("startDate"))
     if frequency == "daily":
         return True
     if frequency == "weekly":
@@ -726,7 +754,18 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
         ids = selected_product_ids[start:start + count]
         if not ids:
             return []
-        query = query.filter(Product.id.in_(ids))
+        # Product.id 是 Integer；前端传来的 id 是字符串，
+        # 直接 in_(["308"]) 会被 psycopg 绑定成 ::VARCHAR，报
+        # 「operator does not exist: integer = character varying」。
+        numeric_ids = []
+        for value in ids:
+            try:
+                numeric_ids.append(int(str(value).strip()))
+            except (TypeError, ValueError):
+                continue
+        if not numeric_ids:
+            return []
+        query = query.filter(Product.id.in_(numeric_ids))
     operator = (operator_service.get(db, operator_id)
                 if operator_id is not None else None)
     if (operator is not None
@@ -738,6 +777,9 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
         _assert_operator_account_access(db, account_id, operator)
         # Shared warehouse products are visible to all students, but each student
         # may schedule only the products they personally claimed.
+        # ProductClaim.product_id 与 Product.id 都是 Integer，直接子查询即可。
+        # 之前误加了 cast(..., Text)，反而造成 integer = text 类型不匹配，
+        # 报「operator does not exist: integer = text」。
         claimed_ids = (db.query(ProductClaim.product_id)
                        .filter(ProductClaim.owner_operator_id == operator.id,
                                ProductClaim.status == "claimed"))
@@ -750,6 +792,12 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
         if not claim_only:
             query = query.filter(Product.status != "published")
     published = _published_identities(db, account_id, operator_id)
+    # 显式选定的商品不再按「是否发布过」过滤（负责人 2026-11-06 明确）：
+    # 运营手动勾选就是要发这几件，哪怕之前发过一次（可能有多个店铺、
+    # 或上次失败要重发）。自动轮转（未指定商品）才需要跳过已发布的，
+    # 否则每轮都会撞同一批。
+    skip_published = not (selected_product_ids is not None
+                          and len(selected_product_ids) > 0)
     # 分页扫完全部候选，而不是只取最近 count*4 件。
     # 只取一页时，若最近那批都已发布（很常见：连着几天跑过），本轮就取到 0 件，
     # 更早的未发布商品永远轮不到——表现为「定时任务明明有货却一直跳过」。
@@ -766,10 +814,11 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
         offset += page_size
         # 只有在扫完这一页仍不够时才继续翻页
         for row in batch:
-            if str(row.detail_id) in published["detail_ids"]:
-                continue
-            if str(row.warehouse_key) in published["keys"]:
-                continue
+            if skip_published:
+                if str(row.detail_id) in published["detail_ids"]:
+                    continue
+                if str(row.warehouse_key) in published["keys"]:
+                    continue
             picked.append({
                 "id": row.id,
                 "detailId": row.detail_id,
@@ -1251,6 +1300,59 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
 RUN_DUE_TIMEOUT_SECONDS = 1800
 
 
+def refresh_processing_logs(db: Session, account_id: Any) -> int:
+    """回源平台刷新 processing 状态的发布记录（后台自动做）。
+
+    发布是异步的：提交成功只代表平台受理，真正的 success/fail 要回源才知道。
+    如果没人点「刷新回执」，记录会一直停在 processing —— 下一轮定时发布
+    就被 `_pending_publish_blocker` 拦住，表现为「任务到点不执行」。
+    这里在每轮扫描前自动回源一次，让状态自己走完。
+    """
+    try:
+        from api.publish import _refresh_processing
+
+        result = _refresh_processing(db, str(account_id) if account_id else None)
+        updated = int(result.get("updated") or 0)
+        if updated:
+            logger.info("定时扫描前刷新回执：%d 条", updated)
+        return updated
+    except Exception as exc:  # noqa: BLE001 - 刷新失败不阻断扫描
+        logger.warning("定时扫描前刷新回执失败：%s", exc)
+        return 0
+
+
+def release_stale_publish_logs(db: Session, *, max_age_seconds: int = 600) -> int:
+    """释放长时间停在 processing 的发布记录。
+
+    发布是异步的，平台回执要稍后刷新。没人刷新就会永久停在 processing，
+    而 `_pending_publish_blocker` 看到 processing 就拒绝再次发布——
+    表现就是「定时任务到点不执行」或「手动发布报结果尚未确认」。
+    这在实际使用里必然发生（网络断、页面关掉、服务重启），
+    所以每轮扫描前先把过期的放掉，标 unknown（不假装成功）。
+    """
+    import time as _time
+
+    from models.publish_log import PublishLog
+
+    now = _time.time()
+    rows = (db.query(PublishLog)
+            .filter(PublishLog.status == "processing").all())
+    released = 0
+    for row in rows:
+        stamp = row.last_requested_at or row.requested_at or 0
+        age = now - float(stamp) if stamp else max_age_seconds + 1
+        if age <= max_age_seconds:
+            continue
+        row.status = "unknown"
+        row.reason = "超时未收到平台回执，已释放以免阻塞后续发布"
+        row.finished_at = now
+        released += 1
+    if released:
+        db.commit()
+        logger.info("释放 %d 条超时未回执的发布记录", released)
+    return released
+
+
 def run_due(db: Session, *, now: datetime | None = None) -> list[dict[str, Any]]:
     """扫描到期的定时任务并执行一轮发布。
 
@@ -1261,6 +1363,16 @@ def run_due(db: Session, *, now: datetime | None = None) -> list[dict[str, Any]]
     每个线程用**自己的会话**：SQLAlchemy 的 Session 不跨线程。
     """
     moment = now or datetime.now()
+    # 先回源刷新 + 释放卡住的记录，否则 _pending_publish_blocker 会把到点任务全拦下。
+    # 顺序：先刷新（能拿到真实结果的走 success/fail），再释放（拿不到的标 unknown）。
+    try:
+        account_ids = {row.account_id for row in
+                       db.query(Schedule).filter(Schedule.enabled.is_(True)).all()}
+        for account_id in account_ids:
+            refresh_processing_logs(db, account_id)
+        release_stale_publish_logs(db)
+    except Exception as exc:  # noqa: BLE001 - 清理失败不阻断扫描
+        logger.warning("刷新/释放发布记录失败：%s", exc)
     tasks = due_tasks(db, moment)
     if not tasks:
         return []

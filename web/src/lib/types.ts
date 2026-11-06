@@ -945,7 +945,7 @@ export interface PublishLogsResponse extends Page<PublishLog> {
  * 定时发布（api.md §9）
  * ================================================================== */
 
-export type ScheduleFrequency = "daily" | "weekly" | "monthly" | "range";
+export type ScheduleFrequency = "once" | "daily" | "weekly" | "monthly" | "range";
 export type ScheduleRunStatus = "ok" | "submitted" | "partial" | "failed" | "empty";
 
 export interface ScheduleLastResult {

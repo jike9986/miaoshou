@@ -12,6 +12,7 @@ import {
   CheckSquare,
   ChevronLeft,
   ChevronRight,
+  Globe,
   Inbox,
   Layers,
   ListChecks,
@@ -19,6 +20,7 @@ import {
   PackageSearch,
   Percent,
   RefreshCw,
+  Rocket,
   SearchX,
   Send,
   Trash2,
@@ -76,7 +78,6 @@ import { TransformDialog } from "@/features/warehouse/TransformDialog";
 import { PublishDialog } from "@/features/publish/PublishDialog";
 import {
   partitionMemberSelection,
-  selectedQualityReviews,
   type QualityReviewSnapshot,
 } from "@/features/warehouse/warehouseSelection";
 import { ClaimJobsPanel } from "@/features/warehouse/ClaimJobsPanel";
@@ -203,12 +204,31 @@ export function WarehousePage() {
   const [selectedClaimed, setSelectedClaimed] = useState<Record<string, boolean>>({});
   const [selectedPublishedShopIds, setSelectedPublishedShopIds] = useState<Record<string, string[]>>({});
   const [, setSelectedDetailIds] = useState<Record<string, string>>({});
-  const [selectedQualityReviewById, setSelectedQualityReviewById] =
+  const [, setSelectedQualityReviewById] =
     useState<Record<string, QualityReviewSnapshot>>({});
 
   const claimOnly = useMutation({
     mutationFn: (body: { items: ReturnType<typeof toPublishItems>; shopId: string; accountId: string; claimOnly: boolean; confirm: boolean }) =>
       api.post<BatchDetailResponse>("/claim-jobs", body),
+  });
+  // 推送到妙手公共采集箱（把成品放进公共货源池，其他学员可认领）。
+  // 与「认领到采集箱」方向相反：那是从公共箱复制到店铺采集箱。
+  const pushCommonBox = useMutation({
+    mutationFn: (body: { items: ReturnType<typeof toPublishItems>; accountId: string }) =>
+      api.post<{ ok: number; fail: number; results: Array<{ productId: string; status: string; detailId?: string; reason?: string }> }>(
+        "/common-box/push", body),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+      if (result.fail > 0) {
+        const first = result.results.find((r) => r.status !== "ok");
+        toast.warning(`已推送 ${result.ok} 件，失败 ${result.fail} 件`, {
+          description: first?.reason || "部分商品推送失败，可单独重试",
+        });
+      } else {
+        toast.success(`已推送 ${result.ok} 件到公共采集箱`);
+      }
+    },
+    onError: (error) => toast.error("推送公共采集箱失败", { description: apiErrorMessage(error) }),
   });
   const reconcileClaims = useMutation({
     mutationFn: () => api.post<{ cleared: number }>(
@@ -895,6 +915,29 @@ export function WarehousePage() {
             disabled: claimOnly.isPending,
             onClick: () => claimSelected(memberClaimableIds),
           }] : []),
+          ...(selectedIds.length > 0 ? [{
+            label: pushCommonBox.isPending
+              ? "正在推送…"
+              : `导入公共采集箱 ${selectedIds.length} 件`,
+            icon: <Globe className="size-3.5" />,
+            disabled: pushCommonBox.isPending || !accountId,
+            onClick: () => {
+              if (!accountId) {
+                toast.warning("推送公共采集箱需要先连接妙手账号");
+                return;
+              }
+              pushCommonBox.mutate({
+                items: toPublishItems(selectedIds.map((id) => ({ warehouseId: id }))),
+                accountId,
+              });
+            },
+          }] : []),
+          ...(selectedIds.length > 0 ? [{
+            // 认领并发布：复制载体 → 覆盖数据 → 直接发布到店铺（一步完成）
+            label: `认领并发布 ${selectedIds.length} 件`,
+            icon: <Rocket className="size-3.5" />,
+            onClick: () => openPublish(selectedIds),
+          }] : []),
           ...(memberPublishableIds.length > 0 ? [{
             label: "发布已认领商品",
             icon: <Send className="size-3.5" />,
@@ -906,6 +949,21 @@ export function WarehousePage() {
             icon: <Inbox className="size-3.5" />,
             disabled: claimOnly.isPending,
             onClick: () => claimSelected(selectedIds),
+          },
+          {
+            label: pushCommonBox.isPending ? "正在推送…" : "导入公共采集箱",
+            icon: <Globe className="size-3.5" />,
+            disabled: pushCommonBox.isPending || selectedIds.length === 0,
+            onClick: () => {
+              if (!accountId) {
+                toast.warning("推送公共采集箱需要先连接妙手账号");
+                return;
+              }
+              pushCommonBox.mutate({
+                items: toPublishItems(selectedIds.map((id) => ({ warehouseId: id }))),
+                accountId,
+              });
+            },
           },
           {
             label: "创建批次",
@@ -1086,7 +1144,6 @@ export function WarehousePage() {
         open={publishOpen}
         onOpenChange={setPublishOpen}
         warehouseIds={publishIds}
-        qualityReviewById={selectedQualityReviews(publishIds, selectedQualityReviewById)}
         sourceShopIds={sourceShopIds}
         defaultShopId={currentShopId}
         connected={connected}

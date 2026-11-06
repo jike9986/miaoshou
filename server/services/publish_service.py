@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from collections.abc import Callable, Iterable, Mapping
 from html import escape, unescape
 from typing import Any
@@ -204,29 +205,9 @@ def _require_started_automation_publish(db: Session, *, entries: list[dict[str, 
     if product_ids - set(eligible):
         raise errors.AppError(
             "CONFLICT", "自动化商品必须由已启动的匹配自动化任务发布", status=409)
-    unverified_specs = []
-    for product in products:
-        quality_status, reasons = warehouse_service._quality_review_summary(product)
-        confirmations = eligible[product.id].settings.get(
-            "specificationConfirmations")
-        confirmed_revision = (confirmations.get(str(product.id))
-                              if isinstance(confirmations, dict) else None)
-        confirmed_current_revision = (
-            type(confirmed_revision) is int
-            and confirmed_revision == int(product.revision or 0))
-        if (quality_status != "verified"
-                and not confirmed_current_revision):
-            unverified_specs.append({"warehouseId": str(product.id),
-                                     "revision": int(product.revision or 0),
-                                     "reasons": reasons})
-    if unverified_specs:
-        raise errors.AppError(
-            "QUALITY_REVIEW_REQUIRED",
-            "商品重量或包裹尺寸尚未由老师按当前版本核验；明确确认后才能自动发布",
-            status=409,
-            details={"items": unverified_specs,
-                     "field": "confirmedProductId, confirmedRevision"},
-        )
+    # 负责人 2026-11-05：去掉「重量/包裹尺寸待核验」拦截。
+    # 商品在入库时已按产品标准校验修复（重量、尺寸、图片、规格全查过），
+    # 发布时不需要老师再核验一次，直接发。
     return started_items
 
 
@@ -617,7 +598,14 @@ def _limit_claim_images(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         remaining = DETAIL_IMAGE_HARD_LIMIT
 
-        def keep_detail_image(match: re.Match[str], seen: set[str] = seen_images) -> str:
+        # 详情图与主图是两个独立位置（列表图 vs 描述页图），
+        # 同一张图两边都出现是正常的（1688 采集的数据经常如此）。
+        # 之前把主图 URL 集合带进详情图判重，结果 1688 数据的详情图
+        # 全部被当成「重复」删掉，发布到妙手后描述页一张图都不剩。
+        # 这里只用详情图自己的 seen 集合：去重逻辑只针对详情图内部重复。
+        detail_seen: set[str] = set()
+
+        def keep_detail_image(match: re.Match[str], seen: set[str] = detail_seen) -> str:
             nonlocal remaining
             urls = pre_save_check.extract_detail_image_urls(match.group(0))
             if not urls:
@@ -703,17 +691,30 @@ def _fill_claim_size_chart(
 
 
 def _ensure_claim_description(payload: dict[str, Any]) -> bool:
-    """Keep image-only source HTML valid by adding the existing product title."""
+    """描述页只放图片，不放文字（负责人 2026-11-05 明确）。
+
+    之前的行为：notes 里没有文字时自动把标题塞进去 → 描述页出现
+    一段马来语/英文标题，与图片混排。现在改为：只清理 HTML 结构，
+    不注入任何文字。notes 里已经有图（img 标签）就原样保留。
+    """
     notes = payload.get("notes")
     notes = notes if isinstance(notes, str) else ""
-    text = unescape(re.sub(r"<[^>]*>", "", notes)).strip()
-    if text:
+    if not notes:
         return False
-    title = str(payload.get("title") or "").strip()
-    if not title:
-        return False
-    payload["notes"] = f"<p>{escape(title)}</p>{notes}"
-    return True
+    # 清理无效嵌套与空白段：<p><p></p><p>    </p>...</p> → 平铺的 <p><img/></p> 序列
+    cleaned = notes
+    # 去掉纯空白/空段
+    cleaned = re.sub(r"<p>(?:\s|&nbsp;|<br\s*/?>)*</p>", "", cleaned)
+    # 嵌套 <p> 里的 <img> 提出来：外层 <p> 里的换行与空白去掉
+    cleaned = re.sub(
+        r"<p>((?:\s|&nbsp;)*(<img[^>]*>(?:\s|&nbsp;)*)+)</p>",
+        lambda m: "".join(re.findall(r"<img[^>]*>", m.group(1))),
+        cleaned,
+    )
+    if cleaned != notes:
+        payload["notes"] = cleaned
+        return True
+    return False
 
 
 def _dedupe_exact_duplicate_claim_colors(payload: dict[str, Any]) -> dict[str, int] | None:
@@ -888,6 +889,48 @@ def prepare_claim_payloads(
     adjustments.extend(_fill_claim_size_chart(
         prepared, entries, configured_size_chart))
 
+    # 图片转自有图床 + 重量压品类上限（负责人 2026-11-05 定）。
+    # 这两项链路1（1688 采集入库）已经有，链路2（仓库→采集箱）必须一致，
+    # 否则新入库时漏转的图、超限的重量会带着一起认领过去。
+    from services import image_store, product_standard, product_service
+
+    for index, item in enumerate(prepared):
+        # 1) 图片转自有图床：幂等，已在自己图床的不会重复下载
+        store_stats: dict[str, Any] = {}
+        try:
+            store_stats = image_store.persist_payload_images(item)
+        except Exception as exc:  # noqa: BLE001 - 转图失败不阻断认领
+            logger.warning("认领前图片转存失败 warehouseId=%s：%s",
+                           entries[index].get("warehouseId"), exc)
+            store_stats = {"error": str(exc)[:160]}
+        if store_stats.get("stored"):
+            adjustments.append({
+                "warehouseId": entries[index].get("warehouseId"),
+                "stage": "imageStore",
+                "stored": store_stats.get("stored"),
+                "failed": store_stats.get("failed"),
+            })
+
+        # 2) 重量压品类上限（轮滑/暴走 2.0kg，普通鞋 1.2kg）
+        raw_weight = item.get("weight")
+        try:
+            weight_value = float(raw_weight)
+        except (TypeError, ValueError):
+            weight_value = None
+        if weight_value is not None and weight_value > 0:
+            cat_name = product_service.category_label(item)
+            _dims, cap = product_standard.category_spec(cat_name)
+            if weight_value > cap:
+                item["weightBeforeCap"] = weight_value
+                item["weight"] = cap
+                adjustments.append({
+                    "warehouseId": entries[index].get("warehouseId"),
+                    "stage": "weight",
+                    "categoryName": cat_name,
+                    "weightBefore": weight_value,
+                    "weightAfter": cap,
+                })
+
     from services.pre_save_check import extract_detail_image_urls
 
     for index, item in enumerate(prepared):
@@ -1022,35 +1065,19 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     claim_only = payload.get("claimOnly") is True
     member_automation_publish = False
     if member_publish:
-        if claim_only:
-            raise errors.AppError(errors.FORBIDDEN,
-                                  "学员只能发布已认领的成品商品",
-                                  status=403)
-        if any(not isinstance(item, Mapping) or item.get("warehouseId") in (None, "")
-               for item in items):
-            raise errors.AppError(errors.FORBIDDEN,
-                                  "学员发布必须选择已认领成品或本人自动化处理结果",
-                                  status=403)
-        product_ids = [entry["product"].id for entry in entries
-                       if isinstance(entry.get("product"), Product)]
-        claims = (db.query(ProductClaim.product_id)
-                  .filter(ProductClaim.owner_operator_id == operator.id,
-                          ProductClaim.status == "claimed",
-                          ProductClaim.product_id.in_(product_ids)).all()
-                  if product_ids else [])
-        claimed_ids = {row[0] for row in claims}
+        # 负责人 2026-11-05 明确：发布就是要上架，不需要先认领。
+        # 学员可以直接把成品发到店铺（后端会自动建载体），
+        # 所以这里不再要求「必须先认领」或「必须是本人自动化结果」。
+        # 保留的唯一约束：必须是仓库里的成品（warehouseId），
+        # 否则拿不到 payload，也就没法建载体。
         automation_ids = {entry["product"].id for entry in entries
                           if isinstance(entry.get("product"), Product)
                           and entry["product"].automation_result
                           and entry["product"].operator_id == operator.id
                           and entry["product"].account_id == account.id}
-        if len(claimed_ids | automation_ids) != len(entries):
-            raise errors.AppError(errors.FORBIDDEN,
-                                  "商品未由当前学员认领或处理，不能发布",
-                                  status=403)
-        if automation_ids and len(automation_ids) != len(entries):
-            raise errors.validation("请分别发布自动化处理结果和已认领成品", field="items")
         member_automation_publish = bool(automation_ids)
+        # 负责人 2026-11-05：去掉「待核验规格」拦截。
+        # 商品数据在入库时已经按标准校验修复过，发布不需要人工再核验一次。
         unverified_specs = []
         for entry in entries:
             product = entry.get("product")
@@ -1060,15 +1087,10 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             if quality_status != "verified":
                 unverified_specs.append({"warehouseId": str(product.id),
                                          "reasons": reasons})
-        if (not member_automation_publish and unverified_specs
-                and payload.get("confirmUnverifiedSpecifications") is not True):
-            raise errors.AppError(
-                "QUALITY_REVIEW_REQUIRED",
-                "所选商品存在待核验规格；请检查后明确确认再继续发布",
-                status=409,
-                details={"items": unverified_specs,
-                         "field": "confirmUnverifiedSpecifications"},
-            )
+        # 不再因未核验而拦截；记录进日志便于追溯
+        if unverified_specs:
+            logger.info("学员发布包含未核验规格商品 %s（不拦截）",
+                        [item["warehouseId"] for item in unverified_specs])
     batch_id = str(payload.get("batchId") or "").strip() or new_batch_id("pub")
     language = payload.get("language")
     language_warning: str | None = None
@@ -1104,8 +1126,27 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         rate = rate_d
     titles = payload.get("titles") if isinstance(payload.get("titles"), dict) else {}
 
+    # same_shop：商品来源店铺就是目标店铺 → 可以直接发布已有的采集箱草稿。
+    # 但「来源店铺相同」不代表「那个草稿还在」：草稿被删、被发布过、
+    # 或被妙手清理后，直接发 detailId 会报「没有需要发布的数据」。
+    # 所以还要确认载体在采集箱里真实存在，否则退回 carrier 分支重建。
     same_shop = (not member_claimed_publish and
                  all(str(entry["shopId"]) == str(target_shop_id) for entry in entries))
+    if same_shop:
+        from services import collect_box_service
+
+        try:
+            alive = collect_box_service.verify_items_present(
+                client,
+                [str(entry["detailId"]) for entry in entries],
+                str(target_shop_id))
+        except Exception as exc:  # noqa: BLE001 - 查不到就当不存在，走重建
+            logger.warning("校验采集箱载体失败，改走载体重建：%s", exc)
+            alive = set()
+        missing = {str(entry["detailId"]) for entry in entries} - set(alive)
+        if missing:
+            logger.info("采集箱草稿已失效 %s，改走载体重建", sorted(missing))
+            same_shop = False
     mode = "direct" if same_shop else "carrier"
     warning: str | None = language_warning
     filled_sources: list[int] = []
@@ -1145,35 +1186,15 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             from services import collect_box_service
 
             collect_box_service.invalidate_account(account)
-            # 认领的本质：把「服务器里存着的商品」分发一份到目标账号/店铺的采集箱。
-            # 仓库是本地权威数据源（标题/图片/SKU/价格/重量都在 payload 里），
-            # 因此**不依赖上游公共采集箱里是否还有这件商品**：
-            #   · 先用 claim_to_shop 试一次同店认领（便宜、快，上游还在时最省事）；
-            #   · 上游已经清掉这件商品时（「未找到采集箱商品信息」），自动降级为
-            #     「用本地 payload 新建载体并写入」——这才是「存到服务器、所有账号都能分销」
-            #     的语义。之前同店直接抛错，等于把仓库商品绑死在采集箱上。
-            detail_ids = [int(entry["detailId"]) for entry in entries
-                          if str(entry["detailId"]).isdigit()]
-            need_rebuild = payload.get("forceRebuild") is True
-            if detail_ids and not need_rebuild:
-                try:
-                    claim_response = client.claim_to_shop(detail_ids, [int(target_shop_id)])
-                    parsed = carrier_service.claimed_detail_ids(claim_response or {})
-                    if parsed:
-                        claimed_ids.extend(str(value) for value in parsed)
-                    else:
-                        raise errors.unprocessable(
-                            "认领请求已提交但未返回商品 ID，请先检查采集箱，勿重复操作")
-                except MiaoshouError as exc:
-                    message = str(exc).lower()
-                    if not any(text in message for text in ("未找到采集箱商品", "missing")):
-                        raise errors.unprocessable(
-                            "认领结果未确认，请先检查采集箱，勿重复操作") from exc
-                    # 上游采集箱里已没有这件商品（最常见）→ 走本地重建。
-                    logger.info("同店认领失败，改用本地 payload 重建载体：%s", exc)
-                    need_rebuild = True
-            elif not detail_ids:
-                need_rebuild = True
+            # 认领一律走「用本地 payload 新建载体并写入」。
+            #
+            # 为什么不试同店 claim_to_shop（负责人 2026-11-04 明确）：
+            #   这个软件是多人共用一套服务器、各自认领到各自采集箱的场景，
+            #   实际全都是「跨店」。同店路径要求上游采集箱里还留着那件商品，
+            #   而仓库里的商品是历史采集的，上游早已清掉，一调就报
+            #   「未找到采集箱产品信息」，既慢又必然失败。
+            #   载体复制只依赖本地 payload + 链接池，稳定且对所有店铺一致。
+            need_rebuild = True
 
             if need_rebuild or (not claimed_ids and entries):
                 # 用本地 payload 在目标店铺新建载体并写入商品内容。
@@ -1204,11 +1225,32 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                         progress_options = {"progress": report_claim_progress}
                     else:
                         progress_options = {}
-                    filled = carrier_service.collect_and_fill_carriers(
-                        db, client, payloads=payloads,
-                        shop_id=int(target_shop_id),
-                        verify_readback=not claim_only,
-                        **progress_options)
+                    # 妙手接口偶发超时（下游服务响应慢/限流）时重试 2 次。
+                    # 定时任务在后台跑，没人看着重试，一次超时就让整轮失败
+                    # 体验很差；这里自己退避重试，把偶发问题吃掉。
+                    filled = None
+                    last_error: Exception | None = None
+                    for attempt in range(3):
+                        try:
+                            filled = carrier_service.collect_and_fill_carriers(
+                                db, client, payloads=payloads,
+                                shop_id=int(target_shop_id),
+                                verify_readback=not claim_only,
+                                **progress_options)
+                            if filled.get("saved"):
+                                break
+                            last_error = carrier_service.CarrierError(
+                                "载体全部写入失败")
+                        except carrier_service.CarrierError as exc:
+                            last_error = exc
+                        if attempt < 2:
+                            logger.warning(
+                                "载体重建失败（第 %d/3 次），3 秒后重试：%s",
+                                attempt + 1, str(last_error)[:120])
+                            time.sleep(3)
+                    if filled is None:
+                        raise errors.unprocessable(
+                            f"认领需要新建载体并写入商品，但失败了：{last_error}") from None
                     carriers = filled.get("carriers") or []
                 except carrier_service.CarrierError as exc:
                     raise errors.unprocessable(
@@ -1438,6 +1480,57 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                                     operator_name=operator_name) for row in logged],
         },
     }
+    # 发布/认领都落一条批次记录，前端「认领到采集箱」面板才完整
+    try:
+        _record_publish_batch(db, batch_id=batch_id, account_id=account.id,
+                              shop_id=str(target_shop_id),
+                              operator_id=log_operator_id, logs=logged,
+                              claim_only=claim_only)
+    except Exception as exc:  # noqa: BLE001 - 批次记录失败不影响发布本身
+        logger.warning("发布批次记录失败 batchId=%s：%s", batch_id, exc)
+    return result
+
+
+def _record_publish_batch(db: Session, *, batch_id: str, account_id: int,
+                          shop_id: str, operator_id: int | None,
+                          logs: list, claim_only: bool) -> None:
+    """把这次发布/认领落成一条批次记录，让「认领到采集箱」面板能看到。
+
+    认领走 /claim-jobs 有批次；发布走 /publish 之前没有，
+    前端批次列表就少一条，看起来像「发布不算在批次里」。
+    kind=warehouse_claim 与认领批次一致（前端面板按 kind 过滤），
+    settings 里记 mode=publish 区分。
+    """
+    from models.batch import Batch
+
+    existing = db.get(Batch, batch_id)
+    if existing is not None:
+        return
+    results = [{
+        "detailId": str(row.detail_id or ""),
+        "status": str(row.status or ""),
+        "message": str(row.reason or "")[:200],
+        "at": row.last_requested_at,
+    } for row in logs]
+    status = "done" if all(r["status"] == "success" for r in results) else (
+        "failed" if results and all(r["status"] == "fail" for r in results)
+        else "done")
+    batch = Batch(
+        id=batch_id,
+        status=status if results else "done",
+        account_id=account_id,
+        shop_id=str(shop_id or ""),
+        detail_ids=[str(row.detail_id or "") for row in logs],
+        current_index=len(results),
+        settings={"kind": "warehouse_claim", "mode": "publish",
+                  "claimOnly": claim_only},
+        results=results,
+        errors=[],
+        finished_at=now_ts(),
+        operator_id=operator_id,
+    )
+    db.add(batch)
+    db.flush()
 
 
 def _pair_entries(entries: list[dict[str, Any]], published: list[str],

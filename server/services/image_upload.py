@@ -288,10 +288,51 @@ def _upload_sftp(source: Path, *, timeout: int = 30) -> str:
 
 
 def upload_image(path: str | Path, *, timeout: int = 30) -> str:
-    """把本地图片传到图床，返回公开 HTTPS 地址。"""
+    """把本地图片传到图床，返回公开 HTTPS 地址。
+
+    三种模式（按优先级）：
+      1. AOHUANG_IMAGE_LOCAL_DIR —— 图床就在本机时直接复制文件，最快
+         （服务器端部署用这个：/var/www/... 就是 nginx 的静态目录）
+      2. IMAGE_UPLOAD_URL —— 走 HTTP 上传接口
+      3. SFTP —— 默认，需要凭据文件
+    """
     source = Path(path)
     if not source.is_file():
         raise ImageUploadError("图片文件无法读取")
+
+    # 1) 本地目录模式：图床目录就在这台机器上
+    local_dir = os.environ.get("AOHUANG_IMAGE_LOCAL_DIR", "").strip()
+    if local_dir:
+        return _copy_to_local_dir(source, local_dir)
+
     if os.environ.get("IMAGE_UPLOAD_URL", "").strip():
         return _upload_http(source, timeout=timeout)
     return _upload_sftp(source, timeout=timeout)
+
+
+def _copy_to_local_dir(source: Path, local_dir: str) -> str:
+    """把图片复制到本机图床目录，返回公开地址。"""
+    import shutil
+
+    base = os.environ.get(
+        "AOHUANG_IMAGE_LOCAL_BASE",
+        DEFAULT_SFTP_PUBLIC_BASE,
+    ).strip()
+    if not base.endswith("/"):
+        base += "/"
+    target_dir = Path(local_dir)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ImageUploadError("图床目录无法创建") from exc
+
+    raw = source.read_bytes()
+    name = _safe_filename(source, raw)
+    target = target_dir / name
+    if not target.exists() or target.stat().st_size != len(raw):
+        try:
+            shutil.copyfile(source, target)
+            os.chmod(target, 0o644)
+        except OSError as exc:
+            raise ImageUploadError("写入图床目录失败") from exc
+    return base + name

@@ -19,7 +19,7 @@ import os
 import threading
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 
@@ -483,6 +483,35 @@ class MiaoshouClient:
     def common_box_detail(self, common_detail_id: int | str) -> dict[str, Any]:
         return self.post(COMMON_BOX_BASE + "get_common_collect_box_detail",
                          {"commonCollectBoxDetailId": int(common_detail_id)})
+
+    def add_common_box_detail(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """创建公共采集箱产品（把一件商品投放到公共采集箱）。
+
+        POST /open/v1/product/common_collect_box/common_collect_box/add_common_collect_box_detail
+        这是「往公共箱写入」的唯一入口——之前试的 save/add/push 都不存在。
+        """
+        return self.post(COMMON_BOX_BASE + "add_common_collect_box_detail",
+                         dict(payload))
+
+    def edit_common_box_detail(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """编辑公共采集箱产品。"""
+        return self.post(COMMON_BOX_BASE + "edit_common_collect_box_detail",
+                         dict(payload))
+
+    def batch_delete_common_box_detail(self, detail_ids: list[int]) -> dict[str, Any]:
+        """批量删除公共采集箱产品。"""
+        return self.post(COMMON_BOX_BASE + "batch_delete_common_collect_box_detail",
+                         {"commonCollectBoxDetailIds": [int(x) for x in detail_ids]})
+
+    def fetch_item_to_common_box(self, collect_links: list[str]) -> dict[str, Any]:
+        """通过货源链接采集货源（把 1688 链接直接采进公共采集箱）。
+
+        POST .../fetch_item  Body: {collectLinks: [...]}，一次最多 50 条。
+        """
+        links = [str(x) for x in collect_links if str(x).strip()][:50]
+        if not links:
+            raise MiaoshouError("请提供货源链接", kind="error")
+        return self.post(COMMON_BOX_BASE + "fetch_item", {"collectLinks": links})
 
     def claim_common_to_platform(self, items: list[tuple[int, str, int]]) -> dict[str, Any]:
         if not items:

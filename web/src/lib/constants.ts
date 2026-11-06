@@ -42,6 +42,7 @@ export const LANGUAGE_NAMES: Record<string, string> = {
 
 /** 定时频率选项（api.md §9.2） */
 export const SCHEDULE_FREQUENCY_OPTIONS: Array<{ value: ScheduleFrequency; label: string }> = [
+  { value: "once", label: "仅一次" },
   { value: "daily", label: "每天" },
   { value: "weekly", label: "每周" },
   { value: "monthly", label: "每月" },

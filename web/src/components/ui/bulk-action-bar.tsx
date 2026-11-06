@@ -61,7 +61,10 @@ export function BulkActionBar({
           exit={{ opacity: 0, y: 4, transition: { duration: 0.14, ease: ease.in } }}
           transition={{ duration: 0.2, ease: ease.out }}
           className={cn(
-            "fixed bottom-6 left-1/2 z-40 flex h-12 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 items-center gap-3 overflow-x-auto",
+            // 居中：用 left-0 right-0 + mx-auto + w-fit，而不是 left-1/2 + -translate-x-1/2。
+            // 后者在有 transform 的祖先里会失效（fixed 相对该祖先定位，中心点算错，
+            // 表现为整体偏右），前者靠外边距自适应，不受 translate 影响。
+            "fixed bottom-6 left-0 right-0 z-40 mx-auto flex h-12 w-fit max-w-[calc(100vw-1.5rem)] items-center gap-3 overflow-x-auto",
             "rounded-lg bg-inverse px-3 text-white shadow-3",
             className
           )}

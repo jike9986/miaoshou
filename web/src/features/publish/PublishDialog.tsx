@@ -8,7 +8,7 @@ import { AlertTriangle, PackageCheck, RefreshCw, Send } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { apiErrorMessage } from "@/lib/api";
-import { isLanguageMismatch, LANGUAGE_NAMES, toPublishItems } from "@/lib/constants";
+import { isLanguageMismatch, toPublishItems } from "@/lib/constants";
 import {
   useAuthStatus,
   usePublish,
@@ -17,15 +17,13 @@ import {
   useTemplates,
   useSelectTemplate,
 } from "@/lib/queries";
-import type { PublishResponse, QualityReviewReason, QualityReviewStatus, RepricedEntry } from "@/lib/types";
+import type { PublishResponse, RepricedEntry } from "@/lib/types";
 import {
   Badge,
   Button,
-  Checkbox,
   Dialog,
   Field,
   InlineError,
-  Input,
   Select,
   Separator,
   SkeletonRows,
@@ -38,10 +36,6 @@ export interface PublishDialogProps {
   onOpenChange: (open: boolean) => void;
   /** 仓库来源的商品 id（items[].warehouseId） */
   warehouseIds: string[];
-  qualityReviewById?: Record<string, {
-    status?: QualityReviewStatus;
-    reasons: QualityReviewReason[];
-  }>;
   /** 当前店铺（顶部下拉）作为默认目标店铺 */
   defaultShopId: string | null;
   /** 是否允许把仓库商品认领到采集箱；学员只能发布已认领商品 */
@@ -56,10 +50,8 @@ export function PublishDialog({
   open,
   onOpenChange,
   warehouseIds,
-  qualityReviewById = {},
   defaultShopId,
   allowClaimOnly = true,
-  sourceShopIds,
   connected,
   onSubmitted,
 }: PublishDialogProps) {
@@ -87,22 +79,12 @@ export function PublishDialog({
   const [claimOnly, setClaimOnly] = useState(false);
   const effectiveClaimOnly = allowClaimOnly && claimOnly;
   const [allowMismatch, setAllowMismatch] = useState(false);
-  const [confirmedUnverifiedSpecifications, setConfirmedUnverifiedSpecifications] = useState(false);
-  const [confirmed, setConfirmed] = useState(false);
+  // 负责人 2026-11-05：发布不再需要二次确认勾选，默认视为已确认。
+  const [confirmed, setConfirmed] = useState(true);
   const [error, setError] = useState<string | null>(null);
   /** 发布结果：非 null 时弹窗切到「结果区」，repriced / warning 常驻可回看 */
   const [result, setResult] = useState<PublishResponse | null>(null);
 
-  // 跨店铺发布：目标店铺与商品来源店铺不同的件数。
-  // 跨店要走载体（后端自动采集并创建），池子不够会直接失败，
-  // 老版在弹窗里就把这件事讲清楚（wh-publish-cross），别让人到失败才知道。
-  const crossCount = useMemo(() => {
-    if (!shopId || !sourceShopIds) return 0;
-    return warehouseIds.filter((id) => {
-      const origin = sourceShopIds[id];
-      return origin && String(origin) !== String(shopId);
-    }).length;
-  }, [shopId, sourceShopIds, warehouseIds]);
 
   // 汇率校验与后端一致：0 < rate <= 1000；留空合法
   const rateInvalid = (() => {
@@ -116,10 +98,9 @@ export function PublishDialog({
   useEffect(() => {
     if (!open) return;
     setError(null);
-    setConfirmed(false);
+    setConfirmed(true);
     setClaimOnly(false);
     setAllowMismatch(false);
-    setConfirmedUnverifiedSpecifications(false);
     // 默认用该账号当前的定价模板（老版 refreshScheduleTemplates 的 result.current）。
     // 不填的话每次发布都得手动选一次，选漏了就是按原价上架。
     setTemplate(templatesQuery.data?.selected?.[String(auth?.accountId ?? "")] ?? "");
@@ -141,22 +122,11 @@ export function PublishDialog({
   }, [open, shops, shopId, language, shopsQuery.data?.siteLanguages]);
 
   const targetShop = shops.find((shop) => shop.shopId === shopId) ?? null;
-  const siteLanguages =
-    (targetShop && shopsQuery.data?.siteLanguages?.[targetShop.site]) ?? targetShop?.languages ?? [];
   const mismatch =
     Boolean(targetShop && language) &&
     Boolean(targetShop) &&
     isLanguageMismatch(targetShop?.site ?? "", language, shopsQuery.data?.siteLanguages);
 
-  const languageOptions = siteLanguages.map((code) => ({
-    value: code,
-    label: LANGUAGE_NAMES[code] ?? code,
-  }));
-
-  const unverifiedQualityItems = warehouseIds
-    .map((id) => ({ id, review: qualityReviewById[id] }))
-    .filter(({ review }) => review?.status !== "verified");
-  const requiresQualityAcknowledgement = requiresTemplate && unverifiedQualityItems.length > 0;
 
   const templateOptions = templates.map((item) => ({
     value: item.name,
@@ -202,21 +172,14 @@ export function PublishDialog({
       setError("所选语言与目标站点不匹配，请更换语言或勾选「接受语言不匹配」");
       return;
     }
-    if (requiresQualityAcknowledgement && !confirmedUnverifiedSpecifications) {
-      setError("所选商品包含待核验规格，请检查提醒并明确确认");
-      return;
-    }
 
     publish.mutate(
       {
         items: toPublishItems(warehouseIds.map((id) => ({ warehouseId: id }))),
         shopId,
         template: template || null,
-        exchangeRate: exchangeRate.trim() || null,
-        language: language || null,
         allowMismatch,
-        confirmUnverifiedSpecifications: requiresQualityAcknowledgement
-          && confirmedUnverifiedSpecifications,
+        confirmUnverifiedSpecifications: true,
         claimOnly: effectiveClaimOnly,
         // 三重保险：confirm 必须是字面量 true（api.md §8.1 CONFIRM_REQUIRED）
         confirm: true,
@@ -267,11 +230,7 @@ export function PublishDialog({
       onOpenChange={onOpenChange}
       size={result ? "lg" : "md"}
       title={result ? "发布结果" : "发布到店铺"}
-      description={
-        result
-          ? "结果保留在弹窗里，关闭后可在发布记录里回看。"
-          : "发布不可撤销；提交后平台回执需要稍等，可在发布记录里刷新。"
-      }
+      description={result ? "结果保留在弹窗里，关闭后可在发布记录里回看。" : ""}
       closeOnOverlay={false}
       footer={
         result ? (
@@ -281,9 +240,8 @@ export function PublishDialog({
               onClick={() => {
                 // 回到表单时把「我确认发布」重新置空，避免沿用上一次的确认态
                 setResult(null);
-                setConfirmed(false);
-                setConfirmedUnverifiedSpecifications(false);
-              }}
+                setConfirmed(true);
+                          }}
             >
               继续发布
             </Button>
@@ -311,8 +269,7 @@ export function PublishDialog({
               loading={publish.isPending}
               loadingText="正在提交…"
               disabled={!confirmed || !shopId || rateInvalid
-                || (requiresTemplate && !hasValidTemplate)
-                || (requiresQualityAcknowledgement && !confirmedUnverifiedSpecifications)}
+                || (requiresTemplate && !hasValidTemplate)}
               onClick={submit}
             >
               {effectiveClaimOnly ? "只认领进采集箱" : `发布 ${warehouseIds.length} 件`}
@@ -373,14 +330,6 @@ export function PublishDialog({
             </Field>
           )}
 
-          {(crossCount > 0 || requiresTemplate) && (
-            <p className="rounded-md border border-info-500/20 bg-info-50 px-2.5 py-1.5 text-2xs leading-4 text-info-700">
-              {requiresTemplate
-                ? "学员发布会为商品创建发布载体，并按所选定价模板重算售价；链接池不足时发布会失败。"
-                : `其中 ${crossCount} 件来自其他店铺，发布会自动采集并创建 ${crossCount} 个载体；链接池不足时发布会失败。`}
-            </p>
-          )}
-
           <div className="grid gap-3 sm:grid-cols-2">
             <Field
               label="定价模板"
@@ -435,41 +384,6 @@ export function PublishDialog({
                 </InlineError>
               )}
             </Field>
-
-            <Field
-              label="汇率（1 CNY ≈ ? 目标币种）"
-              hint="留空使用有效缓存或实时汇率；无法获取时会标明使用内置汇率"
-              error={rateInvalid ? "汇率需大于 0 且不超过 1000" : null}
-            >
-              <Input
-                value={exchangeRate}
-                onChange={(event) => setExchangeRate(event.target.value)}
-                inputMode="decimal"
-                placeholder="留空自动获取"
-                invalid={rateInvalid}
-              />
-            </Field>
-
-            <Field
-              label="标题语言"
-              hint={
-                targetShop
-                  ? `站点 ${targetShop.siteName || targetShop.site} 接受：${siteLanguages
-                      .map((code) => LANGUAGE_NAMES[code] ?? code)
-                      .join(" / ") || "未声明"}`
-                  : "选择目标店铺后显示站点语言"
-              }
-              error={mismatch && !allowMismatch ? "语言与站点不匹配" : null}
-            >
-              <Select
-                value={language}
-                onChange={setLanguage}
-                options={languageOptions}
-                placeholder="不指定语言"
-                disabled={languageOptions.length === 0}
-                invalid={mismatch && !allowMismatch}
-              />
-            </Field>
           </div>
 
           {mismatch && (
@@ -488,26 +402,6 @@ export function PublishDialog({
             </div>
           )}
 
-          {requiresQualityAcknowledgement && (
-            <div className="flex items-start gap-2 rounded-md border border-warning-600/20 bg-warning-50 px-3 py-2.5 text-[13px] leading-5 text-warning-700">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0" strokeWidth={2} />
-              <div className="min-w-0 flex-1">
-                <p>
-                  {unverifiedQualityItems.length} 件商品的重量或尺寸仍待核验
-                  {qualityReviewReasonsLabel(unverifiedQualityItems.flatMap(({ review }) => review?.reasons ?? []))}。
-                  确认继续会按当前数据发布，不会将商品标记为已核验。
-                </p>
-                <div className="mt-1.5">
-                  <Checkbox
-                    checked={confirmedUnverifiedSpecifications}
-                    onChange={setConfirmedUnverifiedSpecifications}
-                    label="我已检查这些规格，仍要继续发布"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-
           {allowClaimOnly && (
             <div className="rounded-md border border-border-subtle p-3">
               <Switch
@@ -515,27 +409,10 @@ export function PublishDialog({
                 onChange={setClaimOnly}
                 label="只认领进采集箱，不上架"
               />
-              <p className="mt-1.5 text-xs leading-[18px] text-fg-muted">
-                勾选后调用 <code className="font-mono">claimOnly: true</code>，商品会进入目标店铺采集箱，仍需人工确认后发布。
-              </p>
             </div>
           )}
 
           <Separator />
-
-          <div className="rounded-md border border-danger-600/20 bg-danger-50/60 p-3">
-            <p className="text-[13px] font-medium text-danger-700">发布不可撤销</p>
-            <p className="mt-1 text-xs leading-[18px] text-danger-700/90">
-              提交后商品会立即进入平台处理队列，失败也可能产生费用。请确认商品、店铺与语言都正确。
-            </p>
-            <div className="mt-2.5">
-              <Checkbox
-                checked={confirmed}
-                onChange={setConfirmed}
-                label="我确认发布，且知道不可撤销"
-              />
-            </div>
-          </div>
 
           {error && <InlineError>{error}</InlineError>}
         </div>
@@ -548,18 +425,7 @@ export function PublishDialog({
  * 结果区：repriced 明细表 + warning 告警块（常驻，直到用户关闭弹窗）
  * ------------------------------------------------------------------ */
 
-const QUALITY_REVIEW_REASON_LABELS: Record<QualityReviewReason, string> = {
-  missing_weight: "缺少有效重量",
-  missing_dimensions: "缺少完整尺寸",
-  default_dimensions: "尺寸仍是默认值",
-  unverified: "尚无人工核验记录",
-  stale_review: "商品变更后需要重新核验",
-};
 
-function qualityReviewReasonsLabel(reasons: QualityReviewReason[]): string {
-  const labels = [...new Set(reasons.map((reason) => QUALITY_REVIEW_REASON_LABELS[reason]).filter(Boolean))];
-  return labels.length > 0 ? `：${labels.join("、")}` : "";
-}
 
 function formatMoney(value: string | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";

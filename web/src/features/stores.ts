@@ -258,10 +258,16 @@ export interface ScheduleFormDraft {
   claimOnly: boolean;
 }
 
+function scheduleNowTime(): string {
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
 export const EMPTY_SCHEDULE_FORM: ScheduleFormDraft = {
   name: "",
   frequency: "daily",
-  time: "09:30",
+  time: scheduleNowTime(),
   days: [],
   dayOfMonth: [],
   startDate: "",

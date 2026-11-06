@@ -139,6 +139,16 @@ class PublishRequest(CamelModel):
     batchId: str | None = None
 
 
+class CommonBoxPushRequest(CamelModel):
+    """把仓库成品推送到妙手公共采集箱。
+
+    items 里的 itemNum 就是仓库商品 id（复用 PublishItem 结构）。
+    不需要 shopId：公共箱不属于任何店铺。
+    """
+    items: list[PublishItem] = Field(default_factory=list)
+    accountId: str | None = None
+
+
 class ScheduleCreate(CamelModel):
     name: str | None = Field(default=None, max_length=120)
     enabled: bool = True

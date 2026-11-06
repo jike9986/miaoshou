@@ -7,7 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   CalendarClock,
-  CalendarDays,
+  PackageCheck,
   History,
   Play,
   Plus,
@@ -18,8 +18,7 @@ import { cn, formatCount, formatRelative } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
 import {
   LIMITS,
-  SCHEDULE_FREQUENCY_OPTIONS,
-  SITE_LANGUAGES,
+  SCHEDULE_FREQUENCY_OPTIONS
 } from "@/lib/constants";
 import {
   useAuthStatus,
@@ -43,9 +42,8 @@ import {
   Badge,
   Button,
   Card,
-  Checkbox,
   ConfirmDialog,
-  Drawer,
+  Dialog,
   EmptyState,
   ErrorState,
   Field,
@@ -565,6 +563,42 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
  * 新建 / 编辑抽屉（api.md §9.2）
  * ------------------------------------------------------------------ */
 
+import { ProductPickerDialog } from "@/features/schedules/ProductPickerDialog";
+import { DatePicker } from "@/features/schedules/DatePicker";
+import { TimePicker } from "@/features/schedules/TimePicker";
+
+/** 当前时间默认值：HH:MM 与 YYYY-MM-DD。 */
+function nowTime(): string {
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+function nowDate(): string {
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/** 任务名默认值：定时发布-20261105-1930（创建那一刻的年月日-时分）。 */
+function defaultScheduleName(): string {
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `定时发布-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+}
+
+/** 今天执行时，把已过的时间点禁用；其他日期不限。 */
+function todayMinTime(draft: { frequency: ScheduleFrequency; startDate: string }): string | undefined {
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  const todayIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const isToday = draft.frequency === "once" || draft.frequency === "range"
+    ? draft.startDate === todayIso
+    : true;
+  if (!isToday) return undefined;
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
 interface ScheduleFormDrawerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -615,6 +649,8 @@ function ScheduleFormDrawer({
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [plannedRuns, setPlannedRuns] = useState(1);
   const [productPage, setProductPage] = useState(1);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerSelected, setPickerSelected] = useState<string[]>([]);
   /**
    * 用户是否手动选过模板。
    *
@@ -671,7 +707,7 @@ function ScheduleFormDrawer({
       setDraft({
         name: task.name,
         frequency: (task.frequency as ScheduleFrequency) ?? "daily",
-        time: task.time || "09:30",
+        time: task.time || nowTime(),
         days: task.days,
         dayOfMonth: task.dayOfMonth,
         startDate: task.startDate,
@@ -687,7 +723,11 @@ function ScheduleFormDrawer({
       setPlannedRuns(task.plannedRuns ?? 1);
       return;
     }
-    setDraft(EMPTY_SCHEDULE_FORM);
+    setDraft({
+      ...EMPTY_SCHEDULE_FORM,
+      time: nowTime(),
+      startDate: nowDate(),
+    });
     setEnabled(true);
     setSelectedProductIds([]);
     setPlannedRuns(1);
@@ -745,6 +785,25 @@ function ScheduleFormDrawer({
     if (draft.frequency === "monthly" && draft.dayOfMonth.length === 0) {
       next.dayOfMonth = "每月任务至少选一个日期";
     }
+    if (draft.frequency === "once" && !draft.startDate) {
+      next.startDate = "请选择执行日期";
+    }
+    // 时间不能早于当前时刻：选了今天且时间已过 → 拒绝。
+    // 其他频率同理（今天这一轮已经错过，避免建完立刻显示「已逾期」）。
+    if (!next.time && /^([01]\d|2[0-3]):[0-5]\d$/.test(draft.time)) {
+      const now = new Date();
+      const pad = (value: number): string => String(value).padStart(2, "0");
+      const todayIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+      const nowHm = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      const targetDay = draft.frequency === "once" || draft.frequency === "range"
+        ? draft.startDate
+        : todayIso;
+      if (targetDay && targetDay < todayIso) {
+        next.startDate = "执行日期不能早于今天";
+      } else if (targetDay === todayIso && draft.time < nowHm) {
+        next.time = `不能早于当前时间 ${nowHm}`;
+      }
+    }
     if (draft.frequency === "range") {
       if (!draft.startDate) next.startDate = "请选择开始日期";
       if (!draft.endDate) next.endDate = "请选择结束日期";
@@ -766,7 +825,7 @@ function ScheduleFormDrawer({
   const submit = (): void => {
     if (!validate()) return;
     onSubmit({
-      name: draft.name.trim() || `定时发布 ${draft.time}`,
+      name: draft.name.trim() || defaultScheduleName(),
       enabled,
       accountId: runAccountId || accountId,
       shopId,
@@ -774,13 +833,16 @@ function ScheduleFormDrawer({
       frequency: draft.frequency,
       days: draft.frequency === "weekly" ? draft.days : [],
       dayOfMonth: draft.frequency === "monthly" ? draft.dayOfMonth : [],
-      startDate: draft.frequency === "range" ? draft.startDate : "",
+      startDate: draft.frequency === "range" || draft.frequency === "once"
+        ? draft.startDate : "",
       endDate: draft.frequency === "range" ? draft.endDate : "",
       time: draft.time,
       perRun: draft.perRun,
       selectedProductIds,
-      plannedRuns: selectedProductIds.length ? plannedRuns : null,
-      claimOnly: draft.claimOnly,
+      plannedRuns: selectedProductIds.length
+        ? Math.ceil(selectedProductIds.length / Math.max(1, draft.perRun))
+        : null,
+      claimOnly: false,
     });
   };
 
@@ -788,12 +850,12 @@ function ScheduleFormDrawer({
     list.includes(value) ? list.filter((item) => item !== value) : [...list, value].sort((a, b) => a - b);
 
   return (
-    <Drawer
+    <Dialog
       open={open}
       onOpenChange={onOpenChange}
       size="lg"
       title={task ? "编辑定时任务" : "新建定时任务"}
-      description={task ? task.id : "选择仓库商品并安排每轮发布数量"}
+      description=""
       closeOnOverlay={false}
       footer={
         <>
@@ -807,11 +869,11 @@ function ScheduleFormDrawer({
       }
     >
       <div className="flex flex-col gap-4">
-        <Field label="任务名称" hint={`留空自动生成；最多 ${LIMITS.scheduleNameLength} 个字符`} error={errors.name ?? null}>
+        <Field label="任务名称"  error={errors.name ?? null}>
           <Input
             value={draft.name}
             maxLength={LIMITS.scheduleNameLength}
-            placeholder={`定时发布 ${draft.time}`}
+            placeholder={defaultScheduleName()}
             onChange={(event) => patch({ name: event.currentTarget.value })}
           />
         </Field>
@@ -866,30 +928,17 @@ function ScheduleFormDrawer({
           label="选择发布商品"
           required
           error={errors.selectedProductIds ?? null}
-          hint={`已选 ${selectedProductIds.length} 件`}
         >
-          <div className="max-h-56 overflow-y-auto rounded-md border border-border-subtle">
-            {productsQuery.isLoading ? (
-              <p className="p-3 text-sm text-fg-muted">正在加载仓库商品…</p>
-            ) : products.length === 0 ? (
-              <p className="p-3 text-sm text-fg-muted">当前账号没有可选仓库商品</p>
-            ) : products.map((product) => (
-              <label key={product.id} className="flex min-h-10 items-center gap-2 border-b border-border-subtle px-3 last:border-0 hover:bg-surface-hover">
-                <Checkbox
-                  checked={selectedProductIds.includes(product.id)}
-                  onChange={(checked) => setSelectedProductIds((current) =>
-                    checked ? [...current, product.id] : current.filter((id) => id !== product.id))}
-                />
-                <span className="min-w-0 flex-1 truncate text-[13px]">{product.title || "未命名商品"}</span>
-                <span className="text-2xs text-fg-muted">{product.status}</span>
-              </label>
-            ))}
-          </div>
-          <div className="mt-2 flex items-center justify-between">
-            <Button size="sm" variant="ghost" disabled={productPage <= 1} onClick={() => setProductPage((page) => page - 1)}>上一页</Button>
-            <span className="text-xs text-fg-muted">第 {productPage} 页 / 共 {Math.max(1, Math.ceil((productsQuery.data?.total ?? 0) / 100))} 页</span>
-            <Button size="sm" variant="ghost" disabled={!productsQuery.data?.hasMore} onClick={() => setProductPage((page) => page + 1)}>下一页</Button>
-          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            icon={<PackageCheck className="size-3.5" />}
+            onClick={() => setPickerOpen(true)}
+          >
+            {selectedProductIds.length > 0
+              ? `已选 ${selectedProductIds.length} 件，点击修改`
+              : "点击选择商品"}
+          </Button>
         </Field>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -904,17 +953,27 @@ function ScheduleFormDrawer({
             />
           </Field>
 
-          <Field label="执行时间" required error={errors.time ?? null} hint="本地时区，HH:MM">
-            <Input
+          <Field label="执行时间" required error={errors.time ?? null}>
+            <TimePicker
               value={draft.time}
-              inputMode="numeric"
-              placeholder="09:30"
-              numeric
+              onChange={(next) => patch({ time: next })}
               invalid={Boolean(errors.time)}
-              onChange={(event) => patch({ time: event.currentTarget.value })}
+              minTime={todayMinTime(draft)}
             />
           </Field>
         </div>
+
+        {draft.frequency === "once" && (
+          <Field label="执行日期" required error={errors.startDate ?? null}>
+            <DatePicker
+              value={draft.startDate}
+              onChange={(next) => patch({ startDate: next })}
+              placeholder="选择执行日期"
+              invalid={Boolean(errors.startDate)}
+              minDate={new Date().toISOString().slice(0, 10)}
+            />
+          </Field>
+        )}
 
         {draft.frequency === "weekly" && (
           <Field label="星期几" required error={errors.days ?? null}>
@@ -972,24 +1031,20 @@ function ScheduleFormDrawer({
         {draft.frequency === "range" && (
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="开始日期" required error={errors.startDate ?? null}>
-              <Input
-                type="date"
+              <DatePicker
                 value={draft.startDate}
+                onChange={(next) => patch({ startDate: next })}
+                placeholder="选择开始日期"
                 invalid={Boolean(errors.startDate)}
-                onChange={(event) => patch({ startDate: event.currentTarget.value })}
               />
             </Field>
-            <Field
-              label="结束日期"
-              required
-              error={errors.endDate ?? null}
-              hint={`跨度 ≤ ${LIMITS.scheduleRangeDays} 天`}
-            >
-              <Input
-                type="date"
+            <Field label="结束日期" required error={errors.endDate ?? null}>
+              <DatePicker
                 value={draft.endDate}
+                onChange={(next) => patch({ endDate: next })}
+                placeholder="选择结束日期"
                 invalid={Boolean(errors.endDate)}
-                onChange={(event) => patch({ endDate: event.currentTarget.value })}
+                minDate={draft.startDate || undefined}
               />
             </Field>
           </div>
@@ -1000,7 +1055,6 @@ function ScheduleFormDrawer({
             label="每次数量"
             required
             error={errors.perRun ?? null}
-            hint={`${LIMITS.schedulePerRun.min}–2000 件`}
           >
             <NumberInput
               value={draft.perRun}
@@ -1014,50 +1068,37 @@ function ScheduleFormDrawer({
             />
           </Field>
 
-          <div className="flex flex-col gap-2 pt-6">
-            <Switch checked={enabled} onChange={setEnabled} label="创建后立即启用" />
-            <Checkbox
-              checked={draft.claimOnly}
-              onChange={(checked) => patch({ claimOnly: checked })}
-              label="只认领进采集箱，不上架"
-            />
-          </div>
         </div>
 
-        {selectedProductIds.length > 0 && (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="计划执行轮数" required hint={`最多可发布 ${draft.perRun * plannedRuns} 件`}>
-              <NumberInput value={plannedRuns} min={1} max={180} step={1} decimals={0} suffix="轮" onChange={(value) => setPlannedRuns(value ?? 1)} />
-            </Field>
-            <p className="self-end pb-2 text-[13px] text-fg-secondary">
-              每天执行一次时，轮数就是天数。预计 {Math.ceil(selectedProductIds.length / draft.perRun)} 轮完成；最后一轮只发布剩余商品。
-            </p>
-          </div>
-        )}
 
         {Object.keys(errors).length > 0 && (
           <InlineError>有 {Object.keys(errors).length} 项需要修正后再提交。</InlineError>
         )}
 
-        <div className="rounded-md border border-border-subtle bg-canvas-inset/60 p-3 text-xs leading-[18px] text-fg-muted">
-          <p className="flex items-center gap-1.5 font-medium text-fg-secondary">
-            <CalendarDays className="size-3.5" strokeWidth={2} />
-            执行说明
-          </p>
-          <p className="mt-1">
-            {selectedProductIds.length > 0
-              ? "任务只会处理上方选中的商品；超过计划容量时无法创建。"
-              : "未选择商品时，旧版兼容模式会自动挑选该账号下未发布的仓库商品。"}
-          </p>
-          <p className="mt-1">
-            站点语言参考：
-            {Object.entries(SITE_LANGUAGES)
-              .map(([site, languages]) => `${site}=${languages.join("/")}`)
-              .join("，")}
-          </p>
-        </div>
       </div>
-    </Drawer>
+      <ProductPickerDialog
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        products={products.map((item) => ({
+          id: item.id,
+          title: item.title || "",
+          images: item.images ?? [],
+          status: item.status,
+          claimed: Boolean(item.claimed),
+        }))}
+        loading={productsQuery.isLoading}
+        selected={pickerSelected}
+        onConfirm={(ids) => {
+          setPickerSelected(ids);
+          setSelectedProductIds(ids);
+          setPickerOpen(false);
+        }}
+        hasMore={productsQuery.data?.hasMore}
+        page={productPage}
+        onPageChange={setProductPage}
+        totalPages={Math.ceil((productsQuery.data?.total ?? 0) / 100)}
+      />
+    </Dialog>
   );
 }
 

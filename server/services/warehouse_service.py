@@ -249,9 +249,11 @@ def _quality_review_summary(product: Product) -> tuple[str, list[str]]:
 #   · 普通运动鞋/帆布鞋 0.2~1.2kg；
 #   · 服饰类软包装 0.1~1.0kg。
 CATEGORY_PACKAGE_SPECS: dict[str, dict[str, Any]] = {
-    "暴走": {"length": 35, "width": 24, "height": 14, "weightRange": (0.3, 1.5)},
-    "轮滑": {"length": 35, "width": 24, "height": 14, "weightRange": (0.3, 1.5)},
-    "旱冰": {"length": 35, "width": 24, "height": 14, "weightRange": (0.3, 1.5)},
+    # 轮滑/暴走/旱冰：整双含轮架与鞋盒，1.6~2.0kg 属正常（负责人 2026-11-05 确认），
+    # 不能按普通鞋类 1.2kg 卡住。
+    "暴走": {"length": 35, "width": 24, "height": 16, "weightRange": (0.3, 2.0)},
+    "轮滑": {"length": 35, "width": 24, "height": 16, "weightRange": (0.3, 2.0)},
+    "旱冰": {"length": 35, "width": 24, "height": 16, "weightRange": (0.3, 2.0)},
     "鞋": {"length": 33, "width": 22, "height": 12, "weightRange": (0.2, 1.2)},
     "服饰": {"length": 30, "width": 24, "height": 6, "weightRange": (0.1, 1.0)},
     "包": {"length": 32, "width": 24, "height": 10, "weightRange": (0.1, 1.2)},
@@ -2466,6 +2468,44 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         image_review_pending=gate.get("images"),
         requirements=requirements,
     )
+    # 产品标准自动修复（负责人 2026-11-05 定）：新采集的商品必须自动套用
+    # 现在这套入库标准，不能靠事后手工脚本补。
+    #   · 只在真要落库时修（save=false 的预览不动物理数据）
+    #   · 修完重跑一遍 issues，让「修没修好」体现在同一份清单里
+    standard_report: dict[str, Any] = {}
+    if enforce_pre_save and isinstance(payload, dict):
+        try:
+            from services import product_standard
+
+            _cat_name = product_service.category_label(payload)
+            _verdict = product_standard.validate(
+                payload, category_name=_cat_name,
+                language=str(language or payload.get("language") or ""))
+            if not _verdict["ok"]:
+                _repaired, _notes = product_standard.repair(
+                    payload, category_name=_cat_name,
+                    language=str(language or payload.get("language") or ""))
+                payload.clear()
+                payload.update(_repaired)
+                standard_report = {
+                    "before": _verdict["issues"][:20],
+                    "fixes": _notes[:20],
+                }
+                # 修完再校验一次：真正修不好的（如字段缺失）才继续报错
+                _again = product_standard.validate(
+                    payload, category_name=_cat_name,
+                    language=str(language or payload.get("language") or ""))
+                if _again["ok"]:
+                    # 已修好，清掉旧的 issue 清单，避免误拦
+                    issues = [
+                        i for i in issues
+                        if i not in set(_verdict["issues"])
+                    ]
+                standard_report["after"] = _again["issues"][:20]
+        except Exception as exc:  # noqa: BLE001 - 修复失败不阻断入库主流程
+            logger.warning("产品标准自动修复失败 detailId=%s：%s", detail_id, exc)
+            standard_report = {"error": str(exc)[:200]}
+
     # 闸门阻断排在规则清单前面报：它是「停下等人看」，比字段缺失更该先说。
     blocks = gate.get("blocks") or []
     if blocks and enforce_pre_save:
@@ -2596,6 +2636,9 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         category_source=category_source, category_message=category_message)
     body["draftSaved"] = draft_verified
     body["draftVerified"] = draft_verified
+    if standard_report:
+        # 让运营看见「这件商品被自动修了什么」，而不是悄悄改掉
+        body["standardRepair"] = standard_report
     if isinstance(image_store_report, dict) and image_store_report.get("stored"):
         body["imageStore"] = image_store_report
 

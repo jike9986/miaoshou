@@ -505,12 +505,19 @@ def _fresh_box_ids(client: MiaoshouClient, common_id: int | None = None,
     return ids
 
 
-def _collect_box_snapshot(client: MiaoshouClient) -> set[int] | None:
-    """Return visible TK draft IDs, or None when the pre-copy snapshot failed."""
+def _collect_box_snapshot(client: MiaoshouClient, *,
+                          page_size: int = 50) -> set[int] | None:
+    """Return visible TK draft IDs, or None when the pre-copy snapshot failed.
+
+    `page_size` 默认 50（最多扫 3 页）是给「复制回执核对」用的最小集。
+    整批复制时**不要**每件都调这个函数：采集箱 700 条时它一轮要 4s，
+    而复制本身只有 2s —— 每件都调等于把流水线拖成 6s/件（实测）。
+    整批调用方应传 `page_size=200` 只取第一页（最近创建的都在最前面）。
+    """
     found: set[int] = set()
     try:
         for page_no in range(1, 4):
-            listing = client.collect_box_list(page_no=page_no, page_size=50)
+            listing = client.collect_box_list(page_no=page_no, page_size=page_size)
             data = listing.get("data") or {}
             if not isinstance(data, Mapping):
                 return None
@@ -523,7 +530,7 @@ def _collect_box_snapshot(client: MiaoshouClient) -> set[int] | None:
                 value = row.get("collectBoxDetailId") or row.get("detailId")
                 if str(value).isdigit():
                     found.add(int(value))
-            if len(rows) < 50:
+            if len(rows) < page_size:
                 break
     except (MiaoshouError, ValueError):
         return None
@@ -599,7 +606,13 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
         copies = min(count - len(details), 100)
         if progress:
             progress({"stage": "claim", "commonId": common_id, "copies": copies})
-        before_ids = _collect_box_snapshot(client)
+        # 快照：整轮复制**只取一次**，而且只取最近一页。
+        #
+        # 它的唯一用途是「复制回执没给 detailId 时，判断捞回来的 id 是不是旧草稿」。
+        # 老实现每轮都调 `_collect_box_snapshot()` 扫 3 页 × 50 条，采集箱有
+        # 700 条时单次约 4s，把 2s 的复制拖成 6s/件 —— 这就是「明明是复制却要
+        # 五秒」的来源。新建草稿一定排在列表最前面，取一页 200 条就够。
+        before_ids = _collect_box_snapshot(client, page_size=200)
         new_ids: list[int] = []
         for _ in range(copies):
             try:
@@ -1242,13 +1255,22 @@ def normalize_spec_for_save(payload: dict[str, Any],
             if len(parts) != len(strict_props):
                 dropped += 1
                 continue
-            # 先把旧 id 换成去重后的新 id（按名称反查）
+            # key 段兼容三种形态：
+            #   1. 规格值 id（仓库原生，:id 形态）
+            #   2. 规格值名称（公共箱/重建后的形态，如 ;White;35;）
+            #   3. 旧 id（去重/改名前的），按名称反查新 id
             mapped = []
             ok = True
             for part in parts:
                 if part in id_to_dim:
                     mapped.append(part)
                     continue
+                # 名称 → id（按维度归属找）
+                by_name = name_to_new.get(part.casefold().replace(" ", ""))
+                if by_name:
+                    mapped.append(by_name)
+                    continue
+                # 旧 id → 名称 → 新 id
                 label_key = old_id_to_name.get(part)
                 new_id = name_to_new.get(label_key) if label_key else None
                 if not new_id:
@@ -1592,7 +1614,18 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
         progress({"stage": "warehouse", "shopId": shop_id,
                   "warehouseId": warehouse_id})
 
-    ready: queue.Queue[tuple[int, int] | None] = queue.Queue(maxsize=1)
+    # 队列容量 = 流水线缓冲深度。
+    #
+    # 原来 maxsize=1：消费者取走一个之后队列才空，生产者才能放下一个。
+    # 消费者一轮覆盖 ~7s，于是复制被硬生生卡成「复制→等覆盖→再复制」，
+    # 实测 4 件要 30.8s（首件覆盖 8.27s 才开始，最后一个载体到 27.74s 才建完），
+    # 根本没并行起来。
+    #
+    # 现在留 3 个缓冲：复制（~2s/次）跑在覆盖（~7s/次）前面，整批按
+    # 「覆盖耗时」而不是「复制+覆盖」计时。上限仍然存在 —— 不能让生产者
+    # 无限超前，否则一批 100 件会在还没开始覆盖时就建出 100 个空载体。
+    READY_BUFFER = 3
+    ready: queue.Queue[tuple[int, int] | None] = queue.Queue(maxsize=READY_BUFFER)
     producer_errors: list[Exception] = []
     progress_lock = threading.Lock()
     carrier_index = 0

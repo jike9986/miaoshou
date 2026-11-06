@@ -91,30 +91,38 @@ export function ProductCard({ product, isMember = false, selected, onToggle, onO
           />
         </div>
 
-        {/* 左上角只显示认领状态：未认领（灰）/ 已认领（绿）。
-            不再显示「待上架」——那是发布态，用户在这里关心的是有没有采集过。 */}
+        {/* 左上角状态：已发布（蓝）> 已认领（绿）> 未认领（灰）。
+            发布过就不该再显示「已认领」——那是两个不同阶段，
+            混在一起会让人以为商品还在采集箱里没上架。 */}
         <span
           className={cn(
             "absolute left-2 top-2 inline-flex items-center gap-1 rounded-xs px-1.5 py-0.5 text-[10px] font-medium leading-3 backdrop-blur-[2px]",
-            product.claimed
-              ? "bg-success-600/92 text-white"
-              : "bg-white/92 text-fg-muted"
+            product.publishedShopIds && product.publishedShopIds.length > 0
+              ? "bg-info-600/92 text-white"
+              : product.claimed
+                ? "bg-success-600/92 text-white"
+                : "bg-white/92 text-fg-muted"
           )}
           title={
-            product.claimed
-              ? (product.claimedShopId
-                ? `已认领到店铺 ${product.claimedShopId} 的采集箱`
-                : "已认领到当前账号的采集箱")
-              : (isMember ? "未认领：尚未采集到你的采集箱" : "未认领：尚未采集到采集箱")
+            product.publishedShopIds && product.publishedShopIds.length > 0
+              ? `已发布到店铺 ${product.publishedShopIds.join("、")}`
+              : product.claimed
+                ? (product.claimedShopId
+                  ? `已认领到店铺 ${product.claimedShopId} 的采集箱`
+                  : "已认领到当前账号的采集箱")
+                : (isMember ? "未认领：尚未采集到你的采集箱" : "未认领：尚未采集到采集箱")
           }
         >
           <span
             className={cn(
               "size-1.5 rounded-full",
-              product.claimed ? "bg-white" : "bg-fg-subtle"
+              (product.publishedShopIds && product.publishedShopIds.length > 0)
+                || product.claimed ? "bg-white" : "bg-fg-subtle"
             )}
           />
-          {product.claimed ? "已认领" : "未认领"}
+          {product.publishedShopIds && product.publishedShopIds.length > 0
+            ? "已发布"
+            : product.claimed ? "已认领" : "未认领"}
         </span>
 
         <div

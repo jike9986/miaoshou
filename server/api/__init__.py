@@ -15,6 +15,7 @@ from api import (
     claim_jobs,
     categories,
     collect_box,
+    common_box,
     groups,
     images,
     operators,
@@ -57,7 +58,7 @@ router.dependencies.append(Depends(track_client))
 
 for _module in (auth, automation_runs, shops, collect_box, warehouse, groups, categories,
                 images, publish, schedules, words, carrier, size_charts, titles,
-                sync, batch, claim_jobs):
+                sync, batch, claim_jobs, common_box):
     _guarded.include_router(_module.router)
 
 # /words 是 /violation-words 的短路径别名（任务书用短名，契约用长名）

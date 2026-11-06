@@ -373,12 +373,33 @@ def process_price(payload: Mapping[str, Any], *, template: Mapping[str, Any] | N
     return priced, report
 
 
+# 已知类目 cid → 中文名。上游详情只给 cid 不给名字时用它兜底，
+# 否则重量/包裹规格会一律按默认「鞋 1.2kg」判定（轮滑鞋 1.5kg 会被误拦）。
+KNOWN_CATEGORY_NAMES: dict[str, str] = {
+    "603171": "运动鞋",
+    "603751": "鞋子",
+    "836488": "轮滑鞋与溜冰鞋",
+    "1000584": "运动拖鞋",
+}
+
+
 def category_label(info: Mapping[str, Any]) -> str:
-    """类目展示名：优先平台中文名，其次英文名，最后 cid。"""
+    """类目展示名：优先平台中文名，其次英文名，最后按 cid 查表，再退回 cid。
+
+    上游详情经常只给 cid、不给类目名（categoryName=None），这时退回
+    「类目 836488」。但重量/包裹规格是按类目名判定的，拿不到名字就会
+    一律按「鞋 1.2kg」处理，把轮滑鞋 1.5kg 这种正常重量判成异常。
+    所以这里补一层 cid → 类目名 的已知映射兜底。
+    """
     name_cn = first_text(info.get("categoryNameChinese"), info.get("cidNameCn"))
     name = first_text(info.get("categoryName"), info.get("cidName"))
     cid = str(info.get("cid") or "").strip()
-    return name_cn or name or (f"类目 {cid}" if cid else "未分类")
+    if name_cn or name:
+        return name_cn or name
+    known = KNOWN_CATEGORY_NAMES.get(cid)
+    if known:
+        return known
+    return f"类目 {cid}" if cid else "未分类"
 
 
 # 目标语言默认马来语（与老版一致）；妙手支持 ms/en/th/vi/zh

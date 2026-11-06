@@ -107,7 +107,7 @@ GROUP_COLORS = ("slate", "rose", "amber", "emerald", "sky", "violet")
 GROUP_COLOR_DEFAULT = "slate"
 
 # 定时任务
-FREQUENCIES = ("daily", "weekly", "monthly", "range")
+FREQUENCIES = ("once", "daily", "weekly", "monthly", "range")
 SCHEDULE_MAX_RANGE_DAYS = 180
 SCHEDULE_MAX_ATTEMPTS_PER_DAY = 3
 
