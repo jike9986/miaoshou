@@ -5,6 +5,17 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawn, ChildProcess } from "node:child_process";
 import { createSessionVault } from "./sessionVault";
+import {
+  broadcastProgress,
+  discardInstaller,
+  downloadInstaller,
+  installOnQuit,
+  isInstallRequested,
+  launchInstaller,
+  pendingInstaller,
+  quitAndInstall,
+  type UpdateManifest,
+} from "./updateInstaller";
 
 // 本机实测结论（决定性实验）：
 //   在 m.js 第一行写日志，然后无参数启动 electron —— 日志文件根本不生成。
@@ -317,6 +328,51 @@ ipcMain.handle("window:toggle-maximize", () => {
 ipcMain.handle("window:close", () => mainWindow?.close());
 ipcMain.handle("window:is-maximized", () => mainWindow?.isMaximized() ?? false);
 
+/* ---------------- 客户端自更新 ----------------
+ * 后端在 shared_mode 下不下载（共享服务器装更新没意义，要装的是本机），
+ * 所以下载/校验/安装都在主进程做。渲染层只负责显示进度和按钮。
+ * 三个入口都要校验来源页面，避免被注入的 iframe 调用来下任意 exe。 */
+function trustedSender(event: Electron.IpcMainInvokeEvent): boolean {
+  return event.sender === mainWindow?.webContents
+    && event.senderFrame === mainWindow.webContents.mainFrame
+    && isTrustedPage(event.senderFrame.url);
+}
+
+ipcMain.handle("update:pending", async (event) => {
+  if (!trustedSender(event)) return null;
+  return pendingInstaller();
+});
+
+ipcMain.handle("update:download", async (event, manifest: UpdateManifest) => {
+  if (!trustedSender(event)) return { ok: false, error: "不可信的调用来源" };
+  if (!manifest || typeof manifest !== "object") {
+    return { ok: false, error: "缺少更新信息" };
+  }
+  const result = await downloadInstaller(manifest, broadcastProgress);
+  return result;
+});
+
+ipcMain.handle("update:install", async (event) => {
+  if (!trustedSender(event)) return { ok: false, error: "不可信的调用来源" };
+  return quitAndInstall();
+});
+
+ipcMain.handle("update:discard", async (event) => {
+  if (!trustedSender(event)) return { ok: false, error: "不可信的调用来源" };
+  await discardInstaller();
+  return { ok: true };
+});
+
+ipcMain.handle("update:run-installer-now", async (event, installerPath: string) => {
+  if (!trustedSender(event)) return { ok: false, error: "不可信的调用来源" };
+  // 只允许跑我们自己下到 updates 目录里的 exe，不接受任意路径
+  const pending = await pendingInstaller();
+  if (!pending || path.resolve(pending.path) !== path.resolve(String(installerPath))) {
+    return { ok: false, error: "安装包路径不受信任" };
+  }
+  return launchInstaller(pending.path, true);
+});
+
 app.whenReady().then(async () => {
   if (useRemoteServer()) {
     // 软件账号登录后才取得用户会话；不再读取旧安装目录中的共享令牌。
@@ -363,5 +419,10 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  // 用户点了「重启并安装」才装；单纯关程序不装 —— 否则下次打开发现版本
+  // 悄悄变了却不知道为什么。安装器是独立进程，本进程退出不会带走它。
+  if (isInstallRequested()) {
+    void installOnQuit();
+  }
   server?.kill();
 });

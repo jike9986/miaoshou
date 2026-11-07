@@ -16,6 +16,36 @@ declare global {
       read: () => string | null;
       write: (token: string | null) => boolean;
     };
+    /**
+     * 客户端自更新通道（app/src/updateInstaller.ts）。
+     * 后端在 shared_mode 下不下载更新包，所以正式客户端的下载/校验/安装
+     * 都由主进程完成：https 白名单 + sha256 + 原子落盘，退出时才安装。
+     */
+    update?: {
+      pending: () => Promise<{ path: string; version: string } | null>;
+      download: (manifest: {
+        version: string;
+        url: string;
+        sha256: string;
+        sizeBytes?: number;
+        notes?: string;
+      }) => Promise<{
+        ok: boolean;
+        path?: string;
+        version?: string;
+        size?: number;
+        sha256?: string;
+        error?: string;
+      }>;
+      install: () => Promise<{ ok: boolean; error?: string }>;
+      discard: () => Promise<{ ok: boolean; error?: string }>;
+      runInstallerNow: (installerPath: string) => Promise<{ ok: boolean; error?: string }>;
+      onProgress: (handler: (progress: {
+        received: number;
+        total: number;
+        percent: number;
+      }) => void) => () => void;
+    };
   }
 
   /**

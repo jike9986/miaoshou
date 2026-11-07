@@ -191,6 +191,12 @@ interface UpdateActionsProps {
 export function UpdateActions({ version, collapsed = false }: UpdateActionsProps) {
   const updateAvailable = Boolean(version?.updateAvailable);
   const remote = !isLoopbackBase(resolveApiBase());
+  // 正式客户端（连中心服务）也要能软件内更新。
+  // 后端在 shared_mode 下会拒绝下载（共享服务器装更新没意义，要装的是本机），
+  // 所以远端模式改走 Electron 主进程的本地下载：同样的 https 白名单 +
+  // sha256 校验 + 原子落盘，只是下载器在客户端而不是服务器。
+  const desktopUpdate = typeof window !== "undefined" ? window.desktop?.update : undefined;
+  const localUpdate = remote && Boolean(desktopUpdate);
   // 只在真有新版本时才去查 canInstall / readOnly：这个接口内部会拉一次清单，
   // 没更新的时候每次开页都打一遍纯属浪费。
   const status = useUpdateStatus({ enabled: updateAvailable && !remote });
@@ -199,10 +205,134 @@ export function UpdateActions({ version, collapsed = false }: UpdateActionsProps
   const install = useDownloadUpdate();
   // 本次会话内下载的结果；pendingFile 只用来在下载前提示「上次那份还在」
   const [downloaded, setDownloaded] = useState<{ verified: boolean; size?: number } | null>(null);
+  // 本地下载的进度（0-100），远端模式下由主进程广播
+  const [localProgress, setLocalProgress] = useState<number | null>(null);
+  const [localBusy, setLocalBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  // 进页面时看看上次是不是已经下好了一份还没装
+  useEffect(() => {
+    if (!localUpdate || !desktopUpdate) return;
+    let alive = true;
+    void desktopUpdate.pending().then((pending) => {
+      if (!alive || !pending) return;
+      setDownloaded({ verified: true });
+    });
+    return () => { alive = false; };
+  }, [localUpdate, desktopUpdate]);
+
+  // 订阅下载进度
+  useEffect(() => {
+    if (!localUpdate || !desktopUpdate) return;
+    return desktopUpdate.onProgress((progress) => setLocalProgress(progress.percent));
+  }, [localUpdate, desktopUpdate]);
 
   if (!updateAvailable) return null;
 
   if (remote) {
+    // 正式客户端：软件内下载 + 提示重启安装（不打断正在跑的任务）
+    if (localUpdate && desktopUpdate) {
+      const handleLocalDownload = (): void => {
+        const manifest = {
+          version: String(version?.latest || ""),
+          url: String(version?.url || ""),
+          sha256: String(version?.sha256 || ""),
+          sizeBytes: version?.sizeBytes ?? undefined,
+          notes: version?.notes ?? undefined,
+        };
+        if (!manifest.url || !manifest.sha256) {
+          setLocalError("更新清单缺少下载地址或校验值，请稍后再试");
+          return;
+        }
+        setLocalError(null);
+        setLocalBusy(true);
+        setLocalProgress(0);
+        void desktopUpdate.download(manifest).then((result) => {
+          setLocalBusy(false);
+          setLocalProgress(null);
+          if (!result.ok) {
+            setLocalError(result.error || "下载失败");
+            toast.error("安装包下载失败", { description: result.error });
+            return;
+          }
+          setDownloaded({ verified: true, size: result.size });
+          const size = formatMB(result.size);
+          toast.success("安装包已下载并校验通过", {
+            description: size
+              ? `安装包 ${size}，点「重启并安装」完成更新`
+              : "点「重启并安装」完成更新",
+          });
+        });
+      };
+
+      const handleLocalInstall = (): void => {
+        setLocalBusy(true);
+        void desktopUpdate.install().then((result) => {
+          if (!result.ok) {
+            setLocalBusy(false);
+            setLocalError(result.error || "安装失败");
+            toast.error("启动安装程序失败", { description: result.error });
+            return;
+          }
+          toast.success("正在退出并安装", { description: "安装完成后请重新打开软件" });
+        });
+      };
+
+      const busyLocal = localBusy || localProgress !== null;
+      const hasLocalPackage = downloaded !== null;
+      const label = busyLocal
+        ? (localProgress !== null ? `下载中 ${localProgress}%` : "正在准备…")
+        : hasLocalPackage ? "重启并安装" : "下载更新";
+      const disabled = busyLocal;
+
+      if (collapsed) {
+        return (
+          <div className="mt-1 flex justify-center">
+            <IconButton
+              size="sm"
+              label={label}
+              title={localError ?? label}
+              disabled={disabled}
+              icon={hasLocalPackage ? <Play /> : <Download />}
+              onClick={hasLocalPackage ? handleLocalInstall : handleLocalDownload}
+              className={cn(disabled && "cursor-progress")}
+            />
+          </div>
+        );
+      }
+      return (
+        <div className="mt-1 flex flex-col gap-1">
+          <Button
+            size="sm"
+            variant={hasLocalPackage ? "primary" : "secondary"}
+            icon={hasLocalPackage ? <Play /> : <Download />}
+            disabled={disabled}
+            loading={busyLocal}
+            onClick={hasLocalPackage ? handleLocalInstall : handleLocalDownload}
+          >
+            {label}
+          </Button>
+          {localProgress !== null && (
+            <div className="h-1 w-full overflow-hidden rounded-full bg-bg-subtle">
+              <div
+                className="h-full rounded-full bg-brand-600 transition-all duration-200"
+                style={{ width: `${localProgress}%` }}
+              />
+            </div>
+          )}
+          {localError && (
+            <p className="text-[11px] leading-4 text-danger-700">{localError}</p>
+          )}
+          {hasLocalPackage && !busyLocal && (
+            <p className="text-[11px] leading-4 text-fg-muted">
+              已下载并校验通过，点上面按钮退出并安装
+            </p>
+          )}
+        </div>
+      );
+    }
+
+    // 没有 Electron 更新通道（例如浏览器里打开）时退回打开下载页
     const url = officialUpdateUrl(version?.url);
     const label = url ? "下载安装包" : "更新链接暂不可用";
     const openDownload = (): void => {

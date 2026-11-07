@@ -84,6 +84,36 @@ const context = {
       }, { filename: "packaged-sessionVault.js" });
       return module.exports;
     }
+    if (name === "./updateInstaller") {
+      // 自更新模块要用 net / createWriteStream / spawn，这些在打包校验里
+      // 不该真跑（校验只验「模块能加载、IPC 能注册」，不验下载）。
+      // 注意 spawn 在 node:child_process 的 stub 里会抛错（防本地后端），
+      // 所以这里单独给一个不抛的版本，否则模块加载阶段就被打断。
+      const module = { exports: {} };
+      vm.runInNewContext(asar.extractFile(archive, "dist/updateInstaller.js").toString(), {
+        exports: module.exports,
+        require(name2) {
+          if (name2 === "electron") return {
+            app: { getPath: () => testData },
+            BrowserWindow: { getAllWindows: () => [] },
+            net: { request: () => ({ on() {}, end() {} }) },
+          };
+          if (name2 === "node:child_process") {
+            return { spawn: () => ({ unref() {} }) };
+          }
+          if (name2 === "node:fs/promises" || name2 === "node:fs"
+              || name2 === "node:crypto" || name2 === "node:path") {
+            return nativeRequire(name2);
+          }
+          return nativeRequire(name2);
+        },
+        Buffer,
+        process,
+        URL,
+        setTimeout,
+      }, { filename: "packaged-updateInstaller.js" });
+      return module.exports;
+    }
     if (name === "node:child_process") return { spawn() { throw new Error("Packaged client started a local backend"); } };
     return nativeRequire(name);
   },
