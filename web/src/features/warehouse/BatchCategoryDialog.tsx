@@ -30,6 +30,12 @@ export interface BatchCategoryDialogProps {
   onOpenChange: (open: boolean) => void;
   ids: string[];
   site?: string | null;
+  /**
+   * 妙手账号 id。类目缓存按账号隔离存（categories.account_id），
+   * 不传就只能查全局哨兵 account_id=0 —— 真实数据都在某账号下，
+   * 下拉会空着。
+   */
+  accountId?: string | null;
   connected: boolean;
   /**
    * 选中商品各自的当前版本号（id → revision）。
@@ -59,6 +65,7 @@ export function BatchCategoryDialog({
   onOpenChange,
   ids,
   site,
+  accountId,
   connected,
   revisions,
   onRefresh,
@@ -77,7 +84,7 @@ export function BatchCategoryDialog({
   const createGroup = useCreateGroup();
   const batch = useBatchCategory();
   const treeQuery = useCategoryTree(
-    { site: site ?? null, depth: 6, leafOnly: true },
+    { accountId: accountId ?? null, site: site ?? null, depth: 6, leafOnly: true },
     open && tab === "category" && connected
   );
 

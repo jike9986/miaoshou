@@ -803,6 +803,10 @@ export function useDeleteGroup(): UseMutationResult<GroupDeleteResponse, Error, 
  * ================================================================== */
 
 export interface CategoryTreeParams {
+  /** 妙手账号 id。类目缓存按账号隔离（categories.account_id），
+   *  不传就只能命中全局哨兵 account_id=0 —— 而真实数据几乎都存在
+   *  某个妙手账号下，于是下拉永远是空的。 */
+  accountId?: string | null;
   site?: string | null;
   depth?: number;
   leafOnly?: boolean;
@@ -815,6 +819,7 @@ export function useCategoryTree(
 ): UseQueryResult<CategoryTreeResponse> {
   return useQuery({
     queryKey: queryKeys.categories.tree({
+      accountId: params.accountId ?? null,
       site: params.site ?? null,
       depth: params.depth,
       leafOnly: params.leafOnly,
@@ -823,6 +828,7 @@ export function useCategoryTree(
     queryFn: () =>
       api.get<CategoryTreeResponse>("/categories", {
         query: compactQuery({
+          accountId: params.accountId,
           site: params.site,
           depth: params.depth,
           leafOnly: params.leafOnly,

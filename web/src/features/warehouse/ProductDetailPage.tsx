@@ -416,26 +416,31 @@ export function ProductDetailPage() {
               尺码图单独放到页面最下面，因为它尺寸不定（方形/长条都有），
               和固定高度的卡片并排会留大片空白。 */}
           <div className="grid gap-4 sm:grid-cols-2">
-            {/* ③ 类目：老师可直接改（复用仓库的批量改类目弹窗，只传这一件） */}
+            {/* ③ 类目：老师直接点标签就能改（不再放右上角按钮） */}
             <Card padding="normal">
-              <div className="flex items-center justify-between gap-2">
-                <SectionTitle>③ 类目</SectionTitle>
-                {!isMember && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    icon={<Tag />}
-                    onClick={() => setCategoryOpen(true)}
-                  >
-                    改类目
-                  </Button>
-                )}
-              </div>
+              <SectionTitle>③ 类目</SectionTitle>
               <div className="mt-3 flex items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-sm bg-canvas-inset px-2 py-1 text-sm text-fg">
-                  <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
-                  {product.categoryName || "未设置"}
-                </span>
+                {isMember ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-sm bg-canvas-inset px-2 py-1 text-sm text-fg">
+                    <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
+                    {product.categoryName || "未设置"}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setCategoryOpen(true)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-sm border border-transparent bg-canvas-inset px-2 py-1 text-sm text-fg",
+                      "transition-colors hover:border-brand-600/40 hover:bg-brand-50 focus-visible:outline-none",
+                      "focus-visible:ring-2 focus-visible:ring-brand-600/40"
+                    )}
+                    title="点击修改类目"
+                  >
+                    <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
+                    {product.categoryName || "未设置"}
+                    <PencilLine className="size-3 text-fg-muted" aria-hidden strokeWidth={1.75} />
+                  </button>
+                )}
               </div>
               {isMember && (
                 <p className="mt-2 text-2xs text-fg-muted">类目由老师设置</p>
@@ -663,6 +668,7 @@ export function ProductDetailPage() {
           onOpenChange={setCategoryOpen}
           ids={[String(product.id)]}
           site={product.site}
+          accountId={product.accountId ?? null}
           connected={Boolean(product.accountId)}
           revisions={
             typeof product.revision === "number"

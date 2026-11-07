@@ -42,7 +42,7 @@ export const queryKeys = {
   },
   categories: {
     all: ["categories"] as const,
-    tree: (params: { site?: string | null; depth?: number; leafOnly?: boolean; rootCid?: string | null }) =>
+    tree: (params: { accountId?: string | null; site?: string | null; depth?: number; leafOnly?: boolean; rootCid?: string | null }) =>
       ["categories", params] as const,
   },
   imageJobs: {

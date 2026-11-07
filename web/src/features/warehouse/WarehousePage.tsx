@@ -1106,6 +1106,7 @@ export function WarehousePage() {
         onOpenChange={setBatchOpen}
         ids={selectedIds}
         site={auth?.accounts.find((account) => account.id === auth?.accountId)?.site ?? null}
+        accountId={accountId ?? auth?.accountId ?? null}
         connected={connected}
         revisions={hasSelectedRevisions ? selectedRevisions : undefined}
         onRefresh={() => void listQuery.refetch()}
