@@ -2368,16 +2368,23 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         payload["sizeChartType"] = "image"
 
     # 图片固化：把上游（1688/妙手）的图片地址全部换成我们自己的图床地址。
-    # 这是「仓库是服务器上的商品库」的前提 —— 采集箱删了、1688 清了，商品和图都得还在，
-    # 任何账号都能直接认领/发布，不用回头再抓图。失败只记报告，不用坏地址覆盖原值。
+    #
+    # 只在**手动入库**（automation_result=False）时做，这是负责人的口径
+    # （2026-11-07 明确）：自动化处理只把商品做出来、放进成品仓库，图片仍指向上游；
+    # 人工挑中并入库时才落到自有图床。理由是自动化是一次性过 200 件的大批量，
+    # 每件几十张图全下载转存会把带宽和图床配额吃光，而真正决定要卖的可能只有几件。
+    #
+    # 认领/发布路径（publish_service._claim_payloads）另有兜底：真的要把图发给
+    # 平台之前会再转一次，所以这里跳过不会导致发布出去的图是外链。
     image_store_report: dict[str, Any] = {}
-    try:
-        from services import image_store
+    if not automation_result:
+        try:
+            from services import image_store
 
-        image_store_report = image_store.persist_payload_images(payload)
-    except Exception as exc:  # noqa: BLE001 - 固化失败不该阻断入库
-        logger.warning("商品图片固化失败 detailId=%s：%s", detail_id, exc)
-        image_store_report = {"error": str(exc)[:200]}
+            image_store_report = image_store.persist_payload_images(payload)
+        except Exception as exc:  # noqa: BLE001 - 固化失败不该阻断入库
+            logger.warning("商品图片固化失败 detailId=%s：%s", detail_id, exc)
+            image_store_report = {"error": str(exc)[:200]}
 
     # 类目三档兜底（老版 product_workflow._resolve_category）。没 cid 时以前只报
     # 一句「category cid is missing」，运营不知道下一步该干什么，整批卡在这里。

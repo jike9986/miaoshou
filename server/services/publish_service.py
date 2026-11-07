@@ -902,7 +902,11 @@ def prepare_claim_payloads(
     from services import image_store, product_standard, product_service
 
     for index, item in enumerate(prepared):
-        # 1) 图片转自有图床：幂等，已在自己图床的不会重复下载
+        # 1) 图片转自有图床：幂等，已在自己图床的不会重复下载。
+        #
+        # 这里是**发出去之前**的最后一道：自动化处理阶段按负责人口径不转存
+        # （见 warehouse_service.save_from_collect_box 的 automation_result 分支），
+        # 所以认领/发布时必须补上，否则平台拿到的是 1688 外链，过期就变商品图挂图。
         store_stats: dict[str, Any] = {}
         try:
             store_stats = image_store.persist_payload_images(item)

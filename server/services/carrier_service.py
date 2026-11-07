@@ -1181,12 +1181,20 @@ def normalize_spec_for_save(payload: dict[str, Any],
             k = "size" if looks_like_size(values) else "color"
         src = carrier_by_kind.get(k) or {}
         attr_id = str(src.get("attrId") or prop.get("attrId") or "").strip()
-        attr_name = str(src.get("attrName") or prop.get("attrName") or "").strip()
+        # 载体的 attrName 可能是中文「颜色/尺码」，而 attrId 是类目元数据里的
+        # 100000/100007（妙手侧叫 Warna/Saiz）。attrName 必须与 attrId 配套，
+        # 混着用会让妙手按 attrId 查表后名字对不上，报
+        # 「SKU【Kuning-41】不存在」那种「规格值找不到」的错（2026-11-07 实测）。
+        fallback_name = str(clean.get(f"_{k}AttrName") or "").strip()
+        attr_name = (str(src.get("attrName") or "").strip()
+                     or fallback_name
+                     or str(prop.get("attrName") or "").strip())
         # 载体里没有 attrId 时，用调用方塞进 carrier_info 的兜底字段
         if not attr_id:
             attr_id = str(clean.get(f"_{k}AttrId") or "").strip()
-        if not attr_name:
-            attr_name = str(clean.get(f"_{k}AttrName") or "").strip()
+            # attrId 用兜底值时，名字也必须跟着兜底名（两者是一对）
+            if fallback_name:
+                attr_name = fallback_name
 
         # 规格值：直接用商品自己的规格（相当于给载体新增/删除规格值）。
         #
