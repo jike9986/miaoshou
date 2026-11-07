@@ -71,6 +71,12 @@ Source: "..\release\win-unpacked\*"; DestDir: "{app}"; Flags: recursesubdirs cre
 [InstallDelete]
 ; 旧测试版可能留有共享令牌；只清除此文件，不动用户登录和商品缓存。
 Type: files; Name: "{app}\resources\client-token.json"
+; 前端资源带内容哈希（index-XXXX.js），每次构建文件名都会变。
+; 覆盖安装时 Inno 只增不删，旧版本会一直堆在 resources\web\assets 里
+; （实测装到 0.1.11 时堆了 0.1.8/0.1.9/0.1.10 三代共 9 个无用文件）。
+; 这里在安装前清掉整个 assets 目录，再让 [Files] 铺新的。
+; 只删 assets，不删整个 web——index.html 之外还有 logo 等静态文件。
+Type: filesandordirs; Name: "{app}\resources\web\assets"
 
 [Icons]
 ; 快捷方式必须带 --no-sandbox：本机 Electron 沙箱在原生层就崩（JS 都没执行），
