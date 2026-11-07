@@ -29,7 +29,7 @@ function appState({ runtimeToken, identity, apiBase }) {
       useVersion: (...args) => { calls.push(args); return {}; },
     },
     "@/lib/bootstrap": { hasRuntimeToken: () => runtimeToken },
-    "@/lib/api": { resolveApiBase: () => apiBase },
+    "@/lib/api": { api: { get: () => new Promise(() => {}) }, resolveApiBase: () => apiBase },
     "@/lib/apiTarget": apiTarget,
     "@/lib/operator": { useOperatorIdentity: () => identity, operatorDisplayName: () => "Test" },
     "@/lib/featureFlags": { SHOW_ACCOUNT_UI: true },
@@ -147,7 +147,7 @@ test("remote updates download inside the app instead of opening a browser", () =
         jsx: (type, props) => ({ type, props }),
         jsxs: (type, props) => ({ type, props }),
       },
-      "@/lib/api": { resolveApiBase: () => "https://aohuang888.com/miaoshou-platform" },
+      "@/lib/api": { api: { get: () => new Promise(() => {}) }, resolveApiBase: () => "https://aohuang888.com/miaoshou-platform" },
       "@/lib/apiTarget": apiTarget,
       // 下载是异步的，回调里会弹 toast；测试环境没有 Toaster，
       // 不 mock 会在测试结束后抛 unhandledRejection。
@@ -193,7 +193,7 @@ test("remote updates fall back to the browser when no desktop bridge exists", ()
     require: (name) => ({
       react: { useState: () => [null, () => {}], useEffect: () => {} },
       "react/jsx-runtime": { jsx: (type, props) => ({ type, props }) },
-      "@/lib/api": { resolveApiBase: () => "https://aohuang888.com/miaoshou-platform" },
+      "@/lib/api": { api: { get: () => new Promise(() => {}) }, resolveApiBase: () => "https://aohuang888.com/miaoshou-platform" },
       "@/lib/apiTarget": apiTarget,
       "@/lib/queries": {
         useUpdateStatus: (options) => { assert.equal(options.enabled, false); return {}; },

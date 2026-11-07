@@ -448,7 +448,17 @@ def _claim_account_keys(db: Session, operator_id: int | None,
 
 def reconcile_member_claims(db: Session, *, operator_id: int,
                             account_id: Any) -> dict[str, int]:
-    """Reconcile this member's saved claim markers with the live collect box."""
+    """Reconcile this member's saved claim markers with the live collect box.
+
+    老师/管理员也会走到这里：前端在「仓库页加载」时会无条件核对一次，
+    而角色刚被提升（member → teacher）的那一刻，浏览器里缓存的旧身份
+    仍是 member，于是继续打这个接口。原先这里硬性要求 `_is_member`，
+    老师一调就 403，界面弹出「无权访问该妙手账号，原有认领标记已保留」
+    —— 用户看到的就是一个莫名其妙的报错，而且认领状态从此不再自动核对。
+
+    正确语义：能不能访问这个妙手账号，取决于**账号绑定**，与角色无关。
+    所以这里只校验归属；老师有绑定就照常核对。
+    """
     from services import account_service, collect_box_service
 
     text = str(account_id or "")
@@ -457,9 +467,7 @@ def reconcile_member_claims(db: Session, *, operator_id: int,
     account = db.get(Account, int(text))
     if account is None:
         raise errors.not_found("妙手账号不存在", accountId=text)
-    if not _is_member(db, operator_id) or not account_service.has_account_access(
-        db, account.id, operator_id
-    ):
+    if not account_service.has_account_access(db, account.id, operator_id):
         raise errors.AppError(errors.FORBIDDEN, "无权访问该妙手账号", status=403)
 
     claim_key = f"operator:{operator_id}:account:{account.id}"

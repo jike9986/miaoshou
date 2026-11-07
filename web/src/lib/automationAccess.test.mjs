@@ -29,7 +29,7 @@ function renderModule(relativePath, identity, from = "/automation") {
       useVersion: () => ({}), useSoftwareCredentialsStatus: () => ({}),
     },
     "@/lib/bootstrap": { hasRuntimeToken: () => false },
-    "@/lib/api": { resolveApiBase: () => "https://aohuang888.com/miaoshou-platform" },
+    "@/lib/api": { api: { get: () => new Promise(() => {}) }, resolveApiBase: () => "https://aohuang888.com/miaoshou-platform" },
     "@/lib/apiTarget": { shouldShowLocalTokenNotice: () => false },
     "@/lib/featureFlags": { SHOW_ACCOUNT_UI: true },
   };

@@ -30,9 +30,9 @@ import { SettingsPage } from "@/features/settings/SettingsPage";
 import { useAuthStatus, useVersion } from "@/lib/queries";
 import { useOperatorSession } from "@/features/auth/guard";
 import { hasRuntimeToken } from "@/lib/bootstrap";
-import { resolveApiBase } from "@/lib/api";
+import { api, resolveApiBase } from "@/lib/api";
 import { shouldShowLocalTokenNotice } from "@/lib/apiTarget";
-import { clearOperator, operatorDisplayName, useOperatorIdentity } from "@/lib/operator";
+import { clearOperator, operatorDisplayName, refreshOperatorProfile, useOperatorIdentity } from "@/lib/operator";
 import { clearOperatorQueryClients } from "@/lib/operatorQueryClientRegistry.mjs";
 import { resetOperatorSessionUiState } from "@/features/stores";
 import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
@@ -79,6 +79,24 @@ function Shell() {
   const { data: status } = useAuthStatus(true);
   const versionQuery = useVersion(true, hasRuntimeToken() || Boolean(operatorIdentity?.token));
   const notifiedVersion = useRef<string | null>(null);
+  // 角色可能被管理员在别处改过（学员 → 老师），而本地只存了登录那一刻的值。
+  // 每次启动都用后端的最新身份校正一次，否则被提权的人界面还是学员：
+  // 看不到「自动化结果」「改重量尺寸」，还会继续调学员专属的
+  // /warehouse/reconcile-claims 拿 403。
+  useEffect(() => {
+    if (!operatorIdentity?.token) return;
+    let alive = true;
+    void api
+      .get<{ current?: { name?: string; role?: "admin" | "teacher" | "member" } }>("/operators")
+      .then((data) => {
+        if (!alive || !data?.current) return;
+        refreshOperatorProfile({ name: data.current.name, role: data.current.role });
+      })
+      .catch(() => {
+        // 网络或权限问题不打扰用户：角色沿用本地的，业务请求自己有兜底
+      });
+    return () => { alive = false; };
+  }, [operatorIdentity?.token]);
 
   useEffect(() => {
     const version = versionQuery.data;

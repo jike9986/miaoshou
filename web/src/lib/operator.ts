@@ -209,6 +209,33 @@ export function clearOperator(): boolean {
   return cleared;
 }
 
+/**
+ * 用后端返回的最新身份刷新本地角色/名字。
+ *
+ * 为什么需要：角色只存在 localStorage，登录时写一次就再也不会变。
+ * 管理员把人从学员提成老师后，对方那边仍然显示学员 —— 界面少掉
+ * 「自动化结果」「改重量尺寸」等入口，而且还会继续调只有学员才需要的
+ * `/warehouse/reconcile-claims`（旧身份触发的），拿到 403 弹一堆报错。
+ *
+ * 这里只在「后端明确给出角色」时覆盖，且不碰 token：
+ * token 失效要走登录流程，不能在这里悄悄改。
+ */
+export function refreshOperatorProfile(profile: {
+  name?: string | null;
+  role?: OperatorIdentity["role"];
+}): void {
+  let changed = false;
+  if (profile.name && profile.name !== readItem(OPERATOR_NAME_KEY)) {
+    writeItem(OPERATOR_NAME_KEY, profile.name);
+    changed = true;
+  }
+  if (profile.role && profile.role !== readItem(OPERATOR_ROLE_KEY)) {
+    writeItem(OPERATOR_ROLE_KEY, profile.role);
+    changed = true;
+  }
+  if (changed) emit();
+}
+
 export function lastLoginIdentifier(): string {
   return readItem(OPERATOR_LAST_LOGIN_KEY) ?? "";
 }

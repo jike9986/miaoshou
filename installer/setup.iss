@@ -3,7 +3,7 @@
 ; AohuangShangpin），中文名在 ISCC/cmd 下会被按 GBK 误解码。用户看到的中文
 ; 来自快捷方式名与窗口标题，不受影响。
 #define MyAppName "奥皇上品"
-#define MyAppVersion "0.1.14"
+#define MyAppVersion "0.1.15"
 #define MyAppPublisher "AOHUANG"
 #define MyAppExeName "AohuangShangpin.exe"
 
