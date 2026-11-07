@@ -38,8 +38,9 @@ import { cn } from "@/lib/utils";
  * `/warehouse/:id`，可以直接分享、刷新、前进后退。
  *
  * 排版顺序按负责人 2026-11-07 的要求固定：
- *   ① 标题 ② 详情图（可点开大图，左右翻页）③ 类目
- *   ④ SKU 颜色 / 尺码 ⑤ 价格 ⑥ 尺码图 ⑦ 重量与尺寸
+ *   ① 标题 ② 详情图（横向滑动，点开大图可翻页）
+ *   ③ 类目 / ④ 尺码图 / ⑤ 包裹重量 / ⑥ 包裹尺寸 —— 这四项一行四块
+ *   ⑦ SKU 颜色与尺码（颜色用大图卡片）⑧ 价格（框内滚动，列宽均分）
  *
  * 权限：学员只读（看得到全部内容，没有编辑控件）；
  *      老师/管理员可以改标题、类目、SKU、价格、尺码图、重量尺寸。
@@ -365,14 +366,17 @@ export function ProductDetailPage() {
             {allImages.length === 0 ? (
               <p className="mt-3 text-xs text-fg-muted">这件商品没有详情图</p>
             ) : (
-              <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-6">
+              // 横向滑动而不是换行铺满：详情图动辄十几张，铺满会把后面的
+              // 类目/规格/价格全部推到很下面，用户得滚很久才能看到关键信息。
+              // 单行横向滚动保持这一节高度固定，鼠标滚轮/触控板左右滑都能翻。
+              <div className="mt-3 -mx-1 flex gap-2 overflow-x-auto px-1 pb-2">
                 {allImages.map((url, index) => (
                   <button
                     key={`${url}-${index}`}
                     type="button"
                     onClick={() => setLightbox(index)}
                     className={cn(
-                      "group relative aspect-square overflow-hidden rounded-sm border border-border bg-canvas-inset",
+                      "group relative aspect-square w-[132px] shrink-0 overflow-hidden rounded-sm border border-border bg-canvas-inset",
                       "transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/40"
                     )}
                     title={`第 ${index + 1} 张`}
@@ -389,55 +393,141 @@ export function ProductDetailPage() {
             )}
           </Card>
 
-          {/* ③ 类目 */}
-          <Card padding="normal">
-            <SectionTitle>③ 类目</SectionTitle>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 rounded-sm bg-canvas-inset px-2 py-1 text-sm text-fg">
-                <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
-                {product.categoryName || "未设置类目"}
-              </span>
+          {/* ③④⑤ 一行四块：类目 / 尺码图 / 重量 / 尺寸
+              这几项都是短字段，各占一张整卡会把页面拉得很长，
+              合并成一行四列后一屏就能看全。 */}
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {/* ③ 类目 */}
+            <Card padding="normal">
+              <SectionTitle>③ 类目</SectionTitle>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 rounded-sm bg-canvas-inset px-2 py-1 text-sm text-fg">
+                  <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
+                  {product.categoryName || "未设置"}
+                </span>
+              </div>
               {product.cid && (
-                <span className="font-mono text-2xs text-fg-muted">cid {product.cid}</span>
+                <p className="mt-2 font-mono text-2xs text-fg-muted">cid {product.cid}</p>
               )}
-            </div>
-            <p className="mt-2 text-2xs text-fg-muted">
-              {isMember
-                ? "类目由老师设置；如需调整请联系老师。"
-                : "改类目请在成品仓库里选中商品后用「批量改类目」，这里只做展示。"}
-            </p>
-          </Card>
+              <p className="mt-2 text-2xs leading-4 text-fg-muted">
+                {isMember ? "类目由老师设置" : "改类目请用仓库「批量改类目」"}
+              </p>
+            </Card>
+
+            {/* ④ 尺码图（与类目/重量/尺寸同一行） */}
+            <Card padding="normal">
+              <div className="flex items-center justify-between gap-2">
+                <SectionTitle>④ 尺码图</SectionTitle>
+                <Ruler className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
+              </div>
+              {(() => {
+                const chart = String(payload?.sizeChart ?? "");
+                if (!chart) {
+                  return <p className="mt-3 text-xs text-fg-muted">未上传尺码图</p>;
+                }
+                return (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const index = allImages.indexOf(chart);
+                      if (index >= 0) setLightbox(index);
+                      else window.open(chart, "_blank", "noopener,noreferrer");
+                    }}
+                    className="mt-3 block h-24 w-full overflow-hidden rounded-sm border border-border bg-canvas-inset"
+                    title="点击查看大图"
+                  >
+                    <RemoteImage src={chart} className="size-full object-contain" />
+                  </button>
+                );
+              })()}
+            </Card>
+
+            {/* ⑦-1 重量 */}
+            <Card padding="normal">
+              <div className="flex items-center justify-between gap-2">
+                <SectionTitle>⑤ 包裹重量</SectionTitle>
+                <Badge
+                  variant={product.qualityReview ? "success" : "warning"}
+                  size="sm"
+                  title={product.qualityReview
+                    ? `核验人：${product.qualityReview.verifiedByOperatorName}`
+                    : "当前规格来源未确认，需对照妙手资料或实物核实"}
+                >
+                  {product.qualityReview ? "已核验" : "待核验"}
+                </Badge>
+              </div>
+              <p className="num mt-3 text-lg font-semibold text-fg">
+                {payload?.weight ? `${String(payload.weight)} kg` : "—"}
+              </p>
+              <p className="mt-1 text-2xs text-fg-muted">
+                {product.qualityReview
+                  ? `${product.qualityReview.source} · ${product.qualityReview.verifiedByOperatorName}`
+                  : "来源未记录"}
+              </p>
+            </Card>
+
+            {/* ⑦-2 尺寸 */}
+            <Card padding="normal">
+              <SectionTitle>⑥ 包裹尺寸</SectionTitle>
+              <p className="num mt-3 text-lg font-semibold text-fg">
+                {[payload?.packageLength, payload?.packageWidth, payload?.packageHeight]
+                  .map((value) => (value === undefined || value === null || value === "" ? "—" : String(value)))
+                  .join(" × ")}
+                <span className="ml-1 text-xs font-normal text-fg-muted">cm</span>
+              </p>
+              <p className="mt-1 text-2xs text-fg-muted">长 × 宽 × 高</p>
+            </Card>
+          </div>
 
           {/* ④ SKU 颜色 / 尺码 */}
           <Card padding="normal">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <SectionTitle>④ 规格（颜色 / 尺码）</SectionTitle>
+              <SectionTitle>⑦ 规格（颜色 / 尺码）</SectionTitle>
               <Badge variant="neutral" size="sm">{formatCount(product.skuCount)} 个 SKU</Badge>
             </div>
             {dimensions.length === 0 ? (
               <p className="mt-3 text-xs text-fg-muted">这件商品没有规格信息</p>
             ) : (
               <div className="mt-3 flex flex-col gap-4">
-                {dimensions.map((dimension) => (
-                  <div key={dimension.name}>
-                    <p className="text-2xs font-medium text-fg-secondary">{dimension.name}</p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {dimension.values.map((value) => (
-                        <span
-                          key={value.label}
-                          className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-surface px-2 py-1 text-xs text-fg"
-                        >
-                          {value.imageUrl && (
-                            <span className="size-4 overflow-hidden rounded-xs bg-canvas-inset">
-                              <RemoteImage src={value.imageUrl} className="size-full object-cover" />
+                {dimensions.map((dimension) => {
+                  // 有图的维度（颜色）用大图卡片，无图的（尺码）用小胶囊
+                  const hasImages = dimension.values.some((value) => value.imageUrl);
+                  return (
+                    <div key={dimension.name}>
+                      <p className="text-2xs font-medium text-fg-secondary">{dimension.name}</p>
+                      {hasImages ? (
+                        <div className="mt-2 flex flex-wrap gap-3">
+                          {dimension.values.map((value) => (
+                            <div
+                              key={value.label}
+                              className="flex w-20 flex-col items-center gap-1.5"
+                            >
+                              <span className="size-20 overflow-hidden rounded-sm border border-border bg-canvas-inset">
+                                {value.imageUrl ? (
+                                  <RemoteImage src={value.imageUrl} className="size-full object-cover" />
+                                ) : null}
+                              </span>
+                              <span className="line-clamp-2 text-center text-2xs leading-4 text-fg">
+                                {value.label}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {dimension.values.map((value) => (
+                            <span
+                              key={value.label}
+                              className="inline-flex min-w-[40px] items-center justify-center rounded-sm border border-border bg-surface px-2 py-1 text-xs text-fg"
+                            >
+                              {value.label}
                             </span>
-                          )}
-                          {value.label}
-                        </span>
-                      ))}
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </Card>
@@ -445,32 +535,42 @@ export function ProductDetailPage() {
           {/* ⑤ 价格 */}
           <Card padding="normal">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <SectionTitle>⑤ 价格</SectionTitle>
+              <SectionTitle>⑧ 价格</SectionTitle>
               <span className="inline-flex items-center gap-1 text-2xs text-fg-muted">
                 <Wallet className="size-3" aria-hidden strokeWidth={1.75} />
                 采购价 {product.purchaseCurrency || "CNY"}
               </span>
             </div>
-            <div className="mt-3 overflow-x-auto">
+            {/* 固定高度 + 内部纵向滚动：一个 24 SKU 的商品能列出 24 行，
+                全部铺开会把重量尺寸挤到屏幕外。给个框在里面滚，页面上
+                其它信息的位置就稳定了。列宽用 table-fixed + 百分比均分，
+                不同商品 SKU 数量不同也不会左右跳动。 */}
+            <div className="mt-3 max-h-[320px] overflow-y-auto rounded-md border border-border-subtle">
               {prices.length === 0 ? (
-                <p className="text-xs text-fg-muted">没有可展示的 SKU 价格</p>
+                <p className="p-3 text-xs text-fg-muted">没有可展示的 SKU 价格</p>
               ) : (
-                <table className="w-full min-w-[420px] text-sm">
-                  <thead>
+                <table className="w-full table-fixed text-sm">
+                  <colgroup>
+                    <col className="w-[40%]" />
+                    <col className="w-[20%]" />
+                    <col className="w-[20%]" />
+                    <col className="w-[20%]" />
+                  </colgroup>
+                  <thead className="sticky top-0 bg-surface-2">
                     <tr className="border-b border-border-subtle text-left text-2xs text-fg-muted">
-                      <th className="py-2 pr-3 font-medium">规格</th>
-                      <th className="py-2 pr-3 font-medium">售价</th>
-                      <th className="py-2 pr-3 font-medium">采购价</th>
-                      <th className="py-2 font-medium">库存</th>
+                      <th className="py-2 pl-3 pr-2 font-medium">规格</th>
+                      <th className="py-2 pr-2 text-right font-medium">售价</th>
+                      <th className="py-2 pr-2 text-right font-medium">采购价</th>
+                      <th className="py-2 pr-3 text-right font-medium">库存</th>
                     </tr>
                   </thead>
                   <tbody>
                     {prices.map((row) => (
                       <tr key={row.name} className="border-b border-border-subtle/60 last:border-0">
-                        <td className="py-2 pr-3 text-fg">{row.name}</td>
-                        <td className="num py-2 pr-3 font-medium text-fg">{row.price || "—"}</td>
-                        <td className="num py-2 pr-3 text-fg-secondary">{row.purchasePrice || "—"}</td>
-                        <td className="num py-2 text-fg-secondary">{row.stock}</td>
+                        <td className="truncate py-2 pl-3 pr-2 text-fg" title={row.name}>{row.name}</td>
+                        <td className="num truncate py-2 pr-2 text-right font-medium text-fg">{row.price || "—"}</td>
+                        <td className="num truncate py-2 pr-2 text-right text-fg-secondary">{row.purchasePrice || "—"}</td>
+                        <td className="num truncate py-2 pr-3 text-right text-fg-secondary">{row.stock}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -495,115 +595,48 @@ export function ProductDetailPage() {
             </div>
           </Card>
 
-          {/* ⑥ 尺码图 */}
-          <Card padding="normal">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="flex items-center gap-2">
-                <SectionTitle>⑥ 尺码图</SectionTitle>
-                <Ruler className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
-              </span>
-            </div>
-            {(() => {
-              const chart = String(payload?.sizeChart ?? "");
-              if (!chart) {
-                return <p className="mt-3 text-xs text-fg-muted">这件商品没有上传尺码图</p>;
-              }
-              return (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const index = allImages.indexOf(chart);
-                    setLightbox(index >= 0 ? index : null);
-                    if (index < 0) window.open(chart, "_blank", "noopener,noreferrer");
-                  }}
-                  className="mt-3 block max-w-md overflow-hidden rounded-sm border border-border"
-                  title="点击查看大图"
+          {/* 老师/管理员可编辑；学员只读（数值见上方 ⑤⑥ 两张卡片） */}
+          {!isMember && (
+            <Card padding="normal">
+              <SectionTitle>修改重量与尺寸</SectionTitle>
+              <p className="mt-1 text-2xs text-fg-muted">
+                填写已从可靠来源核实的数据；保存后用于定价和发布。
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Field label="重量（kg）" required>
+                  <Input type="number" min="0" step="0.001" value={weight} onChange={(event) => setWeight(event.currentTarget.value)} />
+                </Field>
+                <Field label="长（cm）" required>
+                  <Input type="number" min="0" step="0.1" value={length} onChange={(event) => setLength(event.currentTarget.value)} />
+                </Field>
+                <Field label="宽（cm）" required>
+                  <Input type="number" min="0" step="0.1" value={width} onChange={(event) => setWidth(event.currentTarget.value)} />
+                </Field>
+                <Field label="高（cm）" required>
+                  <Input type="number" min="0" step="0.1" value={height} onChange={(event) => setHeight(event.currentTarget.value)} />
+                </Field>
+              </div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <Field label="核验来源" required hint="例如妙手商品资料、原始商品页或实物测量">
+                  <Input maxLength={120} value={qualitySource} onChange={(event) => setQualitySource(event.currentTarget.value)} />
+                </Field>
+                <Field label="核验依据" required hint="记录可复查的信息">
+                  <Input maxLength={1000} value={qualityEvidence} onChange={(event) => setQualityEvidence(event.currentTarget.value)} />
+                </Field>
+              </div>
+              <div className="mt-3 flex justify-end">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<Save />}
+                  loading={reviewQuality.isPending}
+                  onClick={saveQuality}
                 >
-                  <RemoteImage src={chart} className="w-full object-contain" />
-                </button>
-              );
-            })()}
-          </Card>
-
-          {/* ⑦ 重量与尺寸 */}
-          <Card padding="normal">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <SectionTitle>⑦ 重量与尺寸</SectionTitle>
-              <Badge
-                variant={product.qualityReview ? "success" : "warning"}
-                size="sm"
-                title={product.qualityReview
-                  ? `核验人：${product.qualityReview.verifiedByOperatorName}`
-                  : "当前规格来源未确认，需对照妙手资料或实物核实"}
-              >
-                {product.qualityReview ? "已人工核验" : "待人工核验"}
-              </Badge>
-            </div>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              <div className="rounded-md border border-border-subtle bg-canvas-inset/50 p-3">
-                <p className="text-2xs text-fg-muted">包裹重量</p>
-                <p className="num mt-0.5 text-sm font-semibold text-fg">
-                  {payload?.weight ? `${String(payload.weight)} kg` : "缺少有效重量"}
-                </p>
-                {product.qualityReview && (
-                  <p className="mt-1 text-2xs text-fg-muted">
-                    {product.qualityReview.source} · {product.qualityReview.verifiedByOperatorName}
-                  </p>
-                )}
+                  保存重量与尺寸
+                </Button>
               </div>
-              <div className="rounded-md border border-border-subtle bg-canvas-inset/50 p-3">
-                <p className="text-2xs text-fg-muted">包裹尺寸（长 × 宽 × 高）</p>
-                <p className="num mt-0.5 text-sm font-semibold text-fg">
-                  {[payload?.packageLength, payload?.packageWidth, payload?.packageHeight]
-                    .map((value) => (value === undefined || value === null || value === "" ? "缺失" : String(value)))
-                    .join(" × ")}{" "}
-                  cm
-                </p>
-              </div>
-            </div>
-
-            {/* 学员只读；老师和管理员可修改 */}
-            {!isMember && (
-              <div className="mt-4 flex flex-col gap-3 rounded-md border border-border-subtle p-3">
-                <p className="text-xs text-fg-muted">
-                  填写已从可靠来源核实的数据；保存后用于定价和发布。
-                </p>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  <Field label="重量（kg）" required>
-                    <Input type="number" min="0" step="0.001" value={weight} onChange={(event) => setWeight(event.currentTarget.value)} />
-                  </Field>
-                  <Field label="长（cm）" required>
-                    <Input type="number" min="0" step="0.1" value={length} onChange={(event) => setLength(event.currentTarget.value)} />
-                  </Field>
-                  <Field label="宽（cm）" required>
-                    <Input type="number" min="0" step="0.1" value={width} onChange={(event) => setWidth(event.currentTarget.value)} />
-                  </Field>
-                  <Field label="高（cm）" required>
-                    <Input type="number" min="0" step="0.1" value={height} onChange={(event) => setHeight(event.currentTarget.value)} />
-                  </Field>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="核验来源" required hint="例如妙手商品资料、原始商品页或实物测量">
-                    <Input maxLength={120} value={qualitySource} onChange={(event) => setQualitySource(event.currentTarget.value)} />
-                  </Field>
-                  <Field label="核验依据" required hint="记录可复查的信息">
-                    <Input maxLength={1000} value={qualityEvidence} onChange={(event) => setQualityEvidence(event.currentTarget.value)} />
-                  </Field>
-                </div>
-                <div className="flex justify-end">
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    icon={<Save />}
-                    loading={reviewQuality.isPending}
-                    onClick={saveQuality}
-                  >
-                    保存重量与尺寸
-                  </Button>
-                </div>
-              </div>
-            )}
-          </Card>
+            </Card>
+          )}
         </div>
       </PageContent>
 
