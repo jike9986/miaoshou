@@ -173,6 +173,12 @@ def serialize(product: Product, *, account_name: str = "",
         "skuProperties": product.sku_properties if isinstance(product.sku_properties, list) else [],
         "qualityReviewStatus": quality_review_status,
         "qualityReviewReasons": quality_review_reasons,
+        # 产品标准标记：product_standard 判定「数据缺失必须重新采集」时
+        # 会往 payload 里写这两个键。之前只留在 payload 里，列表和卡片都看不到，
+        # 于是这类商品和正常商品长得一模一样，直到认领时才被静默跳过。
+        # 提到顶层后前端才能在卡片上打标记、在筛选里单独找出来。
+        "needsRecollect": bool(_payload_flag(product, "needsRecollect")),
+        "needsRecollectReason": str(_payload_flag(product, "needsRecollectReason") or ""),
     }
     if include_payload:
         payload = product.payload if isinstance(product.payload, dict) else {}
@@ -185,6 +191,12 @@ def serialize(product: Product, *, account_name: str = "",
         body["account"] = ""
         body["collected"] = {}
     return body
+
+
+def _payload_flag(product: Product, key: str) -> Any:
+    """从商品 payload 里取一个标记字段（payload 可能不是 dict，统一兜底）。"""
+    payload = product.payload if isinstance(product.payload, dict) else {}
+    return payload.get(key)
 
 
 def _positive_measure(value: Any) -> float | None:

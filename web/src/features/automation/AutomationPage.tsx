@@ -586,6 +586,14 @@ export function AutomationPage() {
   /* ---------------- 真正执行：串行处理入仓 ---------------- */
   const processItem = useProcessCollectItem();
   const publish = usePublish();
+  // 入库时产品标准的自动修复记录，攒到批次结束统一提示。
+  // 逐件弹 toast 会刷屏；完全不提示又会让「价格被 +2、重量被压到上限」
+  // 这些自动改动变成暗箱操作。所以按件收集，收口时汇总一次。
+  const standardNotesRef = useRef<Array<{
+    title: string;
+    kind: "fixed" | "remaining" | "skipped" | "recollect";
+    detail: string;
+  }>>([]);
   // 新任务跟随顶部店铺，恢复任务继续使用创建时保存的目标店铺。
 
   const requestSpecificationConfirmation = useCallback((
@@ -919,6 +927,7 @@ export function AutomationPage() {
     const imagesPerProduct = runSettings.mainImageCount + runSettings.skuImageCount + runSettings.detailImageCount;
     const plannedImages = runSettings.imagesEnabled ? targets.length * imagesPerProduct : 0;
     stopRef.current = false;
+    standardNotesRef.current = [];
     setStages(Object.fromEntries(targets.map((target) => [target.key, "queued" as ItemStage])));
     setRun({
       phase: "running",
@@ -1003,6 +1012,29 @@ export function AutomationPage() {
         });
         if (scope !== executionScopeRef.current) return;
         processResponseReceived = true;
+        // 产品标准自动修复的提示（后端 product_standard 在落库前跑
+        // validate → repair → 再 validate）。批量自动化里操作者看不到单件的
+        // 返回体，所以必须在这里收集「改了什么」和「还差什么」，
+        // 否则价格被 +2MYR、重量被压到品类上限这些动作是隐形的。
+        // 逐件弹 toast 会刷屏，攒起来在批次结束时统一提示。
+        const repair = result.standardRepair;
+        const itemLabel = target.title || target.detailId;
+        if (repair?.fixes?.length) {
+          standardNotesRef.current.push({ title: itemLabel, kind: "fixed", detail: repair.fixes.join("、") });
+        }
+        if (repair?.after?.length) {
+          standardNotesRef.current.push({ title: itemLabel, kind: "remaining", detail: repair.after.join("、") });
+        }
+        if (repair?.error) {
+          standardNotesRef.current.push({ title: itemLabel, kind: "skipped", detail: repair.error });
+        }
+        if (result.product?.needsRecollect) {
+          standardNotesRef.current.push({
+            title: itemLabel,
+            kind: "recollect",
+            detail: result.product.needsRecollectReason || "数据缺失，需要重新采集",
+          });
+        }
         if (runSettings.publishEnabled && (
           result.saved !== true
           || (result.product?.draftVerified !== true && !automationImagesPending(result.images))
@@ -1365,6 +1397,28 @@ export function AutomationPage() {
       toast.warning(`有 ${imageFailures} 张图片处理失败`, {
         description: "处理记录已保留，请核对失败明细后重试。",
       });
+    }
+
+    // 入库标准自动修正的批次汇总。分两类提示：
+    //   · 已自动修正 —— 告知改了什么（价格+2、重量压上限、描述结构清理…）
+    //   · 仍需处理   —— 修不好的（需重新采集、缺字段），必须让人知道
+    const notes = standardNotesRef.current;
+    if (notes.length > 0) {
+      const fixed = notes.filter((note) => note.kind === "fixed");
+      const blocking = notes.filter((note) => note.kind !== "fixed");
+      if (fixed.length > 0) {
+        const first = fixed[0];
+        toast.info(`已按入库标准自动修正 ${fixed.length} 件`, {
+          description: `${first.title}：${first.detail}${fixed.length > 1 ? " 等" : ""}`,
+        });
+      }
+      if (blocking.length > 0) {
+        const first = blocking[0];
+        toast.warning(`${blocking.length} 件需要人工处理`, {
+          description: `${first.title}：${first.detail}${blocking.length > 1 ? " 等" : ""}`,
+        });
+      }
+      standardNotesRef.current = [];
     }
 
     if (failed > 0 || publishIssues > 0) {

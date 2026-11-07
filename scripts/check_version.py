@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""版本号四处一致性校验（CI job: version-consistency）。
+"""版本号五处一致性校验（CI job: version-consistency）。
 
 为什么需要这个脚本：安装包显示给用户的版本、界面侧栏显示的版本、后端
 `/api/v1/system/version` 返回的版本、PyInstaller 打出来的 exe 属性版本，
@@ -31,6 +31,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # 语义化版本：主.次.修订，允许 -beta.1 / +build 后缀（与 package.json 的 npm 规则一致）
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+# Inno Setup 的版本声明：#define MyAppVersion "0.1.9"（允许中间有空格）
+INNO_VERSION_RE = re.compile(r'^#define\s+MyAppVersion\s+"([^"]+)"', re.MULTILINE)
 
 
 class VersionError(RuntimeError):
@@ -86,13 +88,37 @@ def read_constants_fallback(relative_path: str = "server/core/constants.py") -> 
     raise VersionError(f"{relative_path} 里找不到 _package_version() 函数")
 
 
+def read_inno_version(relative_path: str = "installer/setup.iss") -> str:
+    """从 Inno Setup 脚本的 `#define MyAppVersion "x.y.z"` 取版本。
+
+    为什么必须一起校验：安装包文件名和「应用和功能」里显示的版本都来自这里。
+    2026-11-07 打 0.1.9 时就漏了这一处 —— 前面四处都改成 0.1.9，编译出来却
+    还是 `奥皇上品-0.1.8-安装程序.exe`，构建脚本按 0.1.9 找产物找不到而失败。
+    漏改不会报错，只会在最后一步莫名其妙地失败，所以纳入校验。
+    """
+    path = ROOT / relative_path
+    try:
+        source = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise VersionError(f"找不到文件：{relative_path}") from exc
+    match = INNO_VERSION_RE.search(source)
+    if not match:
+        raise VersionError(
+            f"{relative_path} 里找不到 #define MyAppVersion \"x.y.z\"")
+    value = match.group(1)
+    if not SEMVER_RE.match(value):
+        raise VersionError(f"{relative_path} 的 MyAppVersion 不是合法版本号：{value}")
+    return value
+
+
 def collect() -> dict[str, str]:
-    """按固定顺序收集四处版本，顺序即报告顺序。"""
+    """按固定顺序收集五处版本，顺序即报告顺序。"""
     return {
         "package.json（根 / electron-builder）": read_package_version("package.json"),
         "web/package.json（前端）": read_package_version("web/package.json"),
         "app/package.json（Electron 壳）": read_package_version("app/package.json"),
         "server/core/constants.py（APP_VERSION 兜底）": read_constants_fallback(),
+        "installer/setup.iss（安装包文件名与显示版本）": read_inno_version(),
     }
 
 
@@ -109,7 +135,7 @@ def _force_utf8_stdio() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdio()
-    parser = argparse.ArgumentParser(description="校验版本号四处一致")
+    parser = argparse.ArgumentParser(description="校验版本号五处一致")
     parser.add_argument("--json", action="store_true", help="输出 JSON（给其它工具消费）")
     args = parser.parse_args(argv)
 
@@ -129,14 +155,14 @@ def main(argv: list[str] | None = None) -> int:
         ))
     else:
         width = max(len(name) for name in versions)
-        print("版本号四处对照：")
+        print("版本号五处对照：")
         for name, value in versions.items():
             # 与期望值（第一个文件）不同的标出来，人眼一眼能看出该改哪个
             mark = "" if value == versions["package.json（根 / electron-builder）"] else "  <-- 不一致"
             print(f"  {name.ljust(width)}  {value}{mark}")
         print()
         if consistent:
-            print(f"[版本校验] 通过：四处均为 {distinct[0]}")
+            print(f"[版本校验] 通过：五处均为 {distinct[0]}")
         else:
             print(
                 "[版本校验] 失败：版本号不一致，实际取值 "

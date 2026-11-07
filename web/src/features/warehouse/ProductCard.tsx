@@ -125,6 +125,18 @@ export function ProductCard({ product, isMember = false, selected, onToggle, onO
             : product.claimed ? "已认领" : "未认领"}
         </span>
 
+        {/* 需重新采集标记：product_standard 判定数据缺失（标题占位、无主图、
+            缺类目、无 SKU）时打这个标。这类商品认领时会被静默跳过，
+            不标出来操作者根本不知道为什么这件一直没上架。 */}
+        {product.needsRecollect && (
+          <span
+            className="absolute left-2 top-7 inline-flex items-center gap-1 rounded-xs bg-warning-600/92 px-1.5 py-0.5 text-[10px] font-medium leading-3 text-white backdrop-blur-[2px]"
+            title={product.needsRecollectReason || "数据缺失，需要重新采集"}
+          >
+            需重采
+          </span>
+        )}
+
         <div
           className={cn(
             "absolute right-2 top-2",

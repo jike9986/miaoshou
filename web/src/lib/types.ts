@@ -312,10 +312,37 @@ export interface ProcessImagesResult {
 }
 
 /** POST /collect-box/{detailId}/process 响应（server/api/collect_box.py: process） */
+/**
+ * 入库时「产品标准」自动修复报告（后端 warehouse_service 产出）。
+ *
+ * 后端在真正落库前会跑 product_standard.validate → repair → 再 validate：
+ *   · before：修之前发现的问题（如「售价低于标准(3条SKU)」「缺包裹尺寸」）
+ *   · fixes ：实际自动修了什么（如「价格+2MYR(3条)」「补包裹尺寸(33,22,12)」）
+ *   · after ：修完仍存在的问题（空数组=已修好）
+ *   · error ：修复器本身异常（不阻断入库，但要让人知道没校验过）
+ *
+ * 不展示这个报告，操作者就看不到「入库时价格被自动改过」「重量被压到上限」，
+ * 那 730 行的校验器对用户等于不存在。
+ */
+export interface StandardRepairReport {
+  before?: string[];
+  fixes?: string[];
+  after?: string[];
+  error?: string;
+}
+
 export interface ProcessCollectResult {
   saved: boolean;
-  product: Product & { draftSaved?: boolean; draftVerified?: boolean };
+  product: Product & {
+    draftSaved?: boolean;
+    draftVerified?: boolean;
+    /** 后端 product_standard 标记：数据缺失必须重新采集，不能靠猜 */
+    needsRecollect?: boolean;
+    needsRecollectReason?: string;
+  };
   images?: ProcessImagesResult | null;
+  /** 入库时产品标准的自动修复记录 */
+  standardRepair?: StandardRepairReport | null;
 }
 
 export interface AutomationRunItemRecord {
@@ -424,6 +451,12 @@ export interface Product {
   qualityReview?: ProductQualityReview | null;
   qualityReviewStatus?: QualityReviewStatus;
   qualityReviewReasons?: QualityReviewReason[];
+  /**
+   * 产品标准判定「数据缺失、必须重新采集」（后端 product_standard 写入）。
+   * 这类商品认领时会被静默跳过，卡片上要单独打标，否则看不出为什么一直没上架。
+   */
+  needsRecollect?: boolean;
+  needsRecollectReason?: string;
   salesLast30: number;
   stock: number;
   status: ProductStatus | string;

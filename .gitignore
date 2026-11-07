@@ -62,3 +62,8 @@ Thumbs.db
 client-token.json
 build/client-token.txt
 _client_token.txt
+
+# 构建临时目录（build.ps1 把 TEMP 指到这里，会落 node 编译缓存与验证用 profile）
+_build_tmp/
+# tsc 增量构建缓存
+*.tsbuildinfo
