@@ -556,7 +556,7 @@ export function ProductDetailPage() {
                     <col className="w-[20%]" />
                     <col className="w-[20%]" />
                   </colgroup>
-                  <thead className="sticky top-0 bg-surface-2">
+                  <thead className="sticky top-0 bg-canvas-inset">
                     <tr className="border-b border-border-subtle text-left text-2xs text-fg-muted">
                       <th className="py-2 pl-3 pr-2 font-medium">规格</th>
                       <th className="py-2 pr-2 text-right font-medium">售价</th>

@@ -3,7 +3,7 @@
 ; AohuangShangpin），中文名在 ISCC/cmd 下会被按 GBK 误解码。用户看到的中文
 ; 来自快捷方式名与窗口标题，不受影响。
 #define MyAppName "奥皇上品"
-#define MyAppVersion "0.1.11"
+#define MyAppVersion "0.1.12"
 #define MyAppPublisher "AOHUANG"
 #define MyAppExeName "AohuangShangpin.exe"
 
@@ -77,6 +77,10 @@ Type: files; Name: "{app}\resources\client-token.json"
 ; 这里在安装前清掉整个 assets 目录，再让 [Files] 铺新的。
 ; 只删 assets，不删整个 web——index.html 之外还有 logo 等静态文件。
 Type: filesandordirs; Name: "{app}\resources\web\assets"
+; 语言包同理：0.1.12 起只打包 zh-CN，但覆盖安装不会删掉旧版留下的
+; 其余 54 个 .pak（实测装完 locales 仍是 55 个，白占 30 多 MB）。
+; 清整个 locales 目录，再让 [Files] 铺新的那一个。
+Type: filesandordirs; Name: "{app}\locales"
 
 [UninstallDelete]
 ; 卸载时保留用户数据（商品缓存、登录状态、待装安装包）是有意的，
