@@ -16,13 +16,24 @@ function isPlainObject(value) {
 }
 
 function isPersistableQueryKey(queryKey) {
-  if (!Array.isArray(queryKey) || queryKey.length < 2 || !isPlainObject(queryKey[1])) {
+  if (!Array.isArray(queryKey) || queryKey.length < 2) {
     return false;
   }
 
-  // Persist list summaries only. Detail queries may contain full product payloads,
-  // credentials, or other fields that are unnecessary for a fast first paint.
-  return queryKey[0] === "collect-box" || queryKey[0] === "warehouse";
+  // 列表摘要 + 商品详情都持久化。
+  //
+  // 详情原先被排除，理由是「payload 可能很大、含凭据」。实测本项目的
+  // payload 只有 8–35KB（含规格/图片/描述），不含妙手凭据（凭据只在
+  // accounts 表里单独加密，不进 payload）；而每次打开详情都串一次跨境
+  // 请求，等待感明显。所以放进来，靠 MAX_SERIALIZED_LENGTH 兜底——
+  // 超大详情会在写入时被 while 循环挤掉，不会撑爆 localStorage。
+  //
+  // 注意有两种 key 形态：列表首元素之后是对象，详情是字符串 accountId。
+  // 早先这里要求 queryKey[1] 必须是对象，会把详情条目当垃圾清掉。
+  if (queryKey[0] !== "collect-box" && queryKey[0] !== "warehouse") {
+    return false;
+  }
+  return isPlainObject(queryKey[1]) || typeof queryKey[1] === "string";
 }
 
 function identityStoragePrefix(identityKey) {
@@ -30,11 +41,22 @@ function identityStoragePrefix(identityKey) {
 }
 
 function accountIdForQueryKey(queryKey) {
-  if (!Array.isArray(queryKey) || !isPlainObject(queryKey[1])) return null;
+  if (!Array.isArray(queryKey) || queryKey.length < 2) return null;
   if (queryKey[0] !== "collect-box" && queryKey[0] !== "warehouse") return null;
+
+  // 两种 key 形态：
+  //   列表 ["warehouse", { accountId, claimAccountId, ... }, ...]
+  //   详情 ["warehouse", accountId, id, { includePayload }]  ← accountId 是字符串
+  // 详情原先没被持久化，所以这里只处理了对象形态；放开详情后必须同时识别
+  // 字符串形态，否则读回来时 accountId 对不上，缓存全被当成无效条目清掉。
+  const second = queryKey[1];
+  if (typeof second === "string") {
+    return second === "" || second === "current" || second === "none" ? null : second;
+  }
+  if (!isPlainObject(second)) return null;
   // Warehouse rows are scoped by the MiaoShou account used to claim them.
   // Prefer that id when it differs from the software account id.
-  const accountId = queryKey[1].claimAccountId ?? queryKey[1].accountId;
+  const accountId = second.claimAccountId ?? second.accountId;
   return accountId === null || accountId === undefined || accountId === ""
     ? null
     : String(accountId);

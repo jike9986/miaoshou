@@ -29,7 +29,7 @@ function useStorage(t) {
   return globalThis.window.localStorage;
 }
 
-test("disk cache is scoped by software user and MiaoShou account, and omits details", (t) => {
+test("disk cache is scoped by software user and MiaoShou account, and caches details", (t) => {
   const storage = useStorage(t);
   const source = new QueryClient();
   source.setQueryData(["collect-box", { accountId: "miaoshou-a", page: 1 }], {
@@ -38,8 +38,10 @@ test("disk cache is scoped by software user and MiaoShou account, and omits deta
   source.setQueryData(["collect-box", { accountId: "miaoshou-b", page: 1 }], {
     items: [{ title: "account B" }],
   });
+  // 详情现在也持久化：payload 只有 8–35KB，缓存后再次打开能秒开，
+  // 不必每次串一次跨境请求。
   source.setQueryData(["collect-box", "miaoshou-a", "detail-id", "shop-id"], {
-    payload: "detail should stay in memory only",
+    payload: "detail is cached now",
   });
   const unsubscribe = persistOperatorQueryClient("user-a:member", source);
 
@@ -54,11 +56,34 @@ test("disk cache is scoped by software user and MiaoShou account, and omits deta
     userAAccountA.getQueryData(["collect-box", { accountId: "miaoshou-b", page: 1 }]),
     { items: [{ title: "account B" }] },
   );
-  assert.equal(userAAccountA.getQueryData(["collect-box", "miaoshou-a", "detail-id", "shop-id"]), undefined);
+  // 关键：详情的 accountId 在 queryKey[1] 是字符串，不是对象；
+  // 读回来时必须仍能对上，否则会被当成无效条目清掉。
+  assert.deepEqual(
+    userAAccountA.getQueryData(["collect-box", "miaoshou-a", "detail-id", "shop-id"]),
+    { payload: "detail is cached now" },
+  );
 
   const userB = new QueryClient();
   hydrateOperatorQueryClient("user-b:member", userB);
   assert.equal(userB.getQueryCache().getAll().length, 0);
+  unsubscribe();
+});
+
+test("warehouse detail keyed by string account is persisted", (t) => {
+  useStorage(t);
+  const source = new QueryClient();
+  // 详情页实际使用的 key 形态：["warehouse", accountId, id, { includePayload }]
+  source.setQueryData(["warehouse", "42", "57", { includePayload: true }], {
+    product: { id: "57", title: "cached detail" },
+  });
+  const unsubscribe = persistOperatorQueryClient("user-a:member", source);
+
+  const restored = new QueryClient();
+  hydrateOperatorQueryClient("user-a:member", restored);
+  assert.deepEqual(
+    restored.getQueryData(["warehouse", "42", "57", { includePayload: true }]),
+    { product: { id: "57", title: "cached detail" } },
+  );
   unsubscribe();
 });
 

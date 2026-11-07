@@ -39,8 +39,8 @@ import { cn } from "@/lib/utils";
  *
  * 排版顺序按负责人 2026-11-07 的要求固定：
  *   ① 标题 ② 详情图（横向滑动，点开大图可翻页）
- *   ③ 类目 / ④ 尺码图 / ⑤ 包裹重量 / ⑥ 包裹尺寸 —— 这四项一行四块
- *   ⑦ SKU 颜色与尺码（颜色用大图卡片）⑧ 价格（框内滚动，列宽均分）
+ *   ③ 类目 / ④ 尺码图 / ⑤ 重量与尺寸 —— 一行三块，重量和尺寸同卡上下排列
+ *   ⑥ SKU 颜色与尺码（颜色用大图卡片）⑦ 价格（框内滚动，列宽均分）
  *
  * 权限：学员只读（看得到全部内容，没有编辑控件）；
  *      老师/管理员可以改标题、类目、SKU、价格、尺码图、重量尺寸。
@@ -194,6 +194,21 @@ export function ProductDetailPage() {
     [mainImage, images]
   );
 
+  // 大图查看器用「主图 + 详情图 + 尺码图」的合集。
+  // 尺码图原先不在 allImages 里，点它只能 window.open 兜底 ——
+  // 而主进程的 setWindowOpenHandler 会把非可信地址交给 shell.openExternal，
+  // 于是尺码图跑到浏览器里打开了。放进合集后点它就走应用内查看器。
+  const sizeChartUrl = String(payload?.sizeChart ?? "");
+  const viewerImages = useMemo(() => {
+    if (!sizeChartUrl || allImages.includes(sizeChartUrl)) return allImages;
+    return [...allImages, sizeChartUrl];
+  }, [allImages, sizeChartUrl]);
+  // 查看器当前显示的是哪一张；开尺码图时用它定位
+  const openInViewer = (url: string): void => {
+    const index = viewerImages.indexOf(url);
+    if (index >= 0) setLightbox(index);
+  };
+
   const saveTitle = (): void => {
     if (!product) return;
     update.mutate(
@@ -239,11 +254,11 @@ export function ProductDetailPage() {
   const stepLightbox = useCallback((delta: number): void => {
     setLightbox((current) => {
       if (current === null) return current;
-      const total = allImages.length;
+      const total = viewerImages.length;
       if (total === 0) return current;
       return (current + delta + total) % total;
     });
-  }, [allImages.length]);
+  }, [viewerImages.length]);
 
   // 大图模式下支持键盘左右翻页 / Esc 关闭
   useEffect(() => {
@@ -393,14 +408,15 @@ export function ProductDetailPage() {
             )}
           </Card>
 
-          {/* ③④⑤ 一行四块：类目 / 尺码图 / 重量 / 尺寸
-              这几项都是短字段，各占一张整卡会把页面拉得很长，
-              合并成一行四列后一屏就能看全。 */}
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {/* ③④⑤ 一行三块：类目 / 尺码图 / 重量与尺寸
+              尺码图按原始比例显示（正方形就正方形，长条就长条），
+              不再硬塞固定高度留一圈空白。
+              重量和尺寸合并到同一张卡、上下排列，省一个格子。 */}
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {/* ③ 类目 */}
             <Card padding="normal">
               <SectionTitle>③ 类目</SectionTitle>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div className="mt-3 flex items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 rounded-sm bg-canvas-inset px-2 py-1 text-sm text-fg">
                   <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
                   {product.categoryName || "未设置"}
@@ -409,12 +425,9 @@ export function ProductDetailPage() {
               {product.cid && (
                 <p className="mt-2 font-mono text-2xs text-fg-muted">cid {product.cid}</p>
               )}
-              <p className="mt-2 text-2xs leading-4 text-fg-muted">
-                {isMember ? "类目由老师设置" : "改类目请用仓库「批量改类目」"}
-              </p>
             </Card>
 
-            {/* ④ 尺码图（与类目/重量/尺寸同一行） */}
+            {/* ④ 尺码图：按图片原始比例显示，正方形就方块，长条就长条 */}
             <Card padding="normal">
               <div className="flex items-center justify-between gap-2">
                 <SectionTitle>④ 尺码图</SectionTitle>
@@ -428,24 +441,27 @@ export function ProductDetailPage() {
                 return (
                   <button
                     type="button"
-                    onClick={() => {
-                      const index = allImages.indexOf(chart);
-                      if (index >= 0) setLightbox(index);
-                      else window.open(chart, "_blank", "noopener,noreferrer");
-                    }}
-                    className="mt-3 block h-24 w-full overflow-hidden rounded-sm border border-border bg-canvas-inset"
+                    onClick={() => openInViewer(chart)}
+                    className="mt-3 block w-fit overflow-hidden rounded-sm border border-border"
                     title="点击查看大图"
                   >
-                    <RemoteImage src={chart} className="size-full object-contain" />
+                    {/* 不给固定高度、也不给 w-full：让图片按自己的宽高比铺开，
+                        max-h 只限制极端长条不要顶穿卡片 */}
+                    <img
+                      src={chart}
+                      alt="尺码图"
+                      referrerPolicy="no-referrer"
+                      className="block max-h-56 max-w-full object-contain"
+                    />
                   </button>
                 );
               })()}
             </Card>
 
-            {/* ⑦-1 重量 */}
+            {/* ⑤ 重量与尺寸：合并一张卡，上下两行 */}
             <Card padding="normal">
               <div className="flex items-center justify-between gap-2">
-                <SectionTitle>⑤ 包裹重量</SectionTitle>
+                <SectionTitle>⑤ 重量与尺寸</SectionTitle>
                 <Badge
                   variant={product.qualityReview ? "success" : "warning"}
                   size="sm"
@@ -456,33 +472,30 @@ export function ProductDetailPage() {
                   {product.qualityReview ? "已核验" : "待核验"}
                 </Badge>
               </div>
-              <p className="num mt-3 text-lg font-semibold text-fg">
-                {payload?.weight ? `${String(payload.weight)} kg` : "—"}
-              </p>
-              <p className="mt-1 text-2xs text-fg-muted">
-                {product.qualityReview
-                  ? `${product.qualityReview.source} · ${product.qualityReview.verifiedByOperatorName}`
-                  : "来源未记录"}
-              </p>
-            </Card>
-
-            {/* ⑦-2 尺寸 */}
-            <Card padding="normal">
-              <SectionTitle>⑥ 包裹尺寸</SectionTitle>
-              <p className="num mt-3 text-lg font-semibold text-fg">
-                {[payload?.packageLength, payload?.packageWidth, payload?.packageHeight]
-                  .map((value) => (value === undefined || value === null || value === "" ? "—" : String(value)))
-                  .join(" × ")}
-                <span className="ml-1 text-xs font-normal text-fg-muted">cm</span>
-              </p>
-              <p className="mt-1 text-2xs text-fg-muted">长 × 宽 × 高</p>
+              <dl className="mt-3 flex flex-col gap-2.5">
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="text-2xs text-fg-muted">包裹重量</dt>
+                  <dd className="num text-lg font-semibold text-fg">
+                    {payload?.weight ? `${String(payload.weight)} kg` : "—"}
+                  </dd>
+                </div>
+                <div className="flex items-baseline justify-between gap-3 border-t border-border-subtle pt-2.5">
+                  <dt className="text-2xs text-fg-muted">包裹尺寸（长×宽×高）</dt>
+                  <dd className="num text-lg font-semibold text-fg">
+                    {[payload?.packageLength, payload?.packageWidth, payload?.packageHeight]
+                      .map((value) => (value === undefined || value === null || value === "" ? "—" : String(value)))
+                      .join(" × ")}
+                    <span className="ml-1 text-xs font-normal text-fg-muted">cm</span>
+                  </dd>
+                </div>
+              </dl>
             </Card>
           </div>
 
           {/* ④ SKU 颜色 / 尺码 */}
           <Card padding="normal">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <SectionTitle>⑦ 规格（颜色 / 尺码）</SectionTitle>
+              <SectionTitle>⑥ 规格（颜色 / 尺码）</SectionTitle>
               <Badge variant="neutral" size="sm">{formatCount(product.skuCount)} 个 SKU</Badge>
             </div>
             {dimensions.length === 0 ? (
@@ -535,7 +548,7 @@ export function ProductDetailPage() {
           {/* ⑤ 价格 */}
           <Card padding="normal">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <SectionTitle>⑧ 价格</SectionTitle>
+              <SectionTitle>⑦ 价格</SectionTitle>
               <span className="inline-flex items-center gap-1 text-2xs text-fg-muted">
                 <Wallet className="size-3" aria-hidden strokeWidth={1.75} />
                 采购价 {product.purchaseCurrency || "CNY"}
@@ -595,7 +608,7 @@ export function ProductDetailPage() {
             </div>
           </Card>
 
-          {/* 老师/管理员可编辑；学员只读（数值见上方 ⑤⑥ 两张卡片） */}
+          {/* 老师/管理员可编辑；学员只读（数值见上方 ⑤ 卡片） */}
           {!isMember && (
             <Card padding="normal">
               <SectionTitle>修改重量与尺寸</SectionTitle>
@@ -641,7 +654,7 @@ export function ProductDetailPage() {
       </PageContent>
 
       {/* 大图查看器：点击详情图后打开，左右翻页、Esc 关闭 */}
-      {lightbox !== null && allImages[lightbox] && (
+      {lightbox !== null && viewerImages[lightbox] && (
         <div
           role="dialog"
           aria-modal="true"
@@ -657,7 +670,7 @@ export function ProductDetailPage() {
           >
             <X className="size-5" />
           </button>
-          {allImages.length > 1 && (
+          {viewerImages.length > 1 && (
             <>
               <button
                 type="button"
@@ -688,13 +701,13 @@ export function ProductDetailPage() {
             onClick={(event) => event.stopPropagation()}
           >
             <img
-              src={allImages[lightbox]}
+              src={viewerImages[lightbox]}
               alt={`第 ${lightbox + 1} 张`}
               referrerPolicy="no-referrer"
               className="max-h-[88vh] max-w-[92vw] rounded-md object-contain"
             />
             <p className="mt-2 text-center text-xs text-white/70">
-              {lightbox + 1} / {allImages.length}
+              {lightbox + 1} / {viewerImages.length}
             </p>
           </div>
         </div>

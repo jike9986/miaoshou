@@ -485,6 +485,17 @@ export function useProductDetail(
         query: compactQuery({ includePayload: includePayload ? true : undefined, claimAccountId: accountId }),
       }),
     enabled: Boolean(id),
+    // 详情页要秒开：打开过的商品直接用内存/磁盘里的上一份，后台静默核对。
+    // 实测 payload 只有 8–35KB，缓存代价很低；但每次重进都串一次网络请求，
+    // 在跨境链路上有明显等待感。
+    //
+    // staleTime 5 分钟：这段时间内再打开不再发请求，直接给缓存。
+    // gcTime 30 分钟：离开页面后详情还留在内存里，来回切换商品不用重新拉。
+    // placeholderData 用 keepPreviousData：切换商品时先显示上一件的骨架，
+    // 避免白屏闪烁（数据到达后立刻替换）。
+    staleTime: 5 * 60_000,
+    gcTime: 30 * 60_000,
+    refetchOnMount: "always",
   });
 }
 
