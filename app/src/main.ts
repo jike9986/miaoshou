@@ -13,6 +13,7 @@ import {
   isInstallRequested,
   launchInstaller,
   pendingInstaller,
+  pruneStaleInstallers,
   quitAndInstall,
   type UpdateManifest,
 } from "./updateInstaller";
@@ -374,6 +375,9 @@ ipcMain.handle("update:run-installer-now", async (event, installerPath: string) 
 });
 
 app.whenReady().then(async () => {
+  // 启动时清掉历史安装包：软件内更新每次都会把 77MB 的 exe 下到
+  // userData\updates\，安装器管不到那里。只在后台跑，失败不影响启动。
+  void pruneStaleInstallers();
   if (useRemoteServer()) {
     // 软件账号登录后才取得用户会话；不再读取旧安装目录中的共享令牌。
     bootInfo.apiBase = REMOTE_API_BASE.replace(/\/+$/, "");

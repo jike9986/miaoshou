@@ -78,6 +78,13 @@ Type: files; Name: "{app}\resources\client-token.json"
 ; 只删 assets，不删整个 web——index.html 之外还有 logo 等静态文件。
 Type: filesandordirs; Name: "{app}\resources\web\assets"
 
+[UninstallDelete]
+; 卸载时保留用户数据（商品缓存、登录状态、待装安装包）是有意的，
+; 但「已下载的更新包」不是用户数据 —— 它是几十兆的临时文件，
+; 留着只会白占磁盘。这里只清 updates 目录，不碰 operator-session
+; 和商品缓存。
+Type: filesandordirs; Name: "{%LOCALAPPDATA}\aohuang-desktop\electron\updates"
+
 [Icons]
 ; 快捷方式必须带 --no-sandbox：本机 Electron 沙箱在原生层就崩（JS 都没执行），
 ; 双击 exe 不带参数起不来，参数只能写在快捷方式里。

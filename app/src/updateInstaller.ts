@@ -208,7 +208,13 @@ export function launchInstaller(installerPath: string, silent = true): { ok: boo
 export async function installOnQuit(): Promise<void> {
   const pending = await pendingInstaller();
   if (!pending) return;
-  launchInstaller(pending.path, true);
+  const started = launchInstaller(pending.path, true);
+  // 安装器已经作为独立进程启动（detached），它把文件读进内存/临时目录后
+  // 就不再依赖原路径。这里清理下载缓存与标记，避免每更新一次多留一个
+  // 77MB 的 exe。启动失败时保留，让用户还能手动重试。
+  if (started.ok) {
+    await discardInstaller();
+  }
 }
 
 /** 给渲染层用的「重启并安装」：先记下意图，再退出，由 before-quit 执行安装。 */
@@ -227,7 +233,7 @@ export function isInstallRequested(): boolean {
   return installRequested;
 }
 
-/** 清掉已下载的安装包（用户反悔 / 版本已是最新）。 */
+/** 清掉已下载的安装包（用户反悔 / 版本已是最新 / 安装已启动）。 */
 export async function discardInstaller(): Promise<void> {
   try {
     const dir = updatesDir();
@@ -239,6 +245,36 @@ export async function discardInstaller(): Promise<void> {
       }
     }
   } catch { /* 清理失败不影响主流程 */ }
+}
+
+/**
+ * 启动时清理「不是当前待装版本」的历史安装包。
+ *
+ * 为什么需要：每次软件内更新都会把安装包下到 userData\updates\，
+ * 安装器只负责装到程序目录，管不到 userData —— 不清理就会每更新一次
+ * 多留一个 77MB 的 exe。更新五次就是 385MB 垃圾。
+ *
+ * 保留当前 pending.json 指向的那一份（用户可能还没点「重启并安装」），
+ * 其余 exe / part 一律删掉。
+ */
+export async function pruneStaleInstallers(): Promise<void> {
+  try {
+    const dir = updatesDir();
+    const pending = await pendingInstaller();
+    const keep = pending ? path.resolve(pending.path) : "";
+    const entries = await fs.readdir(dir).catch(() => [] as string[]);
+    for (const name of entries) {
+      const lower = name.toLowerCase();
+      if (!lower.endsWith(".exe") && !lower.endsWith(".part")) continue;
+      const full = path.resolve(path.join(dir, name));
+      if (keep && full === keep) continue;
+      await fs.rm(full, { force: true }).catch(() => {});
+    }
+    // pending.json 指向的文件已经没了（用户手动删了 exe），标记也清掉
+    if (!pending && entries.includes("pending.json")) {
+      await fs.rm(path.join(dir, "pending.json"), { force: true }).catch(() => {});
+    }
+  } catch { /* 清理失败不影响启动 */ }
 }
 
 /** 广播下载进度给所有窗口（渲染层用 preload 暴露的 onProgress 订阅）。 */

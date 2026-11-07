@@ -7,6 +7,11 @@ directories:
 files:
   - dist/**/*
   - package.json
+# 只保留中文语言包。Electron 默认带 55 个 locale（合计约 39MB），
+# 而这个软件只有中文界面，其余 54 个永远不会被加载，纯占体积。
+# electron-builder 会在打完目录包后按这个列表删掉不匹配的 .pak。
+electronLanguages:
+  - zh-CN
 extraResources:
   - from: ../web/dist
     to: web
