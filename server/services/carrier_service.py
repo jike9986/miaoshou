@@ -667,7 +667,8 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
 
 
 def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
-                         body: Mapping[str, Any], product: Mapping[str, Any]) -> list[str]:
+                         body: Mapping[str, Any], product: Mapping[str, Any], *,
+                         strict: bool = False) -> list[str]:
     """保存后重新拉一次做核验（默认已停用，见 fill_carriers 的 verify_readback）。
 
     为什么默认不核验（负责人 2026-11-04 明确要速度）：
@@ -676,18 +677,29 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
         与仓库快照结构天然不同，逐件都报「不一致」，等于必然失败；
       · 老版 fill_carriers 保存后根本不做读回，成败只看 save_shop 抛不抛。
     保留这个函数是为了需要严格核验的场合（如发布前单独复核）能显式打开。
+
+    **失败必须 fail closed（2026-11-07 修）**：以前读回超时、结构异常、比较抛错
+    全部 `return []`，等于「读不到就当没问题」，于是读回核验形同虚设 ——
+    上游明明没存对，这里返回空列表，调用方就把它记成成功并允许发布。
+    现在这些情况一律返回一条明确的不一致项，让调用方按失败处理。
+
+    `strict=True` 是**发布前**用的严格模式：价格和类目也必须一致。
+    认领（铺数据）阶段这两项与仓库快照口径天然不同，可以忽略；
+    但发布出去的商品如果价格被压、类目没下沉成功，用户看到的就是错货，
+    所以发布路径必须逐项核对，不能跟着忽略。
     """
     from services import pre_save_check, readback_check
 
     try:
         snapshot = client.shop_detail(detail_id, shop_id)
-    except (MiaoshouError, ValueError, errors.AppError):
-        return []
+    except (MiaoshouError, ValueError, errors.AppError) as exc:
+        # 读不回来就不算核验通过。返回原因而不是空列表，调用方会记失败。
+        return [f"readbackUnavailable({type(exc).__name__}: {str(exc)[:60]})"]
     if not isinstance(snapshot, Mapping):
-        return []
+        return [f"readbackUnavailable(响应不是对象: {type(snapshot).__name__})"]
     data = snapshot.get("data") or {}
     if not isinstance(data, Mapping):
-        return []
+        return [f"readbackUnavailable(data 不是对象: {type(data).__name__})"]
     nested = data.get("data")
     actual = (data.get("shopCollectItemInfo")
               or data.get("siteCollectItemInfo")
@@ -695,7 +707,7 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
               or (nested.get("shopCollectItemInfo") if isinstance(nested, Mapping) else None)
               or {})
     if not isinstance(actual, Mapping) or not actual:
-        return []
+        return ["readbackUnavailable(读回里没有商品信息)"]
     coverage = (product.get("translation") or {}).get("coverage") or {}
     payload = dict(body)
     payload.pop("detailId", None)
@@ -710,10 +722,14 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
             pricing_enabled=True,
             translate_images=notes_only_images,
         )
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return []
-    # 载体场景下这三项与仓库快照口径必然不同，不作为失败依据
-    ignored = {"categoryCid", "prices", "translations", "readbackUnavailable"}
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        # 比较器自身崩了，说明读回结构不认识 —— 同样不能当通过。
+        return [f"readbackUnavailable(比较失败: {type(exc).__name__})"]
+    # 载体场景下这几项与仓库快照口径必然不同。
+    # strict=False（认领/铺数据）：categoryCid、prices、translations 忽略。
+    # strict=True （发布前核验）：只有 translations 可以忽略（译文是异步产物），
+    #   价格与类目必须核对 —— 发布出去的商品价格错了就是事故。
+    ignored = {"translations"} if strict else {"categoryCid", "prices", "translations"}
     return [item for item in issues if str(item).strip() not in ignored]
 
 
@@ -1417,10 +1433,14 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                   payloads: Iterable[Mapping[str, Any]], *, shop_id: int,
                   progress: Callable[[dict[str, Any]], None] | None = None,
                   verify_readback: bool = False,
+                  strict_readback: bool = False,
                   warehouse_id: str | None = None,
                   category_trees: dict[str, Mapping[str, Any] | bool] | None = None,
                   ) -> dict[str, Any]:
-    """用成品 payload 覆盖每个载体；每个载体先重读拿自己的 ossMd5。"""
+    """用成品 payload 覆盖每个载体；每个载体先重读拿自己的 ossMd5。
+
+    `strict_readback=True`：读回核验把价格和类目也算作失败依据（发布前用）。
+    """
     carrier_list = list(carriers)
     payload_list = list(payloads)
     if len(carrier_list) != len(payload_list):
@@ -1559,7 +1579,8 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             if verify_readback:
                 # Keep strict readback for workflows that publish immediately.
                 mismatched = _readback_mismatches(
-                    client, detail_id, shop_id, body, payload)
+                    client, detail_id, shop_id, body, payload,
+                    strict=strict_readback)
                 if mismatched:
                     logger.warning(
                         "载体覆盖后读回不一致 detailId=%s 目标标题=%r 差异=%s",
@@ -1600,6 +1621,7 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
                               payloads: Iterable[Mapping[str, Any]], shop_id: int,
                               progress: Callable[[dict[str, Any]], None] | None = None,
                               verify_readback: bool = False,
+                              strict_readback: bool = False,
                               ) -> dict[str, Any]:
     """Create carriers while the consumer covers each one as soon as it arrives."""
     payload_list = list(payloads)
@@ -1685,6 +1707,7 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
             result = fill_carriers(
                 client, [detail_id], [payload_list[index]], shop_id=shop_id,
                 progress=report_item_progress, verify_readback=verify_readback,
+                strict_readback=strict_readback,
                 warehouse_id=warehouse_id,
                 category_trees=category_trees)
         except Exception as exc:  # keep draining so the producer cannot block

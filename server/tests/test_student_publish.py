@@ -1112,7 +1112,13 @@ def _stub_member_publish(monkeypatch, db, account, *, received_payloads: list | 
     monkeypatch.setattr(publish_service.carrier_service, "collect_carriers",
                         lambda *_args, **_kwargs: [90001])
 
-    def fill_carriers(_client, _carriers, payloads, *, shop_id):
+    def fill_carriers(_client, _carriers, payloads, *, shop_id,
+                      verify_readback=False, strict_readback=False):
+        # 发布路径现在会显式要求读回核验（verify_readback/strict_readback）。
+        # 这里断言它确实被要求了：否则「发布前必须核对」这条规则一旦被
+        # 改回默认关闭，这些用例会继续绿，问题就漏到线上了。
+        assert verify_readback is True, "发布路径必须开启读回核验"
+        assert strict_readback is True, "发布路径必须是严格核验（含价格/类目）"
         if received_payloads is not None:
             received_payloads.extend(payloads)
         assert shop_id == int(target_shop_id)

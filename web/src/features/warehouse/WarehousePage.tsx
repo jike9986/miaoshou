@@ -915,7 +915,7 @@ export function WarehousePage() {
             disabled: claimOnly.isPending,
             onClick: () => claimSelected(memberClaimableIds),
           }] : []),
-          ...(selectedIds.length > 0 ? [{
+          ...(selectedIds.length > 0 && !isMember ? [{
             label: pushCommonBox.isPending
               ? "正在推送…"
               : `导入公共采集箱 ${selectedIds.length} 件`,

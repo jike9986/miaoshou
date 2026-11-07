@@ -73,6 +73,18 @@ class FakeMiaoshou:
     def category_tree(self, _site):
         return {"data": {"cateTree": {"1": {"cid": 1, "isLastLevel": 1}}}}
 
+    def category_metadata(self, _site, _cid, _shop_ids=None):
+        """类目销售规格定义（颜色 100000 / 尺码 100007）。
+
+        生产代码 carrier_service 会调这个接口拿真实 attrId，缺了它
+        只会在日志里留一条 warning 然后退回默认值——测试就再也验不到
+        「规格归一化到底有没有按类目元数据走」，所以必须补上。
+        """
+        return {"data": {"categorySaleAttrList": [
+            {"attrId": "100000", "attrName": "Warna"},
+            {"attrId": "100007", "attrName": "Saiz"},
+        ]}}
+
     def shop_detail(self, detail_id, _shop_id):
         return {"data": {"ossMd5": "test-version", "shopCollectItemInfo":
                          deepcopy(self.drafts[int(detail_id)])}}

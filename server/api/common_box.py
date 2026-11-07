@@ -19,7 +19,7 @@ router = APIRouter(prefix="/common-box", tags=["公共采集箱"])
 
 
 @router.post("/push", summary="推送仓库成品到公共采集箱",
-             dependencies=[require_permission("product_claim")])
+             dependencies=[require_permission("common_box.push")])
 def push_to_common_box(payload: CommonBoxPushRequest, db: DbSession,
                        operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)

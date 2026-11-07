@@ -1377,8 +1377,17 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             # 载体重建前先用待发布商品的货源补链接池（与旧实现 sync_source_links 一致）
             carrier_service.harvest_from_payloads(db, payloads)
             carriers = carrier_service.collect_carriers(db, client, count=len(entries))
+            # 发布路径必须开读回核验（2026-11-07 修）。
+            # 之前这里没传 verify_readback，默认 False，等于「载体重建完直接发布」：
+            # 上游 save_shop 只要不抛异常就算成功，而妙手对字段是宽松的 ——
+            # 标题没写进去、价格被压、类目下沉失败都可能静默通过，
+            # 结果就是「发布成功」的商品实际是残缺的。
+            # 认领（claim_only）路径才允许跳过：那一步只是铺数据，
+            # 真正的发布在别处，读回代价（每件约 6s）不值得。
             filled = carrier_service.fill_carriers(client, carriers, payloads,
-                                                   shop_id=int(target_shop_id))
+                                                   shop_id=int(target_shop_id),
+                                                   verify_readback=True,
+                                                   strict_readback=True)
             failures.extend({"detailId": item.split(":", 1)[0], "reason": item}
                             for item in filled["failures"])
             if not filled["saved"]:
