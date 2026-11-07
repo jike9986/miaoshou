@@ -166,7 +166,12 @@ async def _image_reconcile_loop(stop: asyncio.Event) -> None:
             logger.exception("图片任务回收失败 type=%s：%s", type(exc).__name__, exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=20)
-        except TimeoutError:
+        except asyncio.TimeoutError:
+            # 必须写 asyncio.TimeoutError：Python 3.10 它等同于
+            # concurrent.futures.TimeoutError，**不是**内置 TimeoutError
+            # （3.11 才合并）。写成 except TimeoutError 在 3.10 上一个都抓不到，
+            # 循环等待第一次超时就抛出去、协程静默结束 —— 线上表现是
+            # 「后台跑一阵就不动了」，定时任务到点不执行（2026-11-07 实证）。
             continue
 
 
@@ -187,11 +192,20 @@ async def _schedule_loop(stop: asyncio.Event) -> None:
             summaries = await asyncio.to_thread(_run_due_once)
             if summaries:
                 logger.info("定时发布执行：%s", summaries)
-        except Exception as exc:  # noqa: BLE001 - 扫描失败不能拖垮服务
+        except asyncio.CancelledError:
+            # 只有 lifespan 关闭时会取消，必须原样上抛，否则关服务会挂住。
+            raise
+        except BaseException as exc:  # noqa: BLE001 - 扫描失败不能拖垮服务
+            # 必须接 BaseException：老代码只接 Exception，CancelledError 之外的
+            # 非 Exception 派生异常会让这个协程静默死掉 —— 表现就是「定时任务
+            # 设置好了不执行」，而日志里连一行报错都没有（2026-11-07 实测：
+            # 服务起来跑一阵后心跳停、tick 全无，界面 running=false）。
             logger.exception("定时发布扫描失败 type=%s：%s", type(exc).__name__, exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=60)
-        except TimeoutError:
+        except asyncio.TimeoutError:
+            # 同上：3.10 必须用 asyncio.TimeoutError。这一行写错就是
+            # 「定时任务设置好了不执行」的本体 —— 调度协程 60 秒后自己死掉。
             continue
 
 
@@ -249,6 +263,17 @@ async def lifespan(_app: FastAPI):
     stop = asyncio.Event()
     worker = asyncio.create_task(_image_reconcile_loop(stop))
     scheduler = asyncio.create_task(_schedule_loop(stop))
+    # 后台循环一旦意外结束，必须留下证据。asyncio 对没人 await 的 task 只在
+    # GC 时打一句 "Task exception was never retrieved"，而且不带调用栈；
+    # 之前「定时任务到点不执行」查不到原因就是卡在这里。
+    def _report_loop(task: asyncio.Task, name: str) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        logger.error("后台循环意外结束：%s exception=%r", name, exc, exc_info=exc)
+
+    for task, label in ((worker, "图片任务回收"), (scheduler, "定时发布扫描")):
+        task.add_done_callback(lambda done, name=label: _report_loop(done, name))
     try:
         yield
     finally:

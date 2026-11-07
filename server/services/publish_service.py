@@ -64,6 +64,9 @@ logger = logging.getLogger("aohuang.publish")
 PUBLISH_STATUSES = ("processing", "success", "fail", "cancel")
 
 _DETAIL_IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+# 末尾那个被截断的 <img（没有收尾的 '>'）连同它后面粘着的 HTML 碎片。
+# 妙手会把这段当成图片 URL 提交，平台回「获取图片【…jpg</p></p】失败」。
+_TRUNCATED_IMG_TAIL = re.compile(r"<img\b[^>]*$", re.IGNORECASE)
 
 # 仅用于提示等待时长；结果未确认的发布不会因超过此时长而自动解锁。
 PUBLISH_PROCESSING_SECONDS = 600.0
@@ -594,32 +597,38 @@ def _limit_claim_images(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen_images = {str(image or "").strip()
                            for image in payload["imgUrls"] if str(image or "").strip()}
 
-        remaining = DETAIL_IMAGE_HARD_LIMIT
-
         # 详情图与主图是两个独立位置（列表图 vs 描述页图），
         # 同一张图两边都出现是正常的（1688 采集的数据经常如此）。
         # 之前把主图 URL 集合带进详情图判重，结果 1688 数据的详情图
         # 全部被当成「重复」删掉，发布到妙手后描述页一张图都不剩。
         # 这里只用详情图自己的 seen 集合：去重逻辑只针对详情图内部重复。
-        detail_seen: set[str] = set()
-
-        def keep_detail_image(match: re.Match[str], seen: set[str] = detail_seen) -> str:
-            nonlocal remaining
-            urls = pre_save_check.extract_detail_image_urls(match.group(0))
-            if not urls:
-                return match.group(0)
-            url = urls[0].strip()
-            if url in seen:
-                return ""
-            seen.add(url)
-            if remaining == 0:
-                return ""
-            remaining -= 1
-            return match.group(0)
-
         notes = payload.get("notes")
         if isinstance(notes, str) and notes:
-            payload["notes"] = _DETAIL_IMG_TAG.sub(keep_detail_image, notes)
+            # 详情 HTML 必须良构：仓库里有历史商品带着截断尾巴（末张图缺结尾
+            # 引号和 '>'），或者图片后面粘着 `</p>`。原样发给妙手，平台抓图时
+            # 会拿到 `...jpg</p></p` 这种畸形 URL，判「获取图片【…】失败」整单
+            # 失败（2026-11-07 实测）。这里只重建 <img> 标签本身，标签之外的
+            # 描述文字原样保留 —— 丢掉文案会变成另一种事故。
+            detail_seen: set[str] = set()
+            kept = 0
+
+            def rebuild_tag(match: re.Match[str]) -> str:
+                nonlocal kept
+                urls = pre_save_check.extract_detail_image_urls(match.group(0))
+                if not urls:
+                    # 标签残缺到抽不出 URL：整段丢掉，留着只会在平台侧报错
+                    return ""
+                url = urls[0].strip()
+                if url in detail_seen or kept >= DETAIL_IMAGE_HARD_LIMIT:
+                    return ""
+                detail_seen.add(url)
+                kept += 1
+                return pre_save_check.detail_images_only([url])
+
+            # 先砍掉尾部被截断的那个 <img（缺结尾引号或 '>'，正则匹配不到，
+            # 留在正文里平台会把它当 URL 的一部分），再逐标签重建。
+            payload["notes"] = _DETAIL_IMG_TAG.sub(
+                rebuild_tag, _TRUNCATED_IMG_TAIL.sub("", notes))
         limited.append(payload)
     return limited
 

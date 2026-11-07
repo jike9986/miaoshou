@@ -1141,6 +1141,57 @@ def _batch_guard():
         word_service.mark_building(False)
 
 
+def _pending_receipt_log(db: Session, task: Schedule) -> Any | None:
+    """本任务上一轮提交、平台回执还没回来的发布记录（没有就 None）。
+
+    只认**同一个任务自己**留下的 processing 行：别人、别的任务挂着不影响本轮，
+    那样才不会被「别人有一个待确认」连坐。
+    """
+    from models.publish_log import PublishLog
+    from services import publish_service
+
+    query = db.query(PublishLog).filter(
+        PublishLog.account_id == task.account_id,
+        PublishLog.schedule_id == str(task.id),
+        PublishLog.status == "processing",
+    )
+    owner = task.owner_operator_id
+    query = (query.filter(PublishLog.operator_id.is_(None)) if owner is None
+             else query.filter(PublishLog.operator_id == owner))
+    for row in query.order_by(PublishLog.id.desc()).all():
+        # 认领（claim_only）行本来就没有发布回执，等它没有意义。
+        if publish_service._is_claim_only_log(db, row):
+            continue
+        return row
+    return None
+
+
+def _store_waiting(db: Session, task: Schedule, *, requested: int, pending: Any,
+                   moment: datetime | None = None) -> dict[str, Any]:
+    """记一次「等回执」：不算一次执行，不动当天失败次数，也不写执行历史。
+
+    为什么必须这样记：发布提交后平台回执要 1–3 分钟才建单（实测提交 19:28:27、
+    平台记录 19:28:29，更早一次隔了约两分钟），而调度器每 60s 扫一轮。
+    如果把「等回执」按失败记账，三次就吃满 SCHEDULE_MAX_ATTEMPTS_PER_DAY=3，
+    任务当天直接不再执行 —— 用户看到的就是「定时任务设置好了不执行」。
+    """
+    summary = summarize(task_id=str(task.id), requested=requested, selected=0,
+                        published=0, submitted=0)
+    summary["status"] = RUN_SUBMITTED
+    summary["reason"] = "上一轮发布还在等平台回执，本轮只等待（不计入失败次数）"
+    summary["pendingLogId"] = str(getattr(pending, "id", "") or "")
+    summary["pendingDetailId"] = str(getattr(pending, "detail_id", "") or "")
+    summary["pendingRequestedAt"] = (getattr(pending, "last_requested_at", None)
+                                     or getattr(pending, "requested_at", None))
+    summary["at"] = now_ts()
+    task.last_result = dict(summary)
+    due = next_due(as_dict(task), datetime.now())
+    task.next_due_at = due.timestamp() if due else None
+    task.updated_at = now_ts()
+    db.flush()
+    return summary
+
+
 def execute(db: Session, task: Schedule, *, raise_on_error: bool = False,
             with_results: bool = False, moment: datetime | None = None
             ) -> dict[str, Any]:
@@ -1205,6 +1256,12 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
                 raise errors.AppError(errors.FORBIDDEN,
                                       "定时任务创建者已无法访问所选妙手账号",
                                       status=403)
+        # 上一轮提交的发布回执还没回来：这一轮什么都别做，但**不是失败**。
+        # 按失败记账会吃满当天额度、把任务锁死一整天（详见 _store_waiting）。
+        pending = _pending_receipt_log(db, task)
+        if pending is not None:
+            return _store_waiting(db, task, requested=requested,
+                                  pending=pending, moment=moment)
         # 直接读 ORM 字段：as_dict() 只含调度判定需要的键，不含账号/店铺/模板
         items = pick_products(db, account_id=task.account_id, count=requested,
                               template=str(task.template_name or ""),

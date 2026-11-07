@@ -28,6 +28,9 @@ router = APIRouter(prefix="/publish", tags=["发布"])
 # 对外分页上限沿用全局约定（100），但平台侧 publish_records 自身只收 1..20，
 # 所以回源时按这个值截断，不能把 100 直接送给上游（会直接判参数错误）。
 PUBLISH_RECORDS_PAGE_SIZE = 20
+# 回源一次最多往下翻几页（20 条/页）。待确认明细一旦不在最新 20 条里，
+# 只翻第一页就永远匹配不到回执，本地会永久停在 processing。
+REFRESH_MAX_PAGES = 5
 
 
 @router.get("/logs", summary="本机发起的发布记录")
@@ -184,7 +187,8 @@ def _current_attempt_receipts(row: Any, candidates: list[Any]) -> list[Any]:
 def _refresh_processing(db: DbSession, account_id: str | None = None, *,
                         page_no: int = 1, page_size: int = PUBLISH_RECORDS_PAGE_SIZE,
                         status: str | None = None,
-                        operator_id: int | None = None) -> dict[str, Any]:
+                        operator_id: int | None = None,
+                        max_pages: int | None = None) -> dict[str, Any]:
     """回源平台，更新 processing 行的状态（best effort，不抛错给调用方）。"""
     account, client = publish_service.account_client_for(db, account_id)
     from services.miaoshou import MiaoshouError
@@ -203,17 +207,10 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
     upstream_status = (status or None)
     if str(upstream_status or "").lower() == "processing":
         upstream_status = None
-    try:
-        records = client.publish_records(page_no=upstream_page,
-                                         page_size=upstream_size,
-                                         status=upstream_status)
-    except (MiaoshouError, ValueError):
-        degraded = True
-        records = {}
-    finally:
-        client.close()
     from models.publish_log import PublishLog
 
+    # 先算本地待确认明细，再按需翻页：翻页的终止条件就是「待确认的都在这一页
+    # 之前出现过」，不然再往下翻也只是白打上游。
     query = db.query(PublishLog).filter(
         PublishLog.account_id == account.id,
         PublishLog.status == "processing")
@@ -225,19 +222,39 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
         local_by_detail.setdefault(str(row.detail_id), []).append(row)
         local_by_target.setdefault((str(row.detail_id), str(row.shop_id)), []).append(row)
     by_detail: dict[str, list[Any]] = {}
-    # 上游同一个接口（search_move_collect_list），老版读 moveCollectDetailList、
-    # 新版读 detailList。两边都试：读错字段的后果是永远解析出 0 行、
-    # 静默返回 updated=0，回执功能整体失效还不报错。
-    data = records.get("data") or {}
-    # 平台真实总数只在上游回执里；本地 count 是本机台账行数，两者不是一回事
-    # （老版就是读这里的 total）。
-    platform_total = data.get("total")
-    platform_rows = data.get("moveCollectDetailList") or data.get("detailList") or []
-    for row in platform_rows:
-        if isinstance(row, dict):
-            detail_id = row.get("detailId") or row.get("collectBoxDetailId")
-            if detail_id not in (None, ""):
-                by_detail.setdefault(str(detail_id), []).append(row)
+    wanted_details = {str(row.detail_id) for row in pending}
+    # 没有待确认行就只拉第一页（界面要平台总数），不为了「可能用得上」多打四轮
+    # 上游接口 —— 定时扫描每 60s 就会进来一次。
+    pages = max(1, int(max_pages or (REFRESH_MAX_PAGES if wanted_details else 1)))
+    try:
+        for offset in range(pages):
+            records = client.publish_records(page_no=upstream_page + offset,
+                                             page_size=upstream_size,
+                                             status=upstream_status)
+            data = records.get("data") or {}
+            # 平台真实总数只在上游回执里；本地 count 是本机台账行数，两者不是一回事
+            # （老版就是读这里的 total）。
+            if platform_total is None:
+                platform_total = data.get("total")
+            # 上游同一个接口（search_move_collect_list），老版读 moveCollectDetailList、
+            # 新版读 detailList。两边都试：读错字段的后果是永远解析出 0 行、
+            # 静默返回 updated=0，回执功能整体失效还不报错。
+            chunk = data.get("moveCollectDetailList") or data.get("detailList") or []
+            for item in chunk:
+                if not isinstance(item, dict):
+                    continue
+                detail_id = item.get("detailId") or item.get("collectBoxDetailId")
+                if detail_id not in (None, ""):
+                    by_detail.setdefault(str(detail_id), []).append(item)
+            # 不足一页说明到底了；待确认明细全都出现过就不必再翻。
+            if len(chunk) < upstream_size:
+                break
+            if wanted_details and wanted_details <= set(by_detail):
+                break
+    except (MiaoshouError, ValueError):
+        degraded = True
+    finally:
+        client.close()
     from core.utils import now_ts
 
     for row in rows:

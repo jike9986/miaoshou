@@ -727,9 +727,15 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
         return [f"readbackUnavailable(比较失败: {type(exc).__name__})"]
     # 载体场景下这几项与仓库快照口径必然不同。
     # strict=False（认领/铺数据）：categoryCid、prices、translations 忽略。
-    # strict=True （发布前核验）：只有 translations 可以忽略（译文是异步产物），
-    #   价格与类目必须核对 —— 发布出去的商品价格错了就是事故。
-    ignored = {"translations"} if strict else {"categoryCid", "prices", "translations"}
+    # strict=True （发布前核验）：prices 必须核对（发出去价格错了就是事故），
+    #   但 **categoryCid 仍需忽略** —— 载体是妙手复制出来的草稿，它的类目跟着
+    #   载体走、与仓库快照口径天然不同（CLAUDE_STANDARD §3.6 已实测确认）。
+    #
+    # 2026-11-07 踩过的坑：把 categoryCid 一起纳入严格核验后，定时发布全部失败，
+    # 日志是「载体覆盖后读回不一致 detailId=… 差异=['categoryCid']」，
+    # 任务状态 failed、一件都发不出去。这正是忽略清单存在的意义。
+    ignored = ({"categoryCid", "translations"} if strict
+               else {"categoryCid", "prices", "translations"})
     return [item for item in issues if str(item).strip() not in ignored]
 
 

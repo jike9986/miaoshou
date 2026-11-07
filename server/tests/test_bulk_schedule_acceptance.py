@@ -275,8 +275,11 @@ def test_due_schedule_waits_for_receipt_and_isolates_users_of_same_key(isolated_
     assert len(fake.published) == 2
 
 
+# 「category」不在失败清单里：载体是妙手复制出来的草稿，类目跟着载体走，
+# 与仓库快照口径天然不同（CLAUDE_STANDARD §3.6）。把 categoryCid 纳入严格核验
+# 会让每一次定时发布都失败，所以它由下面单独一条用例锁住。
 @pytest.mark.parametrize("failure", [
-    "timeout", "empty", "invalid_shape", "comparison", "sale_price", "purchase_price", "category",
+    "timeout", "empty", "invalid_shape", "comparison", "sale_price", "purchase_price",
 ])
 def test_unverified_carrier_is_never_published(isolated_services, monkeypatch, failure):
     db, _sessions, fake, source, account, first, _second = isolated_services
@@ -301,8 +304,6 @@ def test_unverified_carrier_is_never_published(isolated_services, monkeypatch, f
             actual["skuMap"]["sku-1"]["price"] = "1"
         elif failure == "purchase_price":
             actual["skuMap"]["sku-1"]["originPrice"] = "1"
-        elif failure == "category":
-            actual["cid"] = "unexpected"
         return result
 
     monkeypatch.setattr(fake, "shop_detail", readback)
@@ -397,3 +398,103 @@ def test_schedule_partial_submission_counts_are_not_successes():
         "partial", 1, 1, 2)
     assert [item["status"] for item in summary["results"]] == [
         "success", "processing", "fail", "failed"]
+
+def test_carrier_category_divergence_is_not_a_publish_blocker(isolated_services, monkeypatch):
+    """只差 categoryCid 不算核验失败，发布必须照常发出去。
+
+    2026-11-07 的回归：把 categoryCid 从忽略清单里去掉后，定时任务每一轮都
+    「载体覆盖后读回不一致 detailId=… 差异=['categoryCid']」，任务 failed、
+    产品一件都发不出去。载体草稿的类目跟着载体走，与仓库快照口径天然不同，
+    所以严格读回核验仍要忽略它 —— 价格、图片、规格这些必须继续严格核对
+    （见 test_unverified_carrier_is_never_published）。
+    """
+    db, _sessions, fake, source, account, first, _second = isolated_services
+    product = finished_product(db, source, 0)
+    db.flush()
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=first.id))
+    db.commit()
+    original_read = fake.shop_detail
+
+    def readback(detail_id, shop_id):
+        if int(detail_id) not in fake.saved:
+            return original_read(detail_id, shop_id)
+        result = original_read(detail_id, shop_id)
+        result["data"]["shopCollectItemInfo"]["cid"] = "unexpected"
+        return result
+
+    monkeypatch.setattr(fake, "shop_detail", readback)
+    outcome = publish_service.publish(db, {
+        "confirm": True, "accountId": account.id, "shopId": "9",
+        "template": "Acceptance pricing", "items": [{"warehouseId": str(product.id)}],
+    }, operator_id=first.id)
+    assert len(fake.saved) == 1
+    assert len(outcome["published"]) == 1
+    assert len(fake.published) == 1
+    assert db.query(PublishLog).count() == 1
+
+
+def test_waiting_for_receipt_does_not_consume_daily_attempts(isolated_services):
+    """等平台回执不是失败：不能吃掉当天的尝试次数。
+
+    发布提交后平台回执要 1–3 分钟才建单，而调度器每 60s 扫一轮。按失败记账
+    的话三次就吃满 SCHEDULE_MAX_ATTEMPTS_PER_DAY=3，任务当天直接不再执行，
+    表现就是「定时任务设置好了不执行」。
+    """
+    from core.utils import now_ts
+    from models.schedule_log import ScheduleLog
+
+    db, sessions, fake, source, account, first, _second = isolated_services
+    task = scheduled(db, account, first)
+    db.flush()
+    pending = PublishLog(account_id=account.id, operator_id=first.id,
+                         schedule_id=task.id, detail_id="3516485793", shop_id="9",
+                         batch_id="sched-previous", status="processing",
+                         requested_at=now_ts(), last_requested_at=now_ts())
+    db.add(pending)
+    db.commit()
+
+    ticks = (schedule_service.run_due(db, now=datetime(2026, 11, 3, 9, 0))
+             + schedule_service.run_due(db, now=datetime(2026, 11, 3, 9, 1))
+             + schedule_service.run_due(db, now=datetime(2026, 11, 3, 9, 2)))
+    assert len(ticks) == 3
+    for summary in ticks:
+        assert summary["status"] == "submitted"
+        assert (summary["selected"], summary["published"], summary["failed"]) == (0, 0, 0)
+        assert summary["pendingDetailId"] == "3516485793"
+    assert fake.published == []
+    with sessions() as reopened:
+        saved = reopened.get(Schedule, task.id)
+        assert saved.attempts == 0
+        assert (saved.last_run_date or "") == ""
+        assert saved.last_result["status"] == "submitted"
+    assert db.query(ScheduleLog).count() == 0
+
+
+def test_receipt_clears_waiting_and_publishes_on_next_tick(isolated_services):
+    """回执到了之后下一轮照常发布，不再被待确认挡住。"""
+    from core.utils import now_ts
+
+    db, _sessions, fake, source, account, first, _second = isolated_services
+    product = finished_product(db, source, 0)
+    task = scheduled(db, account, first)
+    task.per_run = 1
+    db.flush()
+    db.add(ProductClaim(product_id=product.id, owner_operator_id=first.id))
+    pending = PublishLog(account_id=account.id, operator_id=first.id,
+                         schedule_id=task.id, detail_id="3516485793", shop_id="9",
+                         batch_id="sched-previous", status="processing",
+                         requested_at=now_ts(), last_requested_at=now_ts())
+    db.add(pending)
+    db.commit()
+
+    assert schedule_service.run_due(
+        db, now=datetime(2026, 11, 3, 9, 0))[0]["status"] == "submitted"
+    fake.receipts = [{"detailId": "3516485793", "shopId": "9", "status": "success",
+                      "gmtCreate": datetime.fromtimestamp(
+                          pending.last_requested_at, timezone(timedelta(hours=8))
+                      ).strftime("%Y-%m-%d %H:%M:%S")}]
+    summary = schedule_service.run_due(db, now=datetime(2026, 11, 3, 9, 1))[0]
+    assert summary["status"] == "submitted"
+    assert pending.status == "success"
+    assert len(fake.published) == 1
+

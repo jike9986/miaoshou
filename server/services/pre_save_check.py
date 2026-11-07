@@ -86,6 +86,16 @@ def detail_images_only(urls: Iterable[str]) -> str:
     return "".join(f'<img src="{escape(url, quote=True)}">' for url in urls)
 
 
+def normalize_detail_html(notes: Any) -> str:
+    """把详情 HTML 归一成良构的「只有图片」形态。
+
+    为什么需要：采集回来的备注里混着 `</p>` 之类的排版碎片，甚至出现过末张图
+    标签被截断（缺结尾引号和 `>`）。原样发给妙手，平台抓图时会把 `</p></p`
+    粘进 URL，判「获取图片【…】失败」整单失败（2026-11-07 实测两单）。
+    """
+    return detail_images_only(extract_detail_image_urls(notes))
+
+
 def _is_price_field(key: Any) -> bool:
     return "price" in str(key).casefold()
 
