@@ -775,8 +775,7 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
                                   "学员定时任务只能发布已认领的成品商品",
                                   status=403)
         _assert_operator_account_access(db, account_id, operator)
-        # Shared warehouse products are visible to all students, but each student
-        # may schedule only the products they personally claimed.
+        # 共享仓库商品对所有学员可见，但每个学员只能排自己认领过的。
         # ProductClaim.product_id 与 Product.id 都是 Integer，直接子查询即可。
         # 之前误加了 cast(..., Text)，反而造成 integer = text 类型不匹配，
         # 报「operator does not exist: integer = text」。
@@ -787,9 +786,16 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
                              Product.automation_result.is_(False),
                              Product.status != "archived")
     else:
-        if account_id is not None:
-            query = query.filter(Product.account_id == account_id)
-        if not claim_only:
+        # 成品仓库是所有账号共享的货源，不属于任何一个人（负责人 2026-11-07 明确）：
+        # 任何账号都能认领、都能把它发到自己的店铺。
+        # 所以**不再**按 Product.account_id 过滤 —— 那会把「A 账号采进来的商品」
+        # 锁死成只有 A 能发，换账号排定时任务就报「部分所选商品不可用于该账号发布」。
+        #
+        # 下面这个 status != published 的过滤也只在「自动轮转」（未显式勾选）时生效：
+        # 显式勾选的商品是运营点名要发的，哪怕之前发过（换店铺 / 上次失败要重发）
+        # 也必须允许，否则用户看到的就是「明明选好了却说不可用」。
+        explicit = bool(selected_product_ids)
+        if not claim_only and not explicit:
             query = query.filter(Product.status != "published")
     published = _published_identities(db, account_id, operator_id)
     # 显式选定的商品不再按「是否发布过」过滤（负责人 2026-11-06 明确）：

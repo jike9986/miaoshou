@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Images,
   PencilLine,
   Ruler,
@@ -18,14 +20,16 @@ import {
   Card,
   EmptyState,
   Field,
+  InlineError,
   Input,
   SkeletonCardGrid,
   toast,
 } from "@/components/ui";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
+
 import { RemoteImage } from "@/features/shared/RemoteImage";
-import { BatchCategoryDialog } from "@/features/warehouse/BatchCategoryDialog";
-import { useProductDetail, usePatchProduct, useReviewProductQuality } from "@/lib/queries";
+import { CategoryPicker, type PickerNode } from "@/features/warehouse/CategoryPicker";
+import { useBatchCategory, useCategoryTree, useProductDetail, usePatchProduct, useReviewProductQuality } from "@/lib/queries";
 import { apiErrorMessage } from "@/lib/api";
 import { useOperatorIdentity } from "@/lib/operator";
 import { formatCount, formatDate, formatPrice } from "@/lib/utils";
@@ -40,9 +44,9 @@ import { cn } from "@/lib/utils";
  *
  * 排版顺序按负责人 2026-11-07 的要求固定：
  *   ① 标题 ② 详情图（横向滑动，点开大图可翻页）
- *   ③ 类目 / ④ 重量与尺寸 —— 一行两块，重量和尺寸同卡上下排列
- *   ⑤ SKU 颜色与尺码（颜色用大图卡片）⑥ 价格（框内滚动，列宽均分）
- *   ⑦ 尺码图（放最下面，按原始比例显示）
+ *   ③ 类目（单独一行，内嵌三栏联动选择器，不弹窗）
+ *   ④ SKU 颜色与尺码（颜色用大图卡片）⑤ 价格（框内滚动，列宽均分）
+ *   ⑥ 尺码图（按原始比例显示）⑦ 重量与尺寸（老师在卡内直接改）
  *
  * 权限：学员只读（看得到全部内容，没有编辑控件）；
  *      老师/管理员可以改标题、类目、SKU、价格、尺码图、重量尺寸。
@@ -153,22 +157,48 @@ export function ProductDetailPage() {
   const detail = useProductDetail(ident ?? null, true);
   const update = usePatchProduct();
   const reviewQuality = useReviewProductQuality();
+  const batchCategory = useBatchCategory();
+  // 类目三栏选择器需要的树。带 accountId —— 类目缓存按妙手账号隔离存，
+  // 不传就只能命中全局哨兵，树会是空的。
+  const categoryTree = useCategoryTree(
+    { accountId: detail.data?.product?.accountId ?? null, depth: 6, leafOnly: false },
+    Boolean(detail.data?.product?.accountId),
+  );
 
   const product = detail.data?.product;
   const payload = (product?.payload ?? null) as Record<string, unknown> | null;
 
+  // 当前类目的中文路径（product.categoryName 是叶子名，看不出层级）
+  const categoryLabel = useMemo(() => {
+    const cid = product?.cid;
+    if (!cid) return "";
+    const roots = (categoryTree.data?.tree ?? []) as PickerNode[];
+    const walk = (nodes: PickerNode[], trail: string[]): string | null => {
+      for (const node of nodes) {
+        const next = [...trail, node.nameZh || node.name || node.cid];
+        if (node.cid === cid) return next.join(" / ");
+        const hit = walk(node.children ?? [], next);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    return walk(roots, []) ?? "";
+  }, [categoryTree.data?.tree, product?.cid]);
+
   const [title, setTitle] = useState("");
   const [titleDirty, setTitleDirty] = useState(false);
   const [lightbox, setLightbox] = useState<number | null>(null);
-  // 类目修改弹窗：老师可直接改这一件的类目
+  // 类目选择器默认收起，点当前类目才展开（与妙手一致）
   const [categoryOpen, setCategoryOpen] = useState(false);
-
   const [weight, setWeight] = useState("");
   const [length, setLength] = useState("");
   const [width, setWidth] = useState("");
   const [height, setHeight] = useState("");
-  const [qualitySource, setQualitySource] = useState("");
-  const [qualityEvidence, setQualityEvidence] = useState("");
+  // 核验来源/依据不再让用户填（界面已去掉这两个输入框），保存时自动带上；
+  // 用户若在别处填过就沿用，没填就用默认文案。
+  const [qualitySource] = useState("");
+  const [qualityEvidence] = useState("");
+  const [qualityError, setQualityError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!product) return;
@@ -230,6 +260,16 @@ export function ProductDetailPage() {
 
   const saveQuality = (): void => {
     if (!product) return;
+    // 四个数值都必须 > 0：后端也会校验，但在这里先拦一下，
+    // 免得用户填了空值点保存只看到一句笼统的失败。
+    const numbers = { weightKg: Number(weight), packageLength: Number(length),
+                      packageWidth: Number(width), packageHeight: Number(height) };
+    const invalid = Object.entries(numbers).find(([, value]) => !Number.isFinite(value) || value <= 0);
+    if (invalid) {
+      setQualityError("重量与三个边长都必须是大于 0 的数字");
+      return;
+    }
+    setQualityError(null);
     reviewQuality.mutate(
       {
         id: String(product.id),
@@ -238,18 +278,25 @@ export function ProductDetailPage() {
           packageLength: Number(length),
           packageWidth: Number(width),
           packageHeight: Number(height),
-          source: qualitySource,
-          evidence: qualityEvidence,
+          // 界面不再要求填写：统一记成「详情页直接修改」，
+          // 保留操作痕迹但不打扰操作者（后端这两个字段是必填）。
+          source: qualitySource.trim() || "详情页直接修改",
+          evidence: qualityEvidence.trim() || `操作者 ${identity?.name || "未知"} 于详情页直接修改`,
           // 版本号用于并发冲突检测：详情页已加载的 revision 就是用户看到的那一版
           expectedRevision: product.revision ?? 0,
         },
       },
       {
         onSuccess: () => {
+          setQualityError(null);
           toast.success("重量与尺寸已保存");
           void detail.refetch();
         },
-        onError: (error) => toast.error("保存失败", { description: apiErrorMessage(error) }),
+        onError: (error) => {
+          const message = apiErrorMessage(error);
+          setQualityError(message);
+          toast.error("保存失败", { description: message });
+        },
       }
     );
   };
@@ -412,68 +459,88 @@ export function ProductDetailPage() {
             )}
           </Card>
 
-          {/* ③④ 一行两块：类目 / 重量与尺寸
-              尺码图单独放到页面最下面，因为它尺寸不定（方形/长条都有），
-              和固定高度的卡片并排会留大片空白。 */}
-          <div className="grid gap-4 sm:grid-cols-2">
-            {/* ③ 类目：老师直接点标签就能改（不再放右上角按钮） */}
-            <Card padding="normal">
-              <SectionTitle>③ 类目</SectionTitle>
-              <div className="mt-3 flex items-center gap-2">
-                {isMember ? (
-                  <span className="inline-flex items-center gap-1.5 rounded-sm bg-canvas-inset px-2 py-1 text-sm text-fg">
-                    <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
-                    {product.categoryName || "未设置"}
-                  </span>
-                ) : (
+          {/* ③ 类目：单独一行，做成妙手那种三栏联动，内嵌不弹窗 */}
+          <Card padding="normal">
+            <SectionTitle>③ 类目</SectionTitle>
+            <div className="mt-3">
+              {isMember ? (
+                <span className="inline-flex items-center gap-1.5 rounded-sm bg-canvas-inset px-2 py-1 text-sm text-fg">
+                  <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
+                  {categoryLabel || product.categoryName || "未设置"}
+                </span>
+              ) : (
+                <>
+                  {/* 常态只显示当前类目；点一下才展开三栏选择器。
+                      妙手也是这么做的：选择器常驻会把整页拉得很长。 */}
                   <button
                     type="button"
-                    onClick={() => setCategoryOpen(true)}
+                    onClick={() => setCategoryOpen((open) => !open)}
                     className={cn(
-                      "inline-flex items-center gap-1.5 rounded-sm border border-transparent bg-canvas-inset px-2 py-1 text-sm text-fg",
-                      "transition-colors hover:border-brand-600/40 hover:bg-brand-50 focus-visible:outline-none",
-                      "focus-visible:ring-2 focus-visible:ring-brand-600/40"
+                      "inline-flex max-w-full items-center gap-1.5 rounded-sm border px-2 py-1 text-sm",
+                      "transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/40",
+                      categoryOpen
+                        ? "border-brand-600/50 bg-brand-50 text-brand-700"
+                        : "border-border bg-canvas-inset text-fg hover:border-brand-600/40",
                     )}
-                    title="点击修改类目"
+                    aria-expanded={categoryOpen}
+                    title={categoryOpen ? "收起类目选择" : "点击修改类目"}
                   >
-                    <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
-                    {product.categoryName || "未设置"}
-                    <PencilLine className="size-3 text-fg-muted" aria-hidden strokeWidth={1.75} />
+                    <Tag className="size-3.5 shrink-0 text-fg-muted" aria-hidden strokeWidth={1.75} />
+                    <span className="min-w-0 truncate">
+                      {categoryLabel || "未设置"}
+                    </span>
+                    {categoryOpen ? (
+                      <ChevronUp className="size-3.5 shrink-0" aria-hidden strokeWidth={2} />
+                    ) : (
+                      <ChevronDown className="size-3.5 shrink-0" aria-hidden strokeWidth={2} />
+                    )}
                   </button>
-                )}
-              </div>
-              {isMember && (
-                <p className="mt-2 text-2xs text-fg-muted">类目由老师设置</p>
+                  {categoryOpen && (
+                    <div className="mt-3">
+                      <CategoryPicker
+                        tree={(categoryTree.data?.tree ?? []) as PickerNode[]}
+                        value={product.cid || null}
+                        onChange={(nextCid) => {
+                          if (!nextCid || nextCid === product.cid) return;
+                          batchCategory.mutate(
+                            {
+                              ids: [String(product.id)],
+                              cid: nextCid,
+                              expectedRevisions:
+                                typeof product.revision === "number"
+                                  ? { [String(product.id)]: product.revision }
+                                  : undefined,
+                            },
+                            {
+                              onSuccess: () => {
+                                toast.success("类目已更新");
+                                setCategoryOpen(false);
+                                void detail.refetch();
+                              },
+                              onError: (error) => toast.error("改类目失败", {
+                                description: apiErrorMessage(error),
+                              }),
+                            },
+                          );
+                        }}
+                      />
+                    </div>
+                  )}
+                </>
               )}
-            </Card>
-
-            {/* ⑤ 重量与尺寸：合并一张卡，上下两行 */}
-            <Card padding="normal">
-              <SectionTitle>④ 重量与尺寸</SectionTitle>
-              <dl className="mt-3 flex flex-col gap-2.5">
-                <div className="flex items-baseline justify-between gap-3">
-                  <dt className="text-2xs text-fg-muted">包裹重量</dt>
-                  <dd className="num text-lg font-semibold text-fg">
-                    {payload?.weight ? `${String(payload.weight)} kg` : "—"}
-                  </dd>
-                </div>
-                <div className="flex items-baseline justify-between gap-3 border-t border-border-subtle pt-2.5">
-                  <dt className="text-2xs text-fg-muted">包裹尺寸（长×宽×高）</dt>
-                  <dd className="num text-lg font-semibold text-fg">
-                    {[payload?.packageLength, payload?.packageWidth, payload?.packageHeight]
-                      .map((value) => (value === undefined || value === null || value === "" ? "—" : String(value)))
-                      .join(" × ")}
-                    <span className="ml-1 text-xs font-normal text-fg-muted">cm</span>
-                  </dd>
-                </div>
-              </dl>
-            </Card>
-          </div>
+            </div>
+            {categoryTree.isLoading && !isMember && (
+              <p className="mt-2 text-2xs text-fg-muted">正在加载类目树…</p>
+            )}
+            {isMember && (
+              <p className="mt-2 text-2xs text-fg-muted">类目由老师设置</p>
+            )}
+          </Card>
 
           {/* ④ SKU 颜色 / 尺码 */}
           <Card padding="normal">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <SectionTitle>⑤ 规格（颜色 / 尺码）</SectionTitle>
+              <SectionTitle>④ 规格（颜色 / 尺码）</SectionTitle>
               <Badge variant="neutral" size="sm">{formatCount(product.skuCount)} 个 SKU</Badge>
             </div>
             {dimensions.length === 0 ? (
@@ -526,7 +593,7 @@ export function ProductDetailPage() {
           {/* ⑤ 价格 */}
           <Card padding="normal">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <SectionTitle>⑥ 价格</SectionTitle>
+              <SectionTitle>⑤ 价格</SectionTitle>
               <span className="inline-flex items-center gap-1 text-2xs text-fg-muted">
                 <Wallet className="size-3" aria-hidden strokeWidth={1.75} />
                 采购价 {product.purchaseCurrency || "CNY"}
@@ -590,7 +657,7 @@ export function ProductDetailPage() {
               按原始比例显示，外层容器只限制最大高度不强行拉伸。 */}
           <Card padding="normal">
             <div className="flex items-center justify-between gap-2">
-              <SectionTitle>⑦ 尺码图</SectionTitle>
+              <SectionTitle>⑥ 尺码图</SectionTitle>
               <Ruler className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
             </div>
             {(() => {
@@ -616,74 +683,67 @@ export function ProductDetailPage() {
             })()}
           </Card>
 
-          {/* 老师/管理员可编辑；学员只读（数值见上方 ⑤ 卡片） */}
-          {!isMember && (
-            <Card padding="normal">
-              <SectionTitle>修改重量与尺寸</SectionTitle>
-              <p className="mt-1 text-2xs text-fg-muted">
-                填写已从可靠来源核实的数据；保存后用于定价和发布。
-              </p>
-              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <Field label="重量（kg）" required>
-                  <Input type="number" min="0" step="0.001" value={weight} onChange={(event) => setWeight(event.currentTarget.value)} />
-                </Field>
-                <Field label="长（cm）" required>
-                  <Input type="number" min="0" step="0.1" value={length} onChange={(event) => setLength(event.currentTarget.value)} />
-                </Field>
-                <Field label="宽（cm）" required>
-                  <Input type="number" min="0" step="0.1" value={width} onChange={(event) => setWidth(event.currentTarget.value)} />
-                </Field>
-                <Field label="高（cm）" required>
-                  <Input type="number" min="0" step="0.1" value={height} onChange={(event) => setHeight(event.currentTarget.value)} />
-                </Field>
-              </div>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <Field label="核验来源" required hint="例如妙手商品资料、原始商品页或实物测量">
-                  <Input maxLength={120} value={qualitySource} onChange={(event) => setQualitySource(event.currentTarget.value)} />
-                </Field>
-                <Field label="核验依据" required hint="记录可复查的信息">
-                  <Input maxLength={1000} value={qualityEvidence} onChange={(event) => setQualityEvidence(event.currentTarget.value)} />
-                </Field>
-              </div>
-              <div className="mt-3 flex justify-end">
-                <Button
-                  variant="primary"
-                  size="sm"
-                  icon={<Save />}
-                  loading={reviewQuality.isPending}
-                  onClick={saveQuality}
-                >
-                  保存重量与尺寸
-                </Button>
-              </div>
-            </Card>
-          )}
+          {/* ⑧ 重量与尺寸：老师直接在这张卡里改，学员只读 */}
+          <Card padding="normal">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <SectionTitle>⑦ 重量与尺寸</SectionTitle>
+              {product.qualityReview && (
+                <Badge variant="success" size="sm">
+                  已核验 · {product.qualityReview.verifiedByOperatorName}
+                </Badge>
+              )}
+            </div>
+            {isMember ? (
+              <dl className="mt-3 flex flex-col gap-2.5">
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="text-2xs text-fg-muted">包裹重量</dt>
+                  <dd className="num text-lg font-semibold text-fg">
+                    {payload?.weight ? `${String(payload.weight)} kg` : "—"}
+                  </dd>
+                </div>
+                <div className="flex items-baseline justify-between gap-3 border-t border-border-subtle pt-2.5">
+                  <dt className="text-2xs text-fg-muted">包裹尺寸（长×宽×高）</dt>
+                  <dd className="num text-lg font-semibold text-fg">
+                    {[payload?.packageLength, payload?.packageWidth, payload?.packageHeight]
+                      .map((value) => (value === undefined || value === null || value === "" ? "—" : String(value)))
+                      .join(" × ")}
+                    <span className="ml-1 text-xs font-normal text-fg-muted">cm</span>
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <>
+                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <Field label="重量（kg）" required>
+                    <Input type="number" min="0" step="0.001" value={weight} onChange={(event) => setWeight(event.currentTarget.value)} />
+                  </Field>
+                  <Field label="长（cm）" required>
+                    <Input type="number" min="0" step="0.1" value={length} onChange={(event) => setLength(event.currentTarget.value)} />
+                  </Field>
+                  <Field label="宽（cm）" required>
+                    <Input type="number" min="0" step="0.1" value={width} onChange={(event) => setWidth(event.currentTarget.value)} />
+                  </Field>
+                  <Field label="高（cm）" required>
+                    <Input type="number" min="0" step="0.1" value={height} onChange={(event) => setHeight(event.currentTarget.value)} />
+                  </Field>
+                </div>
+                {qualityError && <div className="mt-3"><InlineError>{qualityError}</InlineError></div>}
+                <div className="mt-3 flex justify-end">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<Save />}
+                    loading={reviewQuality.isPending}
+                    onClick={saveQuality}
+                  >
+                    保存重量与尺寸
+                  </Button>
+                </div>
+              </>
+            )}
+          </Card>
         </div>
       </PageContent>
-
-      {/* 改类目：复用仓库的批量弹窗，只传当前这一件 */}
-      {!isMember && product && (
-        <BatchCategoryDialog
-          open={categoryOpen}
-          onOpenChange={setCategoryOpen}
-          ids={[String(product.id)]}
-          site={product.site}
-          accountId={product.accountId ?? null}
-          connected={Boolean(product.accountId)}
-          revisions={
-            typeof product.revision === "number"
-              ? { [String(product.id)]: product.revision }
-              : undefined
-          }
-          onRefresh={() => void detail.refetch()}
-          onDone={(updated) => {
-            if (updated > 0) {
-              toast.success("类目已更新");
-              void detail.refetch();
-            }
-          }}
-        />
-      )}
 
       {/* 大图查看器：点击详情图后打开，左右翻页、Esc 关闭 */}
       {lightbox !== null && viewerImages[lightbox] && (

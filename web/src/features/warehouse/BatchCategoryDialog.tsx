@@ -9,6 +9,7 @@ import { isLanguageMismatch } from "@/lib/constants";
 import { useBatchCategory, useCategoryTree, useCreateGroup, useGroups } from "@/lib/queries";
 import type { BatchCategoryRequest, CategoryNode } from "@/lib/types";
 import { RevisionConflictDialog } from "@/features/shared/RevisionConflictDialog";
+import { CategoryPicker, type PickerNode } from "@/features/warehouse/CategoryPicker";
 import {
   Button,
   Dialog,
@@ -332,29 +333,19 @@ export function BatchCategoryDialog({
               </InlineError>
             )}
             {connected && !treeQuery.isLoading && !treeQuery.isError && (
-              <Field
-                label="目标类目"
-                hint={
-                  treeQuery.data?.stale
-                    ? "类目缓存超过 7 天且本次回源失败，展示的是旧树"
-                    : "只能选叶子类目（非叶子会被后端拒绝：CATEGORY_NOT_LEAF）"
-                }
-              >
-                <DropdownSelect
+              <div className="flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-fg-secondary">目标类目</span>
+                {treeQuery.data?.stale && (
+                  <p className="text-2xs text-warning-700">
+                    类目缓存超过 7 天且本次回源失败，展示的是旧树
+                  </p>
+                )}
+                <CategoryPicker
+                  tree={(treeQuery.data?.tree ?? []) as PickerNode[]}
                   value={cid}
                   onChange={setCid}
-                  options={leaves.map((leaf) => ({
-                    value: leaf.cid,
-                    label: leaf.path || leaf.nameZh || leaf.name,
-                    description: leaf.cid,
-                  }))}
-                  placeholder={leaves.length === 0 ? "类目树为空，可先同步类目" : "选择类目"}
-                  searchable
-                  searchPlaceholder="搜索类目名 / cid"
-                  emptyText="没有匹配的类目"
-                  maxHeight={280}
                 />
-              </Field>
+              </div>
             )}
           </div>
         )}
