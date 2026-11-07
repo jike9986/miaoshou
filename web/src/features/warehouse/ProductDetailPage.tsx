@@ -24,6 +24,7 @@ import {
 } from "@/components/ui";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { RemoteImage } from "@/features/shared/RemoteImage";
+import { BatchCategoryDialog } from "@/features/warehouse/BatchCategoryDialog";
 import { useProductDetail, usePatchProduct, useReviewProductQuality } from "@/lib/queries";
 import { apiErrorMessage } from "@/lib/api";
 import { useOperatorIdentity } from "@/lib/operator";
@@ -159,6 +160,8 @@ export function ProductDetailPage() {
   const [title, setTitle] = useState("");
   const [titleDirty, setTitleDirty] = useState(false);
   const [lightbox, setLightbox] = useState<number | null>(null);
+  // 类目修改弹窗：老师可直接改这一件的类目
+  const [categoryOpen, setCategoryOpen] = useState(false);
 
   const [weight, setWeight] = useState("");
   const [length, setLength] = useState("");
@@ -413,15 +416,30 @@ export function ProductDetailPage() {
               尺码图单独放到页面最下面，因为它尺寸不定（方形/长条都有），
               和固定高度的卡片并排会留大片空白。 */}
           <div className="grid gap-4 sm:grid-cols-2">
-            {/* ③ 类目 */}
+            {/* ③ 类目：老师可直接改（复用仓库的批量改类目弹窗，只传这一件） */}
             <Card padding="normal">
-              <SectionTitle>③ 类目</SectionTitle>
+              <div className="flex items-center justify-between gap-2">
+                <SectionTitle>③ 类目</SectionTitle>
+                {!isMember && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<Tag />}
+                    onClick={() => setCategoryOpen(true)}
+                  >
+                    改类目
+                  </Button>
+                )}
+              </div>
               <div className="mt-3 flex items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 rounded-sm bg-canvas-inset px-2 py-1 text-sm text-fg">
                   <Tag className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
                   {product.categoryName || "未设置"}
                 </span>
               </div>
+              {isMember && (
+                <p className="mt-2 text-2xs text-fg-muted">类目由老师设置</p>
+              )}
             </Card>
 
             {/* ⑤ 重量与尺寸：合并一张卡，上下两行 */}
@@ -637,6 +655,29 @@ export function ProductDetailPage() {
           )}
         </div>
       </PageContent>
+
+      {/* 改类目：复用仓库的批量弹窗，只传当前这一件 */}
+      {!isMember && product && (
+        <BatchCategoryDialog
+          open={categoryOpen}
+          onOpenChange={setCategoryOpen}
+          ids={[String(product.id)]}
+          site={product.site}
+          connected={Boolean(product.accountId)}
+          revisions={
+            typeof product.revision === "number"
+              ? { [String(product.id)]: product.revision }
+              : undefined
+          }
+          onRefresh={() => void detail.refetch()}
+          onDone={(updated) => {
+            if (updated > 0) {
+              toast.success("类目已更新");
+              void detail.refetch();
+            }
+          }}
+        />
+      )}
 
       {/* 大图查看器：点击详情图后打开，左右翻页、Esc 关闭 */}
       {lightbox !== null && viewerImages[lightbox] && (
