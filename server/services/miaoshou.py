@@ -19,7 +19,7 @@ import os
 import threading
 import time
 from collections.abc import Mapping
-from typing import Any, Mapping
+from typing import Any
 
 import httpx
 

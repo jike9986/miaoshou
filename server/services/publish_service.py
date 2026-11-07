@@ -16,7 +16,6 @@ import math
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
-from html import escape, unescape
 from typing import Any
 
 from sqlalchemy import or_
@@ -43,7 +42,6 @@ from core.utils import (
 from models.account import Account
 from models.automation_run import AutomationRun, AutomationRunItem
 from models.product import Product
-from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
 from services import (
     carrier_service,
@@ -1458,6 +1456,18 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     # 用 finally 立刻释放会漏：台账里那行 processing 还没提交，第二个人查不到，
     # 照样能把同一件商品再发一遍 —— 这正是这把锁要挡的事。
 
+    # 发布/认领都落一条批次记录，前端「认领到采集箱」面板才完整。
+    # 这段必须排在 return 之前：之前写在 return 后面成了死代码，
+    # 批次表永远少一条，「发布不算在批次里」正是这个 bug 的表象。
+    # 记录失败不阻断发布本身 —— 上游已经提交了，回滚批次没意义。
+    try:
+        _record_publish_batch(db, batch_id=batch_id, account_id=account.id,
+                              shop_id=str(target_shop_id),
+                              operator_id=log_operator_id, logs=logged,
+                              claim_only=claim_only)
+    except Exception as exc:  # noqa: BLE001 - 批次记录失败不影响发布本身
+        logger.warning("发布批次记录失败 batchId=%s：%s", batch_id, exc)
+
     return {
         "publishRequested": True,
         "mode": mode,
@@ -1480,15 +1490,6 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                                     operator_name=operator_name) for row in logged],
         },
     }
-    # 发布/认领都落一条批次记录，前端「认领到采集箱」面板才完整
-    try:
-        _record_publish_batch(db, batch_id=batch_id, account_id=account.id,
-                              shop_id=str(target_shop_id),
-                              operator_id=log_operator_id, logs=logged,
-                              claim_only=claim_only)
-    except Exception as exc:  # noqa: BLE001 - 批次记录失败不影响发布本身
-        logger.warning("发布批次记录失败 batchId=%s：%s", batch_id, exc)
-    return result
 
 
 def _record_publish_batch(db: Session, *, batch_id: str, account_id: int,

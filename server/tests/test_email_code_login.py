@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 from db.session import SessionLocal, init_db
 from main import app
 from models.email_verification_code import EmailVerificationCode
-from models.operator import Operator
 from services import email_code_service, email_service, login_rate_limit_service, operator_service
 
 API = "/api/v1"
