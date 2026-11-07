@@ -1573,6 +1573,11 @@ export function useSchedules(
       api.get<SchedulesResponse>("/schedules", {
         query: compactQuery({ accountId: params.accountId, enabled: params.enabled }),
       }),
+    // 发布一件要 20-60 秒，后台跑的时候界面必须自己跟上：有任务在跑就 5 秒
+    // 刷一次，跑完回落到 30 秒。以前完全不定时刷新，任务真跑起来了界面还写着
+    // 「未开始」，用户以为没启动（2026-11-07 实测反馈）。
+    refetchInterval: (query) =>
+      query.state.data?.items?.some((item) => item.running) ? 5_000 : 30_000,
   });
 }
 

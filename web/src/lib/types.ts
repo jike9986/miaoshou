@@ -1017,6 +1017,8 @@ export interface Schedule {
   createdAt: number;
   updatedAt: number;
   lastResult?: ScheduleLastResult | null;
+  /** 后端内存态：此刻正在执行（不落库，重启即消失）。 */
+  running?: boolean;
 }
 
 export interface SchedulesResponse {

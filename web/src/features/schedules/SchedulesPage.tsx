@@ -382,16 +382,30 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
                         </p>
                       </td>
                       <td className="px-3 py-2.5">
-                        <p className="text-[13px] text-fg">
-                          {task.completed
-                            ? "已完成"
-                            : !task.enabled
-                              ? "已暂停"
-                            : !task.lastRunDate
-                              ? "未开始"
-                              : "进行中"}
+                        <p className="flex items-center gap-1.5 text-[13px] text-fg">
+                          {task.running && (
+                            <span
+                              className="inline-block size-1.5 animate-pulse rounded-full bg-brand-600"
+                              aria-hidden="true"
+                            />
+                          )}
+                          {task.running
+                            ? "执行中"
+                            : task.completed
+                              ? "已完成"
+                              : !task.enabled
+                                ? "已暂停"
+                                : !task.lastRunDate
+                                  ? "未开始"
+                                  : "进行中"}
                         </p>
-                        <p className="truncate text-2xs text-fg-muted">{task.enabled ? task.nextDueText || "等待执行" : "可重新启用"}</p>
+                        <p className="truncate text-2xs text-fg-muted">
+                          {task.running
+                            ? "正在发布，请稍候"
+                            : task.enabled
+                              ? task.nextDueText || "等待执行"
+                              : "可重新启用"}
+                        </p>
                         {/* lastResult.status 为空（从未跑过）时不渲染「上次」行，避免出现孤零零的 0/20 */}
                         {task.lastResult?.status && (
                           <p className="flex items-center gap-1 text-2xs text-fg-muted">

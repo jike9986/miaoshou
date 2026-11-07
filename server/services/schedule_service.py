@@ -381,6 +381,8 @@ def serialize(row: Schedule, *, account_name: str = "", shop_name: str = "") -> 
         "createdAt": row.created_at,
         "updatedAt": row.updated_at,
         "lastResult": row.last_result if isinstance(row.last_result, dict) else {},
+        # 此刻正在执行（内存态，不落库）：界面据此显示「执行中」并自动刷新。
+        "running": task_running(row.id),
     }
 
 
@@ -584,6 +586,32 @@ def list_schedules(db: Session, *, account_id: Any = None,
 # 后台扫描间隔，必须与 main._schedule_loop 的 60s 一致
 SCAN_INTERVAL_SECONDS = 60
 _scheduler_heartbeat = {"at": 0.0}
+
+# 正在执行的任务（task_id -> 开始时间）。发布一件要 20-60 秒，期间界面上
+# 「上次结果」还是上一轮的，用户看到的就是「任务没启动」。只放内存：进程重启
+# 后这批执行已经断了，残留状态比没有更误导。
+_running_tasks: dict[str, float] = {}
+# 执行中标记的最长存活时间：线程异常退出时没人清，超时自动失效。
+RUNNING_MARK_TTL_SECONDS = 3600.0
+
+
+def mark_task_running(task_id: str) -> None:
+    _running_tasks[str(task_id)] = now_ts()
+
+
+def clear_task_running(task_id: str) -> None:
+    _running_tasks.pop(str(task_id), None)
+
+
+def task_running(task_id: str) -> bool:
+    """这个任务此刻是否正在执行（供列表展示「执行中」）。"""
+    started = _running_tasks.get(str(task_id))
+    if started is None:
+        return False
+    if now_ts() - started > RUNNING_MARK_TTL_SECONDS:
+        _running_tasks.pop(str(task_id), None)
+        return False
+    return True
 
 
 def mark_scheduler_tick() -> None:
@@ -1218,9 +1246,15 @@ def execute(db: Session, task: Schedule, *, raise_on_error: bool = False,
             "failures": [], "results": [],
         }
 
-    with _batch_guard():
-        return _execute_locked(db, task, raise_on_error=raise_on_error,
-                               with_results=with_results, moment=moment)
+    # 打「执行中」标记：发布一件 20-60 秒，没有这个标记界面只能看到上一轮结果，
+    # 用户会以为任务根本没启动（2026-11-07 实测反馈）。
+    mark_task_running(str(task.id))
+    try:
+        with _batch_guard():
+            return _execute_locked(db, task, raise_on_error=raise_on_error,
+                                   with_results=with_results, moment=moment)
+    finally:
+        clear_task_running(str(task.id))
 
 
 def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False,
