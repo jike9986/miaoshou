@@ -873,7 +873,7 @@ export function WarehousePage() {
                           index={index}
                           selected={selectedIds.includes(product.id)}
                           onToggle={toggleWarehouseSelection}
-                          onOpen={(item) => setDetailId(item.id)}
+                          onOpen={(item) => navigate(`/warehouse/${item.id}`)}
                         />
                       </motion.div>
                     ))}

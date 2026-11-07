@@ -22,6 +22,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { UnlockPage } from "@/features/auth/UnlockPage";
 import { LoginPage } from "@/features/auth/LoginPage";
 import { WarehousePage } from "@/features/warehouse/WarehousePage";
+import { ProductDetailPage } from "@/features/warehouse/ProductDetailPage";
 import { AutomationPage } from "@/features/automation/AutomationPage";
 import { SchedulesPage } from "@/features/schedules/SchedulesPage";
 import { WordsPage } from "@/features/words/WordsPage";
@@ -235,6 +236,7 @@ export default function App() {
                 <Route path="unlock" element={<UnlockPage />} />
                 <Route path="automation" element={<AutomationPage />} />
                 <Route path="warehouse" element={<WarehousePage />} />
+                <Route path="warehouse/:ident" element={<ProductDetailPage />} />
                 <Route path="schedules" element={<SchedulesPage />} />
                 <Route path="words" element={<WordsPage />} />
                 <Route path="words/*" element={<WordsPage />} />
