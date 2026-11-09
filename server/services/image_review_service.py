@@ -13,10 +13,12 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import hashlib
 import json
 import re
 import subprocess
+import threading
 import sys
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,6 +28,8 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler
 
 from core.config import get_settings
+
+logger = logging.getLogger("aohuang.image_review")
 
 OCR_TIMEOUT = 30
 OCR_MAX_BYTES = 15 * 1024 * 1024
@@ -45,6 +49,10 @@ ALLOWED_HOSTS = {
     "earth-rt.chengji-inc.com", "static.chengji-inc.com",
 }
 ALLOWED_SUFFIXES = (".alicdn.com", ".chengji-inc.com", ".taobao.com", ".tmall.com")
+# 自有图床：处理阶段已经把上游图转存到这里，OCR 必须认它。
+# 不认的后果是「转存过的图全部无法识别」——而处理流程里图片一定会先转存，
+# 等于服务器端 OCR 永远不生效（2026-11-09 实测）。
+OWN_IMAGE_HOSTS = {"aohuang888.com", "www.aohuang888.com"}
 # 明确拒绝的主机名/网段（内网、回环、云元数据）
 BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "169.254.169.254"}
 CHINESE = re.compile(r"[\u4e00-\u9fff]")
@@ -96,7 +104,8 @@ def allowed_source(url: str) -> bool:
     host = (parts.hostname or "").lower()
     if not host or parts.port not in (None, 443):
         return False
-    known = host in ALLOWED_HOSTS or host.endswith(ALLOWED_SUFFIXES)
+    known = (host in ALLOWED_HOSTS or host in OWN_IMAGE_HOSTS
+             or host.endswith(ALLOWED_SUFFIXES))
     if not known:
         return False
     return not _is_private_host(host)
@@ -126,7 +135,7 @@ SIZE_CHART_PHRASES = (
 )
 # 尺码表的结构特征：OCR 出来是「35 36 37 …」这种纯数字序列，
 # 或者密集出现「码」字。两者占其一就按尺码图处理。
-_SIZE_RUN = re.compile(r"(?:\d{2}[\s,，/]*){4,}")
+_SIZE_RUN = re.compile(r"(?:\b\d{2}\b[\s,，/\n]*){4,}")
 
 
 def classify_text(text: str) -> dict[str, Any]:
@@ -146,7 +155,7 @@ def classify_text(text: str) -> dict[str, Any]:
         return {"action": "remove", "reason": "疑似厂家宣传：" + "、".join(hits),
                 "hasChinese": True, "chineseText": chinese, "factoryPhrases": hits}
     size_hits = [phrase for phrase in SIZE_CHART_PHRASES if phrase.lower() in lower]
-    if size_hits or _SIZE_RUN.search(clean):
+    if size_hits or _SIZE_RUN.search(text or ""):
         # 尺码图不进主图/详情图：它是「尺码对照表」专用位，混在展示图里
         # 既占 9 张主图额度，又让买家以为那是商品实拍。
         return {"action": "remove",
@@ -232,8 +241,47 @@ def _script_path() -> Path:
     raise ValueError("缺少 windows_ocr.ps1（OCR 脚本未随程序发布），请看图复核")
 
 
+# RapidOCR 单例。模型加载约 1 秒，之后单张 0.3-0.5 秒（4 核 CPU 实测）。
+# 常驻进程里复用同一个引擎，不能每张图都新建。
+_RAPIDOCR_ENGINE: Any = None
+_RAPIDOCR_LOCK = threading.Lock()
+
+
+def _rapidocr_engine() -> Any:
+    """惰性加载 RapidOCR（Linux/服务器端的 OCR 后端）。"""
+    global _RAPIDOCR_ENGINE
+    if _RAPIDOCR_ENGINE is not None:
+        return _RAPIDOCR_ENGINE
+    with _RAPIDOCR_LOCK:
+        if _RAPIDOCR_ENGINE is not None:
+            return _RAPIDOCR_ENGINE
+        from rapidocr import RapidOCR
+
+        _RAPIDOCR_ENGINE = RapidOCR()
+        logger.info("RapidOCR 引擎已加载（服务器端 OCR 后端）")
+        return _RAPIDOCR_ENGINE
+
+
+def _run_ocr_rapidocr(image: Path) -> dict[str, Any]:
+    """用 RapidOCR（ONNX Runtime）识别，返回与 Windows OCR 相同的结构。
+
+    为什么服务器端要另做一套：原来只有 Windows 内置 OCR（WinRT），
+    Linux 服务器上既没有 pwsh 也没有 WinRT，OCR 必然失败 —— 后果是
+    「挑不出含中文的图 → 全部提交翻译」（浪费额度），而且工厂图、
+    尺码对照图也识别不了（2026-11-09 实测）。
+    RapidOCR 是 PaddleOCR 模型的 ONNX 版本，纯 CPU 跑，实测单张 0.35-0.56s，
+    对 35-50s 的图片翻译来说完全可以忽略。
+    """
+    engine = _rapidocr_engine()
+    result = engine(str(image.resolve()))
+    lines = [str(t) for t in (getattr(result, "txts", None) or []) if str(t).strip()]
+    return {"text": "\n".join(lines), "lines": lines, "version": OCR_CACHE_VERSION}
+
+
 def _run_ocr(image: Path) -> dict[str, Any]:
-    """调用 Windows 内置 OCR。必须用 powershell.exe（5.1），PS7 不支持 WinRT。"""
+    """识别一张图：Windows 走系统 OCR，其余平台走 RapidOCR。"""
+    if sys.platform != "win32":
+        return _run_ocr_rapidocr(image)
     script = _script_path()
     executable = "powershell.exe" if sys.platform == "win32" else "pwsh"
     process = subprocess.run(  # noqa: S603 - 固定参数，无 shell

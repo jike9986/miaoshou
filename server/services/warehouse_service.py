@@ -1674,7 +1674,15 @@ def select_translatable_images(
             if row.get("error"):
                 picked.append(url)
                 continue
-            # 只翻译「识别到中文」的图；无中文(keep)/无文字(review)/厂家图(remove) 都不翻
+            # 只翻译「识别到中文」的图；无中文(keep)/厂家图(remove) 不翻。
+            #
+            # review（OCR 没识别到任何文字）要**照翻**：识别不出文字不等于图上
+            # 没中文 —— 深色底白字、艺术字、竖排文字都会 OCR 空白。实测同一批
+            # 主图里 3 张识别为空，肉眼看却有中文（2026-11-09）。
+            # 宁可多翻一张（0.024 元），也不能让带中文的图原样发到海外店铺。
+            if action == "review" and not str(row.get("text") or "").strip():
+                picked.append(url)
+                continue
             if action != "translate":
                 continue
             text = re.sub(r"\s+", "", str(row.get("text") or ""))
