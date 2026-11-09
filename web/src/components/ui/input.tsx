@@ -356,12 +356,12 @@ export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(functi
           fieldSize[size],
           "num",
           prefix && "pl-8",
-          suffix && "pr-10",
+          suffix && "pr-8",
           className
         )}
       />
       {suffix && (
-        <span className="pointer-events-none absolute right-3.5 text-sm text-fg-muted">{suffix}</span>
+        <span className="pointer-events-none absolute right-2 text-xs text-fg-muted">{suffix}</span>
       )}
     </div>
   );

@@ -296,9 +296,11 @@ export function ProcessSettings({
             </span>
           </div>
 
-          {/* 第二行：主图数量（用户要求：主图跟语言一行） + 重量 + 长宽高 */}
-          <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
-            <Field label="主图数量" htmlFor="main-image-count" className="w-[100px] shrink-0">
+          {/* 第二行：主图 / SKU 图 / 详情图 / 重量增加 / 原重上限 / 包裹长宽高
+              全部塞进一行（负责人 2026-11-09 要求）：每个框收窄到 74px，
+              不再 flex-wrap —— 换行会让「包裹高」掉到第三行，看着像另一个分组。 */}
+          <div className="flex flex-nowrap items-end gap-x-2">
+            <Field label="主图数量" htmlFor="main-image-count" className="w-[74px] shrink-0">
               <NumberInput
                 id="main-image-count"
                 value={settings.mainImageCount}
@@ -311,7 +313,7 @@ export function ProcessSettings({
                 disabled={disabled || !settings.imagesEnabled}
               />
             </Field>
-            <Field label="SKU 图数量" htmlFor="sku-image-count" className="w-[100px] shrink-0">
+            <Field label="SKU 图数量" htmlFor="sku-image-count" className="w-[74px] shrink-0">
               <NumberInput
                 id="sku-image-count"
                 value={settings.skuImageCount}
@@ -324,7 +326,7 @@ export function ProcessSettings({
                 disabled={disabled || !settings.imagesEnabled}
               />
             </Field>
-            <Field label="详情图数量" htmlFor="detail-image-count" className="w-[100px] shrink-0">
+            <Field label="详情图数量" htmlFor="detail-image-count" className="w-[74px] shrink-0">
               <NumberInput
                 id="detail-image-count"
                 value={settings.detailImageCount}
@@ -337,7 +339,7 @@ export function ProcessSettings({
                 disabled={disabled || !settings.imagesEnabled}
               />
             </Field>
-            <Field label="重量增加" htmlFor="weight-extra" className="w-[100px] shrink-0">
+            <Field label="重量增加" htmlFor="weight-extra" className="w-[74px] shrink-0">
               <NumberInput
                 id="weight-extra"
                 value={settings.weightExtraKg}
@@ -350,7 +352,7 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="原重上限" htmlFor="weight-limit" className="w-[100px] shrink-0">
+            <Field label="原重上限" htmlFor="weight-limit" className="w-[74px] shrink-0">
               <NumberInput
                 id="weight-limit"
                 value={settings.weightLimitKg}
@@ -363,7 +365,7 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹长" htmlFor="package-length" className="w-[90px] shrink-0">
+            <Field label="包裹长" htmlFor="package-length" className="w-[72px] shrink-0">
               <NumberInput
                 id="package-length"
                 value={settings.lengthCm}
@@ -376,7 +378,7 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹宽" htmlFor="package-width" className="w-[90px] shrink-0">
+            <Field label="包裹宽" htmlFor="package-width" className="w-[72px] shrink-0">
               <NumberInput
                 id="package-width"
                 value={settings.widthCm}
@@ -389,7 +391,7 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
-            <Field label="包裹高" htmlFor="package-height" className="w-[90px] shrink-0">
+            <Field label="包裹高" htmlFor="package-height" className="w-[72px] shrink-0">
               <NumberInput
                 id="package-height"
                 value={settings.heightCm}
