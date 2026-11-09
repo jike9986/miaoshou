@@ -312,20 +312,28 @@ def _upload_sftp(source: Path, *, timeout: int = 30,
     return _public_url(public_base + filename)
 
 
-def cleanup_auto_temp(*, days: int = AUTO_TEMP_RETENTION_DAYS, dry_run: bool = False
-                       ) -> dict[str, Any]:
-    """清理临时区超过 N 天的图片，返回 {scanned, deleted, freedBytes, kept}。
+def cleanup_auto_temp(*, days: int = AUTO_TEMP_RETENTION_DAYS, dry_run: bool = False,
+                      referenced: set[str] | None = None) -> dict[str, Any]:
+    """清理临时区超过 N 天的图片，返回统计。
 
-    负责人 2026-11-09 定：自动化临时图保留 14 天。
-    只删临时区（auto-temp），成品区（products）永不动 —— 那里放的是
-    已入库商品的图，删了商品就变挂图。
+    负责人 2026-11-09 定：自动化临时图保留 14 天，每天清理一次。
+
+    两道保险，缺一都不能删：
+      1. 文件 mtime 必须早于 cutoff（默认 14 天前）。刚上传/刚搬进来的图
+         一定比 cutoff 新，不会被删。
+      2. referenced 里的文件名（数据库里任何商品正在引用的图）一律跳过。
+         必须有这道：入库搬运失败时商品仍指向临时区地址，只按时间删
+         就会把在售商品的图删掉，商品变挂图。
+
+    只扫临时区（auto-temp）；成品区（products）连目录都不碰。
     """
     import time
     from pathlib import Path as _Path
 
     local_auto = os.environ.get("AOHUANG_IMAGE_LOCAL_DIR", "").strip()
     report: dict[str, Any] = {"scanned": 0, "deleted": 0, "freedBytes": 0,
-                              "kept": 0, "days": days, "dryRun": dry_run}
+                              "kept": 0, "skippedReferenced": 0,
+                              "days": days, "dryRun": dry_run}
     if not local_auto:
         report["error"] = "未配置本地图床目录（AOHUANG_IMAGE_LOCAL_DIR），无法清理"
         return report
@@ -333,6 +341,7 @@ def cleanup_auto_temp(*, days: int = AUTO_TEMP_RETENTION_DAYS, dry_run: bool = F
     if not root.is_dir():
         report["error"] = "图床目录不存在"
         return report
+    protected = referenced or set()
     cutoff = time.time() - max(1, int(days)) * 86400
     for entry in root.iterdir():
         if not entry.is_file() or entry.name.startswith("."):
@@ -345,6 +354,9 @@ def cleanup_auto_temp(*, days: int = AUTO_TEMP_RETENTION_DAYS, dry_run: bool = F
         if stat.st_mtime >= cutoff:
             report["kept"] += 1
             continue
+        if entry.name in protected:
+            report["skippedReferenced"] += 1
+            continue
         if dry_run:
             report["deleted"] += 1
             report["freedBytes"] += stat.st_size
@@ -356,6 +368,44 @@ def cleanup_auto_temp(*, days: int = AUTO_TEMP_RETENTION_DAYS, dry_run: bool = F
         except OSError:
             continue
     return report
+
+
+def referenced_temp_names(db: Any) -> set[str]:
+    """数据库里任何商品正在引用的临时区图片文件名。
+
+    清理前必须拿到这份清单：入库时把图搬到成品区**失败**的商品仍指向
+    临时区地址（搬运失败不阻断入库），只按时间删会把在售商品的图删掉。
+    """
+    from models.product import Product
+    from services import pre_save_check
+
+    auto_dir, auto_base, _l, _b = _zone_paths("auto")
+    names: set[str] = set()
+
+    def _collect(url: Any) -> None:
+        text = str(url or "").strip()
+        if text.startswith(auto_base):
+            name = text[len(auto_base):]
+            if name and "/" not in name:
+                names.add(name)
+
+    try:
+        rows = db.query(Product).all()
+    except Exception:  # noqa: BLE001 - 查询失败时保守返回空，由调用方决定是否清理
+        return names
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        for url in payload.get("imgUrls") or []:
+            _collect(url)
+        for url in pre_save_check.extract_detail_image_urls(payload.get("notes")):
+            _collect(url)
+        for prop in payload.get("skuPropertyList") or []:
+            if isinstance(prop, dict):
+                for value in prop.get("attrValueList") or []:
+                    if isinstance(value, dict):
+                        _collect(value.get("imgUrl") or value.get("imageUrl"))
+        _collect(payload.get("sizeChart"))
+    return names
 
 
 def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:

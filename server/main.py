@@ -175,30 +175,45 @@ async def _image_reconcile_loop(stop: asyncio.Event) -> None:
             continue
 
 
+def _cleanup_temp_once() -> dict:
+    """跑一轮临时图床清理（给 to_thread 用，自己管事务）。"""
+    from db.session import session_scope
+    from services import image_upload
+
+    with session_scope() as db:
+        # 先取「数据库里还在引用的临时图」，清理时跳过它们。
+        # 只按时间删是不够的：入库搬运失败的商品仍指向临时区，
+        # 那种图删了商品就变挂图（负责人 2026-11-09 特别确认过这点）。
+        referenced = image_upload.referenced_temp_names(db)
+        return image_upload.cleanup_auto_temp(
+            days=image_upload.AUTO_TEMP_RETENTION_DAYS,
+            referenced=referenced)
+
+
 async def _image_cleanup_loop(stop: asyncio.Event) -> None:
-    """每 6 小时清理一次自动化临时图床（保留 14 天）。
+    """每天清理一次自动化临时图床（保留 14 天）。
 
     临时区和成品区分开放在两个目录，清理才能按目录直接删 —— 混在一起的话
     每次都得扫全库反查哪些图还被引用，图一多就慢。成品区永不清理。
     """
     from services import image_upload
 
-    logger.info("临时图床清理已启动，保留 %s 天", image_upload.AUTO_TEMP_RETENTION_DAYS)
+    logger.info("临时图床清理已启动：每天一次，保留 %s 天",
+                image_upload.AUTO_TEMP_RETENTION_DAYS)
     while not stop.is_set():
         try:
-            report = await asyncio.to_thread(
-                image_upload.cleanup_auto_temp,
-                days=image_upload.AUTO_TEMP_RETENTION_DAYS)
-            if report.get("deleted"):
-                logger.info("临时图床清理：删除 %s 张，释放 %.1f MB，保留 %s 张",
-                            report["deleted"], report["freedBytes"] / 1048576,
-                            report.get("kept"))
+            report = await asyncio.to_thread(_cleanup_temp_once)
+            if report.get("deleted") or report.get("skippedReferenced"):
+                logger.info("临时图床清理：删除 %s 张（%.1f MB），"
+                            "保留 %s 张，因仍被引用跳过 %s 张",
+                            report.get("deleted"), report.get("freedBytes", 0) / 1048576,
+                            report.get("kept"), report.get("skippedReferenced"))
             elif report.get("error"):
                 logger.warning("临时图床清理跳过：%s", report["error"])
         except Exception as exc:  # noqa: BLE001 - 清理失败不能拖垮服务
             logger.exception("临时图床清理失败 type=%s：%s", type(exc).__name__, exc)
         try:
-            await asyncio.wait_for(stop.wait(), timeout=6 * 3600)
+            await asyncio.wait_for(stop.wait(), timeout=24 * 3600)
         except asyncio.TimeoutError:
             continue
 
