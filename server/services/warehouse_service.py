@@ -2420,15 +2420,22 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     #
     # 认领/发布路径（publish_service._claim_payloads）另有兜底：真的要把图发给
     # 平台之前会再转一次，所以这里跳过不会导致发布出去的图是外链。
+    # 图片固化：把上游（1688/妙手）的图片地址换成我们自己的图床地址。
+    #
+    # 自动化处理阶段也要做（2026-11-09 更正）：
+    #   · 负责人原话说的是「自动化只做出来、手动入库再转存」，
+    #     但实测图片翻译必须基于**能下载到的图**：1688 图地址带鉴权/防爬，
+    #     翻译服务取不到，图里的中文就永远清不掉。
+    #   · 而且上游图会过期变挂图，仓库里放着外链等于把商品图交给别人保管。
+    # 所以这里不再按 automation_result 跳过，两条路径都固化。
     image_store_report: dict[str, Any] = {}
-    if not automation_result:
-        try:
-            from services import image_store
+    try:
+        from services import image_store
 
-            image_store_report = image_store.persist_payload_images(payload)
-        except Exception as exc:  # noqa: BLE001 - 固化失败不该阻断入库
-            logger.warning("商品图片固化失败 detailId=%s：%s", detail_id, exc)
-            image_store_report = {"error": str(exc)[:200]}
+        image_store_report = image_store.persist_payload_images(payload)
+    except Exception as exc:  # noqa: BLE001 - 固化失败不该阻断入库
+        logger.warning("商品图片固化失败 detailId=%s：%s", detail_id, exc)
+        image_store_report = {"error": str(exc)[:200]}
 
     # ===== 图片处理：主图 / 详情图 / SKU 图 =====
     # 负责人口径（2026-11-09）：工厂宣传图和尺码对照图会混进主图与详情图，
