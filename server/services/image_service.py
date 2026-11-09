@@ -62,6 +62,11 @@ LANGUAGE_PROMPT_NAMES = {
 }
 
 
+# 兼容旧引用（tests / 老代码直接拿这个常量拼 job id）。保持默认语言
+# 的 prompt 形态，保证同语言下 job id 稳定（image_job_id 按 prompt 摘要）。
+TRANSLATION_PROMPT = TRANSLATION_PROMPT_TEMPLATE.format(language="马来语")
+
+
 def translation_prompt(language: str = "ms") -> str:
     """按目标语言生成翻译指令。"""
     target = str(language or "ms").strip().lower()
