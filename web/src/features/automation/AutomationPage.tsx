@@ -471,9 +471,15 @@ export function AutomationPage() {
         reason: reason || (stage === "needs_review" ? "处理状态未知，请核对妙手记录后再继续。" : "处理失败"),
       });
     }
+    // 计划数按「已提交翻译的实际张数」累加，不用设置上限 × 商品数：
+    // 上限（主图+SKU图+详情图 ≤ 9+9+9）只是理论最大值，1 件商品显示 27 张
+    // 会让人以为要翻 27 张（负责人 2026-11-09 指出）。还没提交过就是 0。
     const planned = saved.settings.imagesEnabled === true
-      ? saved.items.length * (Number(saved.settings.mainImageCount ?? 0)
-        + Number(saved.settings.skuImageCount ?? 0) + Number(saved.settings.detailImageCount ?? 0)) : 0;
+      ? saved.items.reduce((sum, item) => {
+        const images = item.processResult?.images;
+        return sum + (typeof images?.requested === "number" ? images.requested : 0);
+      }, 0)
+      : 0;
     const isInFlight = saved.status === "running";
     setStages(nextStages);
     setProgress(nextProgress);
@@ -925,8 +931,11 @@ export function AutomationPage() {
       toast.warning("此任务的发布配置不完整，请检查文字、图片和定价模板设置后重新创建任务。");
       return;
     }
-    const imagesPerProduct = runSettings.mainImageCount + runSettings.skuImageCount + runSettings.detailImageCount;
-    const plannedImages = runSettings.imagesEnabled ? targets.length * imagesPerProduct : 0;
+    // 计划数先置 0，等第一件商品真的提交翻译后按「实际提交张数」累计。
+    // 用设置上限（主图+SKU图+详情图，最多 9+9+9=27）当分母是错的：
+    // 那是理论最大值，实际能翻几张要 OCR 挑完才知道
+    // （负责人 2026-11-09 指出：1 件商品显示 27 张，明显不对）。
+    const plannedImages = 0;
     stopRef.current = false;
     standardNotesRef.current = [];
     setStages(Object.fromEntries(targets.map((target) => [target.key, "queued" as ItemStage])));
@@ -957,6 +966,9 @@ export function AutomationPage() {
     // 后台异步翻译的商品 id：文字/价格已成功，图片在后台跑，结束后轮询进度
     const queuedImageProducts: string[] = [];
     const queuedImageKeys = new Set<string>();
+    // 实际需要翻译的总张数：按每件提交后返回的 requested 累加。
+    // 不能用「设置上限 × 商品数」当分母（那是 9+9+9 的理论最大值）。
+    let imagePlannedActual = 0;
 
     for (const target of targets) {
       if (scope !== executionScopeRef.current) return;
@@ -967,6 +979,7 @@ export function AutomationPage() {
           done,
           failed,
           imageDone,
+          imagePlanned: imagePlannedActual,
           failedKeys,
           stage: "已手动停止",
           endedAt: Date.now(),
@@ -1076,6 +1089,8 @@ export function AutomationPage() {
         // 记下这一步到底做成了什么：文字译了没、图片交上去几张、失败几张。
         // 只记一个 done，界面就没法区分「全好了」和「文字好了图片全挂」。
         if (runSettings.textEnabled) textDone += 1;
+        // 实际提交了几张，分母就加几张 —— 进度条从一开始就是真实数字。
+        if (runSettings.imagesEnabled) imagePlannedActual += result.images?.requested ?? 0;
         setProgress((prev) => ({
           ...prev,
           [target.key]: {
@@ -1106,6 +1121,7 @@ export function AutomationPage() {
             done,
             failed,
             imageDone,
+            imagePlanned: imagePlannedActual,
             textDone,
             failedKeys: [...failedKeys],
             failures: [...failures],
@@ -1160,6 +1176,7 @@ export function AutomationPage() {
                     ...prev,
                     done,
                     imageDone,
+                    imagePlanned: imagePlannedActual,
                     textDone,
                     failures: [...failures],
                   }));
@@ -1270,6 +1287,7 @@ export function AutomationPage() {
         done,
         failed,
         imageDone,
+        imagePlanned: imagePlannedActual,
         textDone,
         failedKeys: [...failedKeys],
         failures: [...failures],
@@ -1377,6 +1395,7 @@ export function AutomationPage() {
       done,
       failed,
       imageDone,
+      imagePlanned: imagePlannedActual,
       textDone,
       failedKeys,
       stage: failures.length > 0
