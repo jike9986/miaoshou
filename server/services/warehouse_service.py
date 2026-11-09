@@ -1935,6 +1935,23 @@ def _public_result_url(job: ImageJob, uploader: Any = None) -> str:
     return url
 
 
+def _payload_image_urls(payload: Mapping[str, Any]) -> list[str]:
+    """列出 payload 里所有图片地址（主图 / 详情图 / SKU 图 / 尺码图）。"""
+    urls: list[str] = []
+    main = payload.get("imgUrls")
+    if isinstance(main, list):
+        urls.extend(str(u) for u in main if isinstance(u, str))
+    urls.extend(pre_save_check.extract_detail_image_urls(payload.get("notes")))
+    for item in sku_image_sources(payload):
+        url = str(item.get("url") or "")
+        if url:
+            urls.append(url)
+    chart = payload.get("sizeChart")
+    if isinstance(chart, str) and chart:
+        urls.append(chart)
+    return list(dict.fromkeys(urls))
+
+
 def apply_image_results(db: Session, product: Product, payload: Any, *,
                         uploader: Any = None,
                         job_ids: list[str] | None = None) -> dict[str, Any]:
@@ -1995,6 +2012,23 @@ def apply_image_results(db: Session, product: Product, payload: Any, *,
     report["missing"] = missing
     if not replacements:
         return report
+
+    # 入库会把图从 auto-temp 搬到 products，URL 变了但文件没变。
+    # ImageJob.source_url 记的是提交翻译时的旧地址，直接精确匹配会全部失配
+    # （2026-11-09 实测：搬运后 imageApplied.replaced=0，译文图白翻了）。
+    # 这里按「同文件名视为同一张图」补齐映射。
+    try:
+        from services import image_upload
+
+        for url in _payload_image_urls(payload):
+            if url in replacements:
+                continue
+            for source, target in list(replacements.items()):
+                if image_upload.zone_equivalent(url, source):
+                    replacements[url] = target
+                    break
+    except Exception as exc:  # noqa: BLE001 - 补齐失败按原逻辑走
+        logger.warning("图片地址分区等价映射失败 product=%s：%s", product_id, exc)
 
     try:
         main_before = payload.get("imgUrls")
@@ -2347,22 +2381,18 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         previous = existing.payload if isinstance(existing.payload, dict) else {}
         saved_source = str(previous.get("_sourceWeight") or "")
         if not saved_source:
-            # 旧数据没有记账：把上次存下的重量减回增量，还原成上游原值再比。
-            # 否则空串 vs 0.75 恒判「变了」，又加一次增量。
-            try:
-                back = float(previous.get("weight") or 0) - float(increment)
-                saved_source = str(round(back, 6)) if back > 0 else ""
-            except (TypeError, ValueError):
-                saved_source = ""
-        raw_changed = saved_source != str(_raw_weight_of(payload))
-        if not raw_changed:
+            # _sourceWeight 丢失（实验重置 / 老数据 / 手工改库）：
+            # **绝对不能**用「上次重量 - 增量」倒推。倒推把已经加过 N 次增量
+            # 的重量当成「原始重量」，每重跑一次就再 +0.1，重量滚雪球上涨，
+            # 最终超过原重上限被拦（2026-11-09 实测：SKU 重量被推到 1.6kg 还在涨）。
+            # 正确做法：不倒推、不加增量，沿用上次存下的重量，并当场补记
+            # _sourceWeight（用上次的最终重量），下次就能正常比对。
             _copy_saved_weights(payload, previous)
+            payload["_sourceWeight"] = str(previous.get("weight") or "")
             weight_report = {"before": previous.get("weight"),
                              "after": payload.get("weight"),
-                             "increment": 0, "reused": True}
-            # 原始重量沿用上次记下的，不能被这次算出来的值覆盖：
-            # 覆写之后下次比较的就是「加过增量的值」，等价于永远判定没变。
-            payload["_sourceWeight"] = previous.get("_sourceWeight")
+                             "increment": 0, "reused": True, "sourceMissing": True}
+            return weight_report
         else:
             weight_report = prepare_weight(
                 payload, increment,
@@ -2665,7 +2695,6 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 平台解析规格会失败，报「SKU【米色-41】不存在」——看起来像颜色对不上，
     # 实际是空值把规格解析弄崩了（2026-11-09 实测：同样数据把 null 字段去掉就能存）。
     _strip_null_sku_fields(payload)
-    _strip_local_only_fields(payload)
     _restore_sku_key_order(payload, info)
 
     # ===== 最后一步：翻译 =====
@@ -2692,9 +2721,15 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     if enforce_pre_save:
         # A local warehouse write is not proof that the processed draft reached Miaoshou.
         # Publish must only follow a verified upstream save of this exact payload.
+        #
+        # 提交用**副本**剔除只服务本地的字段（colorMap/sizeMap/translation 等）：
+        # 这些字段要留在库里给详情页和译文核对用，直接改 payload 会让入库后的
+        # 商品丢掉它们（2026-11-09 实测：probe_img_wire 的 translation 字段被删，
+        # 11 项断言只剩 4 项通过）。妙手那边仍然拿不到这些多余字段。
+        upstream_payload = _strip_local_only_fields(deepcopy(payload))
         _save_processed_draft(
             client, detail_id=str(detail_id), shop_id=str(shop_id),
-            oss_md5=str(block["ossMd5"]), payload=payload, original=info,
+            oss_md5=str(block["ossMd5"]), payload=upstream_payload, original=info,
             coverage=coverage, pricing_enabled=template is not None,
         )
         draft_verified = True
@@ -3137,12 +3172,15 @@ _LOCAL_ONLY_PAYLOAD_FIELDS = (
 )
 
 
-def _strip_local_only_fields(payload: dict[str, Any]) -> list[str]:
-    """提交前删掉只服务于本地展示的字段，返回被删的字段名。"""
-    removed = [field for field in _LOCAL_ONLY_PAYLOAD_FIELDS if field in payload]
-    for field in removed:
-        payload.pop(field, None)
-    return removed
+def _strip_local_only_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """返回剔除了「只服务本地展示」字段的副本；原对象不动。
+
+    为什么返回副本而不是就地删：这些字段（translation / colorMap / sizeMap …）
+    要留在数据库里给详情页与译文核对用，只是**不能发给妙手**。
+    就地删会让入库后的商品永久丢掉它们。
+    """
+    return {key: value for key, value in payload.items()
+            if key not in _LOCAL_ONLY_PAYLOAD_FIELDS}
 
 
 def _restore_sku_key_order(payload: dict[str, Any],

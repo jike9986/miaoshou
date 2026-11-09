@@ -480,6 +480,44 @@ def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
         return url
 
 
+def auto_temp_name(url: str) -> str:
+    """如果这个地址在临时区，返回文件名；否则空串。"""
+    auto_dir, auto_base, _l, _b = _zone_paths("auto")
+    text = str(url or "").strip()
+    if text.startswith(auto_base):
+        name = text[len(auto_base):]
+        if name and "/" not in name:
+            return name
+    return ""
+
+
+def zone_equivalent(left: str, right: str) -> bool:
+    """两个图片地址是否指向同一份文件（允许一个在临时区、一个在成品区）。
+
+    入库会把图从 auto-temp 搬到 products，URL 随之改变；而 ImageJob.source_url
+    记的是提交翻译时的旧地址。两边分区不同但文件名相同时，它们是同一张图，
+    必须视为等价，否则译文图写回会匹配不上（2026-11-09 实测：
+    apply_image_results 的 replacements 按 source_url 精确匹配，搬完就失配）。
+    """
+    a = str(left or "").strip()
+    b = str(right or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    name_a = auto_temp_name(a) or _basename(a)
+    name_b = auto_temp_name(b) or _basename(b)
+    return bool(name_a) and name_a == name_b
+
+
+def _basename(url: str) -> str:
+    text = str(url or "").strip()
+    if not text.startswith("http"):
+        return ""
+    tail = text.rsplit("/", 1)[-1]
+    return tail.split("?", 1)[0]
+
+
 def promote_payload_images(payload: dict[str, Any]) -> dict[str, Any]:
     """把商品 payload 里所有临时区图片搬到成品区（入库时调用）。
 
@@ -493,12 +531,18 @@ def promote_payload_images(payload: dict[str, Any]) -> dict[str, Any]:
         return report
 
     def _swap(url: str) -> str:
+        # 只处理「确实在临时区」的地址。上游地址（cbu01 等）和已经在成品区的
+        # 一律原样返回 —— 碰它们会把 payload 里的图片地址改成别的东西，
+        # 下游按原地址做的替换/比对全部失配（2026-11-09 实测：
+        # probe_img_wire 的 imageApplied 归零）。
+        if not auto_temp_name(url):
+            return url
         new = promote_to_product_zone(url)
         if new and new != url:
             report["moved"] += 1
         elif new:
             report["failed"] += 1
-        return new
+        return new or url
 
     main = payload.get("imgUrls")
     if isinstance(main, list) and main:

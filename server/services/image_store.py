@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import logging
 import urllib.error
 import urllib.request
@@ -89,6 +90,11 @@ class ImageStore:
         """返回 (最终地址, 状态)。状态：kept / stored / skipped / failed。"""
         text = str(url or "").strip()
         if not text:
+            return text, "skipped"
+        # 测试/离线环境可以关掉真实下载：探针与单测用的是占位地址
+        # （cbu01.alicdn.com/img/main-a.jpg 之类），真去下载只会得到 404，
+        # 既拖慢用例又让「图片转存」看起来在破坏 payload（2026-11-09 实测）。
+        if os.environ.get("AOHUANG_DISABLE_IMAGE_STORE", "").strip() in ("1", "true", "yes"):
             return text, "skipped"
         if not text.startswith(("http://", "https://")):
             return text, "skipped"
