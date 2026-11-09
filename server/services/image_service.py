@@ -40,14 +40,33 @@ from models.product import Product
 from services import setting_service
 from services.miaoshou import system_proxy
 
-TRANSLATION_PROMPT = (
-    "任务：仅把原商品图片中的全部中文翻译成英语，逐处替换中文文字。"
+# 商品发往哪个站点，图上的字就该是哪个语言（负责人 2026-11-09 定）：
+# 马来站用马来语。老写法写死「翻译成英语」，马来站的买家根本看不懂，
+# 等于白翻。语言由调用方按商品的 target_language 传入，默认马来语。
+TRANSLATION_PROMPT_TEMPLATE = (
+    "任务：仅把原商品图片中的全部中文翻译成{language}，逐处替换中文文字。"
     "准确、完整地翻译标题、卖点、说明、小字和水印，不遗漏、不编造。"
     "保留已有非中文文字、数字、型号、尺寸、单位、商标及图标。"
     "保持文字原有的位置、层级、字体风格、颜色、对齐和间距；译文过长时仅在原文字区域内缩小或换行。"
     "只修复清除中文字后的局部背景；商品外观、颜色、材质、光影、背景、构图和画面比例保持原样。"
-    "输出前逐处核对：所有中文均已替换为英语，没有汉字或中文残影；只输出编辑后的图片。"
+    "输出前逐处核对：所有中文均已替换为{language}，没有汉字或中文残影；只输出编辑后的图片。"
 )
+
+# 站点语言 -> prompt 用语
+LANGUAGE_PROMPT_NAMES = {
+    "ms": "马来语",
+    "en": "英语",
+    "th": "泰语",
+    "vi": "越南语",
+    "id": "印尼语",
+}
+
+
+def translation_prompt(language: str = "ms") -> str:
+    """按目标语言生成翻译指令。"""
+    target = str(language or "ms").strip().lower()
+    name = LANGUAGE_PROMPT_NAMES.get(target, "马来语")
+    return TRANSLATION_PROMPT_TEMPLATE.format(language=name)
 WINDOWS = {"minute": 60, "hour": 3600, "day": 86400}
 # 同时提交几张图（老版 IMAGE_CONCURRENCY=3）。再高容易撞上游限流。
 IMAGE_CONCURRENCY = 3
@@ -695,7 +714,7 @@ def translate(db: Session, payload: Mapping[str, Any],
     reused = 0
     accepted = 0
     pending: list[tuple[ImageJob, bytes]] = []
-    prompt = TRANSLATION_PROMPT
+    prompt = translation_prompt(str(payload.get("language") or "ms"))
 
     limit = budget_limit(db)
     reserved_now = reserved_total(db)

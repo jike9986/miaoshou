@@ -299,11 +299,19 @@ def _run_image_translation(job: dict[str, Any]) -> None:
             state["jobs"].extend(result.get("jobs") or [])
             job_ids.extend(str(item["id"]) for item in result.get("jobs") or []
                            if item.get("id"))
+            # 把上游给的真实原因留在 state 里：attach_image_translation 失败时
+            # 会带回「图片翻译服务未配置密钥 / 今日额度已用完」这类可操作提示。
+            # 旧代码只抛一句固定文案「部分图片未能提交翻译」，界面上看不到
+            # 到底是没配密钥还是超预算，运营无从下手（2026-11-09 实测）。
+            if result.get("reason"):
+                state["reason"] = str(result["reason"])[:300]
             row.automation_images = dict(state)
             db.commit()
             if state["failed"]:
                 raise errors.AppError(
-                    "IMAGE_FAILED", "部分图片未能提交翻译，请核对后重试", status=409)
+                    "IMAGE_FAILED",
+                    state.get("reason") or "部分图片未能提交翻译，请核对后重试",
+                    status=409)
         job_ids = list(dict.fromkeys(job_ids))
         if state["requested"] and not job_ids:
             raise errors.AppError("IMAGE_FAILED", "图片翻译没有返回可核对的任务", status=409)

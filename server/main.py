@@ -311,9 +311,15 @@ async def lifespan(_app: FastAPI):
     # GC 时打一句 "Task exception was never retrieved"，而且不带调用栈；
     # 之前「定时任务到点不执行」查不到原因就是卡在这里。
     def _report_loop(task: asyncio.Task, name: str) -> None:
-        if task.cancelled():
+        # 正常关闭时 stop 已被 set，循环是自己 return 出来的，不是异常。
+        # 之前没判这条，每次重启都刷一串「后台循环意外结束 exception=None」，
+        # 把真正的事故日志淹掉了（2026-11-09 实测）。
+        if task.cancelled() or stop.is_set():
             return
         exc = task.exception()
+        if exc is None:
+            logger.error("后台循环意外结束：%s（无异常退出，检查循环条件）", name)
+            return
         logger.error("后台循环意外结束：%s exception=%r", name, exc, exc_info=exc)
 
     for task, label in ((worker, "图片任务回收"), (scheduler, "定时发布扫描"),

@@ -98,7 +98,13 @@ WORD_LIMIT = 500
 UNIT_MILLIYUAN = 24
 IMAGE_BUDGET_MILLIYUAN = 10000
 IMAGE_MAX_BYTES = 15 * 1024 * 1024
-IMAGE_MODEL = "gpt-image-2"
+# 图片翻译用的模型。2026-11-09 实测（每个模型各 3 次，真实商品图）：
+#   gpt-image-2    平均 56.7s（波动 46s），文案偏直译
+#   gpt-image-2.5  平均 45.8s（波动 39s），文案最好但不稳定
+#   gpt-image-2.6  平均 36.0s（波动 17s），文案自然，**最快也最稳**
+#   gemini-3.1-flash 平均 28s 但输出乱码（TIIDAL RAMIER），不可用
+# 固定用 2.6：批量跑时稳定性比单次文案差异更重要。
+IMAGE_MODEL = "gpt-image-2.6"
 IMAGE_SIZES = ("1:1", "16:9", "9:16")
 IMAGE_RATE_LIMITS = {"minute": 600, "hour": 6000, "day": 60000}
 
