@@ -1654,11 +1654,26 @@ def select_translatable_images(
             logger.warning("图片 OCR 筛选不可用，按全部提交翻译：%s", exc)
             return urls
         by_url = {str(row.get("url") or ""): row for row in rows}
+        # OCR 不可用时 analyze() 不抛异常，而是返回 error=True / action="review"
+        # 的行。旧代码只看 action != "translate" 就跳过，等于「OCR 挂了 = 一张都
+        # 不用翻」—— 服务器（Linux）根本没有 Windows OCR，图片于是一张都不提交，
+        # 界面上一直是 0% 而图里的中文原样留着（2026-11-09 实测）。
+        # 这里显式判断：整批都带 error 就退化成「全部提交，让翻译服务自己判断」。
+        failed_rows = [row for row in rows if row.get("error")]
+        if rows and len(failed_rows) == len(rows):
+            logger.warning(
+                "图片 OCR 全部不可用（%s），本次按全部图提交翻译：%s",
+                str(failed_rows[0].get("error"))[:80], failed_rows[0].get("reason") or "")
+            return urls
         picked: list[str] = []
         seen_text: set[str] = set()
         for url in urls:
             row = by_url.get(url) or {}
             action = str(row.get("action") or "")
+            # 单张 OCR 失败的图也照翻：宁可多翻一张，也不能因为识别抖动漏掉中文图。
+            if row.get("error"):
+                picked.append(url)
+                continue
             # 只翻译「识别到中文」的图；无中文(keep)/无文字(review)/厂家图(remove) 都不翻
             if action != "translate":
                 continue
