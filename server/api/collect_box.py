@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -183,6 +184,37 @@ def process(
     return {"saved": True, "product": product, "images": image_result}
 
 
+def _as_number(value: Any) -> float | None:
+    """把重量/尺寸统一成 float 再比；取不到返回 None。"""
+    if value in (None, ""):
+        return None
+    try:
+        return round(float(str(value).strip()), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def _draft_identity_changed(saved: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    """草稿关键身份字段是否被改动（图片处理期间别人改过商品）。
+
+    只比标题 / 类目 / 重量 / 包裹尺寸 / 主图集合：这些字段我们不会在图片
+    处理阶段改动，变了就是外部改动，必须停下让人核对。详情图、价格、
+    规格值属于本流程的正常处理结果，不能拿来判断「草稿被改」。
+    """
+    if not isinstance(saved, Mapping) or not isinstance(current, Mapping):
+        return True
+    if str(saved.get("title") or "") != str(current.get("title") or ""):
+        return True
+    if str(saved.get("cid") or "") != str(current.get("cid") or ""):
+        return True
+    for field in ("weight", "packageLength", "packageWidth", "packageHeight"):
+        # 按数值比，不按字符串：本地存的是 33.0，妙手读回是 33，
+        # 字符串比较会把「同一个尺寸」判成改动（2026-11-09 实测误判）。
+        if _as_number(saved.get(field)) != _as_number(current.get(field)):
+            return True
+    return list(saved.get("imgUrls") or []) != list(current.get("imgUrls") or [])
+
+
 def _spawn_image_translation(job: dict[str, Any]) -> None:
     import threading
 
@@ -325,8 +357,15 @@ def _run_image_translation(job: dict[str, Any]) -> None:
         try:
             fresh = product_service.detail_block(client.shop_detail(row.detail_id, row.shop_id))
             original = fresh["info"]
-            if not original or readback_check.readback_issues(
-                    saved_payload, original, saved_payload, {}, pricing_enabled=True):
+            # 这里只确认「草稿还是我们保存的那一份」，不是完整的读回核验：
+            # readback_issues 会逐项比对 payload 与 upstream，而 payload 里
+            # 主图已截到 9 张、详情图已清洗、颜色规格值已按口径保留原样，
+            # 这些本来就是「与上游不同」的，全量比对必然报不一致
+            # （2026-11-09 实测：图片任务一条都没提交就中止，
+            # automation_images.reason = 图片处理期间妙手草稿已变化）。
+            # 真正需要比对的是「关键身份字段」：标题、cid、重量、包裹尺寸、
+            # 主图集合 —— 它们没变就说明草稿没被别人改过。
+            if not original or _draft_identity_changed(saved_payload, original):
                 raise errors.AppError(
                     "CONFLICT", "图片处理期间妙手草稿已变化，请刷新核对", status=409)
             if applied.get("replaced"):

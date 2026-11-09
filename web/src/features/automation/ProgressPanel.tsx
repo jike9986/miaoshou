@@ -125,9 +125,13 @@ export function ProgressPanel({
             showValue
           />
           <p className="num mt-1 h-4 truncate text-2xs leading-4 text-fg-muted">
-            {settings.imagesEnabled
-              ? `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译`
-              : "已关闭 · 不处理图片"}
+            {!settings.imagesEnabled
+              ? "已关闭 · 不处理图片"
+              : run.phase === "done" && run.imagePlanned === 0
+                ? "无需翻译 · 图片已清理"
+                : run.imagePlanned === 0
+                  ? "识别中…"
+                  : `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译`}
           </p>
         </div>
       </div>
