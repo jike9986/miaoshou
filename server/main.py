@@ -175,6 +175,34 @@ async def _image_reconcile_loop(stop: asyncio.Event) -> None:
             continue
 
 
+async def _image_cleanup_loop(stop: asyncio.Event) -> None:
+    """每 6 小时清理一次自动化临时图床（保留 14 天）。
+
+    临时区和成品区分开放在两个目录，清理才能按目录直接删 —— 混在一起的话
+    每次都得扫全库反查哪些图还被引用，图一多就慢。成品区永不清理。
+    """
+    from services import image_upload
+
+    logger.info("临时图床清理已启动，保留 %s 天", image_upload.AUTO_TEMP_RETENTION_DAYS)
+    while not stop.is_set():
+        try:
+            report = await asyncio.to_thread(
+                image_upload.cleanup_auto_temp,
+                days=image_upload.AUTO_TEMP_RETENTION_DAYS)
+            if report.get("deleted"):
+                logger.info("临时图床清理：删除 %s 张，释放 %.1f MB，保留 %s 张",
+                            report["deleted"], report["freedBytes"] / 1048576,
+                            report.get("kept"))
+            elif report.get("error"):
+                logger.warning("临时图床清理跳过：%s", report["error"])
+        except Exception as exc:  # noqa: BLE001 - 清理失败不能拖垮服务
+            logger.exception("临时图床清理失败 type=%s：%s", type(exc).__name__, exc)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=6 * 3600)
+        except asyncio.TimeoutError:
+            continue
+
+
 async def _schedule_loop(stop: asyncio.Event) -> None:
     """每分钟扫一次到期的定时发布任务。
 
@@ -263,6 +291,7 @@ async def lifespan(_app: FastAPI):
     stop = asyncio.Event()
     worker = asyncio.create_task(_image_reconcile_loop(stop))
     scheduler = asyncio.create_task(_schedule_loop(stop))
+    cleaner = asyncio.create_task(_image_cleanup_loop(stop))
     # 后台循环一旦意外结束，必须留下证据。asyncio 对没人 await 的 task 只在
     # GC 时打一句 "Task exception was never retrieved"，而且不带调用栈；
     # 之前「定时任务到点不执行」查不到原因就是卡在这里。
@@ -272,7 +301,8 @@ async def lifespan(_app: FastAPI):
         exc = task.exception()
         logger.error("后台循环意外结束：%s exception=%r", name, exc, exc_info=exc)
 
-    for task, label in ((worker, "图片任务回收"), (scheduler, "定时发布扫描")):
+    for task, label in ((worker, "图片任务回收"), (scheduler, "定时发布扫描"),
+                        (cleaner, "临时图床清理")):
         task.add_done_callback(lambda done, name=label: _report_loop(done, name))
     try:
         yield
@@ -280,7 +310,8 @@ async def lifespan(_app: FastAPI):
         stop.set()
         worker.cancel()
         scheduler.cancel()
-        for task in (worker, scheduler):
+        cleaner.cancel()
+        for task in (worker, scheduler, cleaner):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         logger.info("后端关闭")

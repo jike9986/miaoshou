@@ -2691,6 +2691,23 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         )
         draft_verified = True
 
+    # 入库 = 进成品仓：把图片从临时区搬到成品区。
+    #
+    # 图床分两个区（负责人 2026-11-09 定）：auto-temp 放自动化临时图、14 天清理；
+    # products 放成品仓图、长期保留。这里必须**真的搬文件**，只改数据库标记的话
+    # 临时区整批清理时会把成品商品的图一起删掉，商品全变挂图。
+    # 搬不动就保留临时地址（图还在），不阻断入库。
+    try:
+        from services import image_upload
+
+        promote_report = image_upload.promote_payload_images(payload)
+        if promote_report.get("moved"):
+            logger.info("入库搬运图片到成品区 detailId=%s moved=%s failed=%s",
+                        detail_id, promote_report.get("moved"), promote_report.get("failed"))
+    except Exception as exc:  # noqa: BLE001 - 搬运失败不阻断入库
+        logger.warning("图片搬运到成品区失败 detailId=%s：%s", detail_id, exc)
+        promote_report = {"error": str(exc)[:160]}
+
     key = product_key(detail_id, shop_id)
     fields = product_service.build_product(
         info=payload, detail_id=detail_id, shop_id=shop_id, account_id=account.id,

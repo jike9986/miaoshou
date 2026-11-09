@@ -26,6 +26,7 @@ import secrets
 import socket
 from pathlib import Path
 from urllib.parse import urlsplit
+from typing import Any
 from urllib.request import Request, urlopen
 
 __all__ = ["ImageUploadError", "upload_image", "image_type", "SIZE_CHART_UPLOAD_LIMIT"]
@@ -39,8 +40,29 @@ class ImageUploadError(ValueError):
 SIZE_CHART_UPLOAD_LIMIT = 8 * 1024 * 1024
 
 DEFAULT_SFTP_HOST = "38.95.75.47"
-DEFAULT_SFTP_REMOTE_DIR = "/var/www/tk-product-automation/translation-temp"
-DEFAULT_SFTP_PUBLIC_BASE = "https://aohuang888.com/tk-product-automation/translation-temp/"
+# 图床分两个区（负责人 2026-11-09 定）：
+#   · auto-temp  自动化处理产生的临时图，14 天后自动清理
+#   · products   已入库成品仓的商品图，长期保留
+# 分成两个目录而不是靠数据库标记，是因为清理要能**按目录删文件**：
+# 混在一个目录里每次清理都得扫全库反查引用，图一多就慢了。
+DEFAULT_SFTP_REMOTE_DIR = "/var/www/tk-product-automation/auto-temp"
+DEFAULT_SFTP_PUBLIC_BASE = "https://aohuang888.com/tk-product-automation/auto-temp/"
+# 成品仓分区
+PRODUCT_REMOTE_DIR = "/var/www/tk-product-automation/products"
+PRODUCT_PUBLIC_BASE = "https://aohuang888.com/tk-product-automation/products/"
+# 临时图保留天数
+AUTO_TEMP_RETENTION_DAYS = 14
+
+def _zone_paths(zone: str) -> tuple[str, str, str, str]:
+    """按分区取 (远程/本地目录, 公开前缀, 本地目录环境变量名, 公开前缀环境变量名)。
+
+    zone: "auto"（自动化临时）或 "product"（成品仓）。
+    """
+    if zone == "product":
+        return (PRODUCT_REMOTE_DIR, PRODUCT_PUBLIC_BASE,
+                "AOHUANG_IMAGE_PRODUCT_DIR", "AOHUANG_IMAGE_PRODUCT_BASE")
+    return (DEFAULT_SFTP_REMOTE_DIR, DEFAULT_SFTP_PUBLIC_BASE,
+            "AOHUANG_IMAGE_LOCAL_DIR", "AOHUANG_IMAGE_LOCAL_BASE")
 
 def image_type(raw: bytes) -> tuple[str, str]:
     """按魔数判真实类型，返回 (mime, extension)。判不出就报错。"""
@@ -215,7 +237,8 @@ def _upload_http(source: Path, *, timeout: int = 30) -> str:
     return _public_url(url)
 
 
-def _upload_sftp(source: Path, *, timeout: int = 30) -> str:
+def _upload_sftp(source: Path, *, timeout: int = 30,
+                 remote_dir: str = "", public_base: str = "") -> str:
     """SFTP 上传：先写隐藏临时名，校验大小后再改名，避免半截文件被访问。"""
     try:
         import paramiko
@@ -223,7 +246,9 @@ def _upload_sftp(source: Path, *, timeout: int = 30) -> str:
         raise ImageUploadError("图片上传组件缺失（paramiko）") from exc
 
     host, user, password, port = _sftp_credentials()
-    remote_dir, public_base = _sftp_remote_settings()
+    default_dir, default_base = _sftp_remote_settings()
+    remote_dir = (remote_dir or default_dir).rstrip("/")
+    public_base = public_base or default_base
     local_size = source.stat().st_size
     if local_size <= 0:
         raise ImageUploadError("图片文件为空")
@@ -287,8 +312,170 @@ def _upload_sftp(source: Path, *, timeout: int = 30) -> str:
     return _public_url(public_base + filename)
 
 
-def upload_image(path: str | Path, *, timeout: int = 30) -> str:
+def cleanup_auto_temp(*, days: int = AUTO_TEMP_RETENTION_DAYS, dry_run: bool = False
+                       ) -> dict[str, Any]:
+    """清理临时区超过 N 天的图片，返回 {scanned, deleted, freedBytes, kept}。
+
+    负责人 2026-11-09 定：自动化临时图保留 14 天。
+    只删临时区（auto-temp），成品区（products）永不动 —— 那里放的是
+    已入库商品的图，删了商品就变挂图。
+    """
+    import time
+    from pathlib import Path as _Path
+
+    local_auto = os.environ.get("AOHUANG_IMAGE_LOCAL_DIR", "").strip()
+    report: dict[str, Any] = {"scanned": 0, "deleted": 0, "freedBytes": 0,
+                              "kept": 0, "days": days, "dryRun": dry_run}
+    if not local_auto:
+        report["error"] = "未配置本地图床目录（AOHUANG_IMAGE_LOCAL_DIR），无法清理"
+        return report
+    root = _Path(local_auto)
+    if not root.is_dir():
+        report["error"] = "图床目录不存在"
+        return report
+    cutoff = time.time() - max(1, int(days)) * 86400
+    for entry in root.iterdir():
+        if not entry.is_file() or entry.name.startswith("."):
+            continue
+        report["scanned"] += 1
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        if stat.st_mtime >= cutoff:
+            report["kept"] += 1
+            continue
+        if dry_run:
+            report["deleted"] += 1
+            report["freedBytes"] += stat.st_size
+            continue
+        try:
+            entry.unlink()
+            report["deleted"] += 1
+            report["freedBytes"] += stat.st_size
+        except OSError:
+            continue
+    return report
+
+
+def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
+    """把临时区的图搬到成品区，返回新的公开地址。
+
+    为什么要真的搬文件而不是只改数据库标记：临时区 14 天后按目录整批清理，
+    只改标记的话成品商品的图会在清理时被一起删掉，商品全变挂图。
+    同一份内容在成品区已存在时直接复用，不重复占用空间。
+    """
+    text = str(url or "").strip()
+    if not text or not text.startswith("https://"):
+        return url
+    auto_dir, auto_base, _local_env, _base_env = _zone_paths("auto")
+    product_dir, product_base, _pl, _pb = _zone_paths("product")
+    # 已经在成品区（或别的地址）就不动
+    if not text.startswith(auto_base):
+        return url
+    name = text[len(auto_base):]
+    if not name or "/" in name:
+        return url
+
+    local_auto = os.environ.get("AOHUANG_IMAGE_LOCAL_DIR", "").strip().rstrip("/")
+    local_product = os.environ.get("AOHUANG_IMAGE_PRODUCT_DIR", "").strip().rstrip("/")
+    if not local_product and local_auto:
+        local_product = re.sub(r"(/?)auto-temp/?$", r"\1products", local_auto)
+
+    # 本机模式：直接复制文件
+    if local_auto and local_product:
+        from pathlib import Path as _Path
+        import shutil
+
+        source = _Path(local_auto) / name
+        target = _Path(local_product) / name
+        if not source.is_file():
+            return url
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.stat().st_size != source.stat().st_size:
+            try:
+                shutil.copyfile(source, target)
+                os.chmod(target, 0o644)
+            except OSError:
+                return url          # 搬不动就保留临时地址，至少图还在
+        return product_base + name
+
+    # 远程模式：用 SFTP 读回来再传到成品区
+    try:
+        import paramiko
+
+        host, user, password, port = _sftp_credentials()
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(hostname=host, port=port, username=user, password=password,
+                           timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
+                           look_for_keys=False, allow_agent=False)
+            sftp = client.open_sftp()
+            try:
+                import tempfile
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    local = Path(tmp) / name
+                    sftp.get(auto_dir + "/" + name, str(local))
+                    return upload_image(local, timeout=timeout, zone="product")
+            finally:
+                sftp.close()
+        finally:
+            client.close()
+    except ImageUploadError:
+        raise
+    except Exception:  # noqa: BLE001 - 单个文件搬不动不影响入库
+        return url
+
+
+def promote_payload_images(payload: dict[str, Any]) -> dict[str, Any]:
+    """把商品 payload 里所有临时区图片搬到成品区（入库时调用）。
+
+    覆盖四处：主图、详情图、SKU 图、尺码图。任何一处搬不动就保留原地址，
+    不会让商品入库失败。
+    """
+    from services import pre_save_check, warehouse_service
+
+    report = {"moved": 0, "failed": 0}
+    if not isinstance(payload, dict):
+        return report
+
+    def _swap(url: str) -> str:
+        new = promote_to_product_zone(url)
+        if new and new != url:
+            report["moved"] += 1
+        elif new:
+            report["failed"] += 1
+        return new
+
+    main = payload.get("imgUrls")
+    if isinstance(main, list) and main:
+        payload["imgUrls"] = [_swap(str(u)) if isinstance(u, str) else u for u in main]
+
+    notes = payload.get("notes")
+    if isinstance(notes, str) and notes:
+        new_notes = notes
+        for old in dict.fromkeys(pre_save_check.extract_detail_image_urls(notes)):
+            new_notes = new_notes.replace(old, _swap(old))
+        payload["notes"] = new_notes
+
+    for item in warehouse_service.sku_image_sources(payload):
+        for field in ("imgUrl", "imageUrl", "image"):
+            if item.get(field):
+                item[field] = _swap(str(item[field]))
+
+    chart = payload.get("sizeChart")
+    if isinstance(chart, str) and chart:
+        payload["sizeChart"] = _swap(chart)
+    return report
+
+
+def upload_image(path: str | Path, *, timeout: int = 30, zone: str = "auto") -> str:
     """把本地图片传到图床，返回公开 HTTPS 地址。
+
+    zone: "auto"（自动化临时图，14 天清理）或 "product"（成品仓，长期保留）。
 
     三种模式（按优先级）：
       1. AOHUANG_IMAGE_LOCAL_DIR —— 图床就在本机时直接复制文件，最快
@@ -300,24 +487,31 @@ def upload_image(path: str | Path, *, timeout: int = 30) -> str:
     if not source.is_file():
         raise ImageUploadError("图片文件无法读取")
 
+    remote_dir, public_base, local_env, base_env = _zone_paths(zone)
     # 1) 本地目录模式：图床目录就在这台机器上
-    local_dir = os.environ.get("AOHUANG_IMAGE_LOCAL_DIR", "").strip()
+    local_dir = os.environ.get(local_env, "").strip()
+    if not local_dir and zone == "product":
+        # 成品区没单独配目录时，跟着自动化区推导：把末尾的 auto-temp 换成 products。
+        auto_dir = os.environ.get("AOHUANG_IMAGE_LOCAL_DIR", "").strip()
+        if auto_dir:
+            local_dir = re.sub(r"(/?)auto-temp/?$", r"products/", auto_dir)
     if local_dir:
-        return _copy_to_local_dir(source, local_dir)
+        return _copy_to_local_dir(source, local_dir, public_base)
 
     if os.environ.get("IMAGE_UPLOAD_URL", "").strip():
         return _upload_http(source, timeout=timeout)
-    return _upload_sftp(source, timeout=timeout)
+    return _upload_sftp(source, timeout=timeout, remote_dir=remote_dir,
+                        public_base=public_base)
 
 
-def _copy_to_local_dir(source: Path, local_dir: str) -> str:
+def _copy_to_local_dir(source: Path, local_dir: str, public_base: str = "") -> str:
     """把图片复制到本机图床目录，返回公开地址。"""
     import shutil
 
-    base = os.environ.get(
+    base = (public_base or os.environ.get(
         "AOHUANG_IMAGE_LOCAL_BASE",
         DEFAULT_SFTP_PUBLIC_BASE,
-    ).strip()
+    )).strip()
     if not base.endswith("/"):
         base += "/"
     target_dir = Path(local_dir)
