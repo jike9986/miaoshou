@@ -39,6 +39,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "translateImages": True,
         "processText": True,
         "weightIncrement": 0.1,
+        # 原重上限（不含上面的增量）：只用来判断采集重量是否填错
+        "weightLimit": 1.5,
         "packageDimensions": {
             "packageLength": 30, "packageWidth": 20, "packageHeight": 10},
         "sizeChartUrl": "https://aohuang888.com/tk-product-automation/size-chart.png",

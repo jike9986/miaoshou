@@ -161,6 +161,13 @@ def translation_readback_matches(payload: Mapping[str, Any], actual: Mapping[str
     for path, status in fields.items():
         if status != "translated":
             continue
+        # 规格属性值（颜色/尺码）不参与译文检查：它们是商品身份，妙手草稿
+        # 存的就是原值，我们按负责人口径也不翻译规格。译文接口会把它们
+        # 一起翻，覆盖率因此标了 translated，但读回的仍是原值 —— 拿它比
+        # 就是必然不一致（2026-11-09 实测：skuPropertyList 的 13 个颜色值
+        # 全部「不一致」，实际内容完全相同）。
+        if str(path).startswith("skuPropertyList"):
+            continue
         if path == "productAttributes" or str(path).startswith("productAttributes["):
             # 索引路径在上游重排后就没意义了，整个集合比一次即可
             if attributes_checked:
@@ -306,7 +313,10 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
         extract_detail_image_urls(actual.get("notes"))
         == extract_detail_image_urls(payload.get("notes")))
 
-    comparisons["skuImages"] = _retained_sku_images_unchanged(payload, actual)
+    # SKU 图我们不改动（清洗只动颜色文案与规格表顺序），基准用草稿 original：
+    # 颜色被清洗后 attrValueList 下标会移位，拿 payload 比会把「下标变了」
+    # 误报成「图被换了」。
+    comparisons["skuImages"] = _retained_sku_images_unchanged(original, actual)
 
     if pricing_enabled:
         # 开定价时销售价必须与处理结果一致，采购价必须原样返回。
@@ -315,7 +325,10 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
     else:
         comparisons["prices"] = _prices_unchanged(original, actual)
 
-    comparisons["translations"] = translation_readback_matches(payload, actual, coverage)
+    # 翻译已挪到最后一步：coverage 为空表示这一轮没做翻译，没有译文字段可比，
+    # 直接放行。老写法空 coverage 会一路报不一致，把正常商品全挡在入库外。
+    comparisons["translations"] = (translation_readback_matches(payload, actual, coverage)
+                                   if coverage else True)
 
     if image_only:
         comparisons["nonImageFields"] = (

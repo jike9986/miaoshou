@@ -20,8 +20,9 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-# 平台侧颜色取值上限：超过这个数量妙手保存会失败，所以必须自己先截断
-MAX_COLORS = 10
+# 平台侧颜色取值上限，同时也是 SKU 图上限（负责人 2026-11-09 定）：
+# 一种颜色一张 SKU 图，9 色正好对应 9 张，超出的颜色没有图可配。
+MAX_COLORS = 9
 
 # 颜色属性名集合（老版 normalize_colors :254 的内联集合，逐字照抄）。
 # 马来语 warna 是翻译后商品的属性名，漏掉它会让译文商品整批「没有颜色属性」。
@@ -50,9 +51,28 @@ MALAY_COLOR_WORDS = (
     "hitam", "putih", "kelabu", "merah", "biru", "hijau", "kuning", "ungu",
     "oren", "jingga", "emas", "perak", "perang", "coklat", "krem",
     "merah jambu", "biru muda", "hijau muda",
+    # 后置深浅修饰：颜色词 + air/muda(浅) / pekat/tua(深) / susu(奶白)
+    # 实测 HD866 kuning air 只收 kuning 会被清成 Kuning，与另一个颜色撞名
+    "kuning air", "kuning muda", "kuning pekat", "kuning tua",
+    "hitam pekat", "hitam muda", "putih susu", "putih tulang",
+    "biru tua", "biru laut", "merah hati", "merah tua", "merah bata",
+    "hijau tua", "hijau army", "kelabu tua", "kelabu muda", "perang muda",
+    "emas tua", "perak muda", "coklat muda", "coklat tua",
 )
 MALAY_COLOR = re.compile(
     r"\b(?:" + "|".join(sorted(MALAY_COLOR_WORDS, key=len, reverse=True)) + r")\b", re.I)
+# 「可选的型号码前缀 + 完整的马来语颜色短语」整体匹配。
+# clean_color_strict 先用它拦一次，命中就直接返回整段短语（保留 air/muda 这种
+# 后置深浅修饰）：等 COLOR_CODE 把型号剥掉再说，`kuning air` 就只剩 `kuning` 了。
+_MALAY_FULL = re.compile(
+    r"^\s*(?:[A-Za-z]*\d+[A-Za-z0-9_*-]*\s+)?"
+    r"(" + "|".join(sorted(MALAY_COLOR_WORDS, key=len, reverse=True)) + r")\s*$",
+    re.I)
+
+# 颜色 + 款号后缀：白黑色（A19）/ 黑金【A19】/ 蓝红(A19)。
+# 括号里是字母数字款号，属于商品身份，清洗时必须整串保留。
+_CODE_SUFFIX = re.compile(
+    r"^.*[一-鿿].*[（(【\[]\s*[A-Za-z]{0,4}\d{1,6}[A-Za-z0-9-]*\s*[）)】\]]\s*$")
 
 # 型号 / 货号码（老版 :38，逐字照抄）。三条分支各自对应供应商的一种写法：
 #   G22 绿色      → 字母+数字
@@ -129,6 +149,25 @@ def clean_color_strict(value: Any) -> str:
     original = str(value or "").strip()
     if not original:
         raise ColorError(f"颜色为空，无法确定：{value!r}")
+
+    # 先整体认马来语「型号 + 颜色短语」（HD866 kuning air / HD866 hitam）。
+    # 为什么必须在剥型号码之前：COLOR_CODE 会把 HD866 当货号删掉，剩下的
+    # `kuningair` 被 MALAY_COLOR 匹配成 kuning，`air`（浅）就丢了 ——
+    # 「浅黄」被当成「黄」，与另一个颜色撞名，妙手保存报
+    # 「SKU【Kuning-41】不存在」（2026-11-09 实证）。
+    # 马来语商品的颜色值本来就是「型号 + 颜色短语」整串（HD866 kuning air），
+    # 上游规格表里存的就是这一整串，我们截短成 Kuning air 反而对不上，
+    # 妙手会报「SKU【Kuning air-41】不存在」——颜色值必须原样保留型号前缀。
+    # 只做去多余空白，不动大小写：HD866 是型号，大写用户自己的写法。
+    if _MALAY_FULL.match(original):
+        return " ".join(original.split())
+
+    # 括号里的款号/批次标识（白黑色（A19）、黑金【A19】）属于商品身份，
+    # 不是备注：妙手草稿的规格表存的就是这一整串，清洗时删掉就对不上，
+    # 保存直接报「SKU【白黑色-36】不存在」（2026-11-09 实测）。原样保留。
+    if _CODE_SUFFIX.match(original):
+        return " ".join(original.split())
+
     text = re.sub(r"\s+", "", original)
     text = COLOR_CODE.sub("", text)
 
@@ -173,6 +212,18 @@ def clean_color_strict(value: Any) -> str:
     if residue.strip(" -_+/、,，配拼撞色"):
         raise ColorError(f"认不出颜色，需要人工确认：{value!r}")
     return "".join(tokens) + variant
+
+
+def _derived_value_id(attr_id: Any, label: str) -> str:
+    """按「属性 id + 规格值」派生一个稳定 id。
+
+    妙手接受任意非空 attrValueId 作为新规格值（载体路径已实测），
+    只要同一个值每次得到同一个 id 就不会来回漂移。
+    """
+    import hashlib
+
+    seed = "%s|%s" % (str(attr_id or ""), str(label or ""))
+    return hashlib.md5(seed.encode("utf-8")).hexdigest()[:10]
 
 
 def _problem_text(names: list[str], matched: int, *, category_selected: bool) -> str:
@@ -275,9 +326,25 @@ def normalize_colors(props: Any, sku_map: Mapping[str, Any] | None = None, *,
     # key 去掉「色」是让「黄」和「黄色」归并（老版 :270 的注释）。
     # 下标一起带进组里，后面要靠它把输出顺序还原成原顺序。
     groups: dict[str, list[tuple[int, Mapping[str, Any], str]]] = {}
+    dropped_remarks: list[tuple[str, str]] = []
     for index, value in enumerate(values):
-        name = clean_color_strict(value.get("attrValue"))
+        raw = value.get("attrValue")
+        try:
+            name = clean_color_strict(raw)
+        except ColorError as exc:
+            # 认不出的颜色值不整件失败：供应商经常在规格里塞厂家备注
+            # （「大量拿货可联系」「现货秒发」「厂家直销」），它们根本不是颜色，
+            # 是混在规格表里的广告。旧行为是抛错让整件商品处理失败，
+            # 一件有 9 个正常色 + 1 条备注的商品会因为那条备注全部作废。
+            # 现在删掉这一条规格值（连带它的 SKU 键），其余颜色照常处理。
+            dropped_remarks.append((str(raw or "")[:40], str(exc)[:80]))
+            continue
         groups.setdefault(name.replace("色", ""), []).append((index, value, name))
+    if not groups:
+        # 一个颜色都没剩下：这不再是「备注混进来」，而是颜色根本认不出，
+        # 必须报错——静默产出无颜色商品，上架时平台会拒，线索更难查。
+        detail = "；".join(f"{text}（{why}）" for text, why in dropped_remarks[:3]) or "颜色属性为空"
+        raise ColorError(f"颜色全部无法识别，需要人工确认：{detail}")
 
     # 每组挑一个代表：优先取「原文本来就是这个写法」的那个，改写量最小，
     # 也保证同名 SKU 的展示文案不会因为清洗顺序而漂移（老版 :274）。
@@ -288,16 +355,33 @@ def normalize_colors(props: Any, sku_map: Mapping[str, Any] | None = None, *,
     # （`after_ids == [v for v in before_ids if v in retained]`），而组代表可能
     # 是组里靠后的那个元素，不重排就会让整件商品被那条规则挡在入库前。
     chosen: list[tuple[int, dict[str, Any]]] = []
+    # 值被改写过的原 id -> 新 id。改了值就必须换 id：妙手按
+    # 「attrName + attrValue + attrValueId」重建规格表，值写成「米色」却留着
+    # 属于「HD866米色」的旧 id，平台按 id 找回报「SKU【米色-41】不存在」，
+    # 整件商品存不进去（2026-11-09 实测）。
+    id_remap: dict[str, str] = {}
     for candidates in list(groups.values())[:MAX_COLORS]:
         index, value, name = min(
             candidates,
             key=lambda pair: str(pair[1].get("attrValue") or "").strip() != pair[2])
-        chosen.append((index, {**dict(value), "attrValue": name}))
+        item = {**dict(value), "attrValue": name}
+        original_id = str(value.get("attrValueId") or "")
+        original_label = str(value.get("attrValue") or "").strip()
+        if original_id and original_label != name:
+            # 稳定派生：同一个「属性 + 新值」永远得到同一个 id，重复执行不会漂移
+            item["attrValueId"] = _derived_value_id(attr.get("attrId"), name)
+            id_remap[original_id] = item["attrValueId"]
+        chosen.append((index, item))
     chosen.sort(key=lambda pair: pair[0])
     chosen_values = [item for _, item in chosen]
 
     colors = [item["attrValue"] for item in chosen_values]
     messages: list[str] = []
+    if dropped_remarks:
+        messages.append(
+            "颜色里混入 %d 条非颜色备注，已剔除：%s" % (
+                len(dropped_remarks),
+                "、".join(text for text, _ in dropped_remarks[:5])))
     if len(groups) > MAX_COLORS:
         # 老版是直接截断（`list(groups.values())[:10]`），这里保持一致，
         # 但把截断这件事说出来——静默少颜色比报错更难查。
@@ -305,7 +389,12 @@ def normalize_colors(props: Any, sku_map: Mapping[str, Any] | None = None, *,
             f"颜色 {len(groups)} 个超过上限 {MAX_COLORS}，已按顺序保留前 {MAX_COLORS} 个")
 
     kept_ids = {str(item["attrValueId"]) for item in chosen_values}
-    removed_ids = [value_id for value_id in ids if value_id not in kept_ids]
+    # removed 的口径是「这个颜色被删了」，不是「这个 id 不在输出里」。
+    # 值被改写时 id 会换新，旧 id 自然不在 kept_ids 里，但它并没有被删 ——
+    # 直接按 id 差集会把它算成删除，全删保护就会误判成「颜色清理会删掉所有
+    # 在售 SKU，已停止」，把每一次清洗都拦死（2026-11-09 实测）。
+    removed_ids = [value_id for value_id in ids
+                   if value_id not in kept_ids and value_id not in id_remap]
 
     sku_map_out: dict[str, Any] | None = None
     removed_sku_keys: list[str] = []
@@ -321,7 +410,26 @@ def normalize_colors(props: Any, sku_map: Mapping[str, Any] | None = None, *,
             if color_ids & set(removed_ids):
                 removed_sku_keys.append(str(key))
                 continue
-            sku_map_out[key] = sku
+            # 值改过的颜色换了 id，SKU 键里的旧 id 也要跟着换，
+            # 否则键指向一个规格表里已不存在的 id，妙手同样报「SKU 不存在」。
+            # SKU 键**保持草稿原来的段顺序**，只把改过值的 id 换掉。
+            #
+            # 不要重排：妙手保存草稿是按「它自己那份草稿的键」逐字匹配的，
+            # 键形如 ;颜色id;尺码id; 还是 ;尺码id;颜色id; 由草稿决定
+            # （采集来的数据两种都有）。我们自作主张排序，键就和草稿对不上，
+            # 平台报「SKU【白黑色（A19）-36】不存在」（2026-11-09 实测：
+            # 产物与草稿的规格、id、颜色值完全一致，唯一差别就是键顺序）。
+            # 载体路径能排序是因为那里是**新建**载体、规格表由我们重建；
+            # 这里是改已有草稿，必须跟着草稿走。
+            parts = [part for part in str(key).strip(";").split(";") if part]
+            parts = [id_remap.get(part, part) for part in parts]
+            new_key = ";" + ";".join(parts) + ";"
+            # 颜色 id 重建后，SKU 记录整条原样搬到新键上 —— 包括
+            # shopIdToWarehouseIdAndStockMap。
+            # 不能删这个字段：它是「这条 SKU 的库存放在哪个店铺仓库」的归属，
+            # 删掉妙手保存时直接报「店铺【xxx】仓库未选择」（2026-11-09 实测）。
+            # 它按 warehouseId 记库存，与规格值 id 无关，换键后依然成立。
+            sku_map_out[new_key] = sku
         # 全删保护：颜色清理不许把商品清成没有在售 SKU（老版 :286-287）。
         if not any(str((sku or {}).get("isDelete", "0")) != "1"
                    for sku in sku_map_out.values() if isinstance(sku, Mapping)):

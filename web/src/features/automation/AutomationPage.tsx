@@ -250,6 +250,7 @@ export function AutomationPage() {
       saveWorkflow.mutate(
         {
           weightIncrement: settings.weightExtraKg,
+        weightLimit: settings.weightLimitKg,
           packageDimensions: {
             packageLength: settings.lengthCm,
             packageWidth: settings.widthCm,
@@ -269,7 +270,7 @@ export function AutomationPage() {
     }, 800);
     return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.weightExtraKg, settings.lengthCm, settings.widthCm, settings.heightCm, settings.sizeChartId, connected, operatorId, settingsReadyForOperator]);
+  }, [settings.weightExtraKg, settings.weightLimitKg, settings.lengthCm, settings.widthCm, settings.heightCm, settings.sizeChartId, connected, operatorId, settingsReadyForOperator]);
 
   const templatesQuery = useTemplates(connected);
   const templateNames = useMemo(

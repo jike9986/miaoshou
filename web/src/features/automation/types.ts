@@ -44,6 +44,8 @@ export interface AutomationSettings {
   imageConcurrency: number;
   /** 重量增加 kg（0–5，步进 0.01） */
   weightExtraKg: number;
+  /** 原重上限（kg）：只比采集原重，不含重量增加 */
+  weightLimitKg: number;
   /** 包裹尺寸 cm（0.01–300） */
   lengthCm: number;
   widthCm: number;
@@ -71,6 +73,7 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
   // 与老版 0.1.4 index.html 的默认 value 完全一致：
   //   weight-increment=0.1、package-length=30、package-width=20、package-height=10
   weightExtraKg: 0.1,
+  weightLimitKg: 1.5,
   lengthCm: 30,
   widthCm: 20,
   heightCm: 10,
@@ -104,6 +107,7 @@ const PERSISTED_KEYS: Array<keyof AutomationSettings> = [
   "detailImageCount",
   "imageConcurrency",
   "weightExtraKg",
+  "weightLimitKg",
   "lengthCm",
   "widthCm",
   "heightCm",

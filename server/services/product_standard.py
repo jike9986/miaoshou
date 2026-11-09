@@ -383,6 +383,17 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
 
 
 # --- 自动修复 -------------------------------------------------------------
+def _title_is_mostly_localized(title: str) -> bool:
+    """标题是否已经本地化（拉丁字母为主），只是混进了中文。
+
+    全中文标题返回 False —— 那是待翻译的中文标题，不是「混入中文的译文」，
+    不能把中文删掉。只有拉丁字母明显多于中文时才清理。
+    """
+    cjk = len(CJK_RE.findall(title or ""))
+    latin = len(re.findall(r"[A-Za-z]", title or ""))
+    return bool(latin) and latin > cjk
+
+
 def repair(payload: Mapping[str, Any], *, category_name: str = "",
            language: str = "") -> tuple[dict[str, Any], list[str]]:
     """按标准修复可修项，返回 (新payload, 修复记录)。"""
@@ -402,8 +413,20 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
         data["needsRecollectReason"] = "标题是占位值(%r)" % title
         done.append("标题占位→标记重采")
     lang = str(language or data.get("language") or "").lower()
-    if lang in ("ms", "en", "vi", "id", "th") and CJK_RE.search(str(data.get("title") or "")):
-        data["title"] = CJK_RE.sub("", str(data.get("title"))).strip() or str(data.get("title"))
+    raw_title = str(data.get("title") or "")
+    if (lang in ("ms", "en", "vi", "id", "th")
+            and CJK_RE.search(raw_title)
+            and _title_is_mostly_localized(raw_title)):
+        # 只清「本地化标题里混进来的中文」。
+        #
+        # 为什么要有 _title_is_mostly_localized 这道判断：翻译已挪到流程最后
+        # （负责人 2026-11-09 定：中文阶段先处理颜色/图片/标题/价格，最后统一翻译），
+        # 所以走到这里时标题**本来就是中文**。老写法无条件 CJK_RE.sub 会把
+        # 「2025新款夏季高端男鞋潮流百搭网面透气厚底青少年跑步运动休闲鞋」
+        # 删成只剩「2025」，妙手保存直接报
+        # 「shopCollectItemInfo.title 长度不能少于25个字符」（实测）。
+        # 判据：拉丁字母数量多于中文字符数，才算「已本地化、混入零星中文」。
+        data["title"] = CJK_RE.sub("", raw_title).strip() or raw_title
         done.append("标题去中文")
 
     # 主图：去重 + 裁到 9

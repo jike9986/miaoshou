@@ -284,6 +284,15 @@ def _validate_workflow_defaults(raw: dict[str, Any]) -> dict[str, Any]:
         if not 0 <= weight <= 5:
             raise errors.validation("重量增量须在 0–5 kg 之间", field="weightIncrement")
         cleaned["weightIncrement"] = weight
+    if "weightLimit" in raw:
+        # 原重上限：只比采集原重，重量增量不算在内（负责人 2026-11-09 口径）
+        try:
+            limit = float(raw["weightLimit"])
+        except (TypeError, ValueError):
+            raise errors.validation("原重上限须为数字", field="weightLimit") from None
+        if not 0.1 <= limit <= 10:
+            raise errors.validation("原重上限须在 0.1–10 kg 之间", field="weightLimit")
+        cleaned["weightLimit"] = limit
     if "packageDimensions" in raw:
         # 复用服务层的同一套校验与键名规则（packageLength/Width/Height，0–300）
         cleaned["packageDimensions"] = warehouse_service.normalize_package_dimensions(

@@ -298,11 +298,25 @@ def category_default_weight(category_name: Any) -> float:
     return DEFAULT_WEIGHT_KG
 
 
-def _weight_hard_max_for(category_name: Any = "") -> float:
-    """该品类允许的重量上限：暴走/轮滑类放到 1.5kg，其余用全局 1.2kg。"""
+def _weight_hard_max_for(category_name: Any = "", override: Any = None) -> float:
+    """原重上限（kg）：优先用处理设置里配的值，没配才按品类。
+
+    这个上限只比「上游原重」，重量增量不算在内 —— 增量是发给平台的报价参数，
+    跟「采集重量是否填错」是两件事，混在一起会让正常重量被误拦
+    （2026-11-09 负责人明确）。
+    """
+    if override not in (None, ""):
+        try:
+            value = float(override)
+            if WEIGHT_LIMIT_RANGE[0] <= value <= WEIGHT_LIMIT_RANGE[1]:
+                return value
+        except (TypeError, ValueError):
+            pass
     spec = category_package_spec(category_name)
     if spec:
-        return float(spec["weightRange"][1])
+        # 品类表里的值也统一抬到 1.5 下限：老表里普通鞋给的是 1.2，
+        # 会把 1.27kg 的厚底老爹鞋这种正常货拦下来（负责人 2026-11-09 定）。
+        return max(WEIGHT_HARD_MAX, float(spec["weightRange"][1]))
     return WEIGHT_HARD_MAX
 
 
@@ -2085,7 +2099,14 @@ WEIGHT_RANGE = (0.05, 5.0)
 #   · 高于 WEIGHT_HARD_MAX（鞋子不可能这么重，多半是数据错）：跳过不处理，备注「重量异常」。
 #   · 两者之间正常处理。两个阈值都可按业务调整。
 WEIGHT_AUTO_MIN = 0.4
-WEIGHT_HARD_MAX = 1.2
+# 原重上限（不含重量增量）。负责人 2026-11-09 定：
+#   · 这个阈值只用来判断**上游原重**是否属于采集错误，与「重量增加」那 0.1 无关；
+#   · 可在处理设置里改（workflow.weightLimit），默认 1.5kg；
+#   · 所有品类统一 1.5，厚底老爹鞋这类 1.27kg 属于正常装箱重量，
+#     按老的 1.2 会把正常货拦下来。
+WEIGHT_HARD_MAX = 1.5
+WEIGHT_LIMIT_DEFAULT = 1.5
+WEIGHT_LIMIT_RANGE = (0.1, 10.0)
 DIMENSION_MAX = 300
 DEFAULT_PACKAGE_DIMENSIONS = {
     "packageLength": 30, "packageWidth": 20, "packageHeight": 10}
@@ -2112,7 +2133,7 @@ def _copy_saved_weights(payload: dict[str, Any], previous: Mapping[str, Any]) ->
 
 
 def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
-                   *, category_name: Any = "") -> dict[str, Any]:
+                   *, category_name: Any = "", weight_limit: Any = None) -> dict[str, Any]:
     """商品与每个未删除 SKU 的重量统一加增量（老版 _prepare_weight）。
 
     注意不是幂等的：跑两次会加两次，所以只在入仓这一步做一次，
@@ -2133,7 +2154,8 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
 
     parsed: dict[str, float] = {}
     auto_fixed_from: Any = None
-    hard_max = _weight_hard_max_for(category_name)
+    # 上限只比原重，不加增量（负责人 2026-11-09 口径）
+    hard_max = _weight_hard_max_for(category_name, weight_limit)
     # 太轻/为空时补到的基准：鞋类用 0.4，暴走/轮滑用 0.5；取品类默认重量与 0.4 的较大者
     base_min = max(WEIGHT_AUTO_MIN, min(category_default_weight(category_name), 0.6))
     for name, sku in targets:
@@ -2148,8 +2170,9 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
         # 超过该品类上限（普通鞋 1.2 / 暴走鞋 1.5）：判为数据异常，跳过不处理。
         if value > hard_max:
             raise errors.unprocessable(
-                f"重量异常：{raw} kg 超过该品类合理上限 {hard_max} kg，"
-                f"已跳过不处理。请核对妙手采集的重量是否为克/千克单位填错",
+                f"重量异常：采集原重 {raw} kg 超过设置的原重上限 {hard_max} kg"
+                f"（不含 {amount} kg 增量），已跳过不处理。"
+                f"请核对妙手采集的重量是否为克/千克单位填错",
                 details={"weightError": {"field": name, "value": raw,
                                          "reason": "too_heavy"}},
             )
@@ -2264,14 +2287,14 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     if not block["ossMd5"]:
         raise errors.unprocessable("商品详情缺少 ossMd5，请先在妙手保存一次草稿")
 
-    # 先翻译再定价：价格字段必须原样保留，翻译不能覆盖金额
-    translated, translation_report = product_service.translated_info(client, info, language)
-    # 逐字段覆盖检查：只翻译了几个字段不代表翻译完成，漏翻的字段会在报告里列出。
-    # 老版靠这个阻止「中文还在标题里就上架」（product_workflow.translation_coverage）。
-    coverage = translation_coverage.translation_coverage(
-        info, translated, target_language=str(language or "ms"))
-    translation_report = {**translation_report, "coverage": coverage}
-    info = translated
+    # 翻译放在**最后**一步（负责人 2026-11-09 定），这里只做占位：
+    # 颜色、标题清洗、图片筛选的规则全是按中文写的（中文颜色词表、违规词表、
+    # 工厂图判定）。先翻译再清洗等于拿马来语撞中文规则 —— 实测
+    # HD866 kuning air（马来语「浅黄」）被中文清洗逻辑当型号码剥成 Kuning，
+    # 与妙手规格表对不上，保存报「SKU【Kuning-41】不存在」，整件处理失败。
+    # 正确顺序：把中文阶段该处理的都处理完，最后统一翻译一次。
+    translation_report: dict[str, Any] = {}
+    coverage: dict[str, Any] = {}
 
     template = None
     if price_template:
@@ -2289,6 +2312,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     already_processed = bool(existing is not None and existing.saved_at)
 
     increment = _workflow_setting(db, "weightIncrement", 0.1, operator_id)
+    # 原重上限：处理设置里的独立项，不含增量（负责人 2026-11-09 定）
+    weight_limit = _workflow_setting(db, "weightLimit", WEIGHT_LIMIT_DEFAULT, operator_id)
     # 注意：定价必须在「重量加完增量之后」再算 —— 运费按最终包裹重量计费，
     # 先用原始重量算价、再把重量加 0.1 保存，会导致「价格按 1.85kg 算、实际存 1.95kg」，
     # 报价与实际重量不符（老版 product_workflow 是 prepare_weight 之后才 apply 定价）。
@@ -2316,12 +2341,16 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             # 覆写之后下次比较的就是「加过增量的值」，等价于永远判定没变。
             payload["_sourceWeight"] = previous.get("_sourceWeight")
         else:
-            weight_report = prepare_weight(payload, increment,
-                                           category_name=product_service.category_label(payload))
+            weight_report = prepare_weight(
+                payload, increment,
+                category_name=product_service.category_label(payload),
+                weight_limit=weight_limit)
             payload["_sourceWeight"] = _raw_weight_of(payload, pre_increment=weight_report)
     else:
-        weight_report = prepare_weight(payload, increment,
-                                       category_name=product_service.category_label(payload))
+        weight_report = prepare_weight(
+            payload, increment,
+            category_name=product_service.category_label(payload),
+            weight_limit=weight_limit)
         payload["_sourceWeight"] = _raw_weight_of(payload, pre_increment=weight_report)
 
     # 现在 payload 的包裹重量已是最终值（含增量），据此定价
@@ -2386,6 +2415,23 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             logger.warning("商品图片固化失败 detailId=%s：%s", detail_id, exc)
             image_store_report = {"error": str(exc)[:200]}
 
+    # ===== 图片处理：主图 / 详情图 / SKU 图 =====
+    # 负责人口径（2026-11-09）：工厂宣传图和尺码对照图会混进主图与详情图，
+    # 详情区除了图片不要任何文字。这里在写回妙手之前统一清一遍。
+    # OCR 拿不到结果时不清（宁可不删，也不误删用户要的图）。
+    image_report: dict[str, Any] = {}
+    try:
+        analyzed = analyze_payload_images(payload, retry=skip_image_review)
+        detail_rows = rows_index(analyzed.get("detail") or [])
+        image_report["detail"] = clean_detail_images(
+            payload, limit=DETAIL_IMAGE_HARD_LIMIT, rows_by_url=detail_rows)
+        # 主图的工厂图/尺码图剔除由 pre_save_gate 的 removeIndexes 负责，
+        # 闸门在主流程后面才算，所以这里只把 OCR 结果记下来，避免重复识别。
+        image_report["ocr"] = {key: len(value) for key, value in analyzed.items()}
+    except Exception as exc:  # noqa: BLE001 - 图片清洗失败不阻断入库
+        logger.warning("图片清洗失败 detailId=%s：%s", detail_id, exc)
+        image_report = {"error": f"{type(exc).__name__}: {exc}"[:160]}
+
     # 类目三档兜底（老版 product_workflow._resolve_category）。没 cid 时以前只报
     # 一句「category cid is missing」，运营不知道下一步该干什么，整批卡在这里。
     # 老版会依次试 AI 匹配、本地类目库名字反查、关键词兜底，三档全失败才提示
@@ -2439,7 +2485,26 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
 
     # 颜色规范化必须在 build_product 之前：build 会快照 sku_properties，
     # 之后清洗只会让 payload 与展示字段不一致（审查 P0-7）。
-    props = _clean_color_props(payload)
+    #
+    # 清洗前先补类目真实 attrId（颜色 100000 / 尺码 100007）。妙手只有拿到
+    # attrId 才会按我们提交的规格**重建**草稿的规格表；attrId 为空时它按草稿里
+    # 原有的规格值逐字匹配，颜色被清洗过（HD866米色 → 米色）就必然报
+    # 「SKU【米色-41】不存在」，整件商品存不进去（2026-11-09 实测）。
+    spec_attr_ids = _fill_spec_attr_ids(
+        db, client, payload, shop_id=shop_id,
+        site=str(info.get("site") or account.site or ""))
+    if spec_attr_ids:
+        props = _clean_color_props(payload)
+    else:
+        # 拿不到类目 attrId 就不要清洗颜色。
+        #
+        # 为什么：妙手只有拿到 attrId 才会按提交的规格重建草稿规格表；
+        # attrId 为空时它按草稿原有的规格值逐字匹配，我们不洗值原样提交反而
+        # 是对的，洗过的值必然对不上（报「SKU【米色-41】不存在」）。
+        # 宁可这次不清洗（下次补上 attrId 再清），也不能产出存不进去的商品。
+        props = [p for p in (payload.get("skuPropertyList") or [])
+                 if isinstance(p, dict)]
+        logger.warning("类目规格 attrId 不可用，本次跳过颜色清洗 detailId=%s", detail_id)
 
     # 必要字段诊断（老版 product_workflow.diagnose_item）。
     # 顺序与老版一致：先判翻译覆盖，再判字段齐备；两项都过才继续。
@@ -2478,6 +2543,16 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 只报告不删等于把问题推给运营逐件手删；闸门已确认「剔完还有图」，
     # 这里按 index 从后往前删，避免前面的下标失效。
     dropped_images = _drop_main_images(payload, gate.get("removeIndexes") or [])
+    # 主图去重 + 截到平台上限 9 张。
+    # 采集回来的主图经常 15~20 张，以前靠 pre_save_check 报
+    # 「main image count exceeds its configured limit」拦下来让人手删；
+    # 负责人 2026-11-09 定的口径是「最多保留前九张」，所以这里直接截，
+    # 不再让正常商品卡在这一步。
+    main_urls = [str(u) for u in (payload.get("imgUrls") or [])
+                 if isinstance(u, str) and u.strip()]
+    unique_main = list(dict.fromkeys(main_urls))[:MAIN_IMAGE_LIMIT]
+    if unique_main != payload.get("imgUrls"):
+        payload["imgUrls"] = unique_main
 
     issues = pre_save_check.pre_save_issues(
         info, payload, coverage,
@@ -2486,7 +2561,11 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         # 尺寸与尺码图已经写进 payload 了，这里传真值让规则 3/4 真正生效
         package_dimensions=dimensions,
         size_chart_url=chart_url,
-        process_images_enabled=False,
+        # 图片处理在本流程里是**开着**的：主图截断、详情图清洗（删文字/厂家图/
+        # 尺码图/去重）都在写回之前做了。传 False 会触发规则 8
+        # 「关掉图片处理却改了图片字段」，把每一次正常清洗都判成异常
+        # （2026-11-09 实测：detail_images 一清就报 image fields changed）。
+        process_images_enabled=True,
         image_only=False,
         pricing_enabled=template is not None,
         # 闸门结果并进 issue 清单：规则 13/14 与上面 gate 共用同一份判定，
@@ -2551,6 +2630,33 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             missingFields=coverage.get("missingFields") or [],
             categoryMessage=category_message,
         )
+
+    # 妙手不接受 skuMap 里的 null：itemNum / identifierCode 这类字段传 null 时，
+    # 平台解析规格会失败，报「SKU【米色-41】不存在」——看起来像颜色对不上，
+    # 实际是空值把规格解析弄崩了（2026-11-09 实测：同样数据把 null 字段去掉就能存）。
+    _strip_null_sku_fields(payload)
+    _strip_local_only_fields(payload)
+    _restore_sku_key_order(payload, info)
+
+    # ===== 最后一步：翻译 =====
+    # 走到这里，标题、图片、类目、颜色、重量、尺寸、价格都已在中文上处理完。
+    # 翻译只做语言转换，不再参与任何清洗判定 —— 这是负责人 2026-11-09 定的流程：
+    #   标题 → 图片（主图/详情图/SKU 图）→ 类目 → 颜色 → 重量 → 尺寸 → 价格 → 翻译
+    # 中文阶段清洗有两层意义：中文颜色词表/违规词表/工厂图判定都是为中文写的，
+    # 拿马来语去撞会把颜色洗坏（HD866 kuning air → Kuning，SKU 对不上）。
+    if _needs_translation(payload, language):
+        # 覆盖率检查的「源」必须是**上游原文**（info），不是已经处理过的 payload：
+        # payload 走到这里已经换过图片、算过价格、清洗过颜色，结构上与译文对不上，
+        # 拿它做源会把「我们把字段改成别的形态」误判成「漏翻」，
+        # 报「translation coverage is incomplete」把整件商品挡在入库外（实测）。
+        translated, translation_report = product_service.translated_info(
+            client, payload, language)
+        coverage = translation_coverage.translation_coverage(
+            info, translated, target_language=str(language or "ms"))
+        translation_report = {**translation_report, "coverage": coverage}
+        # 只把译文字段写回，价格/重量/尺寸/图片/规格 id 一个字都不动：
+        # translated_info 会把整块 info 换掉，直接赋值等于把前面几步全部作废。
+        payload = merge_translated_fields(payload, translated)
 
     draft_verified = False
     if enforce_pre_save:
@@ -2712,6 +2818,83 @@ def apply_transformed_payload(db: Session, product: Product,
     db.flush()
 
 
+def clean_detail_images(payload: dict[str, Any], *,
+                       limit: int = DETAIL_IMAGE_HARD_LIMIT,
+                       rows_by_url: Mapping[str, Mapping[str, Any]] | None = None
+                       ) -> dict[str, Any]:
+    """详情区只留图片：删文字、删厂家宣传图、删尺码图、去重、截上限。
+
+    负责人口径（2026-11-09）：
+      · 详情里除了图片什么都不要——中英文空白、段落文字全部清掉；
+      · 厂家宣传图（厂房/招商/联系方式）和尺码对照图，出现在详情图里是废图；
+      · 同一张图重复出现只留一张；
+      · 最多 limit 张（平台硬上限）。
+
+    OCR 结果由调用方传进来（rows_by_url），拿不到就不做内容判定——
+    网络抖动时按原样保留，宁可不删也不误删用户要的图。
+    """
+    from services import pre_save_check
+
+    urls = pre_save_check.extract_detail_image_urls(payload.get("notes"))
+    kept: list[str] = []
+    seen: set[str] = set()
+    dropped: list[dict[str, str]] = []
+    for url in urls:
+        cleaned = str(url or "").strip()
+        if not cleaned:
+            continue
+        if cleaned in seen:
+            dropped.append({"url": cleaned, "reason": "重复图片"})
+            continue
+        row = (rows_by_url or {}).get(cleaned) or {}
+        action = str(row.get("action") or "")
+        if action == "remove":
+            dropped.append({"url": cleaned,
+                            "reason": str(row.get("reason") or "厂家宣传/尺码图")})
+            continue
+        seen.add(cleaned)
+        if len(kept) >= limit:
+            dropped.append({"url": cleaned, "reason": f"超过详情图上限 {limit} 张"})
+            continue
+        kept.append(cleaned)
+    payload["notes"] = pre_save_check.detail_images_only(kept)
+    return {"kept": len(kept), "dropped": dropped,
+            "before": len(urls), "after": len(kept)}
+
+
+def analyze_payload_images(payload: dict[str, Any], *, retry: bool = False
+                           ) -> dict[str, Any]:
+    """对主图 / 详情图 / SKU 图统一做一次 OCR 分类。
+
+    返回 {main: [...], detail: [...], sku: [...]}，每项是 analyze 的原始行。
+    三类分开返回是为了让调用方按图位决策：主图删掉后要补位，详情图删掉直接不要，
+    SKU 图删掉要重排颜色。
+    """
+    from services import image_review_service, pre_save_check
+
+    def _rows(urls: list[str]) -> list[dict[str, Any]]:
+        urls = [str(u) for u in urls if isinstance(u, str) and u.startswith("http")]
+        if not urls:
+            return []
+        try:
+            return image_review_service.analyze(urls, limit=len(urls), retry=retry)
+        except Exception as exc:  # noqa: BLE001 - OCR 不可用不阻断入库
+            logger.warning("图片 OCR 不可用，跳过内容判定：%s", exc)
+            return []
+
+    return {
+        "main": _rows(list(payload.get("imgUrls") or [])),
+        "detail": _rows(pre_save_check.extract_detail_image_urls(payload.get("notes"))),
+        "sku": _rows([item["url"] for item in sku_image_sources(payload)]),
+    }
+
+
+def rows_index(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """OCR 行按 URL 建索引，供清洗函数查。"""
+    return {str(row.get("url") or ""): dict(row) for row in rows
+            if isinstance(row, Mapping) and row.get("url")}
+
+
 def _drop_main_images(payload: dict[str, Any], indexes: Iterable[Any]) -> int:
     """按 index 从主图里剔掉工厂图，返回实际删掉的数量。
 
@@ -2782,6 +2965,196 @@ def payload_review(product: Product, payload: Mapping[str, Any], *,
         review["gate"] = {"blocks": gate.get("blocks") or [],
                           "warnings": gate.get("warnings") or []}
     return review
+
+
+# 翻译阶段只允许改这些「文案」字段。
+# 价格 / 重量 / 尺寸 / 图片 / 规格 id 都是前面几步辛苦算出来的，译文接口
+# 回一份整块 info 就把它们覆盖掉，等于白算（实测 translated_info 返回的是
+# 上游的完整结构，不只是译文字段）。
+_TRANSLATABLE_TEXT_FIELDS = (
+    "title", "oriTitle", "description",
+    "keyProductFeatures", "productAttributes",
+)
+# notes（详情区 HTML）**不接译文**：详情区按口径只留图片，清洗已在前一步做完
+# （删文字、删厂家图、删尺码图、去重）。接译文等于把上游那份带文字、
+# 带厂家图的原始 HTML 又贴回来，前面的清洗全白做。
+
+
+def merge_translated_fields(payload: dict[str, Any],
+                            translated: Mapping[str, Any]) -> dict[str, Any]:
+    """把译文字段并回已处理好的 payload，其余字段一律保留。
+
+    为什么不能直接赋值：payload 走到翻译这一步时已经带上了
+    「加完增量的重量、按模板算好的售价、截断后的主图、清洗后的颜色 id」，
+    译文的返回体是上游原始结构，直接换掉会把前面几步全部作废。
+    """
+    merged = dict(payload)
+    for field in _TRANSLATABLE_TEXT_FIELDS:
+        value = translated.get(field)
+        if value not in (None, "", [], {}):
+            merged[field] = value
+    # 规格（颜色/尺码）整块保持不动，不接译文。
+    #
+    # 妙手保存草稿时，提交的规格值必须与它自己那份草稿的规格表逐字一致，
+    # 否则直接报「SKU【Beige-41】不存在」。译文接口返回的是翻过的规格
+    # （HD866米色 → Beige），而妙手草稿里存的仍是原值，接过来就必然对不上。
+    # 规格值属于商品身份，不是文案，本来也不该跟着翻译走。
+    return merged
+
+
+def _needs_translation(payload: Mapping[str, Any], language: str) -> bool:
+    """要不要翻：目标语言为空/中文时不翻，省一次上游调用。"""
+    target = str(language or product_service.DEFAULT_LANGUAGE).strip().lower()
+    if target in ("", "zh", "zh-cn", "cn", "chinese"):
+        return False
+    return True
+
+
+def _fill_spec_attr_ids(db: Session, client: Any, payload: dict[str, Any], *,
+                        shop_id: Any, site: str) -> dict[str, str]:
+    """给颜色/尺码维度补类目真实 attrId 与属性名。
+
+    妙手保存草稿的两种行为：
+      · attrId 齐全 → 按提交的规格重建整张规格表（我们清洗过的值才能生效）
+      · attrId 为空 → 按草稿里原有的规格值逐字匹配，清洗过的值一律报
+        「SKU【xxx-41】不存在」
+    所以清洗颜色之前必须先补 attrId，否则清得再对也存不进去。
+    """
+    import time as _time
+
+    from services import carrier_service
+
+    cid = str(payload.get("cid") or "").strip()
+    if not cid:
+        return {}
+    attrs: dict[str, str] = {}
+    # 限流必须重试：拿不到 attrId，颜色清洗就会在没有 attrId 的状态下改值改 id，
+    # 妙手按草稿原有规格逐字匹配，必然报「SKU【米色-41】不存在」。
+    # 实测这条接口批量处理时常回「请求太频繁」，退避重试即可。
+    for attempt in range(3):
+        try:
+            attrs = carrier_service.category_sale_attrs(
+                client, cid, site or "MY", shop_id, strict=True)
+        except Exception as exc:  # noqa: BLE001 - 拿不到就保持原样，不清洗照旧
+            logger.warning("读取类目规格 attrId 失败 cid=%s（第 %d/3 次）：%s",
+                           cid, attempt + 1, exc)
+            attrs = {}
+        if attrs:
+            break
+        if attempt < 2:
+            _time.sleep(1.5 * (attempt + 1))
+    if not attrs:
+        return {}
+    notes: list[str] = []
+    for prop in (payload.get("skuPropertyList") or []):
+        if not isinstance(prop, dict):
+            continue
+        name = str(prop.get("attrName") or prop.get("propName") or "").casefold()
+        values = [str(av.get("attrValue") or "") for av in (prop.get("attrValueList") or [])
+                  if isinstance(av, dict)]
+        # 按属性名判断维度；名字认不出时按取值形态判断（纯数字/区间是尺码）
+        is_size = ("size" in name or "saiz" in name or "尺码" in name or "尺寸" in name)
+        is_color = ("color" in name or "colour" in name or "warna" in name or "颜色" in name)
+        if not is_size and not is_color:
+            size_like = sum(1 for v in values if v and v.replace("-", "").isdigit())
+            is_size = bool(values) and size_like * 2 >= len(values)
+        if is_size and attrs.get("size"):
+            if str(prop.get("attrId") or "") != str(attrs["size"]):
+                prop["attrId"] = attrs["size"]
+                notes.append("尺码 attrId→%s" % attrs["size"])
+            if attrs.get("sizeName") and prop.get("attrName") != attrs["sizeName"]:
+                prop["attrName"] = attrs["sizeName"]
+        elif not is_size and attrs.get("color"):
+            if str(prop.get("attrId") or "") != str(attrs["color"]):
+                prop["attrId"] = attrs["color"]
+                notes.append("颜色 attrId→%s" % attrs["color"])
+            if attrs.get("colorName") and prop.get("attrName") != attrs["colorName"]:
+                prop["attrName"] = attrs["colorName"]
+    # 返回 attrId 字典而不是 notes：调用方要靠「有没有拿到 attrId」决定
+    # 能不能清洗颜色（见 save_from_collect_box）。返回空列表会被当成
+    # 「没拿到」，颜色清洗被跳过，规格值原样提交反而正确 —— 但那样
+    # 就永远清不了颜色。
+    return attrs
+
+
+# 只给本地展示用的字段，绝不能发给妙手。
+# colorMap / sizeMap / colorPropName / sizePropName 是 build_product 写进 payload
+# 的展示快照（详情页用），妙手收到会拿去解析规格，报
+# 「SKU【白黑色（A19）-36】不存在」——看起来像颜色对不上，实际是多余字段
+# 干扰了它的规格解析（2026-11-09 实测：同一份数据去掉这四个字段就能存进去）。
+_LOCAL_ONLY_PAYLOAD_FIELDS = (
+    "colorMap", "sizeMap", "colorPropName", "sizePropName",
+    "_sourceWeight", "weightAutoFixed", "weightBeforeCap",
+    "translation", "violations", "removedWords", "needsRecollect",
+    "needsRecollectReason",
+)
+
+
+def _strip_local_only_fields(payload: dict[str, Any]) -> list[str]:
+    """提交前删掉只服务于本地展示的字段，返回被删的字段名。"""
+    removed = [field for field in _LOCAL_ONLY_PAYLOAD_FIELDS if field in payload]
+    for field in removed:
+        payload.pop(field, None)
+    return removed
+
+
+def _restore_sku_key_order(payload: dict[str, Any],
+                           original: Mapping[str, Any]) -> int:
+    """把 skuMap 的键顺序恢复成妙手草稿里的顺序。
+
+    妙手保存草稿时按**它自己那份草稿的键**逐字匹配：草稿写「分号尺码id分号
+    颜色id分号」，我们提交「分号颜色id分号尺码id分号」就是两个不同的 SKU，
+    平台报「SKU 不存在」。同一批采集数据里两种顺序都有，所以不能统一排序，
+    只能跟着草稿走（2026-11-09 实测：产物与草稿的规格、id、值完全一致，
+    唯一差别是键顺序，把顺序改回草稿顺序就保存成功）。
+
+    段集合相同、只是顺序不同的键做映射；其余键保持原样。
+    """
+    before = payload.get("skuMap")
+    if not isinstance(before, dict) or not before:
+        return 0
+    draft = original.get("skuMap") if isinstance(original, Mapping) else None
+    if not isinstance(draft, dict) or not draft:
+        return 0
+    by_signature: dict[frozenset[str], str] = {}
+    for key in draft:
+        parts = frozenset(part for part in str(key).strip(";").split(";") if part)
+        if parts:
+            by_signature.setdefault(parts, str(key))
+    restored: dict[str, Any] = {}
+    changed = 0
+    for key, value in before.items():
+        parts = frozenset(part for part in str(key).strip(";").split(";") if part)
+        draft_key = by_signature.get(parts)
+        if draft_key and draft_key != key:
+            restored[draft_key] = value
+            changed += 1
+        else:
+            restored[key] = value
+    if changed:
+        payload["skuMap"] = restored
+    return changed
+
+
+def _strip_null_sku_fields(payload: dict[str, Any]) -> int:
+    """删掉 skuMap 里值为 None 的字段。
+
+    妙手对 null 的处理是「字段存在但不合法」，不是「未设置」：
+    itemNum=null / identifierCode=null 会让规格解析失败，
+    整单报「SKU【颜色-尺码】不存在」，排查起来会误以为是颜色值不对。
+    值为空串的保留（平台认它是「没填」）。
+    """
+    removed = 0
+    sku_map = payload.get("skuMap")
+    if not isinstance(sku_map, dict):
+        return 0
+    for key, sku in list(sku_map.items()):
+        if not isinstance(sku, dict):
+            continue
+        cleaned = {field: value for field, value in sku.items() if value is not None}
+        removed += len(sku) - len(cleaned)
+        sku_map[key] = cleaned
+    return removed
 
 
 def _clean_color_props(payload: dict[str, Any]) -> list[dict[str, Any]]:

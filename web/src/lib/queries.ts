@@ -1833,6 +1833,8 @@ export function useDeleteTemplate(): UseMutationResult<DeleteTemplateResponse, E
 
 export interface WorkflowDefaults {
   weightIncrement?: number;
+  /** 原重上限（kg）：只比采集原重，不含 weightIncrement */
+  weightLimit?: number;
   packageDimensions?: {
     packageLength: number;
     packageWidth: number;

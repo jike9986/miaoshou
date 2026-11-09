@@ -350,6 +350,19 @@ export function ProcessSettings({
                 disabled={disabled}
               />
             </Field>
+            <Field label="原重上限" htmlFor="weight-limit" className="w-[100px] shrink-0">
+              <NumberInput
+                id="weight-limit"
+                value={settings.weightLimitKg}
+                onChange={(value) => onChange({ weightLimitKg: value ?? 1.5 })}
+                min={0.1}
+                max={10}
+                step={0.1}
+                decimals={1}
+                suffix="kg"
+                disabled={disabled}
+              />
+            </Field>
             <Field label="包裹长" htmlFor="package-length" className="w-[90px] shrink-0">
               <NumberInput
                 id="package-length"

@@ -215,8 +215,15 @@ def pre_save_issues(
     issues: list[str] = []
     coverage = coverage or {}
 
-    # 1. 译文必须完整：只看「翻译成功」会漏掉嵌套字段里的中文
-    if coverage.get("complete") is not True or coverage.get("missingFields"):
+    # 1. 译文必须完整：只看「翻译成功」会漏掉嵌套字段里的中文。
+    #
+    # 只有调用方**已经做过翻译**（传了非空 coverage）时才校验这一条。
+    # 翻译已挪到流程最后一步（负责人 2026-11-09 定：中文阶段先把颜色、图片、
+    # 标题、价格处理完，最后统一翻译），而洗数据那几步必须在保存前跑完校验，
+    # 此时 coverage 还是空的。按老写法「空 coverage = 不完整」会把每一件
+    # 还没翻译的商品都判成「translation coverage is incomplete」直接拦死。
+    if coverage and (coverage.get("complete") is not True
+                     or coverage.get("missingFields")):
         issues.append("translation coverage is incomplete")
 
     # 2. 类目 cid 必须是正整数

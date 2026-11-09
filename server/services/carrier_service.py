@@ -1058,7 +1058,7 @@ _CATEGORY_ATTR_CACHE: dict[tuple[str, str, int], dict[str, str]] = {}
 
 
 def category_sale_attrs(client: MiaoshouClient, cid: Any, site: str,
-                        shop_id: int) -> dict[str, str]:
+                        shop_id: int, *, strict: bool = False) -> dict[str, str]:
     """取类目的销售规格 attrId：{"color": "100000", "size": "100007"}。
 
     必须从类目元数据拿真实 attrId（实测 MY 站点颜色 100000、尺码 100007）。
@@ -1078,6 +1078,12 @@ def category_sale_attrs(client: MiaoshouClient, cid: Any, site: str,
     result: dict[str, str] = {}
     if not str(cid or "").strip():
         return result
+    # 内置兜底：MY 站点的销售规格 attrId 是平台固定值（实测颜色 100000、
+    # 尺码 100007，多个类目都一致）。批量处理时这个接口很容易回「请求太频繁」，
+    # 拿不到就等于不能清洗颜色，整批卡住 —— 用已知固定值先跑，
+    # 真拿到类目元数据时再以元数据为准。
+    FALLBACK = {"color": "100000", "colorName": "Warna",
+                "size": "100007", "sizeName": "Saiz"}
     try:
         meta = client.category_metadata(site or "MY", str(cid), [shop_int])
         data = meta.get("data") or {}
@@ -1098,6 +1104,12 @@ def category_sale_attrs(client: MiaoshouClient, cid: Any, site: str,
                 result.setdefault("sizeName", str(item.get("name") or ""))
     except Exception as exc:  # noqa: BLE001 - 拿不到就退化到载体里的值
         logger.warning("读取类目 %s 规格定义失败：%s", cid, exc)
+        if strict:
+            # 需要 attrId 才能安全改规格值的调用方（颜色清洗）：限流时用内置
+            # 固定值兜底，而不是放弃 —— 放弃会让整批商品卡在「不能洗颜色」上，
+            # 而 MY 站点的颜色/尺码 attrId 本来就是平台固定值。
+            logger.info("类目 %s 元数据不可用，attrId 使用内置已知值", cid)
+            return dict(FALLBACK)
         return result          # 失败不缓存，下次还能重试
     if result:
         _CATEGORY_ATTR_CACHE[key] = result

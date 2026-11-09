@@ -108,7 +108,25 @@ FACTORY_PHRASES = (
     "厂家直销", "工厂直销", "源头工厂", "实力工厂", "工厂实拍", "工厂展示",
     "生产车间", "生产基地", "厂房展示", "厂家介绍", "工厂介绍", "公司简介",
     "招商加盟", "招收代理", "一件代发", "来图定制", "来样定制",
+    # 实测常见但原词表没有的写法（2026-11-09 补）：
+    # 「厂家」「工厂」单独出现也算——跨境店铺主图放厂房照没有任何转化价值；
+    # 「拿货/批发/代理/定制」是 B2B 用语；联系方式同理，那类图上永远是广告。
+    "厂家", "工厂", "厂价", "出厂价", "货源", "拿货", "大量拿货", "批发",
+    "诚招代理", "招代理", "代理加盟", "支持定制", "来样加工", "OEM", "ODM",
+    "欢迎咨询", "联系电话", "客服电话", "扫码", "二维码", "微信号",
+    "加微信", "微信", "WhatsApp", "Quality Assurance", "Best Price",
 )
+
+# 尺码表 / 尺码图：这类图混进主图或详情图是废图——尺码对照表要作为
+# 「尺码图」单独挂字段，塞在展示图里既占位又误导买家（2026-11-09 负责人提出）。
+SIZE_CHART_PHRASES = (
+    "尺码对照", "尺码表", "尺寸对照", "尺寸表", "尺码说明", "尺码参考",
+    "如何测量", "测量方法", "脚长", "内长", "鞋码对照",
+    "size chart", "size guide", "size table", "how to measure",
+)
+# 尺码表的结构特征：OCR 出来是「35 36 37 …」这种纯数字序列，
+# 或者密集出现「码」字。两者占其一就按尺码图处理。
+_SIZE_RUN = re.compile(r"(?:\d{2}[\s,，/]*){4,}")
 
 
 def classify_text(text: str) -> dict[str, Any]:
@@ -122,10 +140,19 @@ def classify_text(text: str) -> dict[str, Any]:
     if not clean:
         return {"action": "review", "reason": "图上没识别到文字，可保留或人工看图",
                 "hasChinese": None, "chineseText": ""}
-    hits = [phrase for phrase in FACTORY_PHRASES if phrase in clean]
+    lower = clean.lower()
+    hits = [phrase for phrase in FACTORY_PHRASES if phrase.lower() in lower]
     if hits:
         return {"action": "remove", "reason": "疑似厂家宣传：" + "、".join(hits),
                 "hasChinese": True, "chineseText": chinese, "factoryPhrases": hits}
+    size_hits = [phrase for phrase in SIZE_CHART_PHRASES if phrase.lower() in lower]
+    if size_hits or _SIZE_RUN.search(clean):
+        # 尺码图不进主图/详情图：它是「尺码对照表」专用位，混在展示图里
+        # 既占 9 张主图额度，又让买家以为那是商品实拍。
+        return {"action": "remove",
+                "reason": "疑似尺码对照图：" + ("、".join(size_hits) or "密集尺码数字"),
+                "hasChinese": bool(CHINESE.search(text or "")), "chineseText": chinese,
+                "sizeChartPhrases": size_hits}
     if set(CHINESE.findall(text or "")) == {"一"}:
         # 尺码表里表示「不可选」的横线常被 OCR 认成「一」，别当中文标图
         return {"action": "review",
