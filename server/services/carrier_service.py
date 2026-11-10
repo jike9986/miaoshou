@@ -1116,6 +1116,39 @@ def category_sale_attrs(client: MiaoshouClient, cid: Any, site: str,
     return result
 
 
+def _short_labels(label: str) -> list[str]:
+    """Split draft value like model+[color] into short labels.
+
+    Miaoshou draft stores model + bracketed color, we submit the short
+    cleaned name, and skuMap old keys also use the short name. Registering
+    short aliases lets skuMap keys map back to the new ids.
+    """
+    found: list[str] = []
+    depth = 0
+    buf: list[str] = []
+    for ch in str(label or ""):
+        if ch in "(（【[":
+            depth += 1
+            buf = []
+            continue
+        if ch in ")）】]":
+            if depth > 0:
+                inner = "".join(buf).strip()
+                if inner:
+                    found.append(inner)
+                depth -= 1
+                buf = []
+            continue
+        if depth > 0:
+            buf.append(ch)
+    outside = "".join(
+        ch for ch in str(label or "")
+        if ch not in "(（【[])）】]"
+    ).strip()
+    if outside and outside not in found:
+        found.append(outside)
+    return found
+
 def normalize_spec_for_save(payload: dict[str, Any],
                             carrier_info: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """按妙手文档把规格整理成可保存的形态（这是能成功保存的关键）。
@@ -1222,10 +1255,42 @@ def normalize_spec_for_save(payload: dict[str, Any],
             "attrName": attr_name,
             "attrValueList": [],
         }
+        # 草稿里同一维度原有的规格值：清理过的值要能对回原文。
+        # 我们提交的是清洗后的「白绿色」，而妙手草稿里存的是「566【白绿色】」，
+        # 它按**草稿原文逐字匹配**，提交清洗值就报「SKU【白绿色-41】不存在」
+        # （2026-11-10 实测：3522040694 两色全挂）。
+        # 归属判定：草稿原文包含我们的值（去空白后），就沿用草稿的原文与 id。
+        draft_values = [str(dv.get("attrValue") or "").strip()
+                        for dv in (src.get("attrValueList") or [])
+                        if isinstance(dv, Mapping)]
+
+        def draft_original(label: str):
+            folded = label.casefold().replace(" ", "")
+            for dav in (src.get("attrValueList") or []):
+                if not isinstance(dav, Mapping):
+                    continue
+                text = str(dav.get("attrValue") or "").strip()
+                if not text:
+                    continue
+                if text.casefold().replace(" ", "") == folded:
+                    return text, str(dav.get("attrValueId") or "").strip()
+            for dav in (src.get("attrValueList") or []):
+                if not isinstance(dav, Mapping):
+                    continue
+                text = str(dav.get("attrValue") or "").strip()
+                if text and folded and folded in text.casefold().replace(" ", ""):
+                    return text, str(dav.get("attrValueId") or "").strip()
+            return label, ""
+
         for av in values:
             label = str(av.get("attrValue") or "").strip()
             if not label:
                 continue
+            original_label, original_id = draft_original(label)
+            if original_label and original_label != label:
+                label = original_label
+                if original_id:
+                    av = dict(av, attrValueId=original_id)
             key = label.casefold().replace(" ", "")
             if key in seen_labels:
                 continue
@@ -1284,8 +1349,14 @@ def normalize_spec_for_save(payload: dict[str, Any],
         for av in (prop.get("attrValueList") or []):
             label = str(av.get("attrValue") or "").strip()
             if label:
-                name_to_new[label.casefold().replace(" ", "")] = str(
-                    av.get("attrValueId") or "")
+                vid = str(av.get("attrValueId") or "")
+                name_to_new[label.casefold().replace(" ", "")] = vid
+                # Draft value may be model+bracket color while skuMap old keys
+                # use the short cleaned name. Register short aliases too,
+                # otherwise every skuMap key is dropped as misaligned.
+                if len(label) > 2:
+                    for short in _short_labels(label):
+                        name_to_new.setdefault(short.casefold().replace(" ", ""), vid)
 
     old_map = data.get("skuMap") or {}
     new_map: dict[str, Any] = {}

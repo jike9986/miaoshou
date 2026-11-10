@@ -393,9 +393,20 @@ def counts(db: Session, site: str = "", account_id: int | None = None) -> dict[s
 # 就去类目树里找对应的末级名。找不到唯一命中仍然报错，绝不瞎猜
 # （错类目的必填项完全不同，猜错比不猜更糟）。
 CATEGORY_RULES = (
-    # (标题关键词, 候选末级类目名)  —— 候选名必须来自本地类目树实际存在的末级
-    (("拖鞋", "凉拖", "家居拖", "沙滩拖", "slipper", "sandal", "selipar"),
+    # (标题关键词, 候选末级类目名) —— 候选名全部来自本地类目树实际存在的末级。
+    # 顺序 = 优先级：越具体的子品类必须排越前，最后一条泛指兜底。
+    # 马来站类目树只有 22 个鞋类末级，没有「洞洞鞋」「暴走鞋」这种细分，
+    # 所以按最接近的末级归类，绝不硬造不存在的类目名。
+    (("暴走鞋", "轮滑鞋", "溜冰鞋", "滑冰", "滚轴", "旱冰", "heelys",
+      "kasut roda", "roller", "skate"),
+     ("轮滑鞋与溜冰鞋", "Kasut Roda & Ais")),
+    (("洞洞鞋", "果冻鞋", "沙滩鞋", "凉鞋", "凉拖", "拖鞋", "人字拖",
+      "家居拖", "slipper", "sandal", "selipar", "clog"),
      ("运动拖鞋", "Sandal Sukan")),
+    (("雨鞋", "雨靴", "溯溪", "涉水", "防水靴", "kasut air"),
+     ("溯溪鞋", "Kasut air")),
+    (("雪地靴", "雪地鞋", "雪靴", "salji"),
+     ("雪地行走用品", "Berkasut Salji")),
     (("跑步鞋", "跑鞋", "慢跑", "running", "kasut larian", "jogging", "lari"),
      ("跑步鞋", "Kasut Lari")),
     (("帆布鞋", "板鞋", "布鞋", "canvas", "kanvas", "papan selaju"),
@@ -404,11 +415,24 @@ CATEGORY_RULES = (
      ("篮球鞋", "Kasut Bola Keranjang")),
     (("足球鞋", "足球", "football", "soccer", "bola sepak"),
      ("足球鞋", "But Bola Sepak")),
+    (("五人足球", "室内足球", "futsal"),
+     ("五人足球鞋", "Kasut Futsal")),
     (("网球鞋", "网球", "tennis"),
      ("网球鞋", "Kasut Tenis")),
     (("羽毛球鞋", "羽毛球", "badminton"),
      ("羽毛球鞋", "Kasut Badminton")),
-    (("登山鞋", "徒步鞋", "hiking", "mendaki"),
+    (("排球鞋", "排球", "bola tampar"),
+     ("排球鞋", "Kasut Bola Tampar")),
+    (("棒球鞋", "棒球", "besbol"),
+     ("棒球鞋", "Kasut Besbol")),
+    (("高尔夫", "golf"),
+     ("高尔夫球鞋", "Kasut Golf")),
+    (("舞鞋", "舞蹈鞋", "芭蕾", "menari", "dance"),
+     ("舞鞋", "Kasut Menari")),
+    (("骑行鞋", "自行车鞋", "berbasikal", "cycling"),
+     ("骑行鞋", "Kasut Berbasikal")),
+    (("登山鞋", "徒步鞋", "登山靴", "马丁靴", "工装靴", "靴", "hiking",
+      "mendaki", "boot"),
      ("登山鞋", "Kasut Mendaki")),
     (("健走鞋", "健步鞋", "walking", "berjalan"),
      ("健走鞋", "Kasut Berjalan")),
@@ -416,9 +440,9 @@ CATEGORY_RULES = (
      ("训练鞋与健身鞋", "Kasut Training & Gim")),
     (("儿童运动鞋", "童鞋", "kanak-kanak"),
      ("儿童运动鞋", "Kasut Sukan Kanak-kanak")),
-    # 兜底：泛指的「运动鞋/男鞋/女鞋/鞋」——本地类目树里没有「运动鞋」这个末级，
-    # 落到最接近的「跑步鞋」（妙手/平台的运动鞋类目就是它）。
-    # 注意这条必须排最后，让上面更精确的规则先命中。
+    # 兜底：泛指的「运动鞋/男鞋/女鞋/鞋」——类目树里没有「运动鞋」末级，
+    # 落到最接近的「跑步鞋」（平台把运动鞋归在 Kasut Lari 下）。
+    # 必须排最后，让上面更精确的规则先命中。
     (("运动鞋", "休闲鞋", "波鞋", "球鞋", "sneaker", "kasut sukan",
       "男鞋", "女鞋", "鞋", "shoe", "kasut"),
      ("跑步鞋", "Kasut Lari")),
