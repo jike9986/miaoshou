@@ -2422,11 +2422,17 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
 
     # 包裹尺寸：优先用运营在设置里显式配的；没配（或就是旧默认 30×20×10）时
     # 按品类给合理值 —— 鞋盒与软包装的跨境运费差很多，用统一默认会算错价。
-    _configured_dims = normalize_package_dimensions(
-        _workflow_setting(db, "packageDimensions", None, operator_id))
-    _is_legacy_default = (_configured_dims.get("packageLength") == 30
-                          and _configured_dims.get("packageWidth") == 20
-                          and _configured_dims.get("packageHeight") == 10)
+    _raw_dims = _workflow_setting(db, "packageDimensions", None, operator_id)
+    _configured_dims = normalize_package_dimensions(_raw_dims)
+    # 用户**显式配过**就用他的值，哪怕等于 30×20×10。
+    #
+    # 旧逻辑把「30/20/10」当成「没配过、用旧默认」，自动换成品类推荐值
+    # （鞋类 33×22×12），于是运营在界面上明明填了 30/20/10、商品里却是
+    # 33/22/12（2026-11-10 实测）。只有**根本没配**（None / 空）才走品类兜底。
+    _explicit = (isinstance(_raw_dims, Mapping) and bool(_raw_dims)
+                 and all(_raw_dims.get(k) not in (None, "") for k in
+                         ("packageLength", "packageWidth", "packageHeight")))
+    _is_legacy_default = not _explicit
     if _is_legacy_default:
         # 此时 category_row 还没解析出来，先用 payload 上的类目标签；
         # payload["cid"]/类目名在上游详情里就有，足够判断鞋盒还是软包装。
