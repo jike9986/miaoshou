@@ -1260,6 +1260,14 @@ def normalize_spec_for_save(payload: dict[str, Any],
         #     妙手就会按我们提交的规格重建载体的规格表。
         # 名称去重：同维度重名会让妙手报「选项名称重复」。
         seen_labels: set[str] = set()
+        # attrName 必须与 attrId 配套：attrId=100000 在妙手侧叫 Warna，
+        # 100007 叫 Saiz。草稿/上游有时给中文名「颜色/尺码」，与 attrId
+        # 混着提交，妙手按 attrId 查表后名字对不上，报「产品SKU必填」
+        # （2026-11-10 实测：3522040694 颜色维度 attrName=颜色 attrId=100000）。
+        if attr_id == "100000":
+            attr_name = "Warna"
+        elif attr_id == "100007":
+            attr_name = "Saiz"
         entry = {
             "attrId": attr_id,
             "attrName": attr_name,
@@ -1274,8 +1282,24 @@ def normalize_spec_for_save(payload: dict[str, Any],
                         for dv in (src.get("attrValueList") or [])
                         if isinstance(dv, Mapping)]
 
-        def draft_original(label: str):
+        _is_color_dim = k == "color"
+
+        # 颜色 id 由 normalize_colors 生成并同步进 skuMap key —— 是「我们这
+        # 份提交」的身份标识。位置匹配只允许换显示文案，**绝不换 id**：
+        # 换 id 等于把 12 条 skuMap key 全部作废（2026-11-10 实测：
+        # 换 id 后 normalize 输出 0 条，报「产品SKU必填」）。
+        # 所以这里只返回文案，id 由调用方保留自己的。
+        def draft_original(label: str, position: int = -1):
             folded = label.casefold().replace(" ", "")
+            # 0) 当前文案与草稿完全一致：这份文案就是草稿形态，原样保留。
+            #    （上一轮保存可能已把译文写回草稿；此时文案与 skuMap key 配套，
+            #    任何改写都会拆散 SKU —— 2026-11-10 三轮实测的教训）
+            for dav in (src.get("attrValueList") or []):
+                if not isinstance(dav, Mapping):
+                    continue
+                if str(dav.get("attrValue") or "").strip() == label:
+                    return label, str(av.get("attrValueId") or "").strip()
+            # 1) 精确匹配（忽略空白/大小写）
             for dav in (src.get("attrValueList") or []):
                 if not isinstance(dav, Mapping):
                     continue
@@ -1284,19 +1308,40 @@ def normalize_spec_for_save(payload: dict[str, Any],
                     continue
                 if text.casefold().replace(" ", "") == folded:
                     return text, str(dav.get("attrValueId") or "").strip()
-            for dav in (src.get("attrValueList") or []):
-                if not isinstance(dav, Mapping):
-                    continue
+            # 2) 不做包含匹配：folded 是草稿值的**子串**时（如 Jingga 是
+            #    Jingga Gelap 的子串），会把当前值的 id 错换成草稿那条的 id，
+            #    skuMap 全部对不上。模糊匹配的收益远小于拆散 SKU 的风险
+            #    （2026-11-10 实测：6 条黑橘 SKU 被这条逻辑全灭）。
+            # 3) 草稿条数与当前一致时按下标配对 —— 译文与原文是不同语言，
+            #    文字完全不同（Jingga Gelap vs 566【黑橘色】），文字匹配全失灵，
+            #    但顺序是保的（译文接口按同一份规格表顺序返回）。只在数量
+            #    完全一致时启用，否则宁可不动也不猜（2026-11-10 实测）。
+            #    **只对颜色维度启用**：尺码（39/40/S）两边完全一致，走文字匹配
+            #    就够，位置匹配会把尺码 id 换掉、skuMap 全部对不上。
+            if not _is_color_dim:
+                return label, ""
+            draft_list = [d for d in (src.get("attrValueList") or []) if isinstance(d, Mapping)]
+            if (position >= 0 and len(draft_list) == len(values)
+                    and position < len(draft_list)):
+                dav = draft_list[position]
                 text = str(dav.get("attrValue") or "").strip()
-                if text and folded and folded in text.casefold().replace(" ", ""):
-                    return text, str(dav.get("attrValueId") or "").strip()
+                if text:
+                    # 只换文案，id 用自己的：skuMap key 由这些 id 组成，
+                    # 换 id 等于整批 SKU 作废。
+                    return text, str(av.get("attrValueId") or "").strip()
+            # 位置匹配没命中：文案与 id 都保留自己的。
+            own_id = str(av.get("attrValueId") or "").strip()
+            if own_id:
+                return label, own_id
             return label, ""
 
+        _pos = -1
         for av in values:
             label = str(av.get("attrValue") or "").strip()
             if not label:
                 continue
-            original_label, original_id = draft_original(label)
+            _pos += 1
+            original_label, original_id = draft_original(label, position=_pos)
             if original_label and original_label != label:
                 label = original_label
                 if original_id:

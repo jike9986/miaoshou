@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import threading
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -73,20 +74,32 @@ def translation_prompt(language: str = "ms") -> str:
     name = LANGUAGE_PROMPT_NAMES.get(target, "马来语")
     return TRANSLATION_PROMPT_TEMPLATE.format(language=name)
 WINDOWS = {"minute": 60, "hour": 3600, "day": 86400}
-# 单件商品内部同时提交几张图（不是服务器总并发）。
+# 图片翻译并发（负责人 2026-11-10 定的口径）。
 #
-# 2026-11-10 实测上游 image.codesonline.dev 的真实承载：
-#   并发 8  -> 8/8 成功，64.7s
-#   并发 16 -> 16/16 成功，70.6s
-#   并发 32 -> 32/32 成功，99.0s
-#   并发 48 -> 47/48 成功，114.7s（开始出现 502）
-#   5 用户 × 16 = 80 总并发 -> 80/80 成功，但最慢一张 329s（排队严重）
+# 上游是中转站，总并发上限 100，分给我们的额度是 **50**。
+# 所以这里要分成两层，不能只有一个数字：
 #
-# 结论：上游不硬拒，是排队变慢。所以不能只看「不报错」就拉满 ——
-# 单人 8 张并行时单张约 65s，拉到 16 张只慢 6s；但多人叠加后延迟显著恶化。
-# 取 8：单人体验几乎无损（65s vs 70s），4 人同时跑 = 32 并发刚好在稳定上限内。
-# 更多用户时会排队，但不会 502。
-IMAGE_CONCURRENCY = 8
+#   IMAGE_CONCURRENCY      单件商品内部同时提交几张 —— 取 50 的额度，
+#                          一件 27 张的图可以一次性全部发出去，不用分批。
+#   IMAGE_GLOBAL_CONCURRENCY 全服务器同时在跑的提交数上限 —— 50。
+#                          多人同时用时，每人各开线程池，靠这个全局闸门
+#                          把总数压住，不会把中转站打爆。
+#
+# 实测（2026-11-10）：并发 8/16/32 全部成功；48 出现 1 个 502；
+# 80 总并发时 80/80 成功但队尾要等 329s。给到 50 是额度内的安全上限。
+IMAGE_CONCURRENCY = 50
+
+# 全服务器同时提交的图片数（跨用户共享）。中转站分给我们的额度。
+IMAGE_GLOBAL_CONCURRENCY = 50
+# 全局并发闸门：跨用户共享，保证同时提交给中转站的总数不超过额度。
+#
+# 多人同时跑时，每件商品各开一个 ThreadPoolExecutor（各自 IMAGE_CONCURRENCY），
+# 光靠单件并发压不住总数 —— 10 个人同时跑就是 500 并发，中转站直接 502。
+# 这里用一个进程级 Semaphore 把总提交数卡在 IMAGE_GLOBAL_CONCURRENCY。
+# 拿不到许可就等（阻塞在提交线程里），不会丢任务、不会报错。
+_GLOBAL_SUBMIT_SLOTS = threading.BoundedSemaphore(IMAGE_GLOBAL_CONCURRENCY)
+
+
 STATUSES = ("queued", "submitted", "ready", "unknown", "failed")
 
 
@@ -855,11 +868,22 @@ def translate(db: Session, payload: Mapping[str, Any],
     # 每张 20~60 秒，用户就盯着转圈。只把网络请求并行化，落库仍在主线程做
     # （SQLAlchemy Session 不跨线程）。
     outcomes: dict[int, dict[str, Any] | Exception] = {}
+
+    def _submit_guarded(raw, size, *, prompt):
+        """Submit through the global gate: block until a slot is free.
+
+        Each user opens its own pool, so per-product concurrency alone cannot
+        cap the cross-user total. Waiting here only blocks this submit thread;
+        no task is lost and nothing errors out.
+        """
+        with _GLOBAL_SUBMIT_SLOTS:
+            return _submit(raw, size, prompt=prompt)
+
     if pending:
         if len(pending) == 1:
             job, raw = pending[0]
             try:
-                outcomes[0] = _submit(raw, job.size, prompt=job.prompt or prompt)
+                outcomes[0] = _submit_guarded(raw, job.size, prompt=job.prompt or prompt)
             except Exception as exc:  # noqa: BLE001 - 统一在下方处理
                 outcomes[0] = exc
         else:
@@ -868,7 +892,8 @@ def translate(db: Session, payload: Mapping[str, Any],
             with ThreadPoolExecutor(max_workers=IMAGE_CONCURRENCY,
                                     thread_name_prefix="img") as pool:
                 futures = {
-                    pool.submit(_submit, raw, job.size, prompt=job.prompt or prompt): index
+                    pool.submit(_submit_guarded, raw, job.size,
+                                prompt=job.prompt or prompt): index
                     for index, (job, raw) in enumerate(pending)
                 }
                 for future, index in futures.items():

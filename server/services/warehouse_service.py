@@ -2210,6 +2210,7 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
             targets.append((f"sku:{key}:weight", sku))
 
     parsed: dict[str, float] = {}
+    skipped_increment: list[str] = []
     auto_fixed_from: Any = None
     # 上限只比原重，不加增量（负责人 2026-11-09 口径）
     hard_max = _weight_hard_max_for(category_name, weight_limit)
@@ -2224,8 +2225,19 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
             value = 0.0
         if value != value or value in (float("inf"), float("-inf")):
             value = 0.0
-        # 超过该品类上限（普通鞋 1.2 / 暴走鞋 1.5）：判为数据异常，跳过不处理。
+        # 超过该品类上限（普通鞋 1.2 / 暴走鞋 1.5）时分两种情况：
+        #
+        #   a) 原重 <= 上限 + 增量（如 1.6 <= 1.5+0.1）：说明这个重量
+        #      很可能是**之前某次保存加过增量**写回草稿的（草稿重量会被
+        #      我们的保存覆盖）。此时沿用草稿值、不再加增量，不算异常。
+        #      硬拦会让这件商品永远处理不了（2026-11-10 实测：3522040694
+        #      卡死在「采集原重 1.6 超过 1.5」）。
+        #   b) 原重 > 上限 + 增量：真超重（多半是单位填错），拦下不处理。
         if value > hard_max:
+            if value <= hard_max + amount:
+                parsed[name] = value
+                skipped_increment.append(name)
+                continue
             raise errors.unprocessable(
                 f"重量异常：采集原重 {raw} kg 超过设置的原重上限 {hard_max} kg"
                 f"（不含 {amount} kg 增量），已跳过不处理。"
@@ -3081,12 +3093,69 @@ def merge_translated_fields(payload: dict[str, Any],
         value = translated.get(field)
         if value not in (None, "", [], {}):
             merged[field] = value
-    # 规格（颜色/尺码）整块保持不动，不接译文。
-    #
-    # 妙手保存草稿时，提交的规格值必须与它自己那份草稿的规格表逐字一致，
-    # 否则直接报「SKU【Beige-41】不存在」。译文接口返回的是翻过的规格
-    # （HD866米色 → Beige），而妙手草稿里存的仍是原值，接过来就必然对不上。
-    # 规格值属于商品身份，不是文案，本来也不该跟着翻译走。
+    # Spec values join translation; normalize maps them back to draft originals.
+    translated_props = translated.get("skuPropertyList")
+    if isinstance(translated_props, list):
+        merged["skuPropertyList"] = _merge_spec_translation(
+            payload.get("skuPropertyList") or [], translated_props)
+    return merged
+
+
+# 维度语义归类：颜色/尺码，兼容中英马三语 + 上游 attrId。
+_COLOR_DIM_NAMES = ("颜色", "色彩", "color", "colour", "warna")
+_SIZE_DIM_NAMES = ("尺码", "尺寸", "size", "saiz", "ukuran")
+_COLOR_DIM_IDS = {"100000"}
+_SIZE_DIM_IDS = {"100007"}
+
+
+def _spec_kind(name: str, attr_id: str) -> str:
+    folded = name.strip().casefold().replace(" ", "")
+    if attr_id in _COLOR_DIM_IDS or folded in _COLOR_DIM_NAMES:
+        return "color"
+    if attr_id in _SIZE_DIM_IDS or folded in _SIZE_DIM_NAMES:
+        return "size"
+    return ""
+
+
+def _merge_spec_translation(current_props, translated_props):
+    """Merge translated spec values; keep attrValueId / attrId intact."""
+    if not isinstance(current_props, list) or not isinstance(translated_props, list):
+        return current_props
+    merged = deepcopy(current_props)
+    for cur in merged:
+        if not isinstance(cur, dict):
+            continue
+        cur_dim = str(cur.get("attrId") or "").strip()
+        cur_name = str(cur.get("attrName") or "").strip().casefold()
+        # 维度语义判定：翻译接口返回的维度名可能已经变成 Warna/Saiz（英文），
+        # 而当前是 颜色/尺码（中文），attrId 也被上游剥掉，两个常规条件全对不上。
+        # 按语义归类兜底，否则译文规格永远合并不进来（2026-11-10 实测）。
+        cur_kind = _spec_kind(cur_name, cur_dim)
+        twin = None
+        for tp in translated_props:
+            if not isinstance(tp, dict):
+                continue
+            t_dim = str(tp.get("attrId") or "").strip()
+            t_name = str(tp.get("attrName") or "").strip().casefold()
+            if cur_dim and t_dim == cur_dim:
+                twin = tp
+                break
+            if not cur_dim and t_name == cur_name:
+                twin = tp
+                break
+            if cur_kind and _spec_kind(t_name, t_dim) == cur_kind:
+                twin = tp
+                break
+        if twin is None:
+            continue
+        cur_values = [v for v in (cur.get("attrValueList") or []) if isinstance(v, dict)]
+        twin_values = [v for v in (twin.get("attrValueList") or []) if isinstance(v, dict)]
+        if len(cur_values) != len(twin_values) or not cur_values:
+            continue
+        for cv, tv in zip(cur_values, twin_values):
+            label = str(tv.get("attrValue") or "").strip()
+            if label:
+                cv["attrValue"] = label
     return merged
 
 
@@ -3323,7 +3392,25 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
     except Exception as exc:  # noqa: BLE001 - 规范化失败退回原样，交给妙手判
         logger.warning("规格规范化失败 detailId=%s：%s", detail_id, exc)
         upstream_payload = payload
+    # 重量还原：妙手草稿永远保存「采集原重」，不加增量。
+    #
+    # 增量是我们本地的运费口径（运费按最终包裹重量计费），只体现在成品仓
+    # 的记录里。如果把它写回妙手草稿，下次处理时草稿重量已是「原重+增量」，
+    # 再加一次就变 1.6 -> 1.7 -> 1.8 无限上涨，最后被原重上限拦死
+    # （2026-11-10 实测：3522040694 重量 1.6 -> 1.7 反复失败）。
     try:
+        _src = str((payload.get("_sourceWeight") or "") or "").strip()
+        if _src:
+            try:
+                _src_val = float(_src)
+                if _src_val > 0:
+                    upstream_payload = dict(upstream_payload)
+                    upstream_payload["weight"] = _src_val
+                    for _k, _sku in (upstream_payload.get("skuMap") or {}).items():
+                        if isinstance(_sku, dict) and str(_sku.get("isDelete", "0")) != "1":
+                            _sku["weight"] = _src_val
+            except ValueError:
+                pass
         client.save_shop(detail_id, shop_id, oss_md5, upstream_payload)
         saved = client.shop_detail(detail_id, shop_id)
     except MiaoshouError as exc:
