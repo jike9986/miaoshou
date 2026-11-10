@@ -855,7 +855,14 @@ export function AutomationPage() {
       return;
     }
     let durableRun: AutomationRunRecord | null = null;
-    if (persistentRunId.current && savedRun?.id === persistentRunId.current) {
+    // 只有在「本次要处理的商品确实落在那个旧任务里」时，才考虑复用旧任务。
+    // 旧判断只看 persistentRunId 和 savedRun.id 是否相等，用户换一批新商品后
+    // 仍会走复用分支，于是被判成「请单独选择上次任务的待处理商品」，
+    // 新商品根本处理不了（2026-11-10 负责人实测：换了 3 个新成品一直报错）。
+    const overlapsSavedRun = Boolean(savedRun) && targets.some(
+      (target) => savedRun!.items.some((item) => item.key === target.key));
+    if (persistentRunId.current && savedRun?.id === persistentRunId.current
+        && overlapsSavedRun) {
       const previous = new Map(savedRun.items.map((item) => [item.key, item]));
       // 只有「发布侧」不确定才必须拦：发布结果未知时重跑处理会掩盖真实状态。
       // 处理侧的 needs_review（如客户端超时导致没拿到响应）是可以在核对后重跑的，
