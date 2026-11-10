@@ -3306,8 +3306,25 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
     """Write the processed product to Miaoshou and fail closed on readback mismatch."""
     from services import product_service, readback_check
 
+    # 规格值必须与妙手草稿原文逐字一致。
+    #
+    # 我们把颜色清洗成「白绿色」，草稿里存的是「566【白绿色】」；妙手
+    # save_shop 按草稿原文匹配规格值，提交清洗值直接报
+    # 「SKU【白绿色-41】不存在」（2026-11-10 实测：3522040694 反复失败）。
+    # carrier_service.normalize_spec_for_save 早就实现了「对回草稿原文 +
+    # 原 attrValueId + 重建 skuMap」，但那条路径只给学员认领发布用，
+    # 自动化上品走的是这里，所以一直没生效。这里补上同一套处理。
+    from services import carrier_service
+
+    upstream_payload: Mapping[str, Any] = payload
     try:
-        client.save_shop(detail_id, shop_id, oss_md5, payload)
+        upstream_payload, _spec_notes = carrier_service.normalize_spec_for_save(
+            dict(payload), dict(original))
+    except Exception as exc:  # noqa: BLE001 - 规范化失败退回原样，交给妙手判
+        logger.warning("规格规范化失败 detailId=%s：%s", detail_id, exc)
+        upstream_payload = payload
+    try:
+        client.save_shop(detail_id, shop_id, oss_md5, upstream_payload)
         saved = client.shop_detail(detail_id, shop_id)
     except MiaoshouError as exc:
         from services.account_service import map_upstream_error
@@ -3320,8 +3337,13 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
             "妙手已接收保存请求，但无法读回商品详情；已阻止后续发布，请刷新核对",
             status=502,
         )
+    # 校验基准必须是**实际提交给妙手的那份**（upstream_payload），
+    # 不是规范化之前的 payload：规格值对回草稿原文后，payload 里的
+    # 清洗值（白绿色）与读回值（566【白绿色】）必然"不一致"，
+    # 拿它当基准等于每件带型号前缀的商品都过不了核验
+    # （2026-11-10 实测：3522040694 提交 upstream 后仍报 weight/prices 不一致）。
     mismatches = readback_check.readback_issues(
-        payload, actual, original, coverage, pricing_enabled=pricing_enabled,
+        upstream_payload, actual, original, coverage, pricing_enabled=pricing_enabled,
     )
     if mismatches:
         raise errors.AppError(

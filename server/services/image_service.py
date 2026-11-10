@@ -73,8 +73,13 @@ def translation_prompt(language: str = "ms") -> str:
     name = LANGUAGE_PROMPT_NAMES.get(target, "马来语")
     return TRANSLATION_PROMPT_TEMPLATE.format(language=name)
 WINDOWS = {"minute": 60, "hour": 3600, "day": 86400}
-# 同时提交几张图（老版 IMAGE_CONCURRENCY=3）。再高容易撞上游限流。
-IMAGE_CONCURRENCY = 3
+# 同时提交几张图。
+#
+# 从 3 提到 6（2026-11-10）：限流上限是 600/分钟、6000/小时、60000/天，
+# 一件商品最多 27 张，3 并发等于一批要跑 9 轮（每轮 35-50s），光等就 6 分钟。
+# 6 并发在最坏情况（27 张）下也只占 27 次请求，离 600/分钟还很远。
+# 上游真限流时 attach_image_translation 会带 reason 返回，不会静默失败。
+IMAGE_CONCURRENCY = 6
 STATUSES = ("queued", "submitted", "ready", "unknown", "failed")
 
 

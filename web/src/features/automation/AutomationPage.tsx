@@ -1127,7 +1127,20 @@ export function AutomationPage() {
             imageFailures += result.images.failed;
           }
         }
-        setStages((prev) => ({ ...prev, [target.key]: "done" }));
+        // 状态判定：**勾了图片就得等图片也完成**才算 done。
+        // 原来的写法无条件置 done，于是「文字几秒跑完、图片还在后台翻」时
+        // 卡片立刻显示「完成」，右侧却写「识别中…」，两边自相矛盾
+        // （负责人 2026-11-10 连续三次指出这一点）。
+        //   · 勾了文字+图片 → 图片还没完 → 保持 running（显示「图片处理中」）
+        //   · 只勾文字     → 文字完成即 done
+        //   · 只勾图片     → 图片完成即 done
+        const imageNeedsWait = runSettings.imagesEnabled
+          && automationImagesPending(result.images)
+          && Boolean(result.product?.id);
+        setStages((prev) => ({
+          ...prev,
+          [target.key]: imageNeedsWait ? ("running" as ItemStage) : ("done" as ItemStage),
+        }));
         // 记下这一步到底做成了什么：文字译了没、图片交上去几张、失败几张。
         // 只记一个 done，界面就没法区分「全好了」和「文字好了图片全挂」。
         if (runSettings.textEnabled) textDone += 1;

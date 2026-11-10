@@ -101,6 +101,33 @@ def sku_image_refs(item: Any) -> list[dict[str, str]]:
     return refs
 
 
+def _same_number(left, right) -> bool:
+    """Numeric equality: 1 / 1.0 / "1" / "1.00" all count as the same value.
+
+    Miaoshou re-serializes numbers on readback (float becomes int, or a
+    string). Comparing with == flags the same number as different and the
+    product never passes readback verification. Falls back to string
+    comparison for non-numeric values.
+    """
+    def to_float(value):
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    a = to_float(left)
+    b = to_float(right)
+    if a is not None and b is not None:
+        return abs(a - b) < 1e-9
+    return str(left or "").strip() == str(right or "").strip()
+
 def non_image_data(item: Mapping[str, Any]) -> dict[str, Any]:
     """去掉所有图片字段后的商品数据（image_only 模式用来确认没动别的）。"""
     result = deepcopy(dict(item))
@@ -291,12 +318,16 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
 
     payload_sku = payload.get("skuMap") or {}
     actual_sku = actual.get("skuMap") or {}
-    weight_ok = actual.get("weight") == payload.get("weight")
+    # Numeric comparison, not raw ==. Miaoshou stores float 1.0 back as
+    # int 1, so == flags the same weight as different and the product gets
+    # stuck at readback verification forever.
+    weight_ok = _same_number(actual.get("weight"), payload.get("weight"))
     if isinstance(payload_sku, Mapping) and isinstance(actual_sku, Mapping):
         for key, sku in payload_sku.items():
             if not isinstance(sku, Mapping):
                 continue
-            if (actual_sku.get(key) or {}).get("weight") != sku.get("weight"):
+            if not _same_number((actual_sku.get(key) or {}).get("weight"),
+                                sku.get("weight")):
                 weight_ok = False
                 break
     comparisons["weight"] = weight_ok

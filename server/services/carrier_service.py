@@ -1215,6 +1215,16 @@ def normalize_spec_for_save(payload: dict[str, Any],
         if not isinstance(prop, Mapping):
             continue
         k = kind(prop.get("attrName") or prop.get("propName"))
+        if not k:
+            # 草稿维度名可能只剩英文（Warna/Saiz）或中文（颜色/尺码），
+            # 也可能被 _fill_spec_attr_ids 改过名。按 attrId 兜底判定，
+            # 否则 carrier_by_kind 拿不到这一维，草稿原文对不回去
+            # （2026-11-10 实测：3522040694 输出颜色为空数组，SKU 报不存在）。
+            aid = str(prop.get("attrId") or "").strip()
+            if aid == "100000":
+                k = "color"
+            elif aid == "100007":
+                k = "size"
         if k and k not in carrier_by_kind:
             carrier_by_kind[k] = prop
 
