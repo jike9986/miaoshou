@@ -419,27 +419,34 @@ export function AutomationPage() {
   const hydrateRun = useCallback((saved: AutomationRunRecord, keepOtherSelections = false) => {
     if (hydratedRunId.current === saved.id) return;
     hydratedRunId.current = saved.id;
-    persistentRunId.current = saved.id;
+    // **不接管 persistentRunId**。
+    //
+    // 原来这里写 persistentRunId.current = saved.id，导致每次打开页面、
+    // 只要历史任务还在，当前任务就被"绑"到那个旧任务上；用户随后勾一批
+    // 全新商品点开始处理，代码仍认为自己在该旧任务里，于是报
+    // 「请单独选择上次任务的待处理/待核对商品，或取消选择后开始新任务」，
+    // 新商品永远开不了新任务（2026-11-10 负责人反复遇到，两轮都没修掉）。
+    //
+    // persistentRunId 的语义应该是「当前正在执行的这次任务」，
+    // 只有真正开始执行时才绑定（见下面的 createRun / 复用分支）。
     persistentItems.current = new Map(saved.items.map((item) => [item.key, item.id]));
     const nextSelection = new Map(saved.items.filter(retainAutomationSelection).map((item) => [item.key, {
       key: item.key, detailId: item.detailId, shopId: item.shopId, title: item.title,
     }]));
+    // 恢复历史任务**绝不动用户的选择列表**。
+    //
+    // 这里前后改过两版都不对：
+    //   v1  return nextSelection            -> 用户勾的新商品被旧任务整个替换掉
+    //   v2  把 nextSelection 并进 current   -> 用户的选择里被掺进旧任务商品
+    // 两版的结果都是「选中的东西一半属于旧任务」，点开始处理就被
+    // 「请单独选择上次任务的待处理/待核对商品」拦下（2026-11-10 负责人
+    // 连续三次遇到，每次都是换一批新商品想开新任务）。
+    //
+    // 恢复历史任务的职责只有两个：恢复「上次结果/进度展示」和「设置项」。
+    // 选择哪些商品完全由用户决定 —— 只有本次确实要**续跑**旧任务时，
+    // 才由调用方显式传入 keepOtherSelections 去对齐。
     setSelection((current) => {
-      if (!keepOtherSelections) {
-        // 恢复历史任务时**不能清掉用户刚勾的新商品**。
-        //
-        // 原实现直接 return nextSelection，把选择整个换成旧任务的 items：
-        // 用户勾了 3 个新成品 -> 页面加载恢复旧任务 -> 选择被替换成旧商品 ->
-        // 点「开始处理」时发现选中的是旧任务里的商品，于是报
-        // 「请单独选择上次任务的待处理/待核对商品」，新商品永远处理不了
-        // （2026-11-10 负责人反复遇到）。
-        // 正确做法：保留用户已经勾的，只把旧任务里「还需要处理」的并进来。
-        const merged = new Map(current);
-        for (const [key, entry] of nextSelection) {
-          if (!merged.has(key)) merged.set(key, entry);
-        }
-        return merged.size ? merged : nextSelection;
-      }
+      if (!keepOtherSelections || current.size === 0) return current;
       const next = new Map(current);
       for (const item of saved.items) next.delete(item.key);
       for (const [key, entry] of nextSelection) next.set(key, entry);
@@ -877,8 +884,10 @@ export function AutomationPage() {
     // 新商品根本处理不了（2026-11-10 负责人实测：换了 3 个新成品一直报错）。
     const overlapsSavedRun = Boolean(savedRun) && targets.some(
       (target) => savedRun!.items.some((item) => item.key === target.key));
-    if (persistentRunId.current && savedRun?.id === persistentRunId.current
-        && overlapsSavedRun) {
+    // 判断「要不要复用旧任务」只看**选中的商品是否落在那个旧任务里**，
+    // 不再看 persistentRunId：那个 ref 现在只在真正开始执行时才绑定
+    // （见 hydrateRun 的注释），拿它当条件会让「接着跑旧任务」失效。
+    if (overlapsSavedRun && savedRun) {
       const previous = new Map(savedRun.items.map((item) => [item.key, item]));
       // 只有「发布侧」不确定才必须拦：发布结果未知时重跑处理会掩盖真实状态。
       // 处理侧的 needs_review（如客户端超时导致没拿到响应）是可以在核对后重跑的，

@@ -382,14 +382,52 @@ def counts(db: Session, site: str = "", account_id: int | None = None) -> dict[s
 # 这里按老版语义补齐，**不自己发明规则**。
 # ===========================================================================
 
-# 老版 fallback_category_id :119 的关键词表，一个词都没改。
-# 这是「已验证过的末级类目」清单的入口条件：标题里没有这些词，就不许乱猜。
-CATEGORY_KEYWORDS = ("拖鞋", "凉拖", "家居拖", "沙滩拖", "防滑拖鞋",
-                     "slipper", "sandal", "selipar")
+# 关键词兜底：标题命中「鞋类子品类词」→ 在本地类目树里找对应末级 cid。
+#
+# 原表只认拖鞋（拖鞋/凉拖/sandal/selipar → 运动拖鞋），于是**所有跑鞋、运动鞋、
+# 板鞋、帆布鞋一律落空**，直接抛「该商品还没有选类目，妙手的 AI 也匹配不出来」，
+# 运营只能一个个去妙手手选（2026-11-10 负责人实测：3 件鞋类商品 1 件因为
+# cid 为空直接失败）。
+#
+# 现在按「子品类 → 候选末级类目名」映射：标题里出现哪个子品类的词，
+# 就去类目树里找对应的末级名。找不到唯一命中仍然报错，绝不瞎猜
+# （错类目的必填项完全不同，猜错比不猜更糟）。
+CATEGORY_RULES = (
+    # (标题关键词, 候选末级类目名)  —— 候选名必须来自本地类目树实际存在的末级
+    (("拖鞋", "凉拖", "家居拖", "沙滩拖", "slipper", "sandal", "selipar"),
+     ("运动拖鞋", "Sandal Sukan")),
+    (("跑步鞋", "跑鞋", "慢跑", "running", "kasut larian", "jogging", "lari"),
+     ("跑步鞋", "Kasut Lari")),
+    (("帆布鞋", "板鞋", "布鞋", "canvas", "kanvas", "papan selaju"),
+     ("运动板鞋", "Kasut Papan Selaju")),
+    (("篮球鞋", "篮球", "basketball", "bola keranjang"),
+     ("篮球鞋", "Kasut Bola Keranjang")),
+    (("足球鞋", "足球", "football", "soccer", "bola sepak"),
+     ("足球鞋", "But Bola Sepak")),
+    (("网球鞋", "网球", "tennis"),
+     ("网球鞋", "Kasut Tenis")),
+    (("羽毛球鞋", "羽毛球", "badminton"),
+     ("羽毛球鞋", "Kasut Badminton")),
+    (("登山鞋", "徒步鞋", "hiking", "mendaki"),
+     ("登山鞋", "Kasut Mendaki")),
+    (("健走鞋", "健步鞋", "walking", "berjalan"),
+     ("健走鞋", "Kasut Berjalan")),
+    (("训练鞋", "健身鞋", "training", "gym"),
+     ("训练鞋与健身鞋", "Kasut Training & Gim")),
+    (("儿童运动鞋", "童鞋", "kanak-kanak"),
+     ("儿童运动鞋", "Kasut Sukan Kanak-kanak")),
+    # 兜底：泛指的「运动鞋/男鞋/女鞋/鞋」——本地类目树里没有「运动鞋」这个末级，
+    # 落到最接近的「跑步鞋」（妙手/平台的运动鞋类目就是它）。
+    # 注意这条必须排最后，让上面更精确的规则先命中。
+    (("运动鞋", "休闲鞋", "波鞋", "球鞋", "sneaker", "kasut sukan",
+      "男鞋", "女鞋", "鞋", "shoe", "kasut"),
+     ("跑步鞋", "Kasut Lari")),
+)
 
-# 老版 :135 认定的两个末级类目名（中文名 + 马来语站点名）。
-# 关键词命中只说明「像拖鞋」，落到哪个 cid 还得靠这两个名字在类目树里找。
-CATEGORY_FALLBACK_NAMES = ("运动拖鞋", "sandal sukan")
+# 兼容旧名（其它模块可能引用）
+CATEGORY_KEYWORDS = tuple(word for words, _names in CATEGORY_RULES for word in words)
+CATEGORY_FALLBACK_NAMES = tuple(
+    dict.fromkeys(name for _words, names in CATEGORY_RULES for name in names))
 
 # 三档全失败时的提示语。老版 product_workflow._resolve_category :595-598 的
 # 原话是「请**到**妙手给这件商品手动选好类目后再处理」，这里按运维口径统一成
@@ -486,38 +524,54 @@ def name_index(db: Session, account_id: int | None = None, *,
 
 def fallback_by_keyword(db: Session, text: Any, *, account_id: int | None = None,
                         site: str = "") -> str:
-    """关键词兜底：标题命中拖鞋词表 → 在本地类目树里找唯一末级 cid。
+    """关键词兜底：标题命中鞋类子品类词 → 在本地类目树里找唯一末级 cid。
 
-    老版 fallback_category_id（:116-138）的三道闸，顺序不能换：
-      1. 标题里必须出现 CATEGORY_KEYWORDS 之一，否则直接拒绝 —— 这是
-         「只对已确认过的鞋类生效」的保险丝，去掉它就会给任意商品瞎猜类目；
-      2. 在索引里按 CATEGORY_FALLBACK_NAMES 取候选，多个名字的命中合并去重；
-      3. 候选**必须恰好 1 个**，0 个或 2 个都抛错并说明原因。
+    三道闸不能省：
+      1. 标题必须命中某条规则的词，否则直接拒绝（不给任意商品瞎猜类目）；
+      2. 命中后按该规则的候选类目名在索引里找，取唯一命中；
+      3. 同一规则命中多个 cid 就不猜（错类目必填项不同，猜错比不猜更糟），
+         继续尝试下一条**更宽松**的规则；全都不唯一才报错。
 
-    老版第 3 步的报错是「类目树中未找到唯一的运动拖鞋末级类目」，
-    这里保留同样语义，但把「命中几个」也带进 details —— 运营看到「命中 2 个」
-    才知道要先去类目树里清理重名，而不是反复重试。
+    2026-11-10 改：原实现只认拖鞋，跑鞋/运动鞋/帆布鞋全部落空。
     """
     title = _fold(text)
-    if not any(_fold(word) in title for word in CATEGORY_KEYWORDS):
+    if not title:
         raise errors.AppError(
-            errors.UNPROCESSABLE,
-            "AI 类目匹配失败，且未命中已确认的本地类目规则",
-            status=422, details={"keywords": list(CATEGORY_KEYWORDS)})
+            errors.UNPROCESSABLE, "商品标题为空，无法匹配类目",
+            status=422, details={})
+
+    tried: list[str] = []
+    blocked: list[str] = []
     index = name_index(db, account_id, site=site)
-    matches: list[str] = []
-    for name in CATEGORY_FALLBACK_NAMES:
-        for cid in index.get(_fold(name), []):
-            if cid not in matches:
-                matches.append(cid)
-    if len(matches) != 1:
+    for words, names in CATEGORY_RULES:
+        if not any(_fold(word) in title for word in words):
+            continue
+        matches: list[str] = []
+        for name in names:
+            for cid in index.get(_fold(name), []):
+                if cid not in matches:
+                    matches.append(cid)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            # 这条规则命中多个：记下来，继续试更宽松的规则
+            blocked.append(
+                f"{words[0]}→{len(matches)}个候选({','.join(matches[:4])})")
+        tried.append(words[0])
+
+    if not tried:
         raise errors.AppError(
             errors.UNPROCESSABLE,
-            f"类目树中未找到唯一的运动拖鞋末级类目（命中 {len(matches)} 个）",
-            status=422,
-            details={"candidateCids": matches[:20], "candidateCount": len(matches),
-                     "lookedFor": list(CATEGORY_FALLBACK_NAMES)})
-    return matches[0]
+            "AI 类目匹配失败，且标题未命中任何已确认的本地类目规则",
+            status=422, details={"keywords": list(CATEGORY_KEYWORDS)[:20]})
+    raise errors.AppError(
+        errors.UNPROCESSABLE,
+        f"类目树中未找到唯一的末级类目（尝试过 {','.join(tried)}"
+        + (f"；不唯一：{'; '.join(blocked)}" if blocked else "") + "）",
+        status=422,
+        details={"tried": tried, "blocked": blocked,
+                 "candidateCount": sum(int(part.split("→")[1].split("个")[0])
+                                       for part in blocked) if blocked else 0})
 
 
 def resolve_category(db: Session, *, client: Any, detail_id: Any, shop_id: Any,

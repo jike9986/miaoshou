@@ -98,7 +98,10 @@ def case_fallback(db):
     except Exception as exc:  # noqa: BLE001
         err = str(exc)
     check_true("fallback_by_keyword 命中 2 个不唯一时抛错", bool(err), err)
-    check_true("不唯一报错里带命中数", "命中 2 个" in err, err)
+    # 2026-11-10 改：报错文案改成「尝试过 X,Y；不唯一：X→2个候选(...)」，
+    # 要带上「哪条规则、几个候选」，运营才知道去清理哪个重名类目。
+    check_true("不唯一报错里带候选数与规则名",
+               ("不唯一" in err and "个候选" in err), err)
     row.name_cn = "凉拖"
     db.flush()
 
@@ -108,7 +111,9 @@ def case_fallback(db):
         cats.fallback_by_keyword(db, "蓝牙耳机", account_id=1)
     except Exception as exc:  # noqa: BLE001
         err2 = str(exc)
-    check_true("fallback_by_keyword 非拖鞋标题直接拒绝", "未命中已确认的本地类目规则" in err2,
+    # 2026-11-10 改：关键词表从「只认拖鞋」扩到全部鞋类子品类，
+    # 但非鞋类标题（蓝牙耳机）仍必须被拒绝 —— 保险丝还在。
+    check_true("fallback_by_keyword 非鞋类标题直接拒绝", "未命中任何已确认的本地类目规则" in err2,
                err2)
 
 
