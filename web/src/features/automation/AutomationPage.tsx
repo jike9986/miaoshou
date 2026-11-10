@@ -425,7 +425,21 @@ export function AutomationPage() {
       key: item.key, detailId: item.detailId, shopId: item.shopId, title: item.title,
     }]));
     setSelection((current) => {
-      if (!keepOtherSelections) return nextSelection;
+      if (!keepOtherSelections) {
+        // 恢复历史任务时**不能清掉用户刚勾的新商品**。
+        //
+        // 原实现直接 return nextSelection，把选择整个换成旧任务的 items：
+        // 用户勾了 3 个新成品 -> 页面加载恢复旧任务 -> 选择被替换成旧商品 ->
+        // 点「开始处理」时发现选中的是旧任务里的商品，于是报
+        // 「请单独选择上次任务的待处理/待核对商品」，新商品永远处理不了
+        // （2026-11-10 负责人反复遇到）。
+        // 正确做法：保留用户已经勾的，只把旧任务里「还需要处理」的并进来。
+        const merged = new Map(current);
+        for (const [key, entry] of nextSelection) {
+          if (!merged.has(key)) merged.set(key, entry);
+        }
+        return merged.size ? merged : nextSelection;
+      }
       const next = new Map(current);
       for (const item of saved.items) next.delete(item.key);
       for (const [key, entry] of nextSelection) next.set(key, entry);
@@ -846,6 +860,8 @@ export function AutomationPage() {
     const resumableKeys = new Set(resumable.map((item) => item.key));
     if (targets.some((target) => resumableKeys.has(target.key))) {
       if (targets.some((target) => !resumableKeys.has(target.key))) {
+        console.warn("[AUTOMATION-BLOCK] 请只选择同一任务中待发布或续发的商品",
+          { targets: targets.map((t) => t.key), resumable: [...resumableKeys] });
         toast.warning("请只选择同一任务中待发布或续发的商品");
         return;
       }
@@ -873,6 +889,9 @@ export function AutomationPage() {
           || item?.publishStatus === "running"
           || item?.publishStatus === "failed";
       })) {
+        console.warn("[AUTOMATION-BLOCK] 请先刷新发布回执",
+          { targets: targets.map((t) => t.key),
+            items: targets.map((t) => { const i = previous.get(t.key); return i ? { key: i.key, pub: i.publishStatus } : null; }) });
         toast.warning("请先刷新发布回执；只有妙手确认失败或取消后才能重试，避免重复上架");
         return;
       }
@@ -882,6 +901,9 @@ export function AutomationPage() {
         return item?.processStatus === "succeeded"
           && pendingAutomationPublishAction(item) === null;
       })) {
+        console.warn("[AUTOMATION-BLOCK] 所选商品已有成功处理记录",
+          { targets: targets.map((t) => t.key),
+            items: targets.map((t) => { const i = previous.get(t.key); return i ? { key: i.key, proc: i.processStatus } : null; }) });
         toast.warning("所选商品已有成功处理记录，请取消已完成商品后再开始新任务");
         return;
       }
@@ -893,6 +915,10 @@ export function AutomationPage() {
       if (resumesSavedRun) {
         durableRun = savedRun;
       } else if (targets.some((target) => reusable.has(target.key))) {
+        console.warn("[AUTOMATION-BLOCK] 请单独选择上次任务的待处理商品",
+          { targets: targets.map((t) => t.key), reusable: [...reusable],
+            savedRunId: savedRun.id, persistentRunId: persistentRunId.current,
+            overlapsSavedRun, savedItems: savedRun.items.map((i) => ({ key: i.key, proc: i.processStatus })) });
         toast.warning("请单独选择上次任务的待处理/待核对商品，或取消选择后开始新任务");
         return;
       }
