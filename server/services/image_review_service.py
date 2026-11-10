@@ -33,7 +33,11 @@ logger = logging.getLogger("aohuang.image_review")
 
 OCR_TIMEOUT = 30
 OCR_MAX_BYTES = 15 * 1024 * 1024
-OCR_CONCURRENCY = 6
+# OCR 并发。RapidOCR 是纯 CPU（onnxruntime），4 核机器上并发超过核数
+# 只会互相抢 CPU，反而更慢（实测 4 并发 0.44s/张 比串行 0.36s/张 还慢）。
+# 所以这个值跟着 CPU 核数走，不跟上游并发走。
+import os as _os
+OCR_CONCURRENCY = max(2, min(8, (_os.cpu_count() or 4)))
 # 缓存版本：OCR 脚本从 StorageFile 改为 ReadAllBytes 后识别结果才可靠，
 # 旧的失败缓存（version 2 及以前，全是「本地 OCR 未完成」）必须失效，
 # 否则会一直复用「识别不出字」的错误结论，把含中文的图误判成 keep/review。

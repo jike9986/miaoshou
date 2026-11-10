@@ -59,7 +59,15 @@ def test_postgres_engine_uses_postgres_dialect_without_sqlite_options() -> None:
     )
     try:
         assert engine.dialect.name == "postgresql"
-        assert _engine_options(engine.url) == {"future": True}
+        options = _engine_options(engine.url)
+        # PostgreSQL 必须带连接池配置（2026-11-10 加）：默认只有 5+10=15 条，
+        # 多人同时跑自动化时立刻打满，界面卡在「开始处理」。
+        assert options["future"] is True
+        assert options["pool_size"] >= 10
+        assert options["max_overflow"] >= 10
+        assert options["pool_pre_ping"] is True
+        # 不能带 SQLite 专属参数
+        assert "connect_args" not in options
         assert not event.contains(engine, "connect", _sqlite_pragmas)
     finally:
         engine.dispose()

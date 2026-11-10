@@ -303,6 +303,21 @@ async def lifespan(_app: FastAPI):
         logger.warning(notice)
     logger.info("后端启动完成 data_dir=%s log_file=%s token_file=%s",
                 settings.data_dir, log_file, settings.secret_path)
+    # 提高默认线程池容量。
+    #
+    # asyncio.to_thread 用的是 loop 默认 ThreadPoolExecutor，上限是
+    # min(32, cpu+4) = 8（4 核机器）。图片提交、OCR、草稿读写都走它，
+    # 多人同时跑时 8 个槽位立刻打满，后面的请求全部排队等空位 ——
+    # 表现是「界面点了没反应」，但 CPU 和数据库都闲着。
+    # 提高到 40：单人 8 张图 + 后台循环 + API 请求并发足够，且线程都是
+    # IO 等待型（网络请求），40 个线程的内存开销可以忽略。
+    import concurrent.futures as _futures
+
+    _loop = asyncio.get_running_loop()
+    _loop.set_default_executor(
+        _futures.ThreadPoolExecutor(max_workers=40, thread_name_prefix="dsh-io")
+    )
+
     stop = asyncio.Event()
     worker = asyncio.create_task(_image_reconcile_loop(stop))
     scheduler = asyncio.create_task(_schedule_loop(stop))

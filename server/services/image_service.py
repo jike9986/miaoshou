@@ -73,13 +73,20 @@ def translation_prompt(language: str = "ms") -> str:
     name = LANGUAGE_PROMPT_NAMES.get(target, "马来语")
     return TRANSLATION_PROMPT_TEMPLATE.format(language=name)
 WINDOWS = {"minute": 60, "hour": 3600, "day": 86400}
-# 同时提交几张图。
+# 单件商品内部同时提交几张图（不是服务器总并发）。
 #
-# 从 3 提到 6（2026-11-10）：限流上限是 600/分钟、6000/小时、60000/天，
-# 一件商品最多 27 张，3 并发等于一批要跑 9 轮（每轮 35-50s），光等就 6 分钟。
-# 6 并发在最坏情况（27 张）下也只占 27 次请求，离 600/分钟还很远。
-# 上游真限流时 attach_image_translation 会带 reason 返回，不会静默失败。
-IMAGE_CONCURRENCY = 6
+# 2026-11-10 实测上游 image.codesonline.dev 的真实承载：
+#   并发 8  -> 8/8 成功，64.7s
+#   并发 16 -> 16/16 成功，70.6s
+#   并发 32 -> 32/32 成功，99.0s
+#   并发 48 -> 47/48 成功，114.7s（开始出现 502）
+#   5 用户 × 16 = 80 总并发 -> 80/80 成功，但最慢一张 329s（排队严重）
+#
+# 结论：上游不硬拒，是排队变慢。所以不能只看「不报错」就拉满 ——
+# 单人 8 张并行时单张约 65s，拉到 16 张只慢 6s；但多人叠加后延迟显著恶化。
+# 取 8：单人体验几乎无损（65s vs 70s），4 人同时跑 = 32 并发刚好在稳定上限内。
+# 更多用户时会排队，但不会 502。
+IMAGE_CONCURRENCY = 8
 STATUSES = ("queued", "submitted", "ready", "unknown", "failed")
 
 

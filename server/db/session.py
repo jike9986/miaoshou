@@ -49,6 +49,21 @@ def _engine_options(url: URL) -> dict[str, object]:
             "check_same_thread": False,
             "timeout": BUSY_TIMEOUT_SECONDS,
         }
+        return options
+    # PostgreSQL 连接池。
+    #
+    # 原来不配就吃 SQLAlchemy 默认 pool_size=5 + max_overflow=10 = 15 条，
+    # 而每个 API 请求、每个后台循环、每次图片任务回写都要占一条。
+    # 多人同时跑自动化时 15 条立刻打满，表现是「点开始处理卡住不动」
+    # （2026-11-10 负责人反馈多人使用明显变慢）。
+    # 服务器 max_connections=100，给到 20+30=50 留足余量，
+    # 预连接 10 条避免冷启动时排队握手。
+    options.update({
+        "pool_size": 20,
+        "max_overflow": 30,
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+    })
     return options
 
 
