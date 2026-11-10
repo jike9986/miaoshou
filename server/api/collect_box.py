@@ -252,6 +252,15 @@ def _run_image_translation(job: dict[str, Any]) -> None:
             db.refresh(row)
             current = row.automation_images or {}
             if current.get("generation") != generation or current.get("queued") is not True:
+                # 已经有别的线程接手（新 generation）或状态被清掉了：
+                # 静默退出，但把当前挡住的现场记下来，否则界面永远停在
+                # 「识别中…」（2026-11-10 实测：queued=true 挂了一整夜，
+                # 用户看到左边「完成」右边「识别中」自相矛盾）。
+                logger.info(
+                    "图片线程退出 product=%s：generation 不匹配或已取消"
+                    "（当前=%s 期望=%s queued=%s）",
+                    product_id, str(current.get("generation"))[:8],
+                    str(generation)[:8], current.get("queued"))
                 return False
             if row.revision != base_revision or row.operator_id != job.get("operatorId"):
                 raise errors.AppError(
