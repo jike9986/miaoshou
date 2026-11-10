@@ -234,7 +234,6 @@ def _run_image_translation(job: dict[str, Any]) -> None:
         automation_run_service,
         image_service,
         product_service,
-        readback_check,
         warehouse_service,
     )
 

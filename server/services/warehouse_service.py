@@ -3086,7 +3086,11 @@ def merge_translated_fields(payload: dict[str, Any],
 
 def _needs_translation(payload: Mapping[str, Any], language: str) -> bool:
     """要不要翻：目标语言为空/中文时不翻，省一次上游调用。"""
-    target = str(language or product_service.DEFAULT_LANGUAGE).strip().lower()
+    # 延迟导入：product_service 在模块顶层导入会与本文件形成循环
+    # （product_service 也 import warehouse_service）。
+    from services import product_service as _product_service
+
+    target = str(language or _product_service.DEFAULT_LANGUAGE).strip().lower()
     if target in ("", "zh", "zh-cn", "cn", "chinese"):
         return False
     return True
