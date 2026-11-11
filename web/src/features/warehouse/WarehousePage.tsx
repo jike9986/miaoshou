@@ -12,7 +12,6 @@ import {
   CheckSquare,
   ChevronLeft,
   ChevronRight,
-  Eye,
   Globe,
   Inbox,
   Layers,
@@ -70,7 +69,6 @@ import {
 } from "@/components/ui";
 import { CategoryBar } from "@/features/warehouse/CategoryBar";
 import { ProductCard } from "@/features/warehouse/ProductCard";
-import { RemoteImage } from "@/features/shared/RemoteImage";
 import { BatchCategoryDialog } from "@/features/warehouse/BatchCategoryDialog";
 import { CreateBatchDialog } from "@/features/warehouse/CreateBatchDialog";
 import { ProductDetailDrawer } from "@/features/warehouse/ProductDetailDrawer";
@@ -150,6 +148,9 @@ export function WarehousePage() {
   const [automationSelected, setAutomationSelected] = useState<string[]>([]);
   // 入库时选择归到成品仓库的哪个分组（分类）。空串 = 不分组。
   const [importGroupId, setImportGroupId] = useState<string>("");
+  // 「加入成品仓库」先弹框选分类，确认后才真正入库
+  // （负责人口径 2026-11-11：加入的时候是选择，选完分组再加入）。
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
 
   const groupsQuery = useGroups();
   const createGroup = useCreateGroup();
@@ -645,68 +646,7 @@ export function WarehousePage() {
                   />
                   <span>本页 {formatCount(automationQuery.data.items.length)} 件</span>
                 </div>
-                {/* 入库分组选择：决定这批商品进成品仓库后归到哪个分类。 */}
-                <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-border-subtle bg-canvas-inset/40 px-3 py-2">
-                  <span className="text-xs text-fg-muted">入库分类</span>
-                  <select
-                    aria-label="入库分类"
-                    className="h-7 rounded-sm border border-border-subtle bg-canvas px-2 text-xs text-fg"
-                    value={importGroupId}
-                    onChange={(event) => setImportGroupId(event.target.value)}
-                  >
-                    <option value="">不分组</option>
-                    {(groupsQuery.data?.groups ?? []).map((group) => (
-                      <option key={group.id} value={String(group.id)}>
-                        {group.name}（{formatCount(group.count)}）
-                      </option>
-                    ))}
-                  </select>
-                  <span className="text-2xs text-fg-muted">
-                    选中的商品入库后会归到这个分类
-                  </span>
-                </div>
-                <div className="divide-y divide-border-subtle border-y border-border-subtle">
-                  {automationQuery.data.items.map((item) => (
-                    <div key={item.id} className="grid grid-cols-[20px_56px_minmax(0,1fr)] items-center gap-3 py-3 sm:grid-cols-[20px_56px_minmax(0,1fr)_auto]">
-                      <Checkbox
-                        checked={automationSelected.includes(item.id)}
-                        onChange={() => setAutomationSelected((selected) => selected.includes(item.id)
-                          ? selected.filter((id) => id !== item.id)
-                          : [...selected, item.id])}
-                        aria-label={`选择 ${item.title || item.detailId}`}
-                      />
-                      <div className="size-14 overflow-hidden rounded-sm bg-canvas-inset"><RemoteImage src={item.image} className="size-full" /></div>
-                      {/* 标题可点：跳到商品详情页，看到的信息与成品仓库的商品一致
-                          （负责人口径 2026-11-11：这里要能点开看，不能只列个标题）。
-                          自动化结果此时还没入成品仓库，但详情页按 id 取的是同一条
-                          Product 记录，字段完全一样。 */}
-                      <div className="min-w-0">
-                        <button
-                          type="button"
-                          onClick={() => navigate(`/warehouse/${item.id}`)}
-                          className="text-left"
-                          title="查看商品详情"
-                        >
-                          <p className="line-clamp-2 text-sm font-medium text-fg underline-offset-2 hover:underline">
-                            {item.title || "（无标题）"}
-                          </p>
-                        </button>
-                        <p className="mt-1 truncate text-xs text-fg-muted">{item.shopName || item.shopId} · {item.detailId}</p>
-                      </div>
-                      <div className="hidden items-center gap-2 sm:flex">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          icon={<Eye className="size-3.5" />}
-                          onClick={() => navigate(`/warehouse/${item.id}`)}
-                        >
-                          查看
-                        </Button>
-                        <span className="text-xs text-fg-muted">{item.status === "published" ? "已提交发布" : "处理完成"}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                {/* 卡片网格：与成品仓库完全一致（同一个 ProductCard）。                    负责人口径 2026-11-11：自动化结果也要像成品仓库那样                    卡片显示名字 / 价格 / 类目，而不是一行文字。 */}                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">                  {automationQuery.data.items.map((item, index) => (                    <ProductCard                      key={item.id}                      product={item}                      index={index}                      selected={automationSelected.includes(item.id)}                      onToggle={(id) => setAutomationSelected((selected) => selected.includes(id)                        ? selected.filter((value) => value !== id)                        : [...selected, id])}                      onOpen={() => navigate(`/warehouse/${item.id}`)}                    />                  ))}                </div>
                 <Pagination
                   page={automationPage}
                   pageSize={24}
@@ -945,14 +885,7 @@ export function WarehousePage() {
             label: importAutomationResults.isPending ? "正在加入…" : "加入成品仓库",
             icon: <PackageCheck className="size-3.5" />,
             disabled: importAutomationResults.isPending,
-            onClick: () => importAutomationResults.mutate(
-              { ids: automationSelected, groupId: importGroupId || null }, {
-              onSuccess: (result) => {
-                setAutomationSelected([]);
-                toast.success(`已加入成品仓库 ${formatCount(result.added)} 件`);
-              },
-              onError: (error) => toast.error("加入成品仓库失败", { description: apiErrorMessage(error) }),
-            }),
+            onClick: () => setImportDialogOpen(true),
           }] : isMember ? [
           ...(memberClaimableIds.length > 0 ? [{
             label: claimOnly.isPending
@@ -1045,6 +978,69 @@ export function WarehousePage() {
           },
         ]}
       />
+
+      {/* 加入成品仓库：先选分类，确认后才入库 */}
+      <Dialog
+        open={importDialogOpen}
+        onOpenChange={(open) => {
+          setImportDialogOpen(open);
+          if (!open) setImportGroupId("");
+        }}
+        size="sm"
+        title="加入成品仓库"
+        description={`将选中的 ${automationSelected.length} 件商品加入成品仓库。`}
+        closeOnOverlay={false}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setImportDialogOpen(false)}>
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              loading={importAutomationResults.isPending}
+              onClick={() => {
+                importAutomationResults.mutate(
+                  { ids: automationSelected, groupId: importGroupId || null },
+                  {
+                    onSuccess: (result) => {
+                      setAutomationSelected([]);
+                      setImportDialogOpen(false);
+                      setImportGroupId("");
+                      toast.success(`已加入成品仓库 ${formatCount(result.added)} 件`);
+                    },
+                    onError: (error) =>
+                      toast.error("加入成品仓库失败", { description: apiErrorMessage(error) }),
+                  },
+                );
+              }}
+            >
+              确认加入
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-2">
+          <label className="text-xs text-fg-muted" htmlFor="import-group">
+            入库分类
+          </label>
+          <select
+            id="import-group"
+            className="h-9 rounded-sm border border-border-subtle bg-canvas px-2 text-sm text-fg"
+            value={importGroupId}
+            onChange={(event) => setImportGroupId(event.target.value)}
+          >
+            <option value="">不分组</option>
+            {(groupsQuery.data?.groups ?? []).map((group) => (
+              <option key={group.id} value={String(group.id)}>
+                {group.name}（{formatCount(group.count)} 件）
+              </option>
+            ))}
+          </select>
+          <p className="text-2xs text-fg-muted">
+            选中的商品入库后会归到这个分类；不分组时可在成品仓库里再调整。
+          </p>
+        </div>
+      </Dialog>
 
       {/* 新建分类 */}
       <Dialog
