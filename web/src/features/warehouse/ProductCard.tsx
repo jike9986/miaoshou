@@ -5,8 +5,8 @@
 //   · 类目与 SKU 数移到价格最右侧；
 //   · 去掉「近 30 天销量」与「规格已核验」。
 
-import { Images, Package, PencilLine } from "lucide-react";
-import { cn, formatCount, formatPrice, formatTime } from "@/lib/utils";
+import { Images, Package } from "lucide-react";
+import { cn, formatCount, formatPrice } from "@/lib/utils";
 import type { Product } from "@/lib/types";
 import { RemoteImage } from "@/features/shared/RemoteImage";
 import { Badge, Checkbox } from "@/components/ui";
@@ -18,8 +18,8 @@ export interface ProductCardProps {
   onToggle: (id: string) => void;
   onOpen?: (product: Product) => void;
   index: number;
-  /** 是否显示「谁编辑于何时」那一行。成品仓库要（看得出谁改过），
-   *  自动化结果不要（还没人工编辑过，显示“谁改过”没意义且占行）。 */
+  /** 已废弃：卡片不再显示「谁编辑于何时」（负责人 2026-11-11 要求去掉）。
+   *  保留参数只为不破坏既有调用方，传什么都不影响渲染。 */
   showEditor?: boolean;
 }
 
@@ -72,7 +72,6 @@ export function ProductCard({
   onToggle,
   onOpen,
   index,
-  showEditor = true,
 }: ProductCardProps) {
   const price = priceText(product);
   const groupName = product.group?.trim();
@@ -238,21 +237,10 @@ export function ProductCard({
           </div>
         )}
 
-        {/* 谁改的：只有后端真的给了 updatedBy 才显示。 */}
-        {showEditor && product.updatedBy ? (
-          <p
-            className="flex items-center gap-1 truncate text-2xs leading-4 text-fg-muted"
-            title={`最后改动：${product.updatedBy}${
-              product.updatedAt ? ` · ${formatTime(product.updatedAt)}` : ""
-            }`}
-          >
-            <PencilLine className="size-3 shrink-0" strokeWidth={1.75} />
-            <span className="truncate">
-              {product.updatedBy}
-              {product.updatedAt ? ` 编辑于 ${formatTime(product.updatedAt)}` : " 编辑过"}
-            </span>
-          </p>
-        ) : null}
+        {/* 「谁编辑于何时」已按负责人要求去掉（2026-11-11）：
+            卡片上这行信息在商品列表和自动化结果里都不需要，
+            占一行高度又挤占价格/类目，想看改动记录去详情页。
+            保留 showEditor 参数不删，是为了不破坏既有调用方的 props 形状。 */}
       </button>
     </article>
   );
