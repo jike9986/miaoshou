@@ -2551,8 +2551,6 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                 main_limit=int(_limits.get("main") or 0),
                 detail_limit=int(_limits.get("detail") or 0),
                 sku_limit=int(_limits.get("sku") or 0))
-            logger.info("截断后主图 %d 张（设置 main=%s）",
-                        len(payload.get("imgUrls") or []), _limits.get("main"))
         except Exception as exc:  # noqa: BLE001 - 截断失败不阻断入库
             logger.warning("按设置截断图片失败 detailId=%s：%s", detail_id, exc)
         # 主图的工厂图/尺码图剔除由 pre_save_gate 的 removeIndexes 负责，
@@ -2822,8 +2820,6 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         promote_report = {"error": str(exc)[:160]}
 
     key = product_key(detail_id, shop_id)
-    logger.info("build_product 前主图 %d 张 detailId=%s",
-                len(payload.get("imgUrls") or []), detail_id)
     fields = product_service.build_product(
         info=payload, detail_id=detail_id, shop_id=shop_id, account_id=account.id,
         shop_name=_shop_name(db, account, shop_id), language=language,

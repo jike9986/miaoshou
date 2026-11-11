@@ -1282,7 +1282,7 @@ def normalize_spec_for_save(payload: dict[str, Any],
         # 它按**草稿原文逐字匹配**，提交清洗值就报「SKU【白绿色-41】不存在」
         # （2026-11-10 实测：3522040694 两色全挂）。
         # 归属判定：草稿原文包含我们的值（去空白后），就沿用草稿的原文与 id。
-        draft_values = [str(dv.get("attrValue") or "").strip()
+        [str(dv.get("attrValue") or "").strip()
                         for dv in (src.get("attrValueList") or [])
                         if isinstance(dv, Mapping)]
 

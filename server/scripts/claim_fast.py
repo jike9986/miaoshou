@@ -192,9 +192,9 @@ def main() -> int:
 
     t0 = time.time()
     try:
-        tree = client.category_tree("MY")
+        client.category_tree("MY")
     except Exception:
-        tree = None
+        pass
     print("  预取类目树 %.2fs" % (time.time() - t0))
 
     # --- 复制与覆盖并行 ---
