@@ -58,6 +58,14 @@ def create_run(payload: RunCreateRequest, db: DbSession,
     return {"run": automation_run_service.get_full(db, run)}
 
 
+@router.get("/history")
+def history_runs(db: DbSession, operator: OperatorDep, accountId: str,
+                 shopId: str | None = None, limit: int = 30) -> dict[str, Any]:
+    """执行历史列表（按时间倒序，带汇总计数）。"""
+    return {"runs": automation_run_service.list_runs(
+        db, operator, account_id=accountId, shop_id=shopId, limit=limit)}
+
+
 @router.get("/latest")
 def latest_run(db: DbSession, operator: OperatorDep, accountId: str,
                shopId: str | None = None) -> dict[str, Any]:

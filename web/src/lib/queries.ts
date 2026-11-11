@@ -969,6 +969,42 @@ export function useLatestAutomationRun(accountId: string | null, shopId: string 
   });
 }
 
+/** 执行历史里一条记录的汇总（列表页用，不含逐项明细）。 */
+export interface AutomationRunHistoryRow {
+  id: string;
+  status: string;
+  accountId: string;
+  shopId: string;
+  createdAt: number;
+  finishedAt: number | null;
+  total: number;
+  succeeded: number;
+  failed: number;
+  needsReview: number;
+  textEnabled: boolean;
+  imagesEnabled: boolean;
+  publishEnabled: boolean;
+  language: string;
+  template: string;
+}
+
+export function useAutomationRunHistory(
+  accountId: string | null,
+  shopId: string | null,
+  enabled = true,
+  limit = 30,
+): UseQueryResult<{ runs: AutomationRunHistoryRow[] }> {
+  return useQuery({
+    queryKey: [...queryKeys.automationRuns.all, "history", accountId, shopId, limit],
+    queryFn: () => api.get<{ runs: AutomationRunHistoryRow[] }>("/automation-runs/history", {
+      query: { accountId, shopId, limit },
+    }),
+    enabled: Boolean(accountId) && enabled,
+    staleTime: 10_000,
+  });
+}
+
+
 function invalidateAutomationRuns(client: ReturnType<typeof useQueryClient>): void {
   void client.invalidateQueries({ queryKey: queryKeys.automationRuns.all });
 }

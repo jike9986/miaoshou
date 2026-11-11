@@ -74,6 +74,7 @@ import {
 import { ProductPicker } from "@/features/automation/ProductPicker";
 import { isCollectBoxReadOnly } from "@/features/automation/collectBoxSelectionGate.mjs";
 import { ProgressPanel } from "@/features/automation/ProgressPanel";
+import { RunHistoryPanel } from "@/features/automation/RunHistoryPanel";
 import { AccountSwitcher } from "@/features/auth/UnlockPage";
 import { useSessionStore } from "@/features/stores";
 import { useOperatorIdentity } from "@/lib/operator";
@@ -501,7 +502,28 @@ export function AutomationPage() {
         return sum + (typeof images?.requested === "number" ? images.requested : 0);
       }, 0)
       : 0;
+    // 上一次任务已彻底结束（没有可续跑的项目）时，状态卡只恢复「设置」，
+    // 不恢复上一批的失败/核对信息 —— 那些属于历史，已经在执行历史面板留档。
+    //
+    // 以前每次打开页面，右下角都堆着上一次的失败原因，运营会以为「这次又坏了」
+    // （负责人 2026-11-10 要求：下一个任务开始时右边直接重置）。
+    const resumableCount = saved.items.filter((item) =>
+      item.processStatus === "queued" || item.processStatus === "needs_review").length;
     const isInFlight = saved.status === "running";
+    const keepHistory = isInFlight || saved.status === "queued" || resumableCount > 0;
+    if (!keepHistory) {
+      setStages({});
+      setProgress({});
+      setRun({
+        phase: "idle",
+        total: 0, done: 0, failed: 0,
+        startedAt: null, endedAt: null,
+        imageDone: 0, imagePlanned: 0, textDone: 0,
+        stage: "等待开始",
+        failures: [], failedKeys: [],
+      });
+      return;
+    }
     setStages(nextStages);
     setProgress(nextProgress);
     setRun({
@@ -1739,6 +1761,13 @@ export function AutomationPage() {
                 selectedCount={selection.size}
                 visibleCount={visibleItems.length}
                 publishShopName={shopsQuery.data?.shops.find((shop) => shop.shopId === currentShopId)?.name}
+              />
+              {/* 执行历史：把「上一次怎么坏的」从常驻状态卡里挪出来，
+                  状态卡只显示当前这一批的进度。每批留档，跑完自动刷新。 */}
+              <RunHistoryPanel
+                accountId={status?.accountId ?? null}
+                shopId={currentShopId ?? null}
+                running={run.phase === "running"}
               />
             </div>
           </div>

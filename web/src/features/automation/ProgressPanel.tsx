@@ -5,9 +5,9 @@
 // 只改文字，不改变卡片尺寸。
 
 import { useEffect, useState } from "react";
-import { Activity, ListChecks } from "lucide-react";
+import { Activity } from "lucide-react";
 import { cn, formatCount, formatDuration } from "@/lib/utils";
-import { Card, CardTitle, Progress, Separator, StatusBadge } from "@/components/ui";
+import { Card, CardTitle, Progress, StatusBadge } from "@/components/ui";
 import {
   languageLabel,
   type AutomationSettings,
@@ -17,10 +17,10 @@ import {
 export interface ProgressPanelProps {
   run: RunState;
   settings: AutomationSettings;
-  /** 当前选中件数（勾选集合大小，含跨页） */
-  selectedCount: number;
+  /** 当前选中件数（勾选集合大小，含跨页）；摘要已移到执行历史，保留入参兼容 */
+  selectedCount?: number;
   /** 列表里本页可见件数 */
-  visibleCount: number;
+  visibleCount?: number;
   /** 发布目标店铺名；只拿到 id 时回退显示 id */
   publishShopName?: string;
   className?: string;
@@ -44,9 +44,6 @@ function useTickingElapsed(startedAt: number | null, active: boolean): number | 
 export function ProgressPanel({
   run,
   settings,
-  selectedCount,
-  visibleCount,
-  publishShopName,
   className,
 }: ProgressPanelProps) {
   const running = run.phase === "running";
@@ -136,73 +133,18 @@ export function ProgressPanel({
         </div>
       </div>
 
-      <Separator className="my-3" />
-
-      {/* 摘要：固定 2×4 网格，开关变化不会让框长高 */}
-      <div className="flex items-center gap-1.5">
-        <ListChecks className="size-4 text-fg-muted" strokeWidth={1.75} />
-        <h3 className="text-[13px] font-semibold leading-5 text-fg">任务摘要</h3>
-      </div>
-      <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2">
-        <SummaryStat label="已选" value={`${formatCount(selectedCount)} 件`} strong />
-        <SummaryStat label="本页" value={`${formatCount(visibleCount)} 件`} />
-        <SummaryStat label="文字" value={settings.textEnabled ? "开" : "关"} active={settings.textEnabled} />
-        <SummaryStat label="图片" value={settings.imagesEnabled ? "开" : "关"} active={settings.imagesEnabled} />
-        <SummaryStat
-          label="定价"
-          value={settings.priceTemplateEnabled ? settings.template || "未选模板" : "关"}
-          active={settings.priceTemplateEnabled}
-        />
-        <SummaryStat
-          label="发布"
-          value={settings.publishEnabled ? publishShopName || settings.publishShopId || "未选店铺" : "关"}
-          active={settings.publishEnabled}
-        />
-        <SummaryStat
-          label="语言"
-          value={settings.textEnabled ? languageLabel(settings.language) : "不翻译"}
-        />
-        <SummaryStat label="尺码图" value={settings.sizeChartId ? "已选" : "未选"} />
-      </dl>
-
-      <p className="mt-3 text-2xs leading-4 text-fg-muted">
-        运行记录已保存；待处理项目可继续，状态不确定的项目需先核对。
-      </p>
-
-      {(run.needsReview ?? 0) > 0 && (
-        <p className="mt-2 rounded-md border border-warning-600/20 bg-warning-50 px-2.5 py-1.5 text-2xs leading-4 text-warning-700">
-          {formatCount(run.needsReview ?? 0)} 项状态待核对，不会自动重跑
-        </p>
-      )}
-
-      {(run.failed > 0 || run.failures.length > 0) && (
-        <div className="mt-3 border-t border-border-subtle pt-3">
-          <p className="rounded-md border border-warning-600/20 bg-warning-50 px-2.5 py-1.5 text-2xs leading-4 text-warning-700">
-            {run.failed > 0
-              ? `本批失败 ${formatCount(run.failed)} 件`
+      {/* 失败只留一行入口，明细去「执行历史」看 —— 右侧常驻的卡片
+          每次打开都堆满历史错误，运营第一眼看到的是「上次怎么坏」，
+          而不是「这次跑到哪」（负责人 2026-11-10 要求精简）。 */}
+      {(run.failed > 0 || run.failures.length > 0 || (run.needsReview ?? 0) > 0) && (
+        <p className="mt-3 rounded-md border border-warning-600/20 bg-warning-50 px-2.5 py-1.5 text-2xs leading-4 text-warning-700">
+          {run.failed > 0
+            ? `本批失败 ${formatCount(run.failed)} 件`
+            : (run.needsReview ?? 0) > 0
+              ? `${formatCount(run.needsReview ?? 0)} 项状态待核对`
               : `本批需检查 ${formatCount(run.failures.length)} 项`}
-          </p>
-          {run.failures.length > 0 && (
-            <ul className="mt-2 flex max-h-36 flex-col gap-1 overflow-y-auto">
-              {run.failures.map((failure) => (
-                <li
-                  key={failure.key}
-                  className="rounded border border-warning-600/20 bg-warning-50/60 px-2 py-1.5"
-                >
-                  <p
-                    className="truncate text-2xs font-medium text-fg"
-                    title={failure.title || failure.detailId}
-                  >
-                    {failure.title || failure.detailId}
-                  </p>
-                  <p className="mt-0.5 break-words text-2xs leading-4 text-warning-700">
-                    {failure.reason}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+          {" · 明细见下方执行历史"}
+        </p>
       )}
     </Card>
   );
@@ -213,33 +155,6 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="min-w-0">
       <dt className="text-2xs leading-4 text-fg-muted">{label}</dt>
       <dd className="num mt-0.5 h-5 truncate text-[13px] font-medium leading-5 text-fg" title={value}>
-        {value}
-      </dd>
-    </div>
-  );
-}
-
-function SummaryStat({
-  label,
-  value,
-  active = false,
-  strong = false,
-}: {
-  label: string;
-  value: string;
-  active?: boolean;
-  strong?: boolean;
-}) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-2xs leading-4 text-fg-muted">{label}</dt>
-      <dd
-        className={cn(
-          "num mt-0.5 h-5 truncate text-[13px] leading-5",
-          active ? "font-medium text-brand-700" : strong ? "font-semibold text-fg" : "text-fg"
-        )}
-        title={value}
-      >
         {value}
       </dd>
     </div>

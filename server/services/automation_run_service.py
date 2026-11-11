@@ -189,6 +189,56 @@ def latest(db: Session, operator: Operator, *, account_id: Any,
     return query.order_by(AutomationRun.created_at.desc(), AutomationRun.id.desc()).first()
 
 
+def list_runs(db: Session, operator: Operator, *, account_id: Any,
+              shop_id: Any = None, limit: int = 30) -> list[dict[str, Any]]:
+    """执行历史：按时间倒序列出这个人能看到的运行记录。
+
+    只给「列表页」用，所以每一条都带汇总计数而不是逐项明细 —— 明细走
+    get_full(run_id)。运营要的是「哪几批跑过、成了几件、挂了几件」，
+    而不是一屏几百行 SKU。
+    """
+    text = str(account_id or "").strip()
+    if not text.isdigit():
+        raise errors.validation("accountId 必须是数字", field="accountId")
+    account = db.query(Account).filter(Account.id == int(text)).one_or_none()
+    if account is None:
+        raise errors.not_found(f"账号 {text} 不存在", accountId=text)
+    _assert_account_access(db, account, operator)
+    query = db.query(AutomationRun).filter(AutomationRun.account_id == account.id)
+    if shop_id not in (None, ""):
+        query = query.filter(AutomationRun.shop_id == str(shop_id))
+    if not _teacher_or_admin(operator):
+        query = query.filter(AutomationRun.owner_operator_id == operator.id)
+    rows = (query.order_by(AutomationRun.created_at.desc(), AutomationRun.id.desc())
+            .limit(max(1, min(100, int(limit or 30)))).all())
+    result: list[dict[str, Any]] = []
+    for run in rows:
+        items = _items(db, run.id)
+        succeeded = sum(1 for row in items if row.process_status == "succeeded")
+        failed = sum(1 for row in items if row.process_status == "failed")
+        review = sum(1 for row in items if row.process_status == "needs_review"
+                     or row.publish_status in ("needs_review", "failed"))
+        settings = run.settings or {}
+        result.append({
+            "id": run.id,
+            "status": run.status,
+            "accountId": str(run.account_id),
+            "shopId": run.shop_id,
+            "createdAt": run.created_at,
+            "finishedAt": run.finished_at,
+            "total": len(items),
+            "succeeded": succeeded,
+            "failed": failed,
+            "needsReview": review,
+            "textEnabled": settings.get("textEnabled") is True,
+            "imagesEnabled": settings.get("imagesEnabled") is True,
+            "publishEnabled": settings.get("publishEnabled") is True,
+            "language": settings.get("language") or "",
+            "template": settings.get("template") or "",
+        })
+    return result
+
+
 def get_full(db: Session, run: AutomationRun) -> dict[str, Any]:
     return serialize_run(run, _items(db, run.id))
 
