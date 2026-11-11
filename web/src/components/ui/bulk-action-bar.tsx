@@ -34,7 +34,13 @@ export interface BulkActionBarProps {
   children?: ReactNode;
 }
 
-const MAX_ACTIONS = 5;
+// 最多直接显示几个操作。超出部分收进「更多」菜单（三个点）。
+//
+// 原来 5 个：成品仓库工具栏有 6 个操作（认领到采集箱 / 导入公共采集箱 /
+// 批量改价 / 设置分类 / 发布 / 删除），第 6 个被收进三个点。负责人
+// 2026-11-11 要求去掉那个三点 —— 它把「删除」藏起来了，而删除是需要
+// 一眼看到的危险操作。提到 6 后全部平铺。
+const MAX_ACTIONS = 6;
 
 export function BulkActionBar({
   count,

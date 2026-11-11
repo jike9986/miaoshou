@@ -8,7 +8,6 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Calculator,
   CheckSquare,
   ChevronLeft,
   ChevronRight,
@@ -963,16 +962,7 @@ export function WarehousePage() {
               });
             },
           },
-          {
-            label: "创建批次",
-            icon: <ListChecks className="size-3.5" />,
-            onClick: () => setCreateBatchOpen(true),
-          },
-          {
-            label: "价格试算",
-            icon: <Calculator className="size-3.5" />,
-            onClick: () => setPriceOpen(true),
-          },
+
           {
             label: "批量改价",
             icon: <Percent className="size-3.5" />,
