@@ -1644,45 +1644,46 @@ def select_translatable_images(
     from services import image_review_service, pre_save_check
 
     def _pick(urls: list[str], limit: int) -> list[str]:
+        """先剔废图再截上限 —— 顺序不能反。
+
+        负责人口径（2026-11-11）：12 张详情图不是直接取前 9 张。
+        前期图里常夹厂家宣传图/尺码对照图，先截 9 张会把第 10、11 张的
+        好图挡在门外，留下的 9 张里还混着废图。正确顺序：
+          1. 全量 OCR 分类（不预截）
+          2. 先剔 remove（厂家宣传/尺码图）
+          3. 剩下去重 + 截上限（补进来的是后面的好图）
+          4. 从候选里挑含中文的提交翻译
+        """
         urls = list(dict.fromkeys(
-            str(u) for u in urls if isinstance(u, str) and u.startswith("http")))[:limit]
+            str(u) for u in urls if isinstance(u, str) and u.startswith("http")))
         if not urls:
             return []
         try:
             rows = image_review_service.analyze(urls, limit=len(urls))
         except Exception as exc:  # noqa: BLE001 - OCR 不可用退化为全部
             logger.warning("图片 OCR 筛选不可用，按全部提交翻译：%s", exc)
-            return urls
+            return urls[:limit]
         by_url = {str(row.get("url") or ""): row for row in rows}
-        # OCR 不可用时 analyze() 不抛异常，而是返回 error=True / action="review"
-        # 的行。旧代码只看 action != "translate" 就跳过，等于「OCR 挂了 = 一张都
-        # 不用翻」—— 服务器（Linux）根本没有 Windows OCR，图片于是一张都不提交，
-        # 界面上一直是 0% 而图里的中文原样留着（2026-11-09 实测）。
-        # 这里显式判断：整批都带 error 就退化成「全部提交，让翻译服务自己判断」。
         failed_rows = [row for row in rows if row.get("error")]
         if rows and len(failed_rows) == len(rows):
             logger.warning(
                 "图片 OCR 全部不可用（%s），本次按全部图提交翻译：%s",
-                str(failed_rows[0].get("error"))[:80], failed_rows[0].get("reason") or "")
-            return urls
+                str(failed_rows[0].get("error"))[:80],
+                failed_rows[0].get("reason") or "")
+            return urls[:limit]
+        # 先剔废图，再截上限
+        survivors = [u for u in urls
+                     if str((by_url.get(u) or {}).get("action") or "") != "remove"]
+        candidates = survivors[:limit]
         picked: list[str] = []
         seen_text: set[str] = set()
-        for url in urls:
+        for url in candidates:
             row = by_url.get(url) or {}
-            action = str(row.get("action") or "")
-            # 单张 OCR 失败的图也照翻：宁可多翻一张，也不能因为识别抖动漏掉中文图。
             if row.get("error"):
                 picked.append(url)
                 continue
-            # 只翻译「识别到中文」的图；无中文(keep)/厂家图(remove) 不翻。
-            #
-            # review（OCR 没识别到任何文字）要**照翻**：识别不出文字不等于图上
-            # 没中文 —— 深色底白字、艺术字、竖排文字都会 OCR 空白。实测同一批
-            # 主图里 3 张识别为空，肉眼看却有中文（2026-11-09）。
-            # 宁可多翻一张（0.024 元），也不能让带中文的图原样发到海外店铺。
-            if action == "review" and not str(row.get("text") or "").strip():
-                picked.append(url)
-                continue
+            action = str(row.get("action") or "")
+            # review = OCR 一行字都没识别到。实测（2026-11-11，12 张详情图）            # 这类图全是纯产品照，图上确实没有文字，不需要翻译。            # 之前这里「照翻」是怕 OCR 漏识别深色底白字/艺术字，但代价是            # 每件多翻 2-3 张纯产品图（每张 0.024 元），而实测 OCR 对中文            # 的召回很稳（同一批 7 行中文全部识别到，置信度 0.98-1.0）。            # 负责人口径：只翻有中文的图。            if action == "review":                continue
             if action != "translate":
                 continue
             text = re.sub(r"\s+", "", str(row.get("text") or ""))
