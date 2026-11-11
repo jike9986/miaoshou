@@ -45,7 +45,10 @@ from typing import Any
 
 _DETAIL_HARD_LIMIT = 30
 _IMG_TAG = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
-_IMG_SRC = re.compile(r"(\bsrc\s*=\s*)(['\"])(.*?)\2", flags=re.IGNORECASE | re.DOTALL)
+# 宽松 src 提取：故意**不要求**引号成对 —— 妙手返回的 notes 经常在
+# 最后一个 img 上截断（缺结尾引号和 >），严格匹配会把它整条丢掉，
+# 图就永久少一张（2026-11-11 实测：负责人反复说「明明二十多张只有八张」）。
+_IMG_SRC = re.compile(r"""src\s*=\s*["']?([^"'\s>]+)""", flags=re.IGNORECASE)
 
 
 class _DetailImageParser(HTMLParser):
@@ -67,7 +70,20 @@ class _DetailImageParser(HTMLParser):
 
 
 def extract_detail_image_urls(notes: Any) -> list[str]:
-    """从采集箱的详情 HTML 里按顺序取图片 URL。"""
+    """从采集箱的详情 HTML 里按顺序取图片 URL。
+
+    两套互补的提取方式，必须都跑：
+
+      1. HTMLParser（严格）：标准闭合标签。
+      2. 正则兜底：妙手返回的 notes 经常在**最后一个 img 上被截断**
+         （`<img src="...jpg` 没有结尾的 `">`）。HTMLParser 遇到残缺
+         标签会直接丢掉它，于是 9 张图只解析出 8 张，保存时按 8 张写回，
+         第 9 张被永久丢弃（2026-11-11 实测：3525319395 详情图 9 -> 8；
+         更早 20 -> 8 的多轮丢失也是同一个原因，负责人反复指出
+         「明明有二十多张，为什么只有八张」）。
+
+    合并规则：按出现顺序取并集，严格解析的结果优先（它处理引号/实体更准）。
+    """
     if not isinstance(notes, str) or not notes:
         return []
     parser = _DetailImageParser()
@@ -75,8 +91,14 @@ def extract_detail_image_urls(notes: Any) -> list[str]:
         parser.feed(notes)
         parser.close()
     except Exception:  # noqa: BLE001 - 残缺 HTML 不该炸掉整次入仓
-        return parser.urls
-    return parser.urls
+        pass
+    found: list[str] = list(parser.urls)
+    # 正则兜底：补上 HTMLParser 漏掉的残缺 img（含没有结束 > 的最后一个）
+    for match in _IMG_SRC.finditer(notes):
+        url = (match.group(1) or "").strip()
+        if url.startswith(("http://", "https://")) and url not in found:
+            found.append(url)
+    return found
 
 
 def detail_images_only(urls: Iterable[str]) -> str:
