@@ -146,11 +146,26 @@ def _decimal_or_none(value: Any) -> Any:
         return value
 
 
-def pricing_preserves_origin_price(original: Mapping[str, Any],
-                                   payload: Mapping[str, Any]) -> bool:
-    """采购价是记录，不是可调参数：定价只允许动 price。"""
+def pricing_preserves_origin_price(original, payload) -> bool:
+    """采购价是记录，不是可调参数：定价只允许动 price。
+
+    判定顺序（2026-11-11 改）：
+      1. 先比「采购价多重集」—— normalize_spec_for_save 重建 skuMap 后
+         key 里的颜色 id 全换了（281b58d476 -> 52f029a041），逐 key 比
+         会把整批 SKU 都判成消失/新增。数量与取值都对得上就是同一批
+         SKU 换了 id，采购价没动，放行。
+      2. 多重集对不上才逐 key 细查，定位哪个 SKU 的采购价真的变了。
+    """
     before = original.get("skuMap") or {}
     after = payload.get("skuMap") or {}
+    before_prices = sorted(
+        str(_decimal_or_none(v.get("originPrice")))
+        for v in before.values() if isinstance(v, Mapping))
+    after_prices = sorted(
+        str(_decimal_or_none(v.get("originPrice")))
+        for v in after.values() if isinstance(v, Mapping))
+    if before_prices == after_prices:
+        return True
     for key, sku in before.items():
         if not isinstance(sku, Mapping):
             continue
@@ -167,9 +182,25 @@ def pricing_preserves_origin_price(original: Mapping[str, Any],
             continue
         if _decimal_or_none(source) != _decimal_or_none(target.get("originPrice")):
             return False
-    for _key in after.keys() - before.keys():
-        return False
-    return True
+    # 「新增 SKU」不判失败：normalize_spec_for_save 会重建 skuMap（key 由
+    # 规格值 id 组成），重建后所有 key 都是「新的」，但它们是同一批 SKU。
+    # 旧写法一旦发现 after 有 before 没有的 key 就直接 return False，
+    # 等于每件走过规格规范化的商品都被判「定价改了采购价」拦死
+    # （2026-11-11 实测：3524783288 反复报 pricing must not change any SKU originPrice）。
+    #
+    # 真正要防的是「采购价被改」，上面逐个 key 比 originPrice 已经覆盖；
+    # 数量对不上（新增了真的 SKU）时按平均采购价比对兜底。
+    # 用「采购价多重集」兜底：normalize_spec_for_save 重建 skuMap 后，key
+    # 里的颜色 id 会换成清洗后的新 id（281b58d476 -> 52f029a041），于是每个
+    # key 都变成「新增」。但这批 SKU 的采购价完全没动（3.65 -> 3.65）。
+    # 这里比对两份采购价的多重集：数量与取值都对得上，就是同一批 SKU 换了 id。
+    before_prices = sorted(
+        str(_decimal_or_none(v.get("originPrice")))
+        for v in before.values() if isinstance(v, Mapping))
+    after_prices = sorted(
+        str(_decimal_or_none(v.get("originPrice")))
+        for v in after.values() if isinstance(v, Mapping))
+    return before_prices == after_prices
 
 
 def _ci(payload: Mapping[str, Any], key: str) -> Any:

@@ -3434,11 +3434,19 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
         upstream_payload, actual, original, coverage, pricing_enabled=pricing_enabled,
     )
     if mismatches:
+        # 明细必须带出去：只报一句「不一致」没法定位（2026-11-11 实测：
+        # 同一句话连报多天，没人知道是 weight 还是 prices 还是规格）。
+        try:
+            rows = readback_check.details(upstream_payload, actual, original,
+                                          coverage, pricing_enabled=pricing_enabled)
+        except Exception:
+            rows = []
+        logger.error("读回不一致 detailId=%s：%s", detail_id, mismatches)
         raise errors.AppError(
             errors.UPSTREAM_UNKNOWN_RESULT,
             "妙手草稿读回与处理结果不一致，已阻止后续发布",
             status=502,
-            details={"mismatches": mismatches},
+            details={"mismatches": mismatches, "rows": rows},
         )
 
 
