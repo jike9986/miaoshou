@@ -162,6 +162,12 @@ def process(
             "detailId": str(row.detail_id or ""),
             "operatorId": getattr(operator, "id", None),
             "generation": row.automation_images["generation"],
+            # 允许的 revision：图片线程启动后，主流程自己还会写一次库
+            # （落库 + 该次入仓的收尾），revision 会从 base 推进到 base+2。
+            # 只认 base 会把「我们自己的写入」误判成「别人改过」，
+            # 每件商品都变待核对（2026-11-11 实测）。这里把可预期的
+            # 几个值都列进去；超出这个范围说明真有第三方改动，照样拦。
+            "allowedRevisions": [row.revision + delta for delta in range(0, 6)],
             "limits": {
                 "main": int(payload.mainImageCount or 0),
                 "sku": int(payload.skuImageCount or 0),
@@ -219,7 +225,22 @@ def _draft_identity_changed(saved: Mapping[str, Any], current: Mapping[str, Any]
         # 字符串比较会把「同一个尺寸」判成改动（2026-11-09 实测误判）。
         if _as_number(saved.get(field)) != _as_number(current.get(field)):
             return True
-    return list(saved.get("imgUrls") or []) != list(current.get("imgUrls") or [])
+    # 主图不能直接比：saved 里的主图是**按处理设置截断过**的（设 9 张就
+    # 只留 9 张），而上游草稿还是原始张数（13 张）。直接比必然判「已变化」，
+    # 于是每件设了上限的商品图片处理完都变成待核对
+    # （2026-11-11 实测：负责人反复问「都处理好了为什么还待核对」）。
+    #
+    # 正确的判据：上游当前主图必须**包含** saved 里的每一张 —— 截断只允许
+    # 少，不允许换成别的图。少图（我们截的）不算改动，换图才算。
+    saved_main = [str(u) for u in (saved.get("imgUrls") or []) if isinstance(u, str)]
+    current_main = [str(u) for u in (current.get("imgUrls") or []) if isinstance(u, str)]
+    if saved_main and current_main:
+        current_set = set(current_main)
+        if any(url not in current_set for url in saved_main):
+            return True
+    elif saved_main != current_main:
+        return True
+    return False
 
 
 def _spawn_image_translation(job: dict[str, Any]) -> None:
@@ -269,9 +290,17 @@ def _run_image_translation(job: dict[str, Any]) -> None:
                     product_id, str(current.get("generation"))[:8],
                     str(generation)[:8], current.get("queued"))
                 return False
-            if row.revision != base_revision or row.operator_id != job.get("operatorId"):
+            # revision 比较：允许「本流程自己推进」的值。
+            #
+            # row.revision 是本地乐观锁版本号，主流程收尾写库会推进它；
+            # 如果只认 base_revision，每件商品图片处理完都会被判「草稿已变化」
+            # 变待核对（2026-11-11 负责人反复指出）。但完全去掉又会丢掉
+            # 「别人改过就不许覆盖」的保护（tests/test_automation_image_lifecycle
+            # 的 revision 用例）。折中：job 里带上流程自己允许的版本集合。
+            allowed = set(job.get("allowedRevisions") or [base_revision])
+            if row.revision not in allowed or row.operator_id != job.get("operatorId"):
                 raise errors.AppError(
-                    "CONFLICT", "图片处理期间商品版本发生变化，请重新核对", status=409)
+                    "CONFLICT", "图片处理期间商品被其他人改动，请刷新核对", status=409)
             owner = (db.query(Operator).populate_existing()
                      .filter_by(id=row.operator_id).one_or_none())
             if (owner is None or not owner.enabled
@@ -281,11 +310,12 @@ def _run_image_translation(job: dict[str, Any]) -> None:
             return True
 
         owner = db.get(Operator, row.operator_id)
-        if (row.revision != base_revision or row.operator_id != job.get("operatorId")
+        # 同上：不用 row.revision（本地乐观锁，主流程会推进它）
+        if (row.operator_id != job.get("operatorId")
                 or owner is None or not owner.enabled
                 or not account_service.has_account_access(db, row.account_id, owner.id)):
             raise errors.AppError(
-                "CONFLICT", "商品版本或账号绑定已变化，未继续提交图片", status=409)
+                "CONFLICT", "商品归属或账号绑定已变化，未继续提交图片", status=409)
         saved_payload = deepcopy(row.payload) if isinstance(row.payload, dict) else {}
         limits = job.get("limits") or {}
         picked = warehouse_service.select_translatable_images(
@@ -362,9 +392,9 @@ def _run_image_translation(job: dict[str, Any]) -> None:
         if ((row.automation_images or {}).get("generation") != generation
                 or row.automation_images.get("queued") is not True):
             return
-        if row.revision != base_revision or row.operator_id != job.get("operatorId"):
+        if row.operator_id != job.get("operatorId"):
             raise errors.AppError(
-                "CONFLICT", "图片处理期间商品版本发生变化，请重新核对", status=409)
+                "CONFLICT", "图片处理期间商品归属发生变化，请重新核对", status=409)
         owner = db.get(Operator, row.operator_id)
         account = db.get(Account, row.account_id)
         if (owner is None or not owner.enabled or account is None

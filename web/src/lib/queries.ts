@@ -460,14 +460,17 @@ export function useAutomationResults(page: number, enabled = true): UseQueryResu
 export function useImportAutomationResults(): UseMutationResult<
   AutomationResultsImportResponse,
   Error,
-  string[]
+  { ids: string[]; groupId?: string | null }
 > {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (ids) => api.post<AutomationResultsImportResponse, { ids: string[] }>(
-      "/warehouse/automation-results/import", { ids }),
+    // groupId：入库时指定成品仓库的分组（分类）。不传表示不分组。
+    mutationFn: ({ ids, groupId }) =>
+      api.post<AutomationResultsImportResponse, { ids: string[]; groupId?: string | null }>(
+        "/warehouse/automation-results/import", { ids, groupId: groupId ?? null }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+      void client.invalidateQueries({ queryKey: queryKeys.groups.all });
     },
   });
 }

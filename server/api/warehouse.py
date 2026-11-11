@@ -149,6 +149,8 @@ def list_automation_results(
 
 class AutomationResultsImportRequest(CamelModel):
     ids: list[str] = Field(default_factory=list)
+    # 入库时指定成品仓库的分组（分类）。None = 不分组。
+    groupId: str | int | None = None
 
 
 @router.post("/automation-results/import", summary="将自动化结果加入成品仓库",
@@ -159,7 +161,8 @@ def import_automation_results(payload: AutomationResultsImportRequest,
     with audit_service.guard(db, operator=operator,
                              action="warehouse.automation_results.import",
                              target_kind="product", target_id=""):
-        result = warehouse_service.admit_automation_results(db, payload.ids)
+        result = warehouse_service.admit_automation_results(
+            db, payload.ids, group_id=payload.groupId)
         db.commit()
     for ident in result["ids"]:
         audit_service.record(

@@ -1166,7 +1166,13 @@ def list_automation_results(db: Session, *, page: int = 1, page_size: int = 24
     }
 
 
-def admit_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
+def admit_automation_results(db: Session, ids: Iterable[Any], *,
+                             group_id: Any = None) -> dict[str, Any]:
+    """把自动化结果加入成品仓库，可同时指定入库分组（分类）。
+
+    group_id 是成品仓库左侧的分组（负责人 2026-11-11 要求「入库可以选择
+    当前仓库的分类入哪个分类」）。传 None 表示不分组。
+    """
     wanted = list(dict.fromkeys(str(value).strip() for value in ids if str(value).strip()))
     if not wanted or len(wanted) > 100:
         raise errors.validation("请选择 1 到 100 件自动化处理结果", field="ids")
@@ -1187,10 +1193,23 @@ def admit_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
     if len(products) > available:
         raise errors.AppError("WAREHOUSE_FULL", "成品仓库容量不足",
                               status=409, details={"remaining": available})
+    group = None
+    if group_id not in (None, ""):
+        try:
+            gid = int(str(group_id).strip())
+        except (TypeError, ValueError):
+            raise errors.validation("分组 id 必须是数字", field="groupId") from None
+        group = db.get(Group, gid)
+        if group is None:
+            raise errors.validation("分组不存在", field="groupId")
     for product in products:
         product.automation_result = False
+        if group is not None:
+            product.group_id = group.id
+            product.group_name = getattr(group, "name", "") or ""
     db.flush()
-    return {"added": len(products), "ids": [str(product.id) for product in products]}
+    return {"added": len(products), "ids": [str(product.id) for product in products],
+            "groupId": group.id if group is not None else None}
 
 
 # --- 详情 -----------------------------------------------------------------

@@ -342,11 +342,17 @@ def complete_image_processing(db: Session, product: Product) -> None:
     if images is None:
         return
     db.flush()  # updated_at must describe the exact payload and readback proof.
+    # 只查 succeeded 会漏掉「图片线程上一轮把它标成 needs_review」的项：
+    # 那次失败的图片最终跑成功了，但 process_status 永远停在 needs_review，
+    # 于是成品仓库的自动化结果列表（要求 succeeded）一直看不到这件商品
+    # （2026-11-11 实测：负责人问「都处理好了为什么成品仓库没有」）。
+    # 这里把 needs_review 也查出来，核验通过后恢复成 succeeded。
     rows = (db.query(AutomationRunItem, AutomationRun)
             .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
             .filter(AutomationRunItem.product_id == product.id,
                     AutomationRun.owner_operator_id == product.operator_id,
-                    AutomationRunItem.process_status == "succeeded").all())
+                    AutomationRunItem.process_status.in_(
+                        ["succeeded", "needs_review"])).all())
     for row, run in rows:
         previous = dict(row.process_result or {})
         if previous.get("_imageGeneration") != product.automation_images.get("generation"):
@@ -360,6 +366,12 @@ def complete_image_processing(db: Session, product: Product) -> None:
                 "productId": str(product.id), "productUpdatedAt": product.updated_at,
                 "productRevision": product.revision,
             }
+            # 上一轮因图片问题被标成 needs_review 的，核验通过后必须恢复
+            # succeeded：否则成品仓库的「自动化结果」列表永远过滤掉它
+            # （那个列表要求 process_status == succeeded）。
+            if row.process_status == "needs_review":
+                row.process_status = "succeeded"
+                row.process_reason = ""
         else:
             previous.pop("_serverVerification", None)
             row.process_status = "needs_review"

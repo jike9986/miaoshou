@@ -12,6 +12,7 @@ import {
   CheckSquare,
   ChevronLeft,
   ChevronRight,
+  Eye,
   Globe,
   Inbox,
   Layers,
@@ -147,6 +148,8 @@ export function WarehousePage() {
   const automationQuery = useAutomationResults(automationPage, tab === "automation" && isTeacher);
   const importAutomationResults = useImportAutomationResults();
   const [automationSelected, setAutomationSelected] = useState<string[]>([]);
+  // 入库时选择归到成品仓库的哪个分组（分类）。空串 = 不分组。
+  const [importGroupId, setImportGroupId] = useState<string>("");
 
   const groupsQuery = useGroups();
   const createGroup = useCreateGroup();
@@ -642,6 +645,26 @@ export function WarehousePage() {
                   />
                   <span>本页 {formatCount(automationQuery.data.items.length)} 件</span>
                 </div>
+                {/* 入库分组选择：决定这批商品进成品仓库后归到哪个分类。 */}
+                <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-border-subtle bg-canvas-inset/40 px-3 py-2">
+                  <span className="text-xs text-fg-muted">入库分类</span>
+                  <select
+                    aria-label="入库分类"
+                    className="h-7 rounded-sm border border-border-subtle bg-canvas px-2 text-xs text-fg"
+                    value={importGroupId}
+                    onChange={(event) => setImportGroupId(event.target.value)}
+                  >
+                    <option value="">不分组</option>
+                    {(groupsQuery.data?.groups ?? []).map((group) => (
+                      <option key={group.id} value={String(group.id)}>
+                        {group.name}（{formatCount(group.count)}）
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-2xs text-fg-muted">
+                    选中的商品入库后会归到这个分类
+                  </span>
+                </div>
                 <div className="divide-y divide-border-subtle border-y border-border-subtle">
                   {automationQuery.data.items.map((item) => (
                     <div key={item.id} className="grid grid-cols-[20px_56px_minmax(0,1fr)] items-center gap-3 py-3 sm:grid-cols-[20px_56px_minmax(0,1fr)_auto]">
@@ -653,11 +676,34 @@ export function WarehousePage() {
                         aria-label={`选择 ${item.title || item.detailId}`}
                       />
                       <div className="size-14 overflow-hidden rounded-sm bg-canvas-inset"><RemoteImage src={item.image} className="size-full" /></div>
+                      {/* 标题可点：跳到商品详情页，看到的信息与成品仓库的商品一致
+                          （负责人口径 2026-11-11：这里要能点开看，不能只列个标题）。
+                          自动化结果此时还没入成品仓库，但详情页按 id 取的是同一条
+                          Product 记录，字段完全一样。 */}
                       <div className="min-w-0">
-                        <p className="line-clamp-2 text-sm font-medium text-fg">{item.title || "（无标题）"}</p>
+                        <button
+                          type="button"
+                          onClick={() => navigate(`/warehouse/${item.id}`)}
+                          className="text-left"
+                          title="查看商品详情"
+                        >
+                          <p className="line-clamp-2 text-sm font-medium text-fg underline-offset-2 hover:underline">
+                            {item.title || "（无标题）"}
+                          </p>
+                        </button>
                         <p className="mt-1 truncate text-xs text-fg-muted">{item.shopName || item.shopId} · {item.detailId}</p>
                       </div>
-                      <span className="hidden text-xs text-fg-muted sm:block">{item.status === "published" ? "已提交发布" : "处理完成"}</span>
+                      <div className="hidden items-center gap-2 sm:flex">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={<Eye className="size-3.5" />}
+                          onClick={() => navigate(`/warehouse/${item.id}`)}
+                        >
+                          查看
+                        </Button>
+                        <span className="text-xs text-fg-muted">{item.status === "published" ? "已提交发布" : "处理完成"}</span>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -899,7 +945,8 @@ export function WarehousePage() {
             label: importAutomationResults.isPending ? "正在加入…" : "加入成品仓库",
             icon: <PackageCheck className="size-3.5" />,
             disabled: importAutomationResults.isPending,
-            onClick: () => importAutomationResults.mutate(automationSelected, {
+            onClick: () => importAutomationResults.mutate(
+              { ids: automationSelected, groupId: importGroupId || null }, {
               onSuccess: (result) => {
                 setAutomationSelected([]);
                 toast.success(`已加入成品仓库 ${formatCount(result.added)} 件`);
