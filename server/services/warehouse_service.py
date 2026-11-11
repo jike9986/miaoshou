@@ -298,6 +298,15 @@ def category_default_weight(category_name: Any) -> float:
     return DEFAULT_WEIGHT_KG
 
 
+def category_min_weight(category_name) -> float:
+    """Allowed lightest source weight (kg) for this category."""
+    name = str(category_name or "").strip().casefold()
+    for keyword, weight in CATEGORY_MIN_WEIGHT.items():
+        if keyword.casefold() in name:
+            return weight
+    return WEIGHT_AUTO_MIN
+
+
 def _weight_hard_max_for(category_name: Any = "", override: Any = None) -> float:
     """原重上限（kg）：优先用处理设置里配的值，没配才按品类。
 
@@ -2157,6 +2166,22 @@ WEIGHT_RANGE = (0.05, 5.0)
 #   · 高于 WEIGHT_HARD_MAX（鞋子不可能这么重，多半是数据错）：跳过不处理，备注「重量异常」。
 #   · 两者之间正常处理。两个阈值都可按业务调整。
 WEIGHT_AUTO_MIN = 0.4
+
+# 各品类允许的最轻原重。负责人口径（2026-11-11）：拖鞋/洞洞鞋这类 EVA
+# 发泡材质天生就轻，上游采集 0.33kg 是真实值，不能被「太轻自动补基准」
+# 拉成 0.9。拖鞋最轻可以到 0.25，之后再加 0.1 增量。
+# 全局 0.4 对运动鞋是对的，对拖鞋过高。
+CATEGORY_MIN_WEIGHT = {
+    "拖鞋": 0.25,
+    "洞洞鞋": 0.25,
+    "凉鞋": 0.25,
+    "凉拖": 0.25,
+    "sandal": 0.25,
+    "selipar": 0.25,
+    "服饰": 0.2,
+}
+
+
 # 原重上限（不含重量增量）。负责人 2026-11-09 定：
 #   · 这个阈值只用来判断**上游原重**是否属于采集错误，与「重量增加」那 0.1 无关；
 #   · 可在处理设置里改（workflow.weightLimit），默认 1.5kg；
@@ -2216,7 +2241,13 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
     # 上限只比原重，不加增量（负责人 2026-11-09 口径）
     hard_max = _weight_hard_max_for(category_name, weight_limit)
     # 太轻/为空时补到的基准：鞋类用 0.4，暴走/轮滑用 0.5；取品类默认重量与 0.4 的较大者
-    base_min = max(WEIGHT_AUTO_MIN, min(category_default_weight(category_name), 0.6))
+    # 太轻时补到的基准 = 该品类允许的「最轻原重」。
+    #
+    # 不能再用 max(全局0.4, 品类默认0.6) —— 那会把 EVA 拖鞋真实的 0.33kg
+    # 强行拉到 0.6（负责人 2026-11-11 指出：拖鞋就是这么轻）。
+    # 现在只按品类下限：拖鞋/洞洞鞋 0.25，运动鞋 0.4。
+    # 只有「重量为空」或低于该下限时才补到下限值。
+    base_min = category_min_weight(category_name)
     for name, sku in targets:
         raw = info.get("weight") if sku is None else sku.get("weight")
         try:

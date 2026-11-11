@@ -158,13 +158,20 @@ def pricing_preserves_origin_price(original, payload) -> bool:
     """
     before = original.get("skuMap") or {}
     after = payload.get("skuMap") or {}
-    before_prices = sorted(
+    from collections import Counter
+
+    before_prices = Counter(
         str(_decimal_or_none(v.get("originPrice")))
         for v in before.values() if isinstance(v, Mapping))
-    after_prices = sorted(
+    after_prices = Counter(
         str(_decimal_or_none(v.get("originPrice")))
         for v in after.values() if isinstance(v, Mapping))
-    if before_prices == after_prices:
+    # 允许「SKU 变少」：颜色上限 9 个，41 色的草稿会被截到 9 色，
+    # SKU 从 287 条变 63 条是正常业务行为（负责人 2026-11-11 确认
+    # 「最多只能九个颜色」）。只要**保留下来的每个 SKU 采购价都没变**，
+    # 就说明定价没动采购价。判据：payload 的采购价计数逐项 <= 原稿。
+    if all(count <= before_prices.get(price, 0)
+           for price, count in after_prices.items()):
         return True
     for key, sku in before.items():
         if not isinstance(sku, Mapping):

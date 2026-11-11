@@ -267,12 +267,16 @@ def _prices_match(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> boo
     return True
 
 
-def pricing_preserves_origin_price(original: Mapping[str, Any],
-                                   actual: Mapping[str, Any]) -> bool:
-    """开了定价：`price` 可以变，`originPrice` 不能被改掉。
+def pricing_preserves_origin_price(original, actual) -> bool:
+    """开了定价：price 可以变，originPrice 不能被改掉。
 
-    采购价被模板顺手改掉是最隐蔽的一类事故——下次按模板重算时基数就错了。
+    允许 SKU 变少：颜色上限 9 个，41 色的草稿会被截到 9 色，
+    SKU 从 287 条变 63 条是正常业务行为（负责人 2026-11-11 确认
+    「最多只能九个颜色」）。判据改成「读回的每个采购价计数不超过原稿」，
+    而不是要求两份完全一致。
     """
+    from collections import Counter
+
     for field in _ORIGIN_PRICE_FIELDS:
         if _number(original.get(field)) != _number(actual.get(field)):
             return False
@@ -280,15 +284,14 @@ def pricing_preserves_origin_price(original: Mapping[str, Any],
     actual_sku = actual.get("skuMap") or {}
     if not isinstance(original_sku, Mapping) or not isinstance(actual_sku, Mapping):
         return True
-    for key, sku in original_sku.items():
-        if not isinstance(sku, Mapping):
-            continue
-        observed = actual_sku.get(key) or {}
-        for field in _ORIGIN_PRICE_FIELDS:
-            if _number(sku.get(field)) != _number(observed.get(field)):
-                return False
-    return True
-
+    before = Counter(
+        str(_number(v.get("originPrice")))
+        for v in original_sku.values() if isinstance(v, Mapping))
+    after = Counter(
+        str(_number(v.get("originPrice")))
+        for v in actual_sku.values() if isinstance(v, Mapping))
+    # 每个采购价在读回里的出现次数不能超过原稿（超了说明凭空多了 SKU）
+    return all(count <= before.get(price, 0) for price, count in after.items())
 
 def _retained_sku_images_unchanged(original: Mapping[str, Any],
                                    actual: Mapping[str, Any]) -> bool:
