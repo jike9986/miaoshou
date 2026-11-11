@@ -2551,6 +2551,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                 main_limit=int(_limits.get("main") or 0),
                 detail_limit=int(_limits.get("detail") or 0),
                 sku_limit=int(_limits.get("sku") or 0))
+            logger.info("截断后主图 %d 张（设置 main=%s）",
+                        len(payload.get("imgUrls") or []), _limits.get("main"))
         except Exception as exc:  # noqa: BLE001 - 截断失败不阻断入库
             logger.warning("按设置截断图片失败 detailId=%s：%s", detail_id, exc)
         # 主图的工厂图/尺码图剔除由 pre_save_gate 的 removeIndexes 负责，
@@ -2820,6 +2822,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         promote_report = {"error": str(exc)[:160]}
 
     key = product_key(detail_id, shop_id)
+    logger.info("build_product 前主图 %d 张 detailId=%s",
+                len(payload.get("imgUrls") or []), detail_id)
     fields = product_service.build_product(
         info=payload, detail_id=detail_id, shop_id=shop_id, account_id=account.id,
         shop_name=_shop_name(db, account, shop_id), language=language,
@@ -2979,18 +2983,31 @@ def apply_image_limits(payload, *, main_limit=0, detail_limit=0, sku_limit=0):
 
     report = {}
 
-    # 主图
-    main = [u for u in (payload.get("imgUrls") or []) if isinstance(u, str)]
+    # 主图：先去重再截断。
+    #
+    # 上游主图里同一张图重复出现很常见（1688 把一张图同时挂在多个位置），
+    # 不去重就按「前 N 张」取，重复占位会让真正的第 N 张被挤掉，
+    # 且入库时按唯一性去重后张数又变少（2026-11-11 实测：设 9 张、
+    # 上游 13 张，截出 9 张里 2 张重复，最终入库只有 7 张）。
+    main_raw = [u for u in (payload.get("imgUrls") or []) if isinstance(u, str)]
+    main = list(dict.fromkeys(main_raw))
+    if len(main) != len(main_raw):
+        report["main_dedup"] = {"before": len(main_raw), "after": len(main)}
     if main_limit and main_limit > 0 and len(main) > main_limit:
         report["main"] = {"before": len(main), "after": main_limit}
-        payload["imgUrls"] = main[:main_limit]
+        main = main[:main_limit]
+    payload["imgUrls"] = main
 
     # 详情图
     if detail_limit and detail_limit > 0:
-        detail = pre_save_check.extract_detail_image_urls(payload.get("notes"))
+        detail_raw = pre_save_check.extract_detail_image_urls(payload.get("notes"))
+        detail = list(dict.fromkeys(detail_raw))
+        if len(detail) != len(detail_raw):
+            report["detail_dedup"] = {"before": len(detail_raw), "after": len(detail)}
         if len(detail) > detail_limit:
             report["detail"] = {"before": len(detail), "after": detail_limit}
-            payload["notes"] = pre_save_check.detail_images_only(detail[:detail_limit])
+            detail = detail[:detail_limit]
+        payload["notes"] = pre_save_check.detail_images_only(detail)
 
     # 颜色 / SKU 图（同一维度：一个颜色一张 SKU 图）
     if sku_limit and sku_limit > 0:
