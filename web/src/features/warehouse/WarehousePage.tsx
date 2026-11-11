@@ -17,7 +17,6 @@ import {
   ListChecks,
   PackageCheck,
   PackageSearch,
-  Percent,
   RefreshCw,
   Rocket,
   SearchX,
@@ -811,8 +810,33 @@ export function WarehousePage() {
                   disabled={pageIds.length === 0}
                   title={allSelectedOnPage ? "取消本页全部选中" : "选中本页全部商品"}
                 >
-                  {allSelectedOnPage ? "取消本页全选" : "全选本页"}
+                  {allSelectedOnPage ? "取消全选" : "全选"}
                   {selectedCount > 0 && <span className="num text-fg-muted">（{selectedCount}）</span>}
+                </Button>
+                {/* 设置分类 / 删除放到全选旁边（负责人口径 2026-11-11）：
+                    这两个是最高频的整理动作，每次都要滚到底部操作条去点太绕。
+                    底部操作条因此只剩「认领 / 推送 / 发布」这类流程动作。 */}
+                <Button
+                  variant="secondary"
+                  size="md"
+                  icon={<Layers />}
+                  className="shrink-0"
+                  onClick={() => setBatchOpen(true)}
+                  disabled={selectedCount === 0}
+                  title="给选中商品设置分类"
+                >
+                  设置分类
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="md"
+                  icon={<Trash2 />}
+                  className="shrink-0"
+                  onClick={() => setDeleteOpen(true)}
+                  disabled={selectedCount === 0}
+                  title="删除选中商品"
+                >
+                  删除
                 </Button>
               </div>
             </div>
@@ -964,25 +988,9 @@ export function WarehousePage() {
           },
 
           {
-            label: "批量改价",
-            icon: <Percent className="size-3.5" />,
-            onClick: () => setTransformOpen(true),
-          },
-          {
-            label: "设置分类",
-            icon: <Layers className="size-3.5" />,
-            onClick: () => setBatchOpen(true),
-          },
-          {
             label: "发布",
             icon: <Send className="size-3.5" />,
             onClick: () => openPublish(selectedIds),
-          },
-          {
-            label: "删除",
-            icon: <Trash2 className="size-3.5" />,
-            danger: true,
-            onClick: () => setDeleteOpen(true),
           },
         ]}
       />

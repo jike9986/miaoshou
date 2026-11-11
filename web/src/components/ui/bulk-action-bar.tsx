@@ -67,10 +67,14 @@ export function BulkActionBar({
           exit={{ opacity: 0, y: 4, transition: { duration: 0.14, ease: ease.in } }}
           transition={{ duration: 0.2, ease: ease.out }}
           className={cn(
-            // 居中：用 left-0 right-0 + mx-auto + w-fit，而不是 left-1/2 + -translate-x-1/2。
-            // 后者在有 transform 的祖先里会失效（fixed 相对该祖先定位，中心点算错，
-            // 表现为整体偏右），前者靠外边距自适应，不受 translate 影响。
-            "fixed bottom-6 left-0 right-0 z-40 mx-auto flex h-12 w-fit max-w-[calc(100vw-1.5rem)] items-center gap-3 overflow-x-auto",
+            // 居中：left-0 right-0 + mx-auto + w-fit。
+            //
+            // 注意 w-fit 必须配合「不换行 + 不滚动」：一旦同时给 overflow-x-auto，
+            // 浏览器会把 w-fit 算成「内容最小宽度」，整条工具栏被压到容器左侧
+            // （负责人 2026-11-11 反馈「一直居中，现在都偏左了」）。
+            // 这里改用 whitespace-nowrap + 不设 overflow，宽度由内容撑开，
+            // mx-auto 才能真正居中；超宽时靠 max-w 截断而不是滚动。
+            "fixed bottom-6 left-0 right-0 z-40 mx-auto flex h-12 w-fit max-w-[calc(100vw-1.5rem)] items-center justify-center gap-3 whitespace-nowrap",
             "rounded-lg bg-inverse px-3 text-white shadow-3",
             className
           )}
