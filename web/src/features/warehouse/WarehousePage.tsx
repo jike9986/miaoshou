@@ -646,7 +646,25 @@ export function WarehousePage() {
                   />
                   <span>本页 {formatCount(automationQuery.data.items.length)} 件</span>
                 </div>
-                {/* 卡片网格：与成品仓库完全一致（同一个 ProductCard）。                    负责人口径 2026-11-11：自动化结果也要像成品仓库那样                    卡片显示名字 / 价格 / 类目，而不是一行文字。 */}                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">                  {automationQuery.data.items.map((item, index) => (                    <ProductCard                      key={item.id}                      product={item}                      index={index}                      selected={automationSelected.includes(item.id)}                      onToggle={(id) => setAutomationSelected((selected) => selected.includes(id)                        ? selected.filter((value) => value !== id)                        : [...selected, id])}                      onOpen={() => navigate(`/warehouse/${item.id}`)}                    />                  ))}                </div>
+                {/* 卡片网格：与成品仓库完全一致（同一个 ProductCard）。
+                    负责人口径 2026-11-11：自动化结果也要像成品仓库那样
+                    卡片显示名字 / 价格 / 类目，而不是一行文字。 */}
+                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                  {automationQuery.data.items.map((item, index) => (
+                    <ProductCard
+                      key={item.id}
+                      product={item}
+                      index={index}
+                      // 自动化结果还没人工编辑过，「谁编辑于何时」没有意义
+                      showEditor={false}
+                      selected={automationSelected.includes(item.id)}
+                      onToggle={(id) => setAutomationSelected((selected) => selected.includes(id)
+                        ? selected.filter((value) => value !== id)
+                        : [...selected, id])}
+                      onOpen={() => navigate(`/warehouse/${item.id}`)}
+                    />
+                  ))}
+                </div>
                 <Pagination
                   page={automationPage}
                   pageSize={24}

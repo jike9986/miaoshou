@@ -18,6 +18,9 @@ export interface ProductCardProps {
   onToggle: (id: string) => void;
   onOpen?: (product: Product) => void;
   index: number;
+  /** 是否显示「谁编辑于何时」那一行。成品仓库要（看得出谁改过），
+   *  自动化结果不要（还没人工编辑过，显示“谁改过”没意义且占行）。 */
+  showEditor?: boolean;
 }
 
 function priceText(product: Product): { symbol: string; amount: string; range: boolean } | null {
@@ -62,7 +65,15 @@ function isMissingTitle(product: Product): boolean {
   return !(raw.length >= 4 && /[\u4e00-\u9fa5A-Za-z]{2,}/.test(raw));
 }
 
-export function ProductCard({ product, isMember = false, selected, onToggle, onOpen, index }: ProductCardProps) {
+export function ProductCard({
+  product,
+  isMember = false,
+  selected,
+  onToggle,
+  onOpen,
+  index,
+  showEditor = true,
+}: ProductCardProps) {
   const price = priceText(product);
   const groupName = product.group?.trim();
   const weight = weightText(product);
@@ -228,7 +239,7 @@ export function ProductCard({ product, isMember = false, selected, onToggle, onO
         )}
 
         {/* 谁改的：只有后端真的给了 updatedBy 才显示。 */}
-        {product.updatedBy ? (
+        {showEditor && product.updatedBy ? (
           <p
             className="flex items-center gap-1 truncate text-2xs leading-4 text-fg-muted"
             title={`最后改动：${product.updatedBy}${
