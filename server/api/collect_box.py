@@ -127,7 +127,14 @@ def process(
                 allow_image_review=bool(payload.allowImageReview),
                 skip_image_review=bool(payload.skipImageReview),
                 operator_id=getattr(operator, "id", None),
-                automation_result=True)
+                automation_result=True,
+                # 处理设置里的数量 = 保留几张（SKU 图数量 = 颜色数），
+                # 主流程按它真正截断主图/详情图/颜色。
+                image_limits={
+                    "main": int(payload.mainImageCount or 0),
+                    "sku": int(payload.skuImageCount or 0),
+                    "detail": int(payload.detailImageCount or 0),
+                })
     except MiaoshouError as exc:
         raise map_upstream_error(exc) from None
     finally:

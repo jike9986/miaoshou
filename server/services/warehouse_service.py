@@ -2339,7 +2339,9 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                           allow_image_review: bool = False,
                           skip_image_review: bool = False,
                           operator_id: int | None = None,
-                          automation_result: bool = False) -> dict[str, Any]:
+                          automation_result: bool = False,
+                           image_limits: Mapping[str, Any] | None = None
+                           ) -> dict[str, Any]:
     """拉详情 → 按模板定价（可选）→ 入库（主图截断 9 张）。
 
     `allow_title_review` / `allow_image_review` 是人工复核的确认开关：老版默认
@@ -2349,6 +2351,10 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     自动化结果归本次操作员所有；学员不能覆盖共享成品或其他人的处理结果。
     """
     from services import product_service
+
+    # 处理设置里的数量 = 保留几张（SKU 图数量 = 颜色数）
+    _limits: Mapping[str, Any] = (image_limits
+                                 if isinstance(image_limits, Mapping) else {})
 
     key = product_key(detail_id, shop_id)
     if automation_result:
@@ -2535,6 +2541,18 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         detail_rows = rows_index(analyzed.get("detail") or [])
         image_report["detail"] = clean_detail_images(
             payload, limit=DETAIL_IMAGE_HARD_LIMIT, rows_by_url=detail_rows)
+        # 按处理设置「真正截断」主图 / 详情图 / 颜色：
+        # 界面上的数字是保留几张（SKU 图数量 = 颜色数），不是翻译几张。
+        # 顺序必须在 clean 之后：先删废图（厂家宣传/尺码表），再按上限取前 N 张，
+        # 这样设 9 时补进来的是好图而不是废图。
+        try:
+            image_report["limits"] = apply_image_limits(
+                payload,
+                main_limit=int(_limits.get("main") or 0),
+                detail_limit=int(_limits.get("detail") or 0),
+                sku_limit=int(_limits.get("sku") or 0))
+        except Exception as exc:  # noqa: BLE001 - 截断失败不阻断入库
+            logger.warning("按设置截断图片失败 detailId=%s：%s", detail_id, exc)
         # 主图的工厂图/尺码图剔除由 pre_save_gate 的 removeIndexes 负责，
         # 闸门在主流程后面才算，所以这里只把 OCR 结果记下来，避免重复识别。
         image_report["ocr"] = {key: len(value) for key, value in analyzed.items()}
@@ -2949,6 +2967,59 @@ def apply_transformed_payload(db: Session, product: Product,
     bump_revision(product)
     db.flush()
 
+
+def apply_image_limits(payload, *, main_limit=0, detail_limit=0, sku_limit=0):
+    """按处理设置真正截断主图 / 详情图 / SKU 图与颜色。
+
+    负责人口径（2026-11-11）：界面上的「主图数量 / 详情图数量 / SKU 图数量」
+    是**保留几张**，不是「翻译几张」；SKU 图数量 = 颜色数，设 4 就只保留
+    4 个颜色（连带删其余 SKU）。0 表示不限制。
+    """
+    from services import pre_save_check
+
+    report = {}
+
+    # 主图
+    main = [u for u in (payload.get("imgUrls") or []) if isinstance(u, str)]
+    if main_limit and main_limit > 0 and len(main) > main_limit:
+        report["main"] = {"before": len(main), "after": main_limit}
+        payload["imgUrls"] = main[:main_limit]
+
+    # 详情图
+    if detail_limit and detail_limit > 0:
+        detail = pre_save_check.extract_detail_image_urls(payload.get("notes"))
+        if len(detail) > detail_limit:
+            report["detail"] = {"before": len(detail), "after": detail_limit}
+            payload["notes"] = pre_save_check.detail_images_only(detail[:detail_limit])
+
+    # 颜色 / SKU 图（同一维度：一个颜色一张 SKU 图）
+    if sku_limit and sku_limit > 0:
+        for prop in (payload.get("skuPropertyList") or []):
+            if not isinstance(prop, dict):
+                continue
+            if str(prop.get("attrId") or "") != "100000":
+                continue
+            values = [v for v in (prop.get("attrValueList") or [])
+                      if isinstance(v, dict)]
+            if len(values) <= sku_limit:
+                break
+            kept = values[:sku_limit]
+            kept_ids = {str(v.get("attrValueId") or "") for v in kept}
+            all_ids = {str(v.get("attrValueId") or "") for v in values}
+            report["colors"] = {"before": len(values), "after": len(kept)}
+            prop["attrValueList"] = kept
+            sku_map = payload.get("skuMap")
+            if isinstance(sku_map, dict):
+                dropped = 0
+                for key in list(sku_map.keys()):
+                    parts = [x for x in str(key).split(";") if x]
+                    removed = [p for p in parts if p in all_ids and p not in kept_ids]
+                    if removed:
+                        sku_map.pop(key, None)
+                        dropped += 1
+                report["sku"] = {"dropped": dropped}
+            break
+    return report
 
 def clean_detail_images(payload: dict[str, Any], *,
                        limit: int = DETAIL_IMAGE_HARD_LIMIT,
