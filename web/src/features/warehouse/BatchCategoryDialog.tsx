@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FolderPlus, Tag } from "lucide-react";
 import { apiErrorMessage } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { isConflictBusy, revisionConflictOf, type RevisionConflict } from "@/lib/conflict";
 import { isLanguageMismatch } from "@/lib/constants";
 import { useBatchCategory, useCategoryTree, useCreateGroup, useGroups } from "@/lib/queries";
@@ -13,7 +14,6 @@ import { CategoryPicker, type PickerNode } from "@/features/warehouse/CategoryPi
 import {
   Button,
   Dialog,
-  DropdownSelect,
   Field,
   InlineError,
   Input,
@@ -275,20 +275,45 @@ export function BatchCategoryDialog({
               <SkeletonRows rows={3} />
             ) : (
               <div className="flex flex-col gap-3">
-                <Field label="目标分组" hint="分组用于仓库内部归类，不影响平台类目">
-                  <DropdownSelect
-                    value={groupId}
-                    onChange={setGroupId}
-                    options={groups.map((group) => ({
-                      value: group.id,
-                      label: group.name,
-                      description: `${group.count} 件`,
-                    }))}
-                    placeholder={groups.length === 0 ? "还没有分组，先创建一个" : "选择分组"}
-                    searchable
-                    emptyText="没有匹配的分组"
-                  />
-                </Field>
+                <div className="flex items-baseline justify-between">
+                  <Field label="目标分组">
+                    <span />
+                  </Field>
+                  <span className="text-2xs text-fg-muted">
+                    分组用于仓库内部归类，不影响平台类目
+                  </span>
+                </div>
+                {/* 分组全部平铺（负责人 2026-11-11：下拉要展开还要滚动，
+                    被弹窗边缘挡住；分组数量就几个，直接列出来最好用）。
+                    点卡片选中，再点一次取消；新建分组输入框放在列表后面。 */}
+                <div className="grid max-h-64 grid-cols-2 gap-2 overflow-y-auto rounded-md border border-border-subtle bg-canvas-inset/60 p-2 sm:grid-cols-3">
+                  {groups.map((group) => {
+                    const active = groupId === group.id;
+                    return (
+                      <button
+                        key={group.id}
+                        type="button"
+                        onClick={() => setGroupId(active ? null : group.id)}
+                        aria-pressed={active}
+                        className={cn(
+                          "flex min-h-[52px] flex-col justify-center rounded-md border px-3 py-2 text-left",
+                          "transition-colors duration-fast ease-in-out",
+                          active
+                            ? "border-brand-600 bg-brand-50 text-brand-700 ring-1 ring-brand-600"
+                            : "border-border bg-surface text-fg hover:border-border-strong"
+                        )}
+                      >
+                        <span className="truncate text-xs font-medium">{group.name}</span>
+                        <span className="num mt-0.5 text-2xs text-fg-muted">{group.count} 件</span>
+                      </button>
+                    );
+                  })}
+                  {groups.length === 0 && (
+                    <p className="col-span-full text-center text-xs text-fg-muted">
+                      还没有分组，在下面创建一个
+                    </p>
+                  )}
+                </div>
 
                 <div className="rounded-md border border-border-subtle bg-canvas-inset/60 p-3">
                   <p className="text-xs font-medium text-fg-secondary">新建分组</p>
