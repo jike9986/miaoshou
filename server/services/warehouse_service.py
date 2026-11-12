@@ -740,10 +740,15 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
             query = query.filter(Product.group_name == text)
     if group:
         query = query.filter(Product.group_name == str(group))
-    if account_id not in (None, "") and not member_view:
-        text = str(account_id)
-        if text.isdigit():
-            query = query.filter(Product.account_id == int(text))
+    # 成品仓库列表**不按妙手账号过滤**（负责人口径 2026-11-12：
+    # 「从自动化结果把鞋加入成品仓库之后怎么只显示这个了其他的都不显示了」）。
+    #
+    # 顶部账号下拉只是「用哪个账号的妙手接口」的选择器，不是仓库的数据边界 ——
+    # 仓库里同时躺着罗蔓 / 蒋新宇 / 赖彩红三个账号入库的商品，
+    # 切个账号就把其他账号的 71 件藏起来，运营会以为商品丢了。
+    # 分组计数（facets）本来就不按账号过滤，两边不一致也会让人困惑。
+    # 真需要按账号看的时候，搜索框里输入账号名对应的商品即可。
+    # （member_view 学员视角的隔离逻辑不受影响 —— 那是权限边界，保留。）
     if status:
         if member_view and status == "published":
             own_success = _formal_publish_query(db).filter(
@@ -3328,12 +3333,29 @@ def _merge_spec_translation(current_props, translated_props):
             continue
         cur_values = [v for v in (cur.get("attrValueList") or []) if isinstance(v, dict)]
         twin_values = [v for v in (twin.get("attrValueList") or []) if isinstance(v, dict)]
-        if len(cur_values) != len(twin_values) or not cur_values:
+        if not cur_values or not twin_values:
             continue
-        for cv, tv in zip(cur_values, twin_values):
-            label = str(tv.get("attrValue") or "").strip()
-            if label:
-                cv["attrValue"] = label
+        if len(cur_values) == len(twin_values):
+            # 正常情况：两边一一对应，按顺序覆盖
+            for cv, tv in zip(cur_values, twin_values):
+                label = str(tv.get("attrValue") or "").strip()
+                if label:
+                    cv["attrValue"] = label
+        else:
+            # 数量不等：翻译接口有时只返回部分值（实测返回 1 个、本地 5 个），
+            # 直接跳过会导致「只有第一个 SKU 翻译了、其余仍是中文」
+            # （2026-11-12 负责人指出）。
+            # 不能按位置硬配（会张冠李戴），改成按 attrValueId 匹配，
+            # 匹配不到的保持中文 —— 宁可少翻，也不能把颜色配错。
+            by_id = {str(tv.get("attrValueId") or ""): tv for tv in twin_values}
+            for cv in cur_values:
+                vid = str(cv.get("attrValueId") or "")
+                tv = by_id.get(vid) if vid else None
+                if tv is None:
+                    continue
+                label = str(tv.get("attrValue") or "").strip()
+                if label:
+                    cv["attrValue"] = label
     return merged
 
 
