@@ -42,6 +42,18 @@ export interface AutomationSettings {
   detailImageCount: number;
   /** 图片并发数 1–9 */
   imageConcurrency: number;
+  /**
+   * 商品并行数 1–5（同时处理几件不同商品）。
+   *
+   * 单件耗时瓶颈全在妙手接口往返（约 12 秒）和 AI 翻译（20-30 秒/张，
+   * 服务端已 50 并发），本地计算不到 1 秒。所以提速唯一有效的手段是
+   * 多件并行 —— 一件在等妙手响应时，另一件可以同时在跑。
+   *
+   * 后端锁按「账号+商品」加（automation-process:{account}:{key}），
+   * 不同商品之间本来就不互斥，并发是安全的。
+   * 默认 1（与改造前行为一致），用户可调到 3 或 5。
+   */
+  itemConcurrency: number;
   /** 重量增加 kg（0–5，步进 0.01） */
   weightExtraKg: number;
   /** 原重上限（kg）：只比采集原重，不含重量增加 */
@@ -70,6 +82,7 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
   skuImageCount: 5,
   detailImageCount: 5,
   imageConcurrency: 3,
+  itemConcurrency: 1,
   // 与老版 0.1.4 index.html 的默认 value 完全一致：
   //   weight-increment=0.1、package-length=30、package-width=20、package-height=10
   weightExtraKg: 0.1,
@@ -106,6 +119,7 @@ const PERSISTED_KEYS: Array<keyof AutomationSettings> = [
   "skuImageCount",
   "detailImageCount",
   "imageConcurrency",
+  "itemConcurrency",
   "weightExtraKg",
   "weightLimitKg",
   "lengthCm",

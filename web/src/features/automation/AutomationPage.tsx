@@ -1034,8 +1034,26 @@ export function AutomationPage() {
     // 不能用「设置上限 × 商品数」当分母（那是 9+9+9 的理论最大值）。
     let imagePlannedActual = 0;
 
-    for (const target of targets) {
-      if (scope !== executionScopeRef.current) return;
+    // 多件商品并行（负责人口径 2026-11-12：「可以多件商品并行处理」）。
+    //
+    // 单件的耗时瓶颈全在妙手接口往返（约 12 秒）和 AI 翻译（20-30 秒/张），
+    // 本地计算不到 1 秒。一件在等上游响应时，另一件完全可以同时在跑 ——
+    // 这是唯一有效的提速手段。
+    //
+    // 后端锁按「账号 + 商品」加（automation-process:{account}:{key}），
+    // 不同商品之间不互斥，并发是安全的。
+    //
+    // 实现：把串行 for 改成「取号 + 并发池」。每个 worker 循环取下一个
+    // 未处理商品，直到取完或用户停止。itemConcurrency=1 时行为与原来完全一致。
+    const parallel = Math.max(1, Math.min(5, Math.trunc(runSettings.itemConcurrency || 1)));
+    const queue = [...targets];
+    const takeNext = (): (typeof targets)[number] | undefined => queue.shift();
+    // 全批中止标志：一个 worker 判定要停（用户点了停止/页面已切走），
+    // 其他 worker 也要停，不能让它们继续处理下一件。
+    let batchAborted = false;
+    const worker = async (): Promise<void> => {
+      for (let target = takeNext(); target && !batchAborted; target = takeNext()) {
+      if (scope !== executionScopeRef.current) { batchAborted = true; break; }
       if (stopRef.current) {
         setRun((prev) => ({
           ...prev,
@@ -1049,7 +1067,8 @@ export function AutomationPage() {
           endedAt: Date.now(),
         }));
         toast.info(`已停止：完成 ${done} 件，成功 ${done - failed} 件`);
-        return;
+        batchAborted = true;
+        break;
       }
 
       setStages((prev) => ({ ...prev, [target.key]: "running" }));
@@ -1064,7 +1083,7 @@ export function AutomationPage() {
         const itemId = persistentItems.current.get(target.key);
         if (!runId || !itemId) throw new Error("任务记录缺少商品明细，已停止以免丢失执行状态");
         await startRunItemMutation.mutateAsync({ runId, itemId });
-        if (scope !== executionScopeRef.current) return;
+        if (scope !== executionScopeRef.current) { batchAborted = true; break; }
         // 串行 await：一件处理完再下一件，避免后端并发写库
         const result = await processItem.mutateAsync({
           detailId: target.detailId,
@@ -1088,7 +1107,7 @@ export function AutomationPage() {
             allowImageReview: true,
           },
         });
-        if (scope !== executionScopeRef.current) return;
+        if (scope !== executionScopeRef.current) { batchAborted = true; break; }
         processResponseReceived = true;
         // 产品标准自动修复的提示（后端 product_standard 在落库前跑
         // validate → repair → 再 validate）。批量自动化里操作者看不到单件的
@@ -1137,7 +1156,7 @@ export function AutomationPage() {
             draftVerified: result.product?.draftVerified,
           },
         });
-        if (scope !== executionScopeRef.current) return;
+        if (scope !== executionScopeRef.current) { batchAborted = true; break; }
         // 只有真的提交了翻译任务才算「图片处理完成」。
         // 之前这里加的是商品自带图片数，勾不勾「图片」数字都涨，等于假数据。
         if (automationImagesPending(result.images) && result.product?.id) {
@@ -1218,7 +1237,7 @@ export function AutomationPage() {
               } catch {
                 // 恢复接口会把“处理成功、发布仍排队”的项目转为待核对。
               }
-              if (scope !== executionScopeRef.current) return;
+              if (scope !== executionScopeRef.current) { batchAborted = true; break; }
             } else {
               setRun((prev) => ({ ...prev, stage: `正式发布：${target.title || target.detailId}` }));
               try {
@@ -1229,10 +1248,10 @@ export function AutomationPage() {
                   title: target.title || target.detailId,
                   resume: false,
                 });
-                if (scope !== executionScopeRef.current) return;
+                if (scope !== executionScopeRef.current) { batchAborted = true; break; }
                 if (started === "stopped" || stopRef.current) {
                   if (started === "started") await recordStoppedPublish({ runId, itemId });
-                  if (scope !== executionScopeRef.current) return;
+                  if (scope !== executionScopeRef.current) { batchAborted = true; break; }
                   retainedKeys.add(target.key);
                   setPublishQueued(target.key);
                   done += 1;
@@ -1266,7 +1285,7 @@ export function AutomationPage() {
                   confirm: true,
                   claimOnly: false,
                 });
-                if (scope !== executionScopeRef.current) return;
+                if (scope !== executionScopeRef.current) { batchAborted = true; break; }
                 publishSubmitted += response.published.length;
                 const outcome = automationPublishOutcome(response);
                 if (!outcome.accepted) retainedKeys.add(target.key);
@@ -1280,7 +1299,7 @@ export function AutomationPage() {
                     failures: response.failures,
                   },
                 });
-                if (scope !== executionScopeRef.current) return;
+                if (scope !== executionScopeRef.current) { batchAborted = true; break; }
                 setStages((prev) => ({ ...prev, [target.key]: outcome.status }));
                 publishIssues += 1;
                 failures.push({
@@ -1291,13 +1310,13 @@ export function AutomationPage() {
                   reason: outcome.reason,
                 });
               } catch (publishError) {
-                if (scope !== executionScopeRef.current) return;
+                if (scope !== executionScopeRef.current) { batchAborted = true; break; }
                 retainedKeys.add(target.key);
                 const reason = apiErrorMessage(publishError);
                 try {
                   await recordPublishMutation.mutateAsync({ runId, itemId, status: "needs_review", reason });
                 } catch { /* 保留服务端 running 状态，页面恢复时会转成待核对 */ }
-                if (scope !== executionScopeRef.current) return;
+                if (scope !== executionScopeRef.current) { batchAborted = true; break; }
                 setStages((previous) => ({ ...previous, [target.key]: "needs_review" }));
                 publishIssues += 1;
                 failures.push({
@@ -1316,7 +1335,7 @@ export function AutomationPage() {
             } catch {
               // 下次打开时由恢复接口关闭未开始的发布项。
             }
-            if (scope !== executionScopeRef.current) return;
+            if (scope !== executionScopeRef.current) { batchAborted = true; break; }
             setStages((previous) => ({ ...previous, [target.key]: "needs_review" }));
             publishIssues += 1;
             failures.push({
@@ -1328,7 +1347,7 @@ export function AutomationPage() {
           }
         }
       } catch (error) {
-        if (scope !== executionScopeRef.current) return;
+        if (scope !== executionScopeRef.current) { batchAborted = true; break; }
         retainedKeys.add(target.key);
         const uncertain = processResponseReceived;
         if (uncertain) {
@@ -1346,7 +1365,7 @@ export function AutomationPage() {
               runId, itemId, status: uncertain ? "needs_review" : "failed", reason,
             });
           } catch { /* 遗留 running 项在下次打开时会进入待核对 */ }
-          if (scope !== executionScopeRef.current) return;
+          if (scope !== executionScopeRef.current) { batchAborted = true; break; }
         }
         // 留住明细：toast 三秒就没了，失败原因必须能在页面上回看
         failures.push({
@@ -1369,7 +1388,10 @@ export function AutomationPage() {
         failedKeys: [...failedKeys],
         failures: [...failures],
       }));
-    }
+      }
+    };
+    // 起 parallel 个 worker，等全部结束
+    await Promise.all(Array.from({ length: parallel }, () => worker()));
 
     if (scope !== executionScopeRef.current) return;
     if (stopRef.current) {

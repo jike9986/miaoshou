@@ -300,6 +300,22 @@ export function ProcessSettings({
               全部塞进一行（负责人 2026-11-09 要求）：每个框收窄到 74px，
               不再 flex-wrap —— 换行会让「包裹高」掉到第三行，看着像另一个分组。 */}
           <div className="flex flex-nowrap items-end gap-x-2">
+            {/* 商品并行数：单件瓶颈全在妙手接口往返与 AI 翻译，本地不到 1 秒，
+                所以多件并行是唯一有效的提速手段（负责人 2026-11-12
+                「可以多件商品并行处理」）。默认 1，与改造前行为一致。 */}
+            <Field label="并行件数" htmlFor="item-concurrency" className="w-[74px] shrink-0">
+              <NumberInput
+                id="item-concurrency"
+                value={settings.itemConcurrency}
+                onChange={(value) => onChange({ itemConcurrency: value ?? 1 })}
+                min={1}
+                max={5}
+                step={1}
+                decimals={0}
+                suffix="件" 
+                disabled={disabled}
+              />
+            </Field>
             <Field label="主图数量" htmlFor="main-image-count" className="w-[74px] shrink-0">
               <NumberInput
                 id="main-image-count"
