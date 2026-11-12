@@ -2677,6 +2677,10 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         site=str(info.get("site") or account.site or ""))
     if spec_attr_ids:
         props = _clean_color_props(payload)
+        # 尺码值也要清：供应商在码数后面写销售建议，翻译后超 50 字符被妙手拒收。
+        _size_cleaned = _clean_size_values(payload)
+        if _size_cleaned:
+            logger.info("尺码值清洗 %d 条 detailId=%s", _size_cleaned, detail_id)
     else:
         # 拿不到类目 attrId 就不要清洗颜色。
         #
@@ -3273,7 +3277,11 @@ def merge_translated_fields(payload: dict[str, Any],
 
 # 维度语义归类：颜色/尺码，兼容中英马三语 + 上游 attrId。
 _COLOR_DIM_NAMES = ("颜色", "色彩", "color", "colour", "warna")
-_SIZE_DIM_NAMES = ("尺码", "尺寸", "size", "saiz", "ukuran")
+# 「规格」在供应商草稿里几乎总是尺码维度（M/L/XL、34-36 这种），
+# 但也可能是任意属性。不把它归到尺码，妙手补完 attrId 后两个维度都叫
+# Warna，颜色清洗会直接报「商品有 2 个颜色属性，无法确定用哪一个」
+# （2026-11-12 实测：3527583908 颜色 5 个 + 规格 4 个 → 整件失败）。
+_SIZE_DIM_NAMES = ("尺码", "尺寸", "规格", "size", "saiz", "ukuran", "spesifikasi")
 _COLOR_DIM_IDS = {"100000"}
 _SIZE_DIM_IDS = {"100007"}
 
@@ -3383,9 +3391,16 @@ def _fill_spec_attr_ids(db: Session, client: Any, payload: dict[str, Any], *,
         name = str(prop.get("attrName") or prop.get("propName") or "").casefold()
         values = [str(av.get("attrValue") or "") for av in (prop.get("attrValueList") or [])
                   if isinstance(av, dict)]
-        # 按属性名判断维度；名字认不出时按取值形态判断（纯数字/区间是尺码）
-        is_size = ("size" in name or "saiz" in name or "尺码" in name or "尺寸" in name)
-        is_color = ("color" in name or "colour" in name or "warna" in name or "颜色" in name)
+        # 按属性名判断维度；名字认不出时按取值形态判断（纯数字/区间是尺码）。
+        # 「规格」必须算尺码：供应商常写「颜色 + 规格」两维，规格里是
+        # M/L/XL 或 34-36。不认它的话两个维度都会落到下面的 elif 分支，
+        # 双双被赋成颜色 attrId 100000，随后颜色清洗报
+        # 「商品有 2 个颜色属性（Warna、Warna），无法确定用哪一个」
+        # （2026-11-12 实测：3527583908 整件失败）。
+        is_size = ("size" in name or "saiz" in name or "尺码" in name
+                   or "尺寸" in name or "规格" in name or "spesifikasi" in name)
+        is_color = ("color" in name or "colour" in name or "warna" in name
+                    or "颜色" in name or "色彩" in name)
         if not is_size and not is_color:
             size_like = sum(1 for v in values if v and v.replace("-", "").isdigit())
             is_size = bool(values) and size_like * 2 >= len(values)
@@ -3490,6 +3505,48 @@ def _strip_null_sku_fields(payload: dict[str, Any]) -> int:
         sku_map[key] = cleaned
     return removed
 
+
+def _clean_size_values(payload: dict[str, Any]) -> int:
+    """把尺码维度里「M（34-36）运动鞋建议拍大一码」这类值截成 M（34-36）。
+
+    供应商在尺码值里塞销售建议，翻译成马来语后必然超过妙手 50 字符硬限：
+      「Kasut sukan M(34-36) disarankan untuk memilih saiz satu nombor
+        lebih besar.」长度超过50个字符
+    （2026-11-12 实测：3527583908 整件失败）。
+
+    只保留「码数本体」：括号里的尺码区间、字母码、纯数字。
+    返回改动的条数。
+    """
+    import re as _re
+
+    changed = 0
+    for prop in (payload.get("skuPropertyList") or []):
+        if not isinstance(prop, dict):
+            continue
+        if _spec_kind(str(prop.get("attrName") or ""),
+                      str(prop.get("attrId") or "")) != "size":
+            continue
+        for av in (prop.get("attrValueList") or []):
+            if not isinstance(av, dict):
+                continue
+            raw = str(av.get("attrValue") or "").strip()
+            if not raw:
+                continue
+            # 「M（34-36）运动鞋建议拍大一码」→「M（34-36）」
+            # 「L(37-39) 建议拍大一码」      →「L(37-39)」
+            # 「2XL（43-45）…」              →「2XL（43-45）」
+            m = _re.match(r"^([0-9A-Za-z]+)\s*[（(]\s*([0-9]+\s*[-–~]\s*[0-9]+)\s*[）)]",
+                          raw)
+            if m:
+                cleaned = "%s(%s)" % (m.group(1), m.group(2).replace(" ", ""))
+            else:
+                # 「40」「XL」「40-41」这种本来就干净的保留；
+                # 其余取第一个空白前 / 第一个中文前的片段
+                cleaned = _re.split(r"[\s\u4e00-\u9fff]", raw, maxsplit=1)[0].strip()
+            if cleaned and cleaned != raw and len(cleaned) <= 20:
+                av["attrValue"] = cleaned
+                changed += 1
+    return changed
 
 def _clean_color_props(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """就地规范化颜色属性值，返回清洗后的 skuPropertyList。

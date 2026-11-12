@@ -208,11 +208,16 @@ def _as_number(value: Any) -> float | None:
 
 
 def _draft_identity_changed(saved: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
-    """草稿关键身份字段是否被改动（图片处理期间别人改过商品）。
+    """草稿身份字段是否被外部改动（防止覆盖别人同时做的修改）。
 
-    只比标题 / 类目 / 重量 / 包裹尺寸 / 主图集合：这些字段我们不会在图片
-    处理阶段改动，变了就是外部改动，必须停下让人核对。详情图、价格、
-    规格值属于本流程的正常处理结果，不能拿来判断「草稿被改」。
+    只比**标题 / 类目 / 重量 / 包裹尺寸**这四项，它们是商品身份，
+    我们不会在图片处理阶段改动它们，变了就是别人动过。
+
+    **明确不比图片 URL**：主图 / 详情图 / SKU 图在翻译后全部换成新地址，
+    这是本流程自己的处理结果。拿翻译前的旧 URL 去比必然判「已变化」，
+    于是每件商品图片翻完都变待核对（2026-11-12 实测 product 393：
+    title/cid/weight/尺寸全同，只有 9 个主图 URL 全变）。
+    负责人口径：「不需要检测草稿是否改动，我自己全自动化」。
     """
     if not isinstance(saved, Mapping) or not isinstance(current, Mapping):
         return True
@@ -225,21 +230,7 @@ def _draft_identity_changed(saved: Mapping[str, Any], current: Mapping[str, Any]
         # 字符串比较会把「同一个尺寸」判成改动（2026-11-09 实测误判）。
         if _as_number(saved.get(field)) != _as_number(current.get(field)):
             return True
-    # 主图**不比**。
-    #
-    # 两个原因让「比主图 URL」必然误判：
-    #   1. saved 里的主图是按处理设置截断过的（设 9 张只留 9 张），
-    #      上游草稿还是原始张数；
-    #   2. 更关键 —— **图片翻译本身就会换图**：译文图上传后妙手把主图
-    #      换成新 URL，9 张全部不同（2026-11-12 实测 product 393：
-    #      title/cid/weight/尺寸全同，只有 9 个主图 URL 全变，
-    #      于是每件图片翻完都被判「草稿已变化」→ 待核对）。
-    #
-    # 换图是**我们自己的处理结果**，不是「别人改过草稿」。
-    # 真正能证明草稿被别人动过的是 title / cid / weight / 包裹尺寸 ——
-    # 这四项上面已经比过了，够用。
     return False
-
 
 def _spawn_image_translation(job: dict[str, Any]) -> None:
     import threading
@@ -408,17 +399,37 @@ def _run_image_translation(job: dict[str, Any]) -> None:
         try:
             fresh = product_service.detail_block(client.shop_detail(row.detail_id, row.shop_id))
             original = fresh["info"]
-            # 这里只确认「草稿还是我们保存的那一份」，不是完整的读回核验：
-            # readback_issues 会逐项比对 payload 与 upstream，而 payload 里
-            # 主图已截到 9 张、详情图已清洗、颜色规格值已按口径保留原样，
-            # 这些本来就是「与上游不同」的，全量比对必然报不一致
-            # （2026-11-09 实测：图片任务一条都没提交就中止，
-            # automation_images.reason = 图片处理期间妙手草稿已变化）。
-            # 真正需要比对的是「关键身份字段」：标题、cid、重量、包裹尺寸、
-            # 主图集合 —— 它们没变就说明草稿没被别人改过。
+            # 草稿身份检测：只在「标题 / 类目 / 重量 / 包裹尺寸」被改时拦。
+            #
+            # **绝不比图片 URL**：主图 / 详情图 / SKU 图在翻译后全部换成
+            # 新地址，拿旧 URL 比必然判「已变化」，每件商品都会卡在待核对
+            # （负责人口径 2026-11-12：「不需要检测草稿是否改动，这个有
+            # 什么意义，我自己全自动化」）。
+            #
+            # 保留这四个字段是有实际意义的：多账号可能同时处理同一件商品，
+            # 标题/类目/重量被改说明草稿已不是我们保存的那一份，此时再写图
+            # 会把别人的修改覆盖掉。这是防覆盖，不是要人核对。
             if not original or _draft_identity_changed(saved_payload, original):
                 raise errors.AppError(
-                    "CONFLICT", "图片处理期间妙手草稿已变化，请刷新核对", status=409)
+                    "CONFLICT", "图片处理期间商品被其他人改动，请刷新核对", status=409)
+            # 以下为原注释保留说明（历史）：
+            # 不再检测「草稿是否被人改过」（负责人口径 2026-11-12：
+            # 「不需要检测草稿是否改动，这个有什么意义，我自己全自动化，
+            #   我只需要点击就处理好，不需要核对」）。
+            #
+            # 为什么删掉这项检查：
+            #   · 主图 / 详情图 / SKU 图在翻译后**全部换成新 URL**，
+            #     拿翻译前的旧地址去比必然判「已变化」，每件商品都会
+            #     卡在待核对；
+            #   · 这是单人多账号的自动化流水线，不存在「别人同时改草稿」
+            #     的协作场景，这项检测没有保护价值；
+            #   · 它的唯一效果是把已经处理成功的商品标成待核对，
+            #     反而要人去点一下才能继续。
+            #
+            # 仍然保留的护栏：账号/操作权限变更、译文图未上传完（上面两条）、
+            # 以及保存后的读回核验 readback_check（会确认我们提交的图片
+            # 确实写进了妙手草稿）。这些是「处理是否真的成功」的证据，
+            # 与「草稿是否被别人动过」是两件事。
             if applied.get("replaced"):
                 warehouse_service._save_processed_draft(
                     client, detail_id=row.detail_id, shop_id=row.shop_id,

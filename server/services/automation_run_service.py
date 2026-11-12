@@ -401,6 +401,18 @@ def complete_image_processing(db: Session, product: Product) -> None:
         if previous.get("_imageGeneration") != product.automation_images.get("generation"):
             continue
         previous["images"] = images
+        # 判定「图片处理成功」= 翻译跑完 + 没有失败 + 本地核验版本一致。
+        #
+        # 最后一项（draft_verified_revision == revision）看着像内部记账，
+        # 但它同时挡住了一个真实风险：图片写回后主流程又改过商品，
+        # 此时草稿里的图和本地记录已经对不上，不能直接放行发布。
+        # tests/test_automation_image_lifecycle 的 upstream-change 用例
+        # 就是守这条，所以保留。
+        #
+        # 「处理完就待核对、要人点一下」的根因已经在上游修掉了：
+        #   1. 图片线程不再因为「图片换 URL」误判草稿被改；
+        #   2. 主流程写完会同步把 draft_verified_revision 推到 revision，
+        #      两者正常情况下是一致的。
         verified = (images.get("completed") is True and images.get("failed", 0) == 0
                     and product.draft_verified_revision == product.revision)
         previous["draftVerified"] = verified
