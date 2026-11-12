@@ -305,13 +305,20 @@ def recover(db: Session, run: AutomationRun) -> dict[str, Any]:
                 }
                 product.draft_verified_revision = None
                 complete_image_processing(db, product)
+        # 中断一律记 failed，不再是 needs_review（负责人口径 2026-11-12：
+        # 「这里显示的待核对不需要，要不就成功要不就失败，不要出现待核对，
+        #   我是做全自动的」）。
+        #
+        # 「客户端在处理响应前中断」的真实成因是服务端重启（部署）或网络断，
+        # 商品本身没问题 —— 标成待核对等于把「重跑一次就好」的事丢给人。
+        # 记 failed 后运营直接重试即可，状态只有成功/失败两种。
         if row.process_status == "running":
-            row.process_status = "needs_review"
-            row.process_reason = "客户端在处理响应前中断；请核对妙手与商品记录后再处理。"
+            row.process_status = "failed"
+            row.process_reason = "处理过程中断（服务重启或网络断开），请重试这一件。"
             row.updated_at = now_ts()
         if row.publish_status == "running":
-            row.publish_status = "needs_review"
-            row.publish_reason = "客户端在发布响应前中断；请先核对妙手发布记录。"
+            row.publish_status = "failed"
+            row.publish_reason = "发布过程中断（服务重启或网络断开），请重试发布。"
             row.updated_at = now_ts()
         elif row.process_status == "succeeded" and row.publish_status == "queued":
             process_result = row.process_result if isinstance(row.process_result, dict) else {}

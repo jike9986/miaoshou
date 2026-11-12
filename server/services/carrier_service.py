@@ -1340,10 +1340,21 @@ def normalize_spec_for_save(payload: dict[str, Any],
                    or av.get("imageUrl")
                    or (av.get("imgUrls") or [None])[0]
                    or "")
+            # 只有**颜色**维度带图，尺码维度一律清空 imgUrl
+            # （负责人口径 2026-11-12：「怎么自动化处理的这个尺码有图片的，
+            #   不是只有颜色才有吗」）。
+            #
+            # 尺码维度本来就不该有图。上游草稿有时把颜色图错配到尺码值上
+            # （平台规格表里 Saiz 的每个值都挂着同一批商品图），
+            # 我们照抄过去，详情页就会出现「M(34-36) 配一张鞋图」这种怪现象，
+            # 而且平台侧也可能判规格数据异常。
+            _is_color_dim = (str(attr_id or "") == "100000"
+                             or str(entry.get("attrName") or "").casefold() in
+                             ("warna", "color", "colour", "颜色", "色彩"))
             entry["attrValueList"].append({
                 "attrValueId": our_id,
                 "attrValue": label,
-                "imgUrl": str(img or ""),
+                "imgUrl": str(img or "") if _is_color_dim else "",
             })
         if not entry["attrValueList"]:
             notes.append("维度%d规格值为空，跳过" % dim)

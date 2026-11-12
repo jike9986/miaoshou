@@ -158,8 +158,10 @@ def test_recovery_marks_inflight_item_unknown_and_blocks_reprocessing(client, se
     }
     item = recovered_run["items"][0]
     assert item["shopId"] != recovered_run["shopId"]
-    assert item["processStatus"] == "needs_review"
-    assert "核对" in item["processReason"]
+    # 2026-11-12 负责人口径：不要出现待核对，中断一律记 failed（
+    # 「要不就成功要不就失败，不要出现待核对我是做全自动的」）。
+    assert item["processStatus"] == "failed"
+    assert "中断" in item["processReason"]
 
     repeated = client.post(
         API + f"/automation-runs/{run_id}/items/{item_id}/start", headers=auth)

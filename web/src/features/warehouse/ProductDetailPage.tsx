@@ -149,6 +149,19 @@ function skuPrices(payload: Record<string, unknown> | null | undefined): SkuPric
 export function ProductDetailPage() {
   const { ident } = useParams<{ ident: string }>();
   const navigate = useNavigate();
+  // 返回上一页而不是硬跳 /warehouse（负责人口径 2026-11-12：
+  // 「我在成品仓库自动化处理的点击详情打开然后返回就自动到商品列表了」）。
+  //
+  // 详情页可以从商品列表、自动化结果、批次三个 tab 点开，硬跳 /warehouse
+  // 会丢掉来源 tab 与筛选条件，用户每次都要重新点回去。
+  // 优先 history.back()，只有在没有历史记录（直接打开详情链接）时才回列表。
+  const goBack = () => {
+    if (window.history.length > 1) {
+      navigate(-1);
+      return;
+    }
+    navigate("/warehouse");
+  };
   const identity = useOperatorIdentity();
   const isMember = identity?.role === "member";
 
@@ -326,7 +339,7 @@ export function ProductDetailPage() {
   if (detail.isLoading) {
     return (
       <>
-        <PageHeader title="商品详情" actions={<Button variant="ghost" icon={<ArrowLeft />} onClick={() => navigate("/warehouse")}>返回</Button>} />
+        <PageHeader title="商品详情" actions={<Button variant="ghost" icon={<ArrowLeft />} onClick={goBack}>返回</Button>} />
         <PageContent width="full" padding="p-4">
           <Card padding="normal"><SkeletonCardGrid count={1} /></Card>
         </PageContent>
@@ -337,13 +350,13 @@ export function ProductDetailPage() {
   if (detail.isError || !product) {
     return (
       <>
-        <PageHeader title="商品详情" actions={<Button variant="ghost" icon={<ArrowLeft />} onClick={() => navigate("/warehouse")}>返回</Button>} />
+        <PageHeader title="商品详情" actions={<Button variant="ghost" icon={<ArrowLeft />} onClick={goBack}>返回</Button>} />
         <PageContent width="full" padding="p-4">
           <Card padding="normal">
             <EmptyState
               title="没有找到这件商品"
               description={detail.isError ? apiErrorMessage(detail.error) : "商品可能已被删除"}
-              action={{ label: "返回成品仓库", onClick: () => navigate("/warehouse") }}
+              action={{ label: "返回成品仓库", onClick: goBack }}
             />
           </Card>
         </PageContent>
@@ -361,7 +374,7 @@ export function ProductDetailPage() {
         actions={
           <span className="flex items-center gap-2">
             {readOnlyHint && <span className="text-xs text-fg-muted">{readOnlyHint}</span>}
-            <Button variant="ghost" icon={<ArrowLeft />} onClick={() => navigate("/warehouse")}>
+            <Button variant="ghost" icon={<ArrowLeft />} onClick={goBack}>
               返回
             </Button>
             {!isMember && (
@@ -560,11 +573,22 @@ export function ProductDetailPage() {
                               key={value.label}
                               className="flex w-20 flex-col items-center gap-1.5"
                             >
-                              <span className="size-20 overflow-hidden rounded-sm border border-border bg-canvas-inset">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (value.imageUrl) window.open(value.imageUrl, "_blank");
+                                }}
+                                aria-label={`放大查看 ${value.label}`}
+                                className={cn(
+                                  "size-20 overflow-hidden rounded-sm border border-border bg-canvas-inset",
+                                  value.imageUrl && "transition-transform hover:scale-105 cursor-zoom-in"
+                                )}
+                                disabled={!value.imageUrl}
+                              >
                                 {value.imageUrl ? (
                                   <RemoteImage src={value.imageUrl} className="size-full object-cover" />
                                 ) : null}
-                              </span>
+                              </button>
                               <span className="line-clamp-2 text-center text-2xs leading-4 text-fg">
                                 {value.label}
                               </span>
