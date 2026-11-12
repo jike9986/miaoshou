@@ -717,11 +717,22 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
     account_claim_expr = _claim_expression(account_claim_keys)
     owned_accounts = (([int(claim_account_id)] if claim_account_id not in (None, "") else
                        _owned_account_ids(db, int(operator_id))) if member_view else [])
+    # 学员也能看到成品仓库的全部商品（负责人口径 2026-11-12：
+    # 「学员也能看到成品仓库的全部东西，仓库就是给多个人导入采集箱用的」）。
+    #
+    # 原来这里对学员做账号归属校验（_assert_member_account_access），
+    # 学员只能看自己绑定账号的商品，于是老师用别的账号入的 70 多件成品
+    # 对学员完全不可见 —— 但成品仓库本来就是共享货源池，
+    # 学员的用途是「从这里挑货导入自己的采集箱」，看不到就挑不了。
+    #
+    # 账号参数仍然接受（用于「认领状态」这类按账号区分的展示），
+    # 但不再作为可见性门槛。真正的权限边界是 _scope_member_products：
+    # 学员看得到所有成品（automation_result=False），
+    # 未入仓的自动化结果仍只对来源学员可见。
     if member_view and account_id not in (None, ""):
         text = str(account_id)
         if not text.isdigit():
             raise errors.validation("accountId 须为数字", field="accountId")
-        _assert_member_account_access(db, int(text), operator_id)
     query = _scope_member_products(db, query, operator_id)
     if category_id not in (None, ""):
         cid_value = str(category_id)
