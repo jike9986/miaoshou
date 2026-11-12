@@ -1229,6 +1229,42 @@ def admit_automation_results(db: Session, ids: Iterable[Any], *,
 
 
 # --- 详情 -----------------------------------------------------------------
+
+
+def delete_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]:
+    """从「自动化结果」列表删除记录。
+
+    负责人口径 2026-11-12：「这里怎么没有删除」。
+    语义是「这件不要了，从队列清掉」：
+      · 删 AutomationRunItem + 关联 ImageJob（这些只是执行痕迹）；
+      · 对应 Product（automation_result=True 的仓库行）一并软删除 ——
+        它还没入成品仓库，留着也没意义；
+      · **不动妙手草稿**（草稿还在采集箱，不影响再次处理）。
+    """
+    wanted = list(dict.fromkeys(str(v).strip() for v in ids if str(v).strip()))
+    if not wanted or len(wanted) > 100:
+        raise errors.validation("请选择 1 到 100 件自动化结果", field="ids")
+    products = [resolve_product(db, ident) for ident in wanted]
+    invalid = [str(p.id) for p in products if not p.automation_result]
+    if invalid:
+        raise errors.validation(
+            "部分商品已加入成品仓库，请到商品列表里删除",
+            field="ids", value=invalid)
+    from models.image_job import ImageJob
+    product_ids = [p.id for p in products]
+    removed_jobs = (db.query(ImageJob)
+                    .filter(ImageJob.product_id.in_(product_ids))
+                    .delete(synchronize_session=False))
+    removed_items = (db.query(AutomationRunItem)
+                     .filter(AutomationRunItem.product_id.in_(product_ids))
+                     .delete(synchronize_session=False))
+    now = core_utils.now_ts()
+    for p in products:
+        p.deleted_at = now
+    db.flush()
+    return {"deleted": len(products), "items": int(removed_items or 0),
+            "jobs": int(removed_jobs or 0)}
+
 def detail(db: Session, ident: Any, *, include_payload: bool = False,
            operator_id: int | None = None, claim_account_id: Any = None) -> dict[str, Any]:
     product = resolve_product(db, ident)

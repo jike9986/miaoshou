@@ -474,6 +474,22 @@ export function useImportAutomationResults(): UseMutationResult<
     },
   });
 }
+/** 删除自动化结果记录（只清执行痕迹与未入仓的商品行，不动妙手草稿）。 */
+export function useDeleteAutomationResults(): UseMutationResult<
+  { deleted: number; items: number; jobs: number },
+  Error,
+  string[]
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (ids) =>
+      api.post<{ deleted: number; items: number; jobs: number },
+        { ids: string[] }>("/warehouse/automation-results/delete", { ids }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+    },
+  });
+}
 
 export function useProductDetail(
   id: string | null,

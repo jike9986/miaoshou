@@ -443,6 +443,23 @@ def delete_product(ident: str, db: DbSession,
     return result
 
 
+@router.post("/automation-results/delete", summary="删除自动化结果记录",
+             dependencies=[require_permission("process")])
+def delete_automation_results(payload: AutomationResultsImportRequest,
+                              db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    require_writable(db)
+    with audit_service.guard(db, operator=operator,
+                             action="warehouse.automation_results.delete",
+                             target_kind="product", target_id=""):
+        result = warehouse_service.delete_automation_results(db, payload.ids)
+        db.commit()
+    audit_service.record(
+        db, operator=operator, action="warehouse.automation_results.delete",
+        target_kind="product", target_id="batch",
+        detail={"batchSize": result["deleted"]})
+    db.commit()
+    return result
+
 @router.post("/batch-category", summary="批量改类目 / 分组（单事务）",
              dependencies=[require_permission("process")])
 def batch_category(payload: BatchCategoryRequest, db: DbSession,

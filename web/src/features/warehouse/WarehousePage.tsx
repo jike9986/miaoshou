@@ -38,6 +38,7 @@ import {
   useDeleteGroup,
   useGroups,
   useReorderGroup,
+  useDeleteAutomationResults,
   useAutomationResults,
   useImportAutomationResults,
   useOperators,
@@ -153,6 +154,7 @@ export function WarehousePage() {
 
   const groupsQuery = useGroups();
   const reorderGroup = useReorderGroup();
+  const deleteAutomationResults = useDeleteAutomationResults();
   const createGroup = useCreateGroup();
   const deleteGroup = useDeleteGroup();
   const batchDelete = useBatchDelete();
@@ -938,6 +940,24 @@ export function WarehousePage() {
             icon: <PackageCheck className="size-3.5" />,
             disabled: importAutomationResults.isPending,
             onClick: () => setImportDialogOpen(true),
+          },
+          {
+            // 删除失败的自动化结果（负责人口径 2026-11-12：
+            // 「这里怎么没有删除」）。只删这条自动化结果记录本身，
+            // 不动妙手草稿 —— 相当于「这件不要了，从队列里清掉」。
+            label: "删除记录",
+            icon: <Trash2 className="size-3.5" />,
+            danger: true,
+            onClick: () => {
+              if (!automationSelected.length) return;
+              deleteAutomationResults.mutate(automationSelected, {
+                onSuccess: (result) => {
+                  setAutomationSelected([]);
+                  toast.success(`已删除 ${formatCount(result.deleted)} 条记录`);
+                },
+                onError: (error) => toast.error("删除失败", { description: apiErrorMessage(error) }),
+              });
+            },
           }] : isMember ? [
           ...(memberClaimableIds.length > 0 ? [{
             label: claimOnly.isPending
