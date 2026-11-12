@@ -529,7 +529,24 @@ def name_index(db: Session, account_id: int | None = None, *,
     if site:
         query = query.filter(Category.site == site.upper())
     if account_id:
-        query = query.filter(Category.account_id == int(account_id))
+        # 类目树是平台级字典，**跟账号无关** —— 同站点所有账号看到的类目树
+        # 是同一棵。历史的 account_id 只是「当初从哪个账号拉下来的」缓存来源
+        # 标记，不能当成数据隔离的边界。
+        #
+        # 原实现硬过滤 Category.account_id == 本账号，于是：谁先同步谁有数据，
+        # 其他账号一条都查不到，关键词匹配全灭
+        # （2026-11-12 实测：类目都存在 account_id=5 名下，
+        #  蒋新宇账号查 name_index 返回 0 条，雨鞋全部「类目为空」失败）。
+        #
+        # 现在：优先本账号缓存，没有就回退到全局（account_id=0）和任何已有
+        # 缓存，保证「随便哪个账号都能用」。
+        scope = int(account_id)
+        own = query.filter(Category.account_id == scope).count()
+        if own == 0:
+            # 本账号没有缓存 → 不限 account_id，用库里已有的那份
+            pass
+        else:
+            query = query.filter(Category.account_id == scope)
     index: dict[str, list[str]] = {}
     for row in query.all():
         if not row.is_leaf or row.disabled:
