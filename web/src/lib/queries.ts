@@ -972,6 +972,17 @@ export function useLatestAutomationRun(accountId: string | null, shopId: string 
   });
 }
 
+/** 执行历史里某一件商品的异常明细。 */
+export interface AutomationRunIssue {
+  detailId: string;
+  productId: string;
+  title: string;
+  /** process = 处理阶段；publish = 发布阶段 */
+  stage: "process" | "publish" | string;
+  status: string;
+  reason: string;
+}
+
 /** 执行历史里一条记录的汇总（列表页用，不含逐项明细）。 */
 export interface AutomationRunHistoryRow {
   id: string;
@@ -989,6 +1000,8 @@ export interface AutomationRunHistoryRow {
   publishEnabled: boolean;
   language: string;
   template: string;
+  /** 逐件异常明细（只有失败/待核对的才在里面），带具体原因。 */
+  issues?: AutomationRunIssue[];
 }
 
 export function useAutomationRunHistory(
@@ -1004,6 +1017,21 @@ export function useAutomationRunHistory(
     }),
     enabled: Boolean(accountId) && enabled,
     staleTime: 10_000,
+  });
+}
+/** 删除一条执行历史（只删记录，不动已入库商品与妙手草稿）。 */
+export function useDeleteAutomationRun(): UseMutationResult<
+  { deleted: string; items: number },
+  Error,
+  string
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (runId) =>
+      api.del<{ deleted: string; items: number }>(`/automation-runs/${runId}`),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.automationRuns.all });
+    },
   });
 }
 

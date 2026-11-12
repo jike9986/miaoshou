@@ -9,7 +9,7 @@ import { Images, Package } from "lucide-react";
 import { cn, formatCount, formatPrice } from "@/lib/utils";
 import type { Product } from "@/lib/types";
 import { RemoteImage } from "@/features/shared/RemoteImage";
-import { Badge, Checkbox } from "@/components/ui";
+import { Checkbox } from "@/components/ui";
 
 export interface ProductCardProps {
   product: Product;
@@ -74,7 +74,6 @@ export function ProductCard({
   index,
 }: ProductCardProps) {
   const price = priceText(product);
-  const groupName = product.group?.trim();
   const weight = weightText(product);
 
   return (
@@ -228,19 +227,11 @@ export function ProductCard({
           </span>
         </div>
 
-        {/* 分组标签：有分组时才显示，没分组不占行 */}
-        {groupName && groupName !== "" && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant="brand" title={`分组 ${groupName}`}>
-              {groupName}
-            </Badge>
-          </div>
-        )}
-
-        {/* 「谁编辑于何时」已按负责人要求去掉（2026-11-11）：
-            卡片上这行信息在商品列表和自动化结果里都不需要，
-            占一行高度又挤占价格/类目，想看改动记录去详情页。
-            保留 showEditor 参数不删，是为了不破坏既有调用方的 props 形状。 */}
+        {/* 分组标签已按负责人要求去掉（2026-11-12）：
+            卡片下方再重复一次分组名（「运动鞋」「精品」…）没有意义 ——
+            分组已经在顶部筛选栏里，而且同一个分组下每张卡都显示同样两个字，
+            只是占高度。想看归在哪个分组，看顶部选中的 Chip 就行。
+            右下角的 categoryName 保留：那是平台类目，与分组不是一回事。 */}
       </button>
     </article>
   );

@@ -142,6 +142,18 @@ def retry_publish(run_id: str, item_id: str, db: DbSession,
     return {"run": automation_run_service.retry_publish(db, run, item_id)}
 
 
+# 删除历史要 process 权限（老师/管理员），不能是 automation：
+# 成员也有 automation，删记录是破坏性操作，tests/test_role_permissions
+# 专门守这条「写接口的权限必须高于成员」。
+@router.delete("/{run_id}", dependencies=[require_permission("process")])
+def delete_run(run_id: str, db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    """删除一条执行历史（只删记录，不动已入库商品和妙手草稿）。"""
+    require_writable(db)
+    run = automation_run_service.get(db, run_id, operator)
+    result = automation_run_service.delete_run(db, run)
+    db.commit()
+    return result
+
 @router.post("/{run_id}/items/{item_id}/publish-result",
              dependencies=[require_permission("automation")])
 def publish_result(run_id: str, item_id: str, payload: PublishResultRequest,

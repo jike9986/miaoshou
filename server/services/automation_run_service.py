@@ -219,9 +219,32 @@ def list_runs(db: Session, operator: Operator, *, account_id: Any,
         review = sum(1 for row in items if row.process_status == "needs_review"
                      or row.publish_status in ("needs_review", "failed"))
         settings = run.settings or {}
+        # 逐件异常明细：只给「不是成功」的那些，带上详情号 / 标题 / 原因。
+        # 负责人口径 2026-11-12：「要检查到底要检查什么，哪里有问题就写出来
+        # 不要哪里有问题都不清楚」—— 之前列表只给「挂 2 件」这个数字，
+        # 运营点开也看不到是哪两件、为什么挂，等于没有信息。
+        issues: list[dict[str, Any]] = []
+        for row in items:
+            if row.process_status in ("succeeded", "queued", "running"):
+                continue
+            problem = row.process_reason or row.publish_reason or ""
+            if not problem:
+                # 状态是失败的但没记原因：别让界面留空，明确说「没记到原因」。
+                problem = ("处理未完成，但没有记录具体原因；"
+                           "请点开商品详情核对妙手草稿")
+            issues.append({
+                "detailId": str(row.detail_id or ""),
+                "productId": str(row.product_id) if row.product_id else "",
+                "title": str(getattr(row, "title", "") or "")[:80],
+                "stage": "publish" if str(row.publish_status or "") in
+                         ("failed", "needs_review") else "process",
+                "status": str(row.process_status or ""),
+                "reason": str(problem)[:400],
+            })
         result.append({
             "id": run.id,
             "status": run.status,
+            "issues": issues,
             "accountId": str(run.account_id),
             "shopId": run.shop_id,
             "createdAt": run.created_at,
@@ -239,6 +262,26 @@ def list_runs(db: Session, operator: Operator, *, account_id: Any,
     return result
 
 
+
+
+def delete_run(db: Session, run: AutomationRun) -> dict[str, Any]:
+    """删掉一条执行历史（连带逐件明细）。
+
+    负责人 2026-11-12：「还有能在这个历史加上×能够删除这个」。
+    只清历史记录本身：已经入库的成品商品、妙手草稿都不动 ——
+    运营删的是「这批跑过的痕迹」，不是撤回处理结果。
+    运行中的批次不给删（线程还在写这张表）。
+    """
+    if run.status == "running":
+        raise errors.AppError(
+            "CONFLICT", "这批还在运行，不能删除；等跑完或先停止", status=409)
+    run_id = run.id
+    bill = (db.query(AutomationRunItem)
+            .filter(AutomationRunItem.run_id == run_id)
+            .delete(synchronize_session=False))
+    db.delete(run)
+    db.flush()
+    return {"deleted": run_id, "items": int(bill or 0)}
 def get_full(db: Session, run: AutomationRun) -> dict[str, Any]:
     return serialize_run(run, _items(db, run.id))
 

@@ -8,10 +8,10 @@
 // 这里按时间倒序列出每一批：跑了几件、成几件、挂几件、耗时。点开看明细。
 
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, History } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, History, X } from "lucide-react";
 import { cn, formatCount, formatDuration } from "@/lib/utils";
 import { Card, CardTitle, StatusBadge } from "@/components/ui";
-import { useAutomationRunHistory } from "@/lib/queries";
+import { useAutomationRunHistory, useDeleteAutomationRun } from "@/lib/queries";
 import { languageLabel } from "@/features/automation/types";
 
 export interface RunHistoryPanelProps {
@@ -25,6 +25,7 @@ export interface RunHistoryPanelProps {
 export function RunHistoryPanel({ accountId, shopId, running = false, className }: RunHistoryPanelProps) {
   const history = useAutomationRunHistory(accountId, shopId, true, 30);
   const [openId, setOpenId] = useState<string | null>(null);
+  const removeRun = useDeleteAutomationRun();
   const runs = useMemo(() => history.data?.runs ?? [], [history.data]);
 
   return (
@@ -80,7 +81,8 @@ export function RunHistoryPanel({ accountId, shopId, running = false, className 
                   <StatusBadge meta={meta} />
                 </button>
                 {expanded && (
-                  <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t border-border-subtle px-2 py-2">
+                  <div className="border-t border-border-subtle px-2 py-2">
+                    <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5">
                     <HistStat label="耗时" value={elapsed === null ? "—" : formatDuration(elapsed)} />
                     <HistStat label="失败" value={`${formatCount(run.failed)} 件`} />
                     <HistStat label="待核对" value={`${formatCount(run.needsReview)} 项`} />
@@ -89,7 +91,61 @@ export function RunHistoryPanel({ accountId, shopId, running = false, className 
                     <HistStat label="发布" value={run.publishEnabled ? "开" : "关"} />
                     <HistStat label="定价" value={run.template || "关"} />
                     <HistStat label="批次号" value={run.id.slice(-8)} />
-                  </dl>
+                    </dl>
+
+                    {/* 逐件异常明细：负责人口径 2026-11-12「要检查到底要检查什么，
+                        哪里有问题就写出来不要哪里有问题都不清楚」。
+                        之前只给「待核对 2 项」这个数字，点开也看不到是哪两件、
+                        为什么挂 —— 现在把商品号 + 阶段 + 具体原因逐条列出来。 */}
+                    {(run.issues?.length ?? 0) > 0 && (
+                      <div className="mt-2.5 rounded-sm border border-warning-100 bg-warning-50/60 p-2">
+                        <p className="flex items-center gap-1 text-2xs font-medium text-warning-700">
+                          <AlertTriangle className="size-3 shrink-0" strokeWidth={2} />
+                          有问题的 {run.issues!.length} 件
+                        </p>
+                        <ul className="mt-1.5 flex flex-col gap-1.5">
+                          {run.issues!.map((issue) => (
+                            <li
+                              key={`${issue.detailId}-${issue.stage}`}
+                              className="rounded-xs bg-surface/80 px-1.5 py-1"
+                            >
+                              <p className="num truncate text-2xs font-medium text-fg" title={issue.title || issue.detailId}>
+                                {issue.detailId || issue.productId}
+                                {issue.title ? ` · ${issue.title}` : ""}
+                              </p>
+                              <p className="mt-0.5 text-2xs leading-4 text-warning-700">
+                                {issue.stage === "publish" ? "发布阶段：" : "处理阶段："}
+                                {issue.reason}
+                              </p>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* 删除这条历史。只删记录，不动已入库商品和妙手草稿。 */}
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (removeRun.isPending) return;
+                          removeRun.mutate(run.id, {
+                            onSuccess: () => setOpenId(null),
+                          });
+                        }}
+                        disabled={removeRun.isPending || run.status === "running"}
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-2xs font-medium",
+                          "text-fg-muted transition-colors hover:bg-danger-50 hover:text-danger-600",
+                          "disabled:pointer-events-none disabled:opacity-50"
+                        )}
+                        title={run.status === "running" ? "运行中不能删除" : "删除这条执行历史"}
+                      >
+                        <X className="size-3" strokeWidth={2.4} />
+                        删除这条记录
+                      </button>
+                    </div>
+                  </div>
                 )}
               </li>
             );

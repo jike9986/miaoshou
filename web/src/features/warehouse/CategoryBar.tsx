@@ -1,7 +1,8 @@
 // features/warehouse —— 分类栏（全部 / 平台类目 / 自定义分组 / + 分类）
 // design-system：chips 用 Badge 视觉 + 计数，高度 28，横向滚动不换行。
 
-import { Folder, Layers, Plus, X } from "lucide-react";
+import { useState } from "react";
+import { Folder, Layers, Plus, Trash2, X } from "lucide-react";
 import { cn, formatCount } from "@/lib/utils";
 import type { CategoryFacet, GroupFacet } from "@/lib/types";
 import { Button, Skeleton } from "@/components/ui";
@@ -71,9 +72,12 @@ function Chip({ label, count, active, icon, onClick, onRemove }: ChipProps) {
             event.stopPropagation();
             onRemove();
           }}
+          // 删除模式下 × 必须常驻可见：原来是 opacity-0 + hover 才显，
+          // 运营进了删除模式却看不到能点哪里（2026-11-12 负责人要求
+          // 「点击删除再点击分类右边的删除」）。
           className={cn(
-            "grid h-full w-5 place-items-center rounded-r-md text-fg-muted",
-            "opacity-0 transition-opacity duration-fast hover:text-danger-600 group-hover:opacity-100"
+            "grid h-full w-5 place-items-center rounded-r-md",
+            "bg-danger-50 text-danger-600 transition-colors duration-fast hover:bg-danger-100"
           )}
         >
           <X className="size-3" strokeWidth={2.4} />
@@ -94,6 +98,10 @@ export function CategoryBar({
   manageable = true,
 }: CategoryBarProps) {
   const allActive = active.kind === "all";
+  // 删除模式：默认不显示每个分组右侧的 ×，点「删除」按钮才进入。
+  // 负责人口径 2026-11-12：分组右边的 × 平时太容易误点（一点就删组），
+  // 必须先点「删除」进入删除态，再点具体分组上的 × 才真删。
+  const [deleteMode, setDeleteMode] = useState(false);
 
   return (
     // min-h 固定住：分类加载态只有 3 个骨架、真实分类十几个，高度来回变会让
@@ -137,7 +145,14 @@ export function CategoryBar({
                     ? onSelect({ kind: "all" })
                     : onSelect({ kind: "group", groupId: group.id, name: group.name })
                 }
-                onRemove={manageable ? () => onDeleteGroup(group) : undefined}
+                onRemove={
+                  manageable && deleteMode
+                    ? () => {
+                        onDeleteGroup(group);
+                        setDeleteMode(false);
+                      }
+                    : undefined
+                }
               />
             );
           })}
@@ -145,6 +160,15 @@ export function CategoryBar({
 
       {manageable && (
         <div className="flex shrink-0 items-center gap-1">
+          <Button
+            variant={deleteMode ? "primary" : "secondary"}
+            size="sm"
+            icon={deleteMode ? <X /> : <Trash2 />}
+            onClick={() => setDeleteMode((value) => !value)}
+            title={deleteMode ? "退出删除模式" : "进入删除模式后，点分组上的 × 删除该分组"}
+          >
+            {deleteMode ? "取消" : "删除"}
+          </Button>
           <Button variant="secondary" size="sm" icon={<Plus />} onClick={onCreateGroup}>
             分类
           </Button>
