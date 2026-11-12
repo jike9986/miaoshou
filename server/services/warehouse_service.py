@@ -2443,15 +2443,38 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 原来这段在图片清洗之后（第 2582 行左右），前面已经用过
     # product_service.category_label(payload) 算重量基准了 —— 那时
     # payload 还没有 cid，等于拿「未分类」的默认值算完整件商品。
-    # 类目三档兜底（老版 product_workflow._resolve_category）。没 cid 时以前只报
-    # 一句「category cid is missing」，运营不知道下一步该干什么，整批卡在这里。
-    # 老版会依次试 AI 匹配、本地类目库名字反查、关键词兜底，三档全失败才提示
-    # 去妙手手动选 —— 提示语明确说了「没选类目时颜色、尺码、重量都不会正常显示」，
-    # 这句话本身就是操作指引，不能省。
+    # 类目解析：先本地关键词（毫秒级），命不中才调 AI（20-30 秒）。
+    #
+    # 负责人口径（2026-11-12）：「AI 类目匹配有点慢啊，万一没识别出来怎么办」。
+    # 原来一上来就调 AI，每件商品白等 20-30 秒；而雨鞋/拖鞋/跑鞋这类
+    # 标题特征极明显，本地词表就能定。现在：
+    #   1. 草稿已有 cid → 直接用；
+    #   2. 关键词兜底唯一命中 → 直接用（毫秒级）；
+    #   3. 都没命中 → 才调 AI 匹配（带超时，失败也不阻断）；
+    #   4. 全失败 → 报「请手动选类目」，不让整批默默挂掉。
+    #
+    # 注意：类目虽然排在流程最前面，但它是**文字处理**的一环 ——
+    # 图片处理（OCR 挑图 / 翻译）完全不看 cid（select_translatable_images
+    # 里零处引用 cid），所以 AI 匹配慢只会拖文字，不影响图片。
     cid = str(payload.get("cid") or "").strip()
     category_source = "existing" if cid else ""
     category_message = ""
     if not cid:
+        # 第 1 档：本地关键词，毫秒级
+        kw_cid = ""
+        try:
+            kw_cid = category_service.fallback_by_keyword(
+                db, str(payload.get("title") or ""),
+                account_id=account.id, site=str(info.get("site") or ""))
+        except Exception:  # noqa: BLE001 - 关键词不命中就走 AI
+            kw_cid = ""
+        if kw_cid:
+            cid = str(kw_cid)
+            category_source = "keyword"
+            logger.info("类目关键词命中 detailId=%s cid=%s（跳过 AI 匹配）",
+                        detail_id, cid)
+    if not cid:
+        # 第 2 档：AI 匹配。慢，所以放最后。
         try:
             resolved = category_service.resolve_category(
                 db, client=client, detail_id=detail_id, shop_id=shop_id,
@@ -2461,11 +2484,14 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             # AI 匹配不唯一是「需要人做决定」，不是「系统坏了」：转成提示继续走，
             # 让 pre_save 的规则 2 报出来，别把整件商品的处理链打断。
             resolved = {"cid": "", "source": "", "message": exc.message}
+        except Exception as exc:  # noqa: BLE001 - AI 超时不该拖垮整件商品
+            logger.warning("AI 类目匹配失败 detailId=%s：%s", detail_id, exc)
+            resolved = {"cid": "", "source": "", "message": str(exc)[:200]}
         cid = str(resolved.get("cid") or "").strip()
         category_source = str(resolved.get("source") or "")
         category_message = str(resolved.get("message") or "")
-        if cid:
-            payload["cid"] = cid
+    if cid:
+        payload["cid"] = cid
     category_row = (category_service.find_by_cid(db, cid, site=str(info.get("site") or ""),
                                                  account_id=account.id)
                     if cid else None)
