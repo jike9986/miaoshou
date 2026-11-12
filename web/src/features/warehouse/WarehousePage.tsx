@@ -37,6 +37,7 @@ import {
   useCreateGroup,
   useDeleteGroup,
   useGroups,
+  useReorderGroup,
   useAutomationResults,
   useImportAutomationResults,
   useOperators,
@@ -151,6 +152,7 @@ export function WarehousePage() {
   const [importDialogOpen, setImportDialogOpen] = useState(false);
 
   const groupsQuery = useGroups();
+  const reorderGroup = useReorderGroup();
   const createGroup = useCreateGroup();
   const deleteGroup = useDeleteGroup();
   const batchDelete = useBatchDelete();
@@ -710,6 +712,15 @@ export function WarehousePage() {
                 setCreateOpen(true);
               }}
               onDeleteGroup={(group) => setDeleteGroupTarget(group)}
+              // 拖拽排序：按新顺序把 sort 依次写成 1..N（老师/管理员才有拖拽手柄）。
+              // 一串 PATCH 打过去而不是新开批量接口：分组就十来个，且
+              // group_service.update 已经处理了 sort 校验。
+              onReorder={(orderedIds) => {
+                orderedIds.forEach((gid, index) => {
+                  reorderGroup.mutate({ id: gid, sort: index + 1 });
+                });
+                void groupsQuery.refetch();
+              }}
             />
 
             {/* 工具栏 */}

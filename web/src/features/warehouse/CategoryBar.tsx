@@ -1,7 +1,7 @@
 // features/warehouse —— 分类栏（全部 / 平台类目 / 自定义分组 / + 分类）
 // design-system：chips 用 Badge 视觉 + 计数，高度 28，横向滚动不换行。
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Folder, Layers, Plus, Trash2, X } from "lucide-react";
 import { cn, formatCount } from "@/lib/utils";
 import type { CategoryFacet, GroupFacet } from "@/lib/types";
@@ -19,6 +19,8 @@ export interface CategoryBarProps {
   onSelect: (filter: WarehouseCategoryFilter) => void;
   onCreateGroup: () => void;
   onDeleteGroup: (group: GroupFacet) => void;
+  /** 拖拽排序后回调（老师/管理员才有）。传完整的新顺序 id 列表。 */
+  onReorder?: (orderedIds: string[]) => void;
   /**
    * 是否可管理分类（新建 / 删除分组）。
    * 学员只有 `warehouse` 权限，后端 `/groups` 写接口要 `process` 权限，
@@ -95,6 +97,7 @@ export function CategoryBar({
   onSelect,
   onCreateGroup,
   onDeleteGroup,
+  onReorder,
   manageable = true,
 }: CategoryBarProps) {
   const allActive = active.kind === "all";
@@ -102,6 +105,11 @@ export function CategoryBar({
   // 负责人口径 2026-11-12：分组右边的 × 平时太容易误点（一点就删组），
   // 必须先点「删除」进入删除态，再点具体分组上的 × 才真删。
   const [deleteMode, setDeleteMode] = useState(false);
+  // 拖拽排序（负责人口径 2026-11-12：分类可以长按拖动顺序，只能老师）。
+  // 用 HTML5 draggable 而不是引入 dnd 库：这里就一排 chip，原生够用，
+  // 也不会给主包再加一个依赖。
+  const dragIndexRef = useRef<number | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   return (
     // min-h 固定住：分类加载态只有 3 个骨架、真实分类十几个，高度来回变会让
@@ -131,29 +139,69 @@ export function CategoryBar({
             只在卡片右下角显示。分类栏混进平台类目会让人以为它们也是分组。
             平台类目仍可通过商品卡片右下角查看，筛选走搜索。 */}
         {!loading &&
-          groups.map((group) => {
+          groups.map((group, index) => {
             const isActive = active.kind === "group" && active.groupId === group.id;
+            const canDrag = manageable && Boolean(onReorder) && !deleteMode;
             return (
-              <Chip
+              <span
                 key={`grp-${group.id}`}
-                label={group.name}
-                count={group.count}
-                active={isActive}
-                icon={<Folder className="size-3.5" strokeWidth={2} />}
-                onClick={() =>
-                  isActive
-                    ? onSelect({ kind: "all" })
-                    : onSelect({ kind: "group", groupId: group.id, name: group.name })
-                }
-                onRemove={
-                  manageable && deleteMode
-                    ? () => {
-                        onDeleteGroup(group);
-                        setDeleteMode(false);
-                      }
-                    : undefined
-                }
-              />
+                draggable={canDrag}
+                onDragStart={(event) => {
+                  if (!canDrag) return;
+                  dragIndexRef.current = index;
+                  setDraggingId(group.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  // Firefox 必须 setData 才会真正开始拖拽
+                  event.dataTransfer.setData("text/plain", group.id);
+                }}
+                onDragOver={(event) => {
+                  if (!canDrag || dragIndexRef.current === null) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(event) => {
+                  if (!canDrag) return;
+                  event.preventDefault();
+                  const from = dragIndexRef.current;
+                  dragIndexRef.current = null;
+                  setDraggingId(null);
+                  if (from === null || from === index) return;
+                  const next = groups.map((item) => String(item.id));
+                  const [moved] = next.splice(from, 1);
+                  next.splice(index, 0, moved);
+                  onReorder?.(next);
+                }}
+                onDragEnd={() => {
+                  dragIndexRef.current = null;
+                  setDraggingId(null);
+                }}
+                className={cn(
+                  "inline-flex",
+                  canDrag && "cursor-grab active:cursor-grabbing",
+                  draggingId === group.id && "opacity-40"
+                )}
+                title={canDrag ? "按住拖动可以调整顺序" : undefined}
+              >
+                <Chip
+                  label={group.name}
+                  count={group.count}
+                  active={isActive}
+                  icon={<Folder className="size-3.5" strokeWidth={2} />}
+                  onClick={() =>
+                    isActive
+                      ? onSelect({ kind: "all" })
+                      : onSelect({ kind: "group", groupId: group.id, name: group.name })
+                  }
+                  onRemove={
+                    manageable && deleteMode
+                      ? () => {
+                          onDeleteGroup(group);
+                          setDeleteMode(false);
+                        }
+                      : undefined
+                  }
+                />
+              </span>
             );
           })}
       </div>

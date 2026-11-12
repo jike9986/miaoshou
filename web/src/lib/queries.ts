@@ -800,6 +800,22 @@ export function useDeleteGroup(): UseMutationResult<GroupDeleteResponse, Error, 
     },
   });
 }
+/** 改分组排序（拖拽后用）。sort 是整数，越小越靠前。 */
+export function useReorderGroup(): UseMutationResult<
+  { group: Group },
+  Error,
+  { id: string; sort: number }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, sort }) =>
+      api.patch<{ group: Group }, { sort: number }>(`/groups/${id}`, { sort }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.groups.all });
+      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+    },
+  });
+}
 
 /* ================================================================== *
  * §6 类目
