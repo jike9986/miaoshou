@@ -80,6 +80,27 @@ export function RunHistoryPanel({ accountId, shopId, running = false, className 
                   </span>
                   <StatusBadge meta={meta} />
                 </button>
+                {/* 删除按钮放在折叠行上（负责人口径 2026-11-12：
+                    「这个删除放到这里不要打开才能删除」）。
+                    之前要展开才能删，多一步没意义。 */}
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (removeRun.isPending) return;
+                    removeRun.mutate(run.id, { onSuccess: () => setOpenId(null) });
+                  }}
+                  disabled={removeRun.isPending || run.status === "running"}
+                  aria-label="删除这条执行历史"
+                  title={run.status === "running" ? "运行中不能删除" : "删除这条执行历史"}
+                  className={cn(
+                    "grid size-6 shrink-0 place-items-center rounded-sm text-fg-muted",
+                    "transition-colors hover:bg-danger-50 hover:text-danger-600",
+                    "disabled:pointer-events-none disabled:opacity-40"
+                  )}
+                >
+                  <X className="size-3" strokeWidth={2.4} />
+                </button>
                 {expanded && (
                   <div className="border-t border-border-subtle px-2 py-2">
                     <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5">

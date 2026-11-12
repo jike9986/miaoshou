@@ -47,6 +47,27 @@ export function ProgressPanel({
   className,
 }: ProgressPanelProps) {
   const running = run.phase === "running";
+  // 文字阶段：正在做什么。文字很快，但用户要求「处理到哪里就显示出来」。
+  const textStageHint = !settings.textEnabled
+    ? ""
+    : run.total > 0 && run.done >= run.total
+      ? "已完成"
+      : run.done > 0
+        ? "处理中"
+        : running
+          ? "准备中"
+          : "";
+  // 图片阶段：挑图 → 识别 → 提交翻译 → 写回。
+  // 图片是独立后台线程，文字跑完它可能还在跑，必须单独显示当前步骤。
+  const imageStageHint = !settings.imagesEnabled
+    ? ""
+    : run.imagePlanned === 0
+      ? running ? "识别中…" : ""
+      : run.imageDone >= run.imagePlanned
+        ? "已翻译完"
+        : run.imageDone > 0
+          ? "翻译中"
+          : "已选图，等待提交";
   const elapsed = useTickingElapsed(run.startedAt, running);
   const finalElapsed =
     run.startedAt !== null && run.endedAt !== null
@@ -112,6 +133,10 @@ export function ProgressPanel({
             {settings.textEnabled
               ? `${formatCount(run.done)} / ${formatCount(run.total)} 件 · ${languageLabel(settings.language)}`
               : "已关闭 · 不翻译标题与属性"}
+            {/* 处理到哪一步就说到哪一步（负责人口径 2026-11-12）：
+                文字几秒就跑完，但界面不能一直只显示「1/1 件」就没了。
+                下面这段把当前正在做的事写出来。 */}
+            {textStageHint && ` · ${textStageHint}`}
           </p>
         </div>
         <div>
@@ -127,8 +152,9 @@ export function ProgressPanel({
               : run.phase === "done" && run.imagePlanned === 0
                 ? "无需翻译 · 图片已清理"
                 : run.imagePlanned === 0
-                  ? "识别中…"
-                  : `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译`}
+                  ? imageStageHint || "识别中…"
+                  : `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译` +
+                    (imageStageHint ? ` · ${imageStageHint}` : "")}
           </p>
         </div>
       </div>

@@ -2430,6 +2430,45 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                                   f"定价模板「{price_template}」不存在",
                                   status=422, details={"field": "template"})
         template = raw
+    # 注意：定价必须在「重量加完增量之后」再算 —— 运费按最终包裹重量计费，
+    # 先用原始重量算价、再把重量加 0.1 保存，会导致「价格按 1.85kg 算、实际存 1.95kg」，
+    # 报价与实际重量不符（老版 product_workflow 是 prepare_weight 之后才 apply 定价）。
+    payload = dict(info)
+    # === 类目解析（必须在重量 / 尺寸 / 定价之前）===
+    # 负责人 2026-11-12 明确要求：先有类目才能处理后面的东西。
+    # 重量上限、包裹尺寸推荐值、尺码图 URL、颜色清洗的 attrId 全部按
+    # 类目取值；类目为空时这些步骤要么走默认值、要么直接跳过，
+    # 结果就是「类目为空」失败，或者用错误的默认值算出一份错价格。
+    #
+    # 原来这段在图片清洗之后（第 2582 行左右），前面已经用过
+    # product_service.category_label(payload) 算重量基准了 —— 那时
+    # payload 还没有 cid，等于拿「未分类」的默认值算完整件商品。
+    # 类目三档兜底（老版 product_workflow._resolve_category）。没 cid 时以前只报
+    # 一句「category cid is missing」，运营不知道下一步该干什么，整批卡在这里。
+    # 老版会依次试 AI 匹配、本地类目库名字反查、关键词兜底，三档全失败才提示
+    # 去妙手手动选 —— 提示语明确说了「没选类目时颜色、尺码、重量都不会正常显示」，
+    # 这句话本身就是操作指引，不能省。
+    cid = str(payload.get("cid") or "").strip()
+    category_source = "existing" if cid else ""
+    category_message = ""
+    if not cid:
+        try:
+            resolved = category_service.resolve_category(
+                db, client=client, detail_id=detail_id, shop_id=shop_id,
+                info=payload, account_id=account.id,
+                site=str(info.get("site") or ""))
+        except errors.AppError as exc:
+            # AI 匹配不唯一是「需要人做决定」，不是「系统坏了」：转成提示继续走，
+            # 让 pre_save 的规则 2 报出来，别把整件商品的处理链打断。
+            resolved = {"cid": "", "source": "", "message": exc.message}
+        cid = str(resolved.get("cid") or "").strip()
+        category_source = str(resolved.get("source") or "")
+        category_message = str(resolved.get("message") or "")
+        if cid:
+            payload["cid"] = cid
+    category_row = (category_service.find_by_cid(db, cid, site=str(info.get("site") or ""),
+                                                 account_id=account.id)
+                    if cid else None)
 
     # 加增量之前先看这件商品是不是已经处理过。
     # prepare_weight 不幂等：同一件重复入仓会一次次 +0.1，重量越漂越远。
@@ -2440,10 +2479,6 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     increment = _workflow_setting(db, "weightIncrement", 0.1, operator_id)
     # 原重上限：处理设置里的独立项，不含增量（负责人 2026-11-09 定）
     weight_limit = _workflow_setting(db, "weightLimit", WEIGHT_LIMIT_DEFAULT, operator_id)
-    # 注意：定价必须在「重量加完增量之后」再算 —— 运费按最终包裹重量计费，
-    # 先用原始重量算价、再把重量加 0.1 保存，会导致「价格按 1.85kg 算、实际存 1.95kg」，
-    # 报价与实际重量不符（老版 product_workflow 是 prepare_weight 之后才 apply 定价）。
-    payload = dict(info)
     if already_processed and existing is not None:
         # 已入过仓：沿用上次存下的重量，不再加增量。
         # 上游原始重量确实变了（换了规格）才重新算一次。
@@ -2579,32 +2614,6 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         logger.warning("图片清洗失败 detailId=%s：%s", detail_id, exc)
         image_report = {"error": f"{type(exc).__name__}: {exc}"[:160]}
 
-    # 类目三档兜底（老版 product_workflow._resolve_category）。没 cid 时以前只报
-    # 一句「category cid is missing」，运营不知道下一步该干什么，整批卡在这里。
-    # 老版会依次试 AI 匹配、本地类目库名字反查、关键词兜底，三档全失败才提示
-    # 去妙手手动选 —— 提示语明确说了「没选类目时颜色、尺码、重量都不会正常显示」，
-    # 这句话本身就是操作指引，不能省。
-    cid = str(payload.get("cid") or "").strip()
-    category_source = "existing" if cid else ""
-    category_message = ""
-    if not cid:
-        try:
-            resolved = category_service.resolve_category(
-                db, client=client, detail_id=detail_id, shop_id=shop_id,
-                info=payload, account_id=account.id,
-                site=str(info.get("site") or ""))
-        except errors.AppError as exc:
-            # AI 匹配不唯一是「需要人做决定」，不是「系统坏了」：转成提示继续走，
-            # 让 pre_save 的规则 2 报出来，别把整件商品的处理链打断。
-            resolved = {"cid": "", "source": "", "message": exc.message}
-        cid = str(resolved.get("cid") or "").strip()
-        category_source = str(resolved.get("source") or "")
-        category_message = str(resolved.get("message") or "")
-        if cid:
-            payload["cid"] = cid
-    category_row = (category_service.find_by_cid(db, cid, site=str(info.get("site") or ""),
-                                                 account_id=account.id)
-                    if cid else None)
 
     # 类目发布要求（老版 extract_category_requirements + validate_category_requirements）。
     # 平台按类目校验必填项：有的类目强制包裹长宽高，有的强制某些属性。这些要求
