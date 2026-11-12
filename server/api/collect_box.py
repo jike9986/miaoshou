@@ -225,21 +225,19 @@ def _draft_identity_changed(saved: Mapping[str, Any], current: Mapping[str, Any]
         # 字符串比较会把「同一个尺寸」判成改动（2026-11-09 实测误判）。
         if _as_number(saved.get(field)) != _as_number(current.get(field)):
             return True
-    # 主图不能直接比：saved 里的主图是**按处理设置截断过**的（设 9 张就
-    # 只留 9 张），而上游草稿还是原始张数（13 张）。直接比必然判「已变化」，
-    # 于是每件设了上限的商品图片处理完都变成待核对
-    # （2026-11-11 实测：负责人反复问「都处理好了为什么还待核对」）。
+    # 主图**不比**。
     #
-    # 正确的判据：上游当前主图必须**包含** saved 里的每一张 —— 截断只允许
-    # 少，不允许换成别的图。少图（我们截的）不算改动，换图才算。
-    saved_main = [str(u) for u in (saved.get("imgUrls") or []) if isinstance(u, str)]
-    current_main = [str(u) for u in (current.get("imgUrls") or []) if isinstance(u, str)]
-    if saved_main and current_main:
-        current_set = set(current_main)
-        if any(url not in current_set for url in saved_main):
-            return True
-    elif saved_main != current_main:
-        return True
+    # 两个原因让「比主图 URL」必然误判：
+    #   1. saved 里的主图是按处理设置截断过的（设 9 张只留 9 张），
+    #      上游草稿还是原始张数；
+    #   2. 更关键 —— **图片翻译本身就会换图**：译文图上传后妙手把主图
+    #      换成新 URL，9 张全部不同（2026-11-12 实测 product 393：
+    #      title/cid/weight/尺寸全同，只有 9 个主图 URL 全变，
+    #      于是每件图片翻完都被判「草稿已变化」→ 待核对）。
+    #
+    # 换图是**我们自己的处理结果**，不是「别人改过草稿」。
+    # 真正能证明草稿被别人动过的是 title / cid / weight / 包裹尺寸 ——
+    # 这四项上面已经比过了，够用。
     return False
 
 

@@ -231,7 +231,13 @@ _BRACKET_ANY = re.compile(r"[（(【\[][^）)】\]]*[）)】\]]")
 _STYLE_WORDS = re.compile(
     r"升级版|标准版|新款|款|"
     r"踩屎感|正版|原版|官方|专柜|同款|爆款|网红|热卖|包邮|"
-    r"加厚款|特价|限时|断码清仓|工厂直发|一件代发"
+    r"加厚款|特价|限时|断码清仓|工厂直发|一件代发|"
+    # 供应商在颜色值里塞「男款/女款」「标准码/加大码」区分人群与鞋码，
+    # 这些都不是颜色。不剥掉的话值会变成「男款】3306黑色（标准码」这种，
+    # 翻译成马来语后长度爆到 50 字符以上，妙手直接拒收：
+    # 「规格[Warna]，选项[...]长度超过50个字符」
+    # （2026-11-12 实测：3527923061 六个颜色全挂）。
+    r"【男款】|【女款】|男款|女款|标准码|加大码|小码|均码"
 )
 # 变体后缀后面跟的「版 / 款」（老版 :206）
 _VARIANT_VERSION = re.compile(rf"({COLOR_VARIANT_PATTERN})(?:版|款)")
@@ -282,6 +288,22 @@ def clean_color_strict(value: Any) -> str:
     # 必须在所有剥离之前处理：COLOR_CODE 会先把 566 当货号删掉、末尾 strip
     # 又会把括号剥成半个，两条路都让括号再也配不上
     # （2026-11-10 实测：这两条颜色直接抛「颜色全部无法识别」，整件商品失败）。
+    # 「【男款】3306黑色（标准码）」这种：人群标签 + 货号 + 颜色 + 鞋码备注。
+    # 必须先把人群标签和鞋码备注剥掉，剩下的「3306黑色」才能被后面的
+    # COLOR_CODE / 颜色词表正常处理。
+    # 不剥的话 _MODEL_BRACKET_COLOR 会把「男款」当颜色提取出来，
+    # 整串原样保留 → 翻译后超 50 字符被妙手拒收
+    # （2026-11-12 实测：3527923061 六个颜色全挂）。
+    stripped = original.strip()
+    stripped = re.sub(r"^[【\[（(]?\s*(?:男款|女款|男|女|情侣|中性)\s*[】\]）)]?", "", stripped)
+    stripped = re.sub(r"[（(]\s*(?:标准码|加大码|小码|均码|偏大一码|偏小一码)\s*[）)]", "", stripped)
+    stripped = stripped.strip()
+    if stripped and stripped != original.strip():
+        try:
+            return clean_color_strict(stripped)
+        except ColorError:
+            pass
+
     bracketed = _MODEL_BRACKET_COLOR.fullmatch(original.strip())
     if bracketed:
         inner = bracketed.group(1).strip()
