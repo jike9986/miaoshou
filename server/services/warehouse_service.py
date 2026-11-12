@@ -1258,7 +1258,7 @@ def delete_automation_results(db: Session, ids: Iterable[Any]) -> dict[str, Any]
     removed_items = (db.query(AutomationRunItem)
                      .filter(AutomationRunItem.product_id.in_(product_ids))
                      .delete(synchronize_session=False))
-    now = core_utils.now_ts()
+    now = now_ts()
     for p in products:
         p.deleted_at = now
     db.flush()
