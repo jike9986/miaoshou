@@ -235,9 +235,12 @@ export function BatchCategoryDialog({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      size="md"
+      // xl（880px）：平台类目是三栏联动，md（480px）下每栏只有 140px，
+      // 类目名被截成一两个字，看起来像「全挤到左列」（负责人 2026-11-11）。
+      // 三栏每栏 280px 才够显示「运动与户外服装」「Casual Shoes」这种长名。
+      size="xl"
       title="设置分类"
-      description={`对已选的 ${ids.length} 件商品统一改分类（单事务，全部成功或全部失败）`}
+      description={`对已选的 ${ids.length} 件商品统一改分类。仓库分组只是你自己归类用；平台类目（运动鞋 / 运动拖鞋 / 轮滑鞋…）才是发布到平台时的类目。`}
       closeOnOverlay={false}
       footer={
         <>
@@ -259,8 +262,8 @@ export function BatchCategoryDialog({
           }}
           idBase="batch-category"
           items={[
-            { value: "group", label: "自定义分组", icon: <FolderPlus className="size-3.5" /> },
-            { value: "category", label: "平台类目", icon: <Tag className="size-3.5" /> },
+            { value: "group", label: "仓库分组（自己建）", icon: <FolderPlus className="size-3.5" /> },
+            { value: "category", label: "平台类目（运动鞋等）", icon: <Tag className="size-3.5" /> },
           ]}
         />
 

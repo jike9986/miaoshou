@@ -313,9 +313,11 @@ export function CategoryPicker({
           )}
         </div>
       ) : (
-        // 三栏联动：每列独立滚动，高度固定，互不撑高
+        // 三栏联动：每列独立滚动，高度固定，互不撑高。
+        // min-w-0 必须有：grid 子项默认 min-width:auto，长类目名会把列撑开，
+        // 三栏挤成不等宽（看起来像「全挤到左边」）。
         <div className="grid grid-cols-3 gap-2">
-          <div className="h-[320px] overflow-y-auto rounded-md border border-border">
+          <div className="h-[400px] min-w-0 overflow-y-auto rounded-md border border-border">
             {tree.map((node) =>
               renderRow(
                 node,
@@ -329,7 +331,7 @@ export function CategoryPicker({
               ),
             )}
           </div>
-          <div className="h-[320px] overflow-y-auto rounded-md border border-border">
+          <div className="h-[400px] min-w-0 overflow-y-auto rounded-md border border-border">
             {column2.length === 0 ? (
               <p className="p-3 text-2xs text-fg-muted">先选左侧父类目</p>
             ) : (
@@ -346,7 +348,7 @@ export function CategoryPicker({
               )
             )}
           </div>
-          <div className="h-[320px] overflow-y-auto rounded-md border border-border">
+          <div className="h-[400px] min-w-0 overflow-y-auto rounded-md border border-border">
             {column3.length === 0 ? (
               <p className="p-3 text-2xs text-fg-muted">先选中间子类目</p>
             ) : (

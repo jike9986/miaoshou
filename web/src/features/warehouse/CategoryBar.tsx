@@ -1,14 +1,16 @@
 // features/warehouse —— 分类栏（全部 / 平台类目 / 自定义分组 / + 分类）
 // design-system：chips 用 Badge 视觉 + 计数，高度 28，横向滚动不换行。
 
-import { Folder, Layers, Plus, Tag, X } from "lucide-react";
+import { Folder, Layers, Plus, X } from "lucide-react";
 import { cn, formatCount } from "@/lib/utils";
 import type { CategoryFacet, GroupFacet } from "@/lib/types";
 import { Button, Skeleton } from "@/components/ui";
 import type { WarehouseCategoryFilter } from "@/features/stores";
 
 export interface CategoryBarProps {
-  categories: CategoryFacet[];
+  /** 已废弃：平台类目不再显示在分类栏（只显示自定义分组）。
+   *  保留字段避免破坏调用方。 */
+  categories?: CategoryFacet[];
   groups: GroupFacet[];
   active: WarehouseCategoryFilter;
   total: number;
@@ -82,7 +84,6 @@ function Chip({ label, count, active, icon, onClick, onRemove }: ChipProps) {
 }
 
 export function CategoryBar({
-  categories,
   groups,
   active,
   total,
@@ -116,39 +117,11 @@ export function CategoryBar({
           </>
         )}
 
-        {!loading &&
-          categories.map((category) => {
-            const isActive =
-              (active.kind === "cid" && active.cid === category.cid && Boolean(category.cid)) ||
-              (active.kind === "categoryId" &&
-                Boolean(category.categoryId) &&
-                active.categoryId === category.categoryId);
-            return (
-              <Chip
-                key={`cat-${category.cid || category.categoryId || category.name}`}
-                label={category.name}
-                count={category.count}
-                active={isActive}
-                icon={<Tag className="size-3.5" strokeWidth={2} />}
-                onClick={() => {
-                  if (isActive) {
-                    onSelect({ kind: "all" });
-                    return;
-                  }
-                  if (category.cid) {
-                    onSelect({ kind: "cid", cid: category.cid, name: category.name });
-                  } else if (category.categoryId) {
-                    onSelect({
-                      kind: "categoryId",
-                      categoryId: category.categoryId,
-                      name: category.name,
-                    });
-                  }
-                }}
-              />
-            );
-          })}
-
+        {/* 平台类目不再出现在分类栏里（负责人口径 2026-11-12：
+            「现在这六个全部是自定义分组」——分类栏只放仓库自己的分组，
+            平台类目（运动鞋 / 跑步鞋 / 轮滑鞋…）属于商品属性，
+            只在卡片右下角显示。分类栏混进平台类目会让人以为它们也是分组。
+            平台类目仍可通过商品卡片右下角查看，筛选走搜索。 */}
         {!loading &&
           groups.map((group) => {
             const isActive = active.kind === "group" && active.groupId === group.id;

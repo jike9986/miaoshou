@@ -377,11 +377,46 @@ def process_price(payload: Mapping[str, Any], *, template: Mapping[str, Any] | N
 # 否则重量/包裹规格会一律按默认「鞋 1.2kg」判定（轮滑鞋 1.5kg 会被误拦）。
 KNOWN_CATEGORY_NAMES: dict[str, str] = {
     "603171": "运动鞋",
-    "603751": "鞋子",
+    # 603751 的正确名字是「跑步鞋」（本地类目表 name_cn）
+    # 之前写成「鞋子」，导致卡片右下角显示的不是平台类目名。
+    "603751": "跑步鞋",
     "836488": "轮滑鞋与溜冰鞋",
     "1000584": "运动拖鞋",
 }
 
+
+
+
+# cid -> 类目中文名缓存。类目表是低频变更的字典表，一次进程号查一遍就够；
+# category_label 在热路径上每件商品要调用好几次，不能每次都开 Session。
+_CATEGORY_NAME_CACHE: dict[str, str] = {}
+
+
+def _category_name_from_db(cid: str) -> str:
+    """从本地类目表取类目中文名（带进程内缓存）。查不到返回空串。"""
+    key = str(cid or "").strip()
+    if not key:
+        return ""
+    cached = _CATEGORY_NAME_CACHE.get(key)
+    if cached is not None:
+        return cached
+    name = ""
+    try:
+        from db.session import SessionLocal
+        from models.category import Category
+
+        db = SessionLocal()
+        try:
+            row = db.query(Category).filter(Category.cid == key).first()
+            if row is not None:
+                name = (getattr(row, "name_cn", "") or
+                        getattr(row, "name", "") or "").strip()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - 查表失败不该拖垮处理链
+        return ""
+    _CATEGORY_NAME_CACHE[key] = name
+    return name
 
 def category_label(info: Mapping[str, Any]) -> str:
     """类目展示名：优先平台中文名，其次英文名，最后按 cid 查表，再退回 cid。
@@ -399,6 +434,13 @@ def category_label(info: Mapping[str, Any]) -> str:
     known = KNOWN_CATEGORY_NAMES.get(cid)
     if known:
         return known
+    # 再查本地类目表：这张表是从妙手同步下来的真实类目（name_cn 是中文名）。
+    # 只靠上面的硬编码表覆盖不全，缺了的会退化成「类目 603751」这种，
+    # 卡片右下角显示成一串数字（2026-11-12 负责人指出）。
+    if cid:
+        name_from_db = _category_name_from_db(cid)
+        if name_from_db:
+            return name_from_db
     return f"类目 {cid}" if cid else "未分类"
 
 
