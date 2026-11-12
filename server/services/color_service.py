@@ -355,6 +355,30 @@ def clean_color_strict(value: Any) -> str:
         found_my = MALAY_COLOR.findall(original)
         if found_my:
             return " ".join(dict.fromkeys(word.capitalize() for word in found_my))
+        # 最后一档：直接在**原始字符串**里扫颜色词（负责人口径 2026-11-12：
+        # 「像这种颜色都这么明显的，把颜色提取出来其他的去掉不就行了，
+        #   有这么难识别吗」）。
+        #
+        # 上面的规则都是「整体形态匹配」，遇到没见过的写法就整条失败：
+        #   棕色/束口        —— 颜色 + 款式用斜杠分隔
+        #   225-【卡其】加棉款 —— 货号 + 方括号颜色 + 款式词
+        #   3311【白色】加绒  —— 同上
+        # 这些串里颜色词是**明显存在**的（棕色、卡其、白色），只是外围噪声
+        # 没被前面的正则剥干净。这里退化成「扫描 + 提取」：
+        # 在原文里找所有颜色词，按出现顺序去重拼起来。
+        # 提取不到才真的抛错（那才是「认不出」）。
+        scanned = COLOR_TOKEN.findall(original)
+        if scanned:
+            # 长词优先：避免「卡其布」被拆成「卡其」+「布」这类残片
+            scanned = sorted(set(scanned), key=lambda w: (-len(w), original.find(w)))
+            picked: list[str] = []
+            for word in scanned:
+                if not any(word in kept for kept in picked):
+                    picked.append(word)
+            # 还原成原文出现顺序，读起来更自然（黑红 而不是 红黑）
+            picked.sort(key=lambda w: original.find(w))
+            if picked:
+                return "".join(picked)
         # 老版这里还有一条「纯拉丁文本就按词首字母大写放行」，它会把 `zzz`
         # 变成 `Zzz` 当成颜色交上去——正是要修掉的静默放行。改成直接抛。
         raise ColorError(f"认不出颜色，需要人工确认：{value!r}")
@@ -367,6 +391,24 @@ def clean_color_strict(value: Any) -> str:
     # （2026-11-10 实测：一件商品两个颜色都认不出，整件入不了仓）。
     leftover = residue.strip(" -_+/、,，配拼撞色")
     if leftover and not all(ch in _COLOR_MODIFIER_CHARS for ch in leftover):
+        # residue 里还有实词。以前直接抛错，于是「棕色/束口」这种
+        # 「颜色 + 款式说明」的写法整条失败（负责人口径 2026-11-12：
+        # 「像这种颜色都这么明显的，把颜色提取出来其他的去掉不就行了」）。
+        #
+        # 现在：已经识别出的颜色词就是答案，外围噪声（束口/松紧口/系带/
+        # 加棉款/加绒/货号）直接丢掉。只有**一个颜色词都没有**才真的抛错 ——
+        # 那种情况才是「认不出」。
+        #
+        # 安全性：颜色词来自 COLOR_TOKEN（内置颜色词表），不会误把
+        # 材质词当颜色；丢掉的 residue 只影响展示名，不影响 SKU 归属 ——
+        # 去重与 SKU 剪枝在 normalize_colors 里按颜色名做，同名即合并，
+        # 正是负责人要的「颜色去掉之后如果有重复的就删掉重复的」。
+        if tokens:
+            # 只回颜色词本身，**不带 variant**：variant 是「加棉/加绒/加厚」
+            # 这类工艺后缀，拼在颜色后面会变成「卡其加棉」——
+            # 既不是干净的颜色名，翻译后还容易被妙手判成超长/对不上规格。
+            # 工艺差异如果需要保留，应该在 SKU 层面表达，不是塞进颜色名。
+            return "".join(dict.fromkeys(tokens))
         raise ColorError(f"认不出颜色，需要人工确认：{value!r}")
     return "".join(tokens) + variant
 

@@ -80,7 +80,16 @@ export function ProgressPanel({
       : null;
 
   const batchPercent = run.total > 0 ? (run.done / run.total) * 100 : 0;
-  const imagePercent = run.imagePlanned > 0 ? (run.imageDone / run.imagePlanned) * 100 : 0;
+  // 图片进度条：
+  //   · 已提交任务 → 按张数算（真实翻译进度）；
+  //   · 还没提交（正在 OCR 挑图）→ 按已处理件数算，
+  //     否则整段 OCR 期间进度条一直是 0%，看着像卡死
+  //     （负责人口径 2026-11-12：「一直显示识别中」）。
+  const imagePercent = run.imagePlanned > 0
+    ? (run.imageDone / run.imagePlanned) * 100
+    : run.total > 0
+      ? (run.done / run.total) * 100
+      : 0;
   const textPercent = settings.textEnabled && run.total > 0 ? (run.done / run.total) * 100 : 0;
 
   const phaseMeta =

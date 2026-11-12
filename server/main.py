@@ -319,6 +319,19 @@ async def lifespan(_app: FastAPI):
     )
 
     stop = asyncio.Event()
+    # 服务启动时把卡在 queued=True 的商品重新拉起图片线程。
+    # 图片翻译跑在 daemon 线程里，部署/升级重启会把正在跑的批次直接杀死，
+    # 商品永远停在 queued=True、图片任务 0 个，界面一直「识别中…」，
+    # 没有任何重试机制（2026-11-12 实测：一次部署杀了 20 件的批次）。
+    try:
+        from api.collect_box import _resume_stuck_image_jobs
+
+        resumed = await asyncio.to_thread(_resume_stuck_image_jobs)
+        if resumed:
+            logger.info("启动恢复：重新拉起 %d 个卡住的图片任务 %s",
+                        len(resumed), resumed)
+    except Exception:
+        logger.exception("启动恢复图片任务失败")
     worker = asyncio.create_task(_image_reconcile_loop(stop))
     scheduler = asyncio.create_task(_schedule_loop(stop))
     cleaner = asyncio.create_task(_image_cleanup_loop(stop))

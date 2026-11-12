@@ -232,6 +232,55 @@ def _draft_identity_changed(saved: Mapping[str, Any], current: Mapping[str, Any]
             return True
     return False
 
+def _resume_stuck_image_jobs() -> list[int]:
+    """服务启动时，把卡在 queued=True 的商品重新拉起图片线程。
+
+    为什么需要：图片翻译跑在后台 daemon 线程里，服务重启（部署/升级）
+    会直接杀掉它 —— 商品永远停在 queued=True、图片任务 0 个，
+    界面一直「识别中…」，没有任何重试机制
+    （2026-11-12 实测：部署重启杀了 20 件正在处理的批次，
+    5 件成功的商品全部卡死在 queued=True）。
+
+    重启后把这些商品重新 spawn 一遍：
+      · generation 保留原值（线程用 generation 判断归属）；
+      · limits 重新从 payload 推导；
+      · allowedRevisions 放宽到当前 revision 及之后 5 个，
+        覆盖主流程正常推进的范围。
+    返回重新拉起的 product id 列表。
+    """
+    import secrets as _secrets
+
+    from db.session import SessionLocal
+    from models import Product
+
+    db = SessionLocal()
+    resumed: list[int] = []
+    try:
+        rows = (db.query(Product)
+                .filter(Product.deleted_at.is_(None))
+                .all())
+        for row in rows:
+            ai = row.automation_images or {}
+            if ai.get("queued") is not True:
+                continue
+            job = {
+                "productId": int(row.id),
+                "detailId": str(row.detail_id or ""),
+                "operatorId": row.operator_id,
+                "generation": ai.get("generation") or _secrets.token_hex(16),
+                "allowedRevisions": [row.revision + d for d in range(0, 6)],
+                "limits": {
+                    "main": 9, "sku": 9, "detail": 9,
+                },
+            }
+            _spawn_image_translation(job)
+            resumed.append(row.id)
+            logger.info("重启恢复图片线程 product=%s detailId=%s",
+                        row.id, row.detail_id)
+    finally:
+        db.close()
+    return resumed
+
 def _spawn_image_translation(job: dict[str, Any]) -> None:
     import threading
 
