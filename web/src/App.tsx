@@ -37,6 +37,7 @@ import { clearOperatorQueryClients } from "@/lib/operatorQueryClientRegistry.mjs
 import { resetOperatorSessionUiState } from "@/features/stores";
 import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 import { Button } from "@/components/ui/button";
+import { UpdateDialog } from "@/components/layout/UpdateDialog";
 
 /* ------------------------------------------------------------------ *
  * 左侧导航（与路由一一对应）
@@ -103,12 +104,9 @@ function Shell() {
     if (!version?.ok || !version.updateAvailable || !version.latest
       || notifiedVersion.current === version.latest) return;
     notifiedVersion.current = version.latest;
-    toast.info(`发现新版本 ${version.latest}`, {
-      description: "更新详情和安装操作可在设置中查看。",
-      action: { label: "查看更新", onClick: () => navigate("/settings?tab=about") },
-      duration: 8000,
-    });
-  }, [versionQuery.data, navigate]);
+    // 仅作为备选：弹窗已经在 UpdateDialog 里自动出现；这里的 toast 保底，
+    // 万一弹窗被关掉后用户还记得有更新，可以从设置里二次触发。
+  }, [versionQuery.data]);
 
   useEffect(() => {
     if (operatorIdentity?.mustChangePassword && location.pathname !== "/login") {
@@ -154,6 +152,11 @@ function Shell() {
         // 这里再放一份就是两套重复控件，只会占掉标题栏高度。
         // 也不传 routeMeta：标题栏中部不显示「功能 / 板块名」面包屑。
         // 老版顶部只有 logo，页面标题由 PageHeader 负责。
+      />
+      {/* 自动更新弹窗：检测到新版本时自动弹出，软件内下载+重启安装 */}
+      <UpdateDialog
+        version={versionQuery.data}
+        onViewSettings={() => navigate("/settings?tab=about")}
       />
     </>
   );
