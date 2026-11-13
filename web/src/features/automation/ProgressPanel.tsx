@@ -5,9 +5,10 @@
 // 只改文字，不改变卡片尺寸。
 
 import { useEffect, useRef, useState } from "react";
-import { Activity } from "lucide-react";
+import { Activity, RotateCcw } from "lucide-react";
 import { cn, formatCount, formatDuration } from "@/lib/utils";
 import { Card, CardTitle, Progress, StatusBadge } from "@/components/ui";
+import { IconButton } from "@/components/ui";
 import {
   languageLabel,
   type AutomationSettings,
@@ -23,6 +24,8 @@ export interface ProgressPanelProps {
   visibleCount?: number;
   /** 发布目标店铺名；只拿到 id 时回退显示 id */
   publishShopName?: string;
+  /** 任务结束后清空状态面板（返回 idle） */
+  onReset?: () => void;
   className?: string;
 }
 
@@ -44,12 +47,13 @@ function useTickingElapsed(startedAt: number | null, active: boolean): number | 
 export function ProgressPanel({
   run,
   settings,
+  onReset,
   className,
 }: ProgressPanelProps) {
   const running = run.phase === "running";
-  // 计时器只要任务还没结束（endedAt 尚未写入）就一直走，
-  // 避免 running → 短暂其他状态 → running 的过渡中定时器被重建、从 0 重计。
-  const timerActive = run.startedAt !== null && run.endedAt === null;
+  // 计时器只在 phase === "running" 时走；任务停止/完成后立即冻结，
+  // 不再用 endedAt 是否为 null 判断（hydrateRun 恢复历史任务时 endedAt 可能短暂为 null）。
+  const timerActive = running;
   // 文字阶段：正在做什么。文字很快，但用户要求「处理到哪里就显示出来」。
   const textStageHint = !settings.textEnabled
     ? ""
@@ -130,7 +134,19 @@ export function ProgressPanel({
           <Activity className="size-4 text-fg-muted" strokeWidth={1.75} />
           <CardTitle>处理状态</CardTitle>
         </span>
-        <StatusBadge meta={phaseMeta} />
+        <span className="flex items-center gap-1.5">
+          {/* 任务结束后显示刷新按钮：点击清空状态、恢复初始界面 */}
+          {run.phase !== "idle" && run.phase !== "running" && onReset && (
+            <IconButton
+              size="sm"
+              label="清空记录，恢复初始状态"
+              title="清空记录，恢复初始状态"
+              icon={<RotateCcw />}
+              onClick={onReset}
+            />
+          )}
+          <StatusBadge meta={phaseMeta} />
+        </span>
       </div>
 
       <div className="mt-3 rounded-md border border-border-subtle bg-canvas-inset/45 p-2.5">

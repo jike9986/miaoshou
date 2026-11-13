@@ -81,8 +81,8 @@ export function ProductCard({
       data-selected={selected ? "true" : undefined}
       className={cn(
         "group relative flex flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-1",
-        "transition-[transform,box-shadow,border-color] duration-card ease-out",
-        "hover:-translate-y-0.5 hover:border-border-strong hover:shadow-2",
+        "transition-[box-shadow,border-color] duration-card ease-out",
+        "hover:border-border-strong hover:shadow-2",
         "focus-within:ring-2 focus-within:ring-brand-600/25",
         selected && "border-brand-600 ring-1 ring-brand-600"
       )}

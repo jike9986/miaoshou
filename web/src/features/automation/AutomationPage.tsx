@@ -1810,6 +1810,7 @@ export function AutomationPage() {
                 selectedCount={selection.size}
                 visibleCount={visibleItems.length}
                 publishShopName={shopsQuery.data?.shops.find((shop) => shop.shopId === currentShopId)?.name}
+                onReset={() => { setRun(IDLE_RUN); setStages({}); setProgress({}); }}
               />
               {/* 执行历史：把「上一次怎么坏的」从常驻状态卡里挪出来，
                   状态卡只显示当前这一批的进度。每批留档，跑完自动刷新。 */}
