@@ -61,7 +61,10 @@ export function PublishDialog({
 }: PublishDialogProps) {
   const navigate = useNavigate();
   const identity = useOperatorIdentity();
-  const isTeacher = identity?.role === "teacher" || identity?.role === "admin";
+  // 多账号模式只给老师/管理员；用 identity.role 判断，
+  // identity 可能还没加载，此时 accounts.length > 1 是充分条件（学员看不到多账号）
+  const isTeacher = identity?.role === "teacher" || identity?.role === "admin"
+    || (identity?.role === undefined && accounts.length > 1);
   const { data: auth } = useAuthStatus();
   const shopsQuery = useShops(auth?.accountId, { enabled: open && connected });
   const templatesQuery = useTemplates(open && connected);
@@ -71,7 +74,7 @@ export function PublishDialog({
 
   // 老师多账号状态
   const [checkedAccountIds, setCheckedAccountIds] = useState<string[]>([]);
-  const [shopsByAccount, setShopsByAccount] = useState<Record<string, Shop[]>>({});
+  const [shopsByAccount, setShopsByAccount] = useState<Record<string, Shop[] | null>>({});
   const [selectedShopByAccount, setSelectedShopByAccount] = useState<Record<string, string>>({});
   const [multiPublishing, setMultiPublishing] = useState(false);
 
@@ -106,9 +109,10 @@ export function PublishDialog({
     return !Number.isFinite(parsed) || parsed <= 0 || parsed > 1000;
   })();
 
-  // 老师多账号：勾选账号时懒加载店铺
+  // 老师多账号：勾选账号时懒加载店铺。null = 加载中
   const fetchShopsForAccount = async (accId: string): Promise<void> => {
-    if (shopsByAccount[accId]) return;
+    if (accId in shopsByAccount) return;
+    setShopsByAccount((prev) => ({ ...prev, [accId]: null }));
     try {
       const result = await api.get<{ shops: Shop[] }>(`/shops?accountId=${encodeURIComponent(accId)}`);
       setShopsByAccount((prev) => ({ ...prev, [accId]: result.shops ?? [] }));
@@ -418,13 +422,16 @@ export function PublishDialog({
                     <span className="text-sm font-medium text-fg">发布账号</span>
                     <span className="text-xs text-fg-secondary">（老师模式：每个账号独立发布）</span>
                   </div>
-                  <div className="max-h-48 overflow-y-auto rounded-md border border-border-subtle p-2">
+                  <div className="max-h-56 overflow-y-auto rounded-md border border-border-subtle p-2">
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
                     {accounts.map((account) => {
                       const checked = checkedAccountIds.includes(account.id);
-                      const accShops = shopsByAccount[account.id] ?? [];
+                      const accShopsRaw = shopsByAccount[account.id];
+                      const accShopsLoading = accShopsRaw === null || (checked && !(account.id in shopsByAccount));
+                      const accShops = accShopsRaw ?? [];
                       const accShopId = selectedShopByAccount[account.id] ?? accShops[0]?.shopId ?? "";
                       return (
-                        <div key={account.id} className="mb-2 last:mb-0">
+                        <div key={account.id} className="rounded-md border border-border-subtle bg-canvas-inset/40 p-2">
                           <label className="flex cursor-pointer items-center gap-2 text-sm">
                             <input
                               type="checkbox"
@@ -432,10 +439,13 @@ export function PublishDialog({
                               checked={checked}
                               onChange={(e) => toggleAccount(account.id, e.target.checked)}
                             />
-                            <span className="font-medium text-fg">{account.name}</span>
+                            <span className="truncate font-medium text-fg">{account.name}</span>
                           </label>
-                          {checked && accShops.length > 1 && (
-                            <div className="ml-6 mt-1">
+                          {checked && accShopsLoading && (
+                            <p className="mt-0.5 text-xs text-fg-muted">加载店铺中…</p>
+                          )}
+                          {checked && !accShopsLoading && accShops.length > 1 && (
+                            <div className="mt-1">
                               <Select
                                 value={accShopId}
                                 onChange={(val) =>
@@ -449,15 +459,16 @@ export function PublishDialog({
                               />
                             </div>
                           )}
-                          {checked && accShops.length === 1 && (
-                            <p className="ml-6 mt-0.5 text-xs text-fg-secondary">→ {accShops[0].name}</p>
+                          {checked && !accShopsLoading && accShops.length === 1 && (
+                            <p className="mt-0.5 truncate text-xs text-fg-secondary">→ {accShops[0].name}</p>
                           )}
-                          {checked && accShops.length === 0 && (
-                            <p className="ml-6 mt-0.5 text-xs text-danger-600">加载店铺中…</p>
+                          {checked && !accShopsLoading && accShops.length === 0 && (
+                            <p className="mt-0.5 text-xs text-danger-600">暂无店铺（未绑定）</p>
                           )}
                         </div>
                       );
                     })}
+                    </div>
                   </div>
                 </div>
               ) : (
