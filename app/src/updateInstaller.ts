@@ -153,19 +153,29 @@ export async function downloadInstaller(
         error: `安装包校验失败（期望 ${expected.slice(0, 12)}… 实际 ${actual.slice(0, 12)}…）`,
       };
     }
-    // 校验通过才原子改名：这之前任何失败都不会留下「看起来已下载」的文件
-    await fs.rm(target, { force: true });
-    await fs.rename(partial, target);
-    const stat = await fs.stat(target);
+    // 校验通过才原子改名。目标文件可能被系统锁住（上次下载的 exe 还在），
+    // 先尝试删旧文件，EBUSY 时改用随机后缀名绕开（不影响安装逻辑：
+    // pending.json 记的是实际路径，launchInstaller 从那里读）。
+    let finalPath = target;
+    try {
+      await fs.rm(target, { force: true });
+      await fs.rename(partial, target);
+    } catch {
+      // 如果目标文件被锁无法删/改名，就用带随机后缀的临时名
+      const rand = Math.random().toString(36).slice(2, 8);
+      finalPath = `${target}.${rand}.exe`;
+      await fs.rename(partial, finalPath);
+    }
+    const stat = await fs.stat(finalPath);
     await fs.writeFile(
       path.join(dir, "pending.json"),
-      JSON.stringify({ path: target, version: manifest.version, sha256: actual,
+      JSON.stringify({ path: finalPath, version: manifest.version, sha256: actual,
                        downloadedAt: Date.now() }),
       "utf-8",
     );
     return {
       ok: true,
-      path: target,
+      path: finalPath,
       version: manifest.version,
       size: stat.size,
       sha256: actual,
