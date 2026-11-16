@@ -189,16 +189,12 @@ export async function downloadInstaller(
 /**
  * 启动安装器。
  *
- * Inno Setup 的 `/S` 是静默安装。这里**不等待**安装器退出：
- * 它会关掉本程序，等待会让主进程挂在一个正在被卸载的进程上。
- * 独立进程 + stdio ignore，保证安装器不被本进程的退出带走。
+ * NSIS /S 静默安装，安装完成后自动启动程序（通过 /postinstall 参数触发
+ * installer.nsh 里的 customInstallEnd，或直接在安装器退出后由我们 spawn 软件）。
+ * 这里**不等待**安装器退出：它会关掉本程序，等待会让主进程挂在一个正在被卸载的进程上。
  */
 export function launchInstaller(installerPath: string, silent = true): { ok: boolean; error?: string } {
   try {
-    // NSIS 静默安装参数（/S，注意是大写 S）。
-    // 注意：早期版本误用了 Inno Setup 的 /VERYSILENT /SUPPRESSMSGBOXES，
-    // NSIS 不认识这些参数会忽略并以 GUI 模式运行，导致用户看到安装界面、
-    // 可以改路径，改完快捷方式就指向旧目录了。
     const args = silent ? ["/S"] : [];
     const child = spawn(installerPath, args, {
       detached: true,
