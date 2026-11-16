@@ -22,11 +22,12 @@ def upgrade() -> None:
     op.create_index("ix_operator_tokens_operator_id", "operator_tokens", ["operator_id"])
     op.create_index("ix_operator_tokens_token_hash", "operator_tokens", ["token_hash"])
 
-    # 用原始 SQL 以支持 IF NOT EXISTS（alembic 的 add_column 不支持）
-    op.execute(
-        "ALTER TABLE operators ADD COLUMN IF NOT EXISTS "
-        "multi_device BOOLEAN NOT NULL DEFAULT FALSE"
-    )
+    # 用 alembic 标准 API，同时兼容 SQLite（CI）和 PostgreSQL（生产）
+    with op.batch_alter_table("operators", schema=None) as batch_op:
+        batch_op.add_column(
+            sa.Column("multi_device", sa.Boolean(), nullable=False,
+                      server_default=sa.false())
+        )
 
 
 def downgrade() -> None:

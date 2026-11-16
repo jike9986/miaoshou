@@ -45,7 +45,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("uq_operators_email_normalized", table_name="operators")
+    op.execute("DROP INDEX IF EXISTS uq_operators_email_normalized")
     op.drop_index("uq_email_codes_active", table_name="email_verification_codes")
     op.drop_index("ix_email_codes_expires_at", table_name="email_verification_codes")
     op.drop_index("ix_email_codes_lookup", table_name="email_verification_codes")
