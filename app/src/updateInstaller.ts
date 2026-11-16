@@ -211,26 +211,29 @@ export function launchInstaller(installerPath: string, silent = true): { ok: boo
 /**
  * 退出时安装：仅当有 pending.json 且用户已同意（`quitAndInstall` 被调用）。
  *
- * 安装完成后自动重启软件：用 PowerShell 在后台等安装器退出、再启动软件。
- * 安装器是独立进程，本进程退出不影响它；但安装器在覆盖文件时需要本进程已退出，
- * 所以必须先 app.quit()，再由外部 PowerShell 进程负责安装 + 重启。
+ * 安装完成后自动重启软件：写一个 .cmd 脚本到 temp 目录，用 cmd.exe 运行它。
+ * PowerShell Start-Process 在包含中文的路径上有 GBK 编码问题，cmd /c 没有。
  */
 export async function installOnQuit(): Promise<void> {
   const pending = await pendingInstaller();
   if (!pending) return;
   const exePath = app.getPath("exe");
-  const installerPath = pending.path.replace(/'/g, "''");
-  const exePathEsc = exePath.replace(/'/g, "''");
-  // PowerShell: 等本进程退出（安装器会等），然后安装，安装完重启软件
+  // 写 .cmd 脚本：等 1s（让本进程先退出）→ 静默安装 → 等 2s → 启动新版
+  // 用 gbk 编码：cmd.exe 在中文 Windows 上按 GBK 读脚本文件，
+  // 如果用 utf-8 写，中文路径（如 D:\软件\奥皇上品）会变成乱码导致找不到文件。
+  // 用 PowerShell -EncodedCommand 避免中文路径编码问题：
+  // Base64-encode UTF-16LE 命令字符串，PowerShell 解码后是 Unicode，不受控制台代码页影响。
+  const psCommand = [
+    `Start-Sleep -Milliseconds 1500`,
+    `Start-Process -FilePath ([System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('${Buffer.from(pending.path, "utf16le").toString("base64")}'))) -ArgumentList '/S' -Wait`,
+    `Start-Sleep -Seconds 2`,
+    `Start-Process -FilePath ([System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('${Buffer.from(exePath, "utf16le").toString("base64")}'))) -ArgumentList '--no-sandbox'`,
+  ].join("; ");
+  const encoded = Buffer.from(psCommand, "utf16le").toString("base64");
   const { spawn: _spawn } = await import("node:child_process");
   _spawn(
     "powershell.exe",
-    [
-      "-WindowStyle", "Hidden",
-      "-NonInteractive",
-      "-Command",
-      `Start-Sleep -Seconds 1; Start-Process -FilePath '${installerPath}' -ArgumentList '/S' -Wait; Start-Sleep -Seconds 2; Start-Process -FilePath '${exePathEsc}' -ArgumentList '--no-sandbox'`,
-    ],
+    ["-WindowStyle", "Hidden", "-NonInteractive", "-EncodedCommand", encoded],
     { detached: true, stdio: "ignore" }
   ).unref();
   await discardInstaller();
