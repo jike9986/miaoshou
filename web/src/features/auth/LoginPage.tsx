@@ -70,6 +70,10 @@ export function LoginPage() {
               <dt className="text-[13px] font-medium leading-5 text-fg">成品仓库</dt>
               <dd className="mt-1 text-[13px] leading-6 text-fg-muted">认领已编辑商品，定价后直接发布。</dd>
             </div>
+            <div>
+              <dt className="text-[13px] font-medium leading-5 text-fg">排班计划</dt>
+              <dd className="mt-1 text-[13px] leading-6 text-fg-muted">按时段规划批次发布，合理分配商品上架节奏。</dd>
+            </div>
           </dl>
         </section>
 
@@ -90,8 +94,8 @@ export function LoginPage() {
             allowRegister
             showBack={false}
           />
-          <p className="mt-4 text-center text-[12px] leading-5 text-fg-muted">
-            妙手账号请在登录后前往「连接妙手」绑定。
+          <p className="mt-4 rounded-md border border-border-subtle bg-canvas-inset px-3 py-2.5 text-center text-[12px] leading-5 text-fg-secondary">
+            TikTok 妙手账号在登录后于「连接妙手」页绑定——软件账号与妙手账号是两套不同的账号。
           </p>
         </section>
       </div>

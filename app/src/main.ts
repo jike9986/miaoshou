@@ -217,6 +217,29 @@ function createWindow(): void {
 
   mainWindow.once("ready-to-show", () => mainWindow?.show());
 
+  // 根据窗口宽度自动缩放，解决大屏下 UI 比例偏小的问题。
+  // 用 setZoomFactor（Electron 级缩放）而非 CSS zoom：前者让 100vh/媒体查询等
+  // 都按缩放后的逻辑像素计算，不会出现内容溢出屏幕底部的情况。
+  function getTargetZoom(): number {
+    if (!mainWindow) return 1.0;
+    const [w] = mainWindow.getContentSize();
+    if (w >= 1800) return 1.15;
+    if (w >= 1600) return 1.08;
+    return 1.0;
+  }
+  function applyZoom(): void {
+    if (!mainWindow) return;
+    const target = getTargetZoom();
+    const current = mainWindow.webContents.getZoomFactor();
+    if (Math.abs(current - target) > 0.01) {
+      mainWindow.webContents.setZoomFactor(target);
+    }
+  }
+  // 页面加载完成后设置（Chromium 会在 did-finish-load 后恢复持久化 zoom）
+  mainWindow.webContents.on("did-finish-load", applyZoom);
+  // 窗口大小变化时动态调整
+  mainWindow.on("resize", applyZoom);
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     openWebLink(url);
     return { action: "deny" };

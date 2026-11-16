@@ -1,11 +1,11 @@
 // features/auth —— 连接妙手（api.md §1）
-// 未连接：全屏引导（AppID / AppSecret，密码框可切换明文，错误就地显示）。
+// 未连接：全屏引导（AppID / AppSecret，错误就地显示）。
 // 已连接：顶部账号名 + 店铺下拉（AccountSwitcher，挂在标题栏右侧）。
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, Eye, EyeOff, KeyRound, Link2 } from "lucide-react";
+import { ArrowRight, KeyRound, Link2 } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
@@ -165,7 +165,6 @@ export function AccountSwitcher({ compact = false, disabled = false, className }
 interface FormErrors {
   appId?: string;
   appSecret?: string;
-  studentOperatorId?: string;
   form?: string;
 }
 
@@ -185,18 +184,10 @@ export function UnlockPage() {
   const role = operatorsData?.current?.role ?? identity?.role;
   const canBindForStudent = role === "admin" || role === "teacher";
   const { data: deploymentSettings } = useWorkflowDefaults(identity?.id ?? null, canBindForStudent);
-  const sharedTeacherMode = canBindForStudent && deploymentSettings?.sharedMode === true;
   const deploymentModeReady = !canBindForStudent || typeof deploymentSettings?.sharedMode === "boolean";
-  const students = useMemo(
-    () => (operatorsData?.operators ?? []).filter((operator) => operator.role === "member" && operator.enabled),
-    [operatorsData?.operators]
-  );
-
   const [appId, setAppId] = useState("");
   const [appSecret, setAppSecret] = useState("");
-  const [showSecret, setShowSecret] = useState(false);
   const [rememberName, setRememberName] = useState("");
-  const [studentOperatorId, setStudentOperatorId] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
 
   const connected = status?.connected ?? false;
@@ -227,7 +218,6 @@ export function UnlockPage() {
     if (!trimmedSecret) next.appSecret = "请填写 AppSecret";
     else if (trimmedSecret.length > 512) next.appSecret = "AppSecret 不能超过 512 个字符";
     if (!deploymentModeReady) next.form = "正在确认服务器连接模式，请稍后重试";
-    if (sharedTeacherMode && !studentOperatorId) next.studentOperatorId = "请选择要绑定妙手账号的学员";
     setErrors(next);
     if (Object.keys(next).length > 0) return;
 
@@ -236,7 +226,6 @@ export function UnlockPage() {
       {
         appId: trimmedId,
         appSecret: trimmedSecret,
-        ...(sharedTeacherMode ? { studentOperatorId } : {}),
         name: name ? name : null,
         save: true,
         autoScan: true,
@@ -271,13 +260,9 @@ export function UnlockPage() {
       setErrors({ form: "正在确认服务器连接模式，请稍后重试" });
       return;
     }
-    if (sharedTeacherMode && !studentOperatorId) {
-      setErrors({ studentOperatorId: "请选择要绑定妙手账号的学员" });
-      return;
-    }
     setErrors({});
     connect.mutate(
-      { accountId, ...(sharedTeacherMode ? { studentOperatorId } : {}) },
+      { accountId },
       {
         onSuccess: (result) => {
           toast.success(`已连接「${result.connectionName ?? accountId}」`);
@@ -339,37 +324,6 @@ export function UnlockPage() {
               <CardTitle>账号凭据</CardTitle>
 
               <div className="mt-4 flex flex-col gap-4">
-                {sharedTeacherMode && (
-                  <Field
-                    label="绑定给学员"
-                    required
-                    htmlFor="miaoshou-student-target"
-                    error={errors.studentOperatorId ?? null}
-                    hint="每位学员只能绑定一个妙手账号；同一个妙手账号可以由多位学员共享。"
-                  >
-                    <DropdownSelect
-                      id="miaoshou-student-target"
-                      value={studentOperatorId || null}
-                      onChange={(value) => {
-                        setStudentOperatorId(value);
-                        if (errors.studentOperatorId) setErrors((current) => ({ ...current, studentOperatorId: undefined }));
-                      }}
-                      options={students.map((student) => ({
-                        value: student.id,
-                        label: student.name,
-                        description: student.miaoshouBinding?.linked
-                          ? `已绑定妙手账号${student.miaoshouBinding.appIdHint ? `（${student.miaoshouBinding.appIdHint}）` : ""}`
-                          : "尚未绑定妙手账号",
-                      }))}
-                      placeholder={students.length > 0 ? "选择学员" : "暂无可绑定的学员"}
-                      searchable
-                      searchPlaceholder="搜索学员姓名"
-                      aria-label="选择妙手账号所属学员"
-                      emptyText="没有匹配的学员"
-                      disabled={students.length === 0}
-                    />
-                  </Field>
-                )}
                 <Field
                   label="AppID"
                   required
@@ -381,7 +335,6 @@ export function UnlockPage() {
                     value={appId}
                     autoComplete="off"
                     spellCheck={false}
-                    placeholder="ak_7f3c9a1b2d4e"
                     invalid={Boolean(errors.appId)}
                     icon={<KeyRound />}
                     onChange={(event) => {
@@ -396,52 +349,31 @@ export function UnlockPage() {
                   required
                   htmlFor={secretField}
                   error={errors.appSecret ?? null}
-                  action={
-                    <button
-                      type="button"
-                      onClick={() => setShowSecret((prev) => !prev)}
-                      className="rounded-sm px-1 text-xs font-medium text-brand-700 transition-colors duration-fast hover:bg-brand-50"
-                    >
-                      {showSecret ? "隐藏明文" : "显示明文"}
-                    </button>
-                  }
                 >
-                  <div className="relative flex items-center">
-                    <Input
-                      id={secretField}
-                      type={showSecret ? "text" : "password"}
-                      value={appSecret}
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="sk_9c1f0e2a7b6d4f8a"
-                      invalid={Boolean(errors.appSecret)}
-                      className="pr-10"
-                      onChange={(event) => {
-                        setAppSecret(event.currentTarget.value);
-                        if (errors.appSecret) setErrors((prev) => ({ ...prev, appSecret: undefined }));
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") submit();
-                      }}
-                    />
-                    <button
-                      type="button"
-                      aria-label={showSecret ? "隐藏 AppSecret" : "显示 AppSecret"}
-                      onClick={() => setShowSecret((prev) => !prev)}
-                      className="absolute right-1.5 grid size-7 place-items-center rounded-sm text-fg-muted transition-colors duration-fast hover:bg-surface-active hover:text-fg"
-                    >
-                      {showSecret ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                    </button>
-                  </div>
+                  <Input
+                    id={secretField}
+                    type="password"
+                    value={appSecret}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="sk_9c1f0e2a7b6d4f8a"
+                    invalid={Boolean(errors.appSecret)}
+                    onChange={(event) => {
+                      setAppSecret(event.currentTarget.value);
+                      if (errors.appSecret) setErrors((prev) => ({ ...prev, appSecret: undefined }));
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") submit();
+                    }}
+                  />
                 </Field>
 
                 <Field
-                  label="连接名称"
+                  label="备注"
                 >
                   <Input
                     value={rememberName}
                     maxLength={60}
-                    placeholder="妙手罗蔓"
                     onChange={(event) => setRememberName(event.currentTarget.value)}
                   />
                 </Field>
@@ -929,7 +861,9 @@ export function SoftwareAccountPanel({ redirectTo, onBack, scrollToTop, allowIni
               </Button>
             }
           >
-            <Input ref={passwordInputRef} id={passwordId} type="password" autoComplete="current-password" value={password} invalid={Boolean(loginFieldErrors.password)} onChange={(e) => { setPassword(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, password: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} />
+            <div className="relative flex items-center">
+              <Input ref={passwordInputRef} id={passwordId} type="password" autoComplete="current-password" value={password} invalid={Boolean(loginFieldErrors.password)} onChange={(e) => { setPassword(e.currentTarget.value); setLoginFieldErrors((current) => ({ ...current, password: null })); }} onKeyDown={(e) => { if (e.key === "Enter") submitLogin(); }} />
+            </div>
           </Field>
           <div className="flex items-center justify-between gap-3">
             <Checkbox

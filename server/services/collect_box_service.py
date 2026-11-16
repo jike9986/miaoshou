@@ -285,7 +285,7 @@ def verify_items_present(client: Any, detail_ids: set[str] | list[str], shop_id:
                 if any(isinstance(shop, Mapping) and str(shop.get("shopId")) == str(shop_id)
                        for shop in shops):
                     found.add(detail_id)
-            total = int(data.get("total") or 0)
+            total = int(data.get("total") or data.get("totalCount") or 0)
             if (len(upstream_rows) < COLLECT_BOX_UPSTREAM_PAGE
                     or (total and page_no * COLLECT_BOX_UPSTREAM_PAGE >= total)):
                 break
@@ -297,9 +297,17 @@ def verify_items_present(client: Any, detail_ids: set[str] | list[str], shop_id:
 
 
 def _scan_upstream(account: Account, *, page: int, page_size: int, status: str,
-                   keyword: str, shop_id: str | None, site: str | None
+                   keyword: str, shop_id: str | None, site: str | None,
+                   count_all: bool = False
                    ) -> dict[str, Any]:
-    """真正打妙手的那一段（缓存未命中时才走这里）。返回值可 JSON 化。"""
+    """真正打妙手的那一段（缓存未命中时才走这里）。返回值可 JSON 化。
+
+    count_all=True：用 pageSize=500 一次尽量拉完所有商品，以 raw_count（原始行数）
+    作为 total，不受 listing_rows 的 editModel/shopId 过滤影响，不依赖上游 total 字段。
+    count_all=False（默认）：凑够本页所需 items 就停，速度快。
+    """
+    # 妙手接口 pageSize 上限 500；count_all 时用最大值以减少翻页次数
+    upstream_page_size = 500 if count_all else COLLECT_BOX_UPSTREAM_PAGE
     client = account_client(account)
     try:
         upstream_status = None if status == "all" else status
@@ -308,17 +316,19 @@ def _scan_upstream(account: Account, *, page: int, page_size: int, status: str,
         request_page = 1
         offset = (page - 1) * page_size
         matched = 0
+        raw_count = 0  # 原始 detailList 行数（不受 editModel 过滤影响）
         items: list[dict[str, Any]] = []
-        total = 0
         scanned = 0
         has_more = False
+        items_done = False  # 本页所需 items 已凑够
         while True:
             response = client.collect_box_list(
                 status=upstream_status, keyword=keyword or "",
-                page_no=request_page, page_size=COLLECT_BOX_UPSTREAM_PAGE)
+                page_no=request_page, page_size=upstream_page_size)
             data = (response or {}).get("data") or {}
+            upstream_rows = data.get("detailList") or []
+            raw_count += len(upstream_rows)  # 原始行数，含 site 模式等
             rows = listing_rows(response)
-            total = max(total, int(data.get("total") or 0))
             scanned += len(rows)
             for row in rows:
                 if shop_id and str(row["shopId"]) != str(shop_id):
@@ -328,19 +338,25 @@ def _scan_upstream(account: Account, *, page: int, page_size: int, status: str,
                 if keyword and not _matches_keyword(row, keyword):
                     continue
                 matched += 1
-                if matched <= offset:
+                if items_done or matched <= offset:
                     continue
                 if len(items) >= page_size:
                     has_more = True
-                    break
-                items.append(row)
-            upstream_rows = data.get("detailList") or []
-            if (has_more or len(upstream_rows) < COLLECT_BOX_UPSTREAM_PAGE
-                    or (total and request_page * COLLECT_BOX_UPSTREAM_PAGE >= total)):
+                    items_done = True
+                else:
+                    items.append(row)
+            if not count_all and (has_more or items_done):
+                # 快速模式：items 已经凑够，不必继续翻页
+                break
+            # 上游返回行数不足一页说明到底了
+            if len(upstream_rows) < upstream_page_size:
                 break
             request_page += 1
     finally:
         client.close()
+    # count_all 模式：用原始行数（不受 editModel 过滤）作为总数，贴近妙手界面显示的数字
+    # 普通模式：用 matched（已通过过滤的行数）作为 total
+    total = raw_count if count_all else matched
     return {"items": items, "total": total, "scanned": scanned, "hasMore": has_more}
 
 
@@ -368,11 +384,15 @@ def list_items(db: Session, account: Account, *, page: int = 1, page_size: int =
 
     key = _cache_key(account, page=page, page_size=page_size, status=status,
                      keyword=keyword, shop_id=shop_id, site=site, sort=sort)
+    # count_all=True：扫完所有上游页以得到准确总数（无过滤条件时使用）
+    count_all = (page == 1 and not keyword and not shop_id and not site
+                 and page_size <= COLLECT_BOX_UPSTREAM_PAGE)
     try:
         outcome: FetchResult = _cache().fetch(
             key,
             lambda: _scan_upstream(account, page=page, page_size=page_size, status=status,
-                                   keyword=keyword, shop_id=shop_id, site=site),
+                                   keyword=keyword, shop_id=shop_id, site=site,
+                                   count_all=count_all),
             ttl=cache_ttl(),
             force_refresh=force_refresh,
             stale_on=MiaoshouError,

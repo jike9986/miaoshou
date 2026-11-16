@@ -229,9 +229,7 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
         if frequency == "once" and start_date == _today_iso and time_text < _now_hm:
             raise errors.validation(
                 f"执行时间不能早于当前时间 {_now_hm}", field="time", value=time_text)
-        if frequency in ("daily", "weekly", "monthly") and time_text < _now_hm:
-            raise errors.validation(
-                f"执行时间不能早于当前时间 {_now_hm}", field="time", value=time_text)
+        # daily/weekly/monthly：首次执行是明天起，不限制时间早于当前时刻
 
     name = clean_text(pick("name") or "", 120)
     if len(name) > 120:
@@ -538,8 +536,7 @@ def _assert_schedule_owner(row: Schedule, operator: Operator | None) -> None:
 def _visible_account_ids(db: Session, operator: Operator | None) -> list[int] | None:
     if _is_global_operator(operator):
         return None
-    return [row.id for row in db.query(Account).all()
-            if account_service.has_account_access(db, row.id, operator.id)]
+    return account_service.visible_account_ids_for_member(db, operator.id)
 
 
 def list_schedules(db: Session, *, account_id: Any = None,
@@ -755,7 +752,7 @@ def note_result(db: Session, task_id: str, *, success: bool, result: dict[str, A
         row.attempts = int(row.attempts or 0) + 1
     row.last_result = {**result, "at": now_ts()}
     row.last_run_at = now_ts()
-    due = next_due(as_dict(row), datetime.now())
+    due = next_due(as_dict(row), moment or datetime.now())
     row.next_due_at = due.timestamp() if due else None
     row.updated_at = now_ts()
     db.flush()
@@ -838,13 +835,11 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
     picked: list[dict[str, Any]] = []
     page_size = max(count * 4, 50)
     offset = 0
-    rows: list[Any] = []
     while len(picked) < count:
         batch = (query.order_by(Product.saved_at.desc())
                  .limit(page_size).offset(offset).all())
         if not batch:
             break
-        rows.extend(batch)
         offset += page_size
         # 只有在扫完这一页仍不够时才继续翻页
         for row in batch:

@@ -70,6 +70,7 @@ export interface AppShellProps {
   account?: SidebarAccount | null;
   onAccountClick?: () => void;
   onAccountLogout?: () => void;
+  onSettingsClick?: () => void;
   /** 标题栏中部（默认：全局搜索入口 > 面包屑） */
   titleBarCenter?: ReactNode;
   /** 标题栏右侧附加入口（最多 1 个） */
@@ -87,6 +88,7 @@ export function AppShell({
   account,
   onAccountClick,
   onAccountLogout,
+  onSettingsClick,
   titleBarCenter,
   titleBarExtra,
   onOpenSearch,
@@ -148,6 +150,7 @@ export function AppShell({
       account={account}
       onAccountClick={onAccountClick}
       onAccountLogout={onAccountLogout}
+      onSettingsClick={onSettingsClick}
       collapseTogglePosition="top"
       showCollapseToggle={!narrow}
       onNavigate={() => setDrawerOpen(false)}

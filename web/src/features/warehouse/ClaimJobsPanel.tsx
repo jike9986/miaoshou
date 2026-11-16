@@ -6,10 +6,13 @@ import { queryKeys } from "@/lib/queryKeys";
 import { formatDate } from "@/lib/utils";
 import type { BatchDetailResponse, BatchListResponse } from "@/lib/types";
 import { Badge, Button, Card, ErrorState, Progress } from "@/components/ui";
+import { useRefreshPublishLogs } from "@/lib/queries";
+import { toast } from "@/components/ui/toast";
 
 const labels: Record<string, string> = {
   pending: "待开始", running: "进行中", done: "已完成", failed: "失败",
   ok: "已导入采集箱", skipped: "已跳过", stopped: "已停止", paused: "已暂停",
+  processing: "等待平台确认",
 };
 
 const stageLabels: Record<string, string> = {
@@ -36,6 +39,7 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
   focusJobId: string | null;
 }) {
   const [expanded, setExpanded] = useState<string | null>(focusJobId);
+  const refreshLogs = useRefreshPublishLogs();
   const detail = useQuery({
     queryKey: queryKeys.claimJobs.detail(operatorId, accountId, expanded ?? "none"),
     queryFn: () => api.get<BatchDetailResponse>(`/claim-jobs/${encodeURIComponent(expanded!)}`, { query: { accountId } }),
@@ -52,11 +56,26 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
           size="sm"
           variant="secondary"
           icon={<RefreshCw className="size-3.5" />}
-          loading={list.isFetching}
+          loading={list.isFetching || refreshLogs.isPending}
           disabled={!accountId}
           onClick={() => {
             void list.refetch();
             if (expanded) void detail.refetch();
+            // 有 processing 发布批次时，同时刷新平台回执
+            const hasProcessing = list.data?.items.some(
+              (job) => job.status === "processing" && job.id.startsWith("pub_")
+            );
+            if (hasProcessing) {
+              refreshLogs.mutate(undefined, {
+                onSuccess: (data) => {
+                  if (data.updated > 0) {
+                    toast.success(`已更新 ${data.updated} 条发布回执`);
+                    void list.refetch();
+                  }
+                },
+                onError: () => {/* 静默失败，不干扰刷新 */},
+              });
+            }
           }}
         >刷新任务</Button>
       </div>
@@ -74,6 +93,11 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
         const done = Math.min(total, progressDone);
         const completedSuccesses = job.results.filter((row) => row.status === "ok").length;
         const completedFailures = job.results.filter((row) => row.status === "failed").length;
+        const isPublishProcessing = job.status === "processing" && job.id.startsWith("pub_");
+        // 发布已提交等待平台回执时，所有 processing 结果都算"已提交"
+        const submittedCount = isPublishProcessing
+          ? job.results.filter((row) => row.status === "processing").length
+          : 0;
         const succeeded = completedSuccesses + (active ? progress?.verified ?? 0 : 0);
         const failed = completedFailures + (active ? progress?.failed ?? 0 : 0);
         const pending = Math.max(0, total - done);
@@ -81,7 +105,7 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
         return (
           <Card key={job.id} className="p-4">
             <div className="flex flex-wrap items-center gap-3 text-sm">
-              <Badge variant={job.status === "done" ? "success" : job.status === "failed" ? "danger" : "info"}>{job.status === "failed" && succeeded > 0 ? "部分失败" : labels[job.status] ?? job.status}</Badge>
+              <Badge variant={job.status === "done" ? "success" : job.status === "failed" ? "danger" : job.status === "processing" ? "warning" : "info"}>{job.status === "failed" && succeeded > 0 ? "部分失败" : labels[job.status] ?? job.status}</Badge>
               <span>店铺 {job.shopId}</span>
               <span className="text-fg-muted">{formatDate(job.createdAt)}</span>
               <Button
@@ -101,7 +125,10 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
               showValue
             />
             <p className="mt-2 text-sm text-fg-secondary" role="status">
-              成功 <span className="num">{succeeded}</span> 件 · 失败 <span className="num">{failed}</span> 件 · {active ? "待处理" : "未处理"} <span className="num">{pending}</span> 件
+              {isPublishProcessing
+                ? <>已提交 <span className="num">{submittedCount}</span> 件，等待平台回执（点「刷新任务」获取最新结果）</>
+                : <>成功 <span className="num">{succeeded}</span> 件 · 失败 <span className="num">{failed}</span> 件 · {active ? "待处理" : "未处理"} <span className="num">{pending}</span> 件</>
+              }
             </p>
             {active && progress ? (
               <p className="mt-2 text-sm text-fg-muted" role="status">

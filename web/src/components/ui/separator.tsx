@@ -129,17 +129,15 @@ export function Progress({
         aria-valuenow={indeterminate ? undefined : Math.round(clamped)}
         className="h-1.5 w-full overflow-hidden rounded-full bg-canvas-inset"
       >
-        {indeterminate ? (
-          <div
-            className={cn("h-full w-[30%] rounded-full", PROGRESS_TONE[tone])}
-            style={{ animation: "progress-slide 1.2s ease-in-out infinite" }}
-          />
-        ) : (
-          <div
-            className={cn("h-full rounded-full transition-[width] duration-medium ease-out", PROGRESS_TONE[tone])}
-            style={{ width: `${clamped}%` }}
-          />
-        )}
+        {/* 确定/不确定模式共用同一个 div，浏览器能识别为同一节点，
+            切换时 transition 才不会被打断、进度才能平滑增加
+            （两个条件渲染的 div 切换时旧节点被卸载，transition 无从跑）。*/}
+        <div
+          className={cn("h-full rounded-full transition-[width] duration-700 ease-out", PROGRESS_TONE[tone])}
+          style={indeterminate
+            ? { width: "30%", animation: "progress-slide 1.2s ease-in-out infinite" }
+            : { width: `${clamped}%` }}
+        />
       </div>
     </div>
   );

@@ -301,6 +301,10 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
                 automation_run_service.reconcile_publish_log(db, row)
                 schedule_service.reconcile_publish_log(db, row)
     db.commit()
+    # 把已经落定的 pub_ 批次从 processing 同步到最终状态
+    synced = publish_service.sync_publish_batch_statuses(db, account.id)
+    if synced:
+        db.commit()
     return {"updated": updated, "degraded": degraded, "accountId": str(account.id),
             "platformTotal": platform_total}
 

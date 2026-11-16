@@ -84,6 +84,34 @@ def has_account_access(db: Session, account_id: Any, operator_id: int | None) ->
     ).first() is not None)
 
 
+def visible_account_ids_for_member(db: Session, operator_id: int) -> list[int]:
+    """Return the account IDs a non-admin/teacher operator may access.
+
+    Uses at most 2 queries instead of the O(N×3) loop that calling
+    has_account_access() per account would produce.
+
+    Case A — operator has explicit AccountBinding rows: return exactly those
+    account ids (explicit bindings are authoritative; legacy fallback is off).
+
+    Case B — no explicit bindings at all: legacy path — return accounts whose
+    owner_operator_id matches and that have no explicit bindings of their own.
+    """
+    # Query 1: does this operator have any explicit binding?
+    bound_ids = [r.account_id for r in
+                 db.query(AccountBinding.account_id).filter(
+                     AccountBinding.operator_id == operator_id).all()]
+    if bound_ids:
+        return bound_ids
+    # Query 2: legacy fallback
+    bound_accounts_sq = db.query(AccountBinding.account_id).subquery()
+    rows = db.query(Account.id).filter(
+        Account.owner_operator_id == operator_id,
+        Account.legacy_owner_fallback_disabled.is_(False),
+        Account.id.not_in(db.query(bound_accounts_sq)),
+    ).all()
+    return [r.id for r in rows]
+
+
 # --- 读 -------------------------------------------------------------------
 def list_accounts(db: Session) -> list[Account]:
     return db.query(Account).order_by(Account.id.asc()).all()

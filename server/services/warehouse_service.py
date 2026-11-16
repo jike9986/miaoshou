@@ -387,8 +387,7 @@ def _owned_account_ids(db: Session, operator_id: int):
     """Return accounts visible to one student, with legacy fallback scoped safely."""
     from services import account_service
 
-    return [account_id for (account_id,) in db.query(Account.id).all()
-            if account_service.has_account_access(db, account_id, operator_id)]
+    return account_service.visible_account_ids_for_member(db, operator_id)
 
 
 def _source_owned_product_ids(db: Session, operator_id: int):
@@ -397,8 +396,7 @@ def _source_owned_product_ids(db: Session, operator_id: int):
     # member can access now.
     from services import account_service
 
-    account_ids = [account_id for (account_id,) in db.query(Account.id).all()
-                   if account_service.has_account_access(db, account_id, operator_id)]
+    account_ids = account_service.visible_account_ids_for_member(db, operator_id)
     return (db.query(AutomationRunItem.product_id)
             .join(AutomationRun, AutomationRun.id == AutomationRunItem.run_id)
             .filter(AutomationRun.owner_operator_id == operator_id,
@@ -2570,6 +2568,16 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             # 正确做法：不倒推、不加增量，沿用上次存下的重量，并当场补记
             # _sourceWeight（用上次的最终重量），下次就能正常比对。
             _copy_saved_weights(payload, previous)
+            # 沿用时仍要过一次下限检查：上游原重可能是 0.001（采集错误），
+            # 直接搬过来等于把坏数据写进草稿（2026-11-13 实测）。
+            _cat_name_for_min = product_service.category_label(payload)
+            _base_min = category_min_weight(_cat_name_for_min)
+            try:
+                _w = float(payload.get("weight") or 0)
+            except (TypeError, ValueError):
+                _w = 0.0
+            if _w < _base_min:
+                payload["weight"] = round(_base_min, 6)
             payload["_sourceWeight"] = str(previous.get("weight") or "")
             weight_report = {"before": previous.get("weight"),
                              "after": payload.get("weight"),
@@ -2893,7 +2901,11 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         translation_report = {**translation_report, "coverage": coverage}
         # 只把译文字段写回，价格/重量/尺寸/图片/规格 id 一个字都不动：
         # translated_info 会把整块 info 换掉，直接赋值等于把前面几步全部作废。
-        payload = merge_translated_fields(payload, translated)
+        payload = merge_translated_fields(payload, translated, language=str(language or "ms"))
+        # 颜色清洗在翻译前跑，清洗后的 props 引用的是中文版；翻译后必须更新
+        # props 指向译后版本，否则 2958 行会把译文覆盖掉（2026-11-13 实测）。
+        if props:
+            props = payload.get("skuPropertyList") or []
 
     draft_verified = False
     if enforce_pre_save:
@@ -3307,7 +3319,8 @@ _TRANSLATABLE_TEXT_FIELDS = (
 
 
 def merge_translated_fields(payload: dict[str, Any],
-                            translated: Mapping[str, Any]) -> dict[str, Any]:
+                            translated: Mapping[str, Any],
+                            language: str = "ms") -> dict[str, Any]:
     """把译文字段并回已处理好的 payload，其余字段一律保留。
 
     为什么不能直接赋值：payload 走到翻译这一步时已经带上了
@@ -3324,7 +3337,116 @@ def merge_translated_fields(payload: dict[str, Any],
     if isinstance(translated_props, list):
         merged["skuPropertyList"] = _merge_spec_translation(
             payload.get("skuPropertyList") or [], translated_props)
+    # Fallback: 当上游 API 未返回颜色翻译时，用本地中文→目标语言词表补足。
+    # 覆盖率检查中 attrValue "missing" 表示上游没有返回该字段，
+    # 此时颜色值仍为中文，需要在这里做备用翻译。
+    _apply_color_translation_fallback(merged, language)
     return merged
+
+
+def _has_cjk(text: str) -> bool:
+    return any("一" <= c <= "鿿" for c in str(text or ""))
+
+
+def _deepseek_translate_colors(texts: list[str], language: str) -> dict[str, str]:
+    """用 DeepSeek API 批量翻译颜色词；返回 {原文: 译文}。
+
+    只在本地词表翻不出时调用，一次批量处理所有缺漏项，不逐件请求。
+    翻译失败时静默返回空字典，调用方保留原文。
+    """
+    import json as _json
+    import urllib.request as _req
+    from core.config import get_settings
+    key = get_settings().deepseek_api_key
+    if not key or not texts:
+        return {}
+    lang_names = {
+        "ms": "Malay (Bahasa Malaysia)",
+        "en": "English",
+        "th": "Thai",
+        "vi": "Vietnamese",
+        "tl": "Filipino (Tagalog)",
+        "id": "Indonesian",
+        "zh": "Simplified Chinese",
+    }
+    lang_name = lang_names.get(str(language or "ms").lower(), "Malay (Bahasa Malaysia)")
+    # 一次最多 50 个词，避免超出 token 限制
+    batch = texts[:50]
+    items_json = _json.dumps(batch, ensure_ascii=False)
+    prompt = (
+        f"Translate the following Chinese product color names to {lang_name}. "
+        "Return ONLY a JSON array of translated strings in the same order, no explanation.\n"
+        f"Input: {items_json}"
+    )
+    body = _json.dumps({
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": 512,
+    }).encode("utf-8")
+    request = _req.Request(
+        "https://api.deepseek.com/chat/completions",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+        },
+        method="POST",
+    )
+    try:
+        with _req.urlopen(request, timeout=15) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        content = data["choices"][0]["message"]["content"].strip()
+        # 提取 JSON 数组（有时 DeepSeek 在前后加 markdown ```json```）
+        start = content.find("[")
+        end = content.rfind("]") + 1
+        if start < 0 or end <= start:
+            return {}
+        translated_list: list[str] = _json.loads(content[start:end])
+        if len(translated_list) != len(batch):
+            return {}
+        return {orig: tr for orig, tr in zip(batch, translated_list)
+                if tr and str(tr).strip()}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _apply_color_translation_fallback(payload: dict[str, Any], language: str) -> None:
+    """原地：把颜色维度里仍为中文的 attrValue 用本地词表翻译。
+
+    只处理颜色维度（attrId=100000 / attrName in _COLOR_DIM_NAMES），
+    不碰其他维度（尺码等），不改 attrValueId。
+    本地词表翻不出时，批量交给 DeepSeek 处理。
+    """
+    from services.color_map import translate_chinese_color
+    # 第一遍：本地词表
+    still_chinese: list[tuple[dict, str]] = []  # (val_dict, original_text)
+    for prop in (payload.get("skuPropertyList") or []):
+        if not isinstance(prop, dict):
+            continue
+        dim_id = str(prop.get("attrId") or prop.get("propId") or "")
+        dim_name = str(prop.get("attrName") or prop.get("propName") or "").strip().casefold()
+        if dim_id not in _COLOR_DIM_IDS and dim_name not in _COLOR_DIM_NAMES:
+            continue
+        for val in (prop.get("attrValueList") or []):
+            if not isinstance(val, dict):
+                continue
+            current = str(val.get("attrValue") or "")
+            if not _has_cjk(current):
+                continue  # 已翻译或非中文
+            translated = translate_chinese_color(current, language)
+            if translated:
+                val["attrValue"] = translated
+            else:
+                still_chinese.append((val, current))
+    # 第二遍：本地词表翻不出的交给 DeepSeek 批量处理
+    if still_chinese:
+        originals = list(dict.fromkeys(text for _, text in still_chinese))  # 去重保序
+        ds_map = _deepseek_translate_colors(originals, language)
+        for val, original in still_chinese:
+            tr = ds_map.get(original)
+            if tr:
+                val["attrValue"] = tr
 
 
 # 维度语义归类：颜色/尺码，兼容中英马三语 + 上游 attrId。
@@ -3355,8 +3477,9 @@ def _merge_spec_translation(current_props, translated_props):
     for cur in merged:
         if not isinstance(cur, dict):
             continue
-        cur_dim = str(cur.get("attrId") or "").strip()
-        cur_name = str(cur.get("attrName") or "").strip().casefold()
+        # 上游有时用 propId/propName，有时用 attrId/attrName，两组都要认
+        cur_dim = str(cur.get("attrId") or cur.get("propId") or "").strip()
+        cur_name = str(cur.get("attrName") or cur.get("propName") or "").strip().casefold()
         # 维度语义判定：翻译接口返回的维度名可能已经变成 Warna/Saiz（英文），
         # 而当前是 颜色/尺码（中文），attrId 也被上游剥掉，两个常规条件全对不上。
         # 按语义归类兜底，否则译文规格永远合并不进来（2026-11-10 实测）。
@@ -3365,8 +3488,11 @@ def _merge_spec_translation(current_props, translated_props):
         for tp in translated_props:
             if not isinstance(tp, dict):
                 continue
-            t_dim = str(tp.get("attrId") or "").strip()
-            t_name = str(tp.get("attrName") or "").strip().casefold()
+            # 上游翻译接口返回体里维度可能用 propId/propName（而非 attrId/attrName）：
+            # 两组字段全空时 _spec_kind("","") 返回 ""，语义兜底也对不上，
+            # twin 永远 None → 颜色值一条都翻不了（2026-11-13 实测）。
+            t_dim = str(tp.get("attrId") or tp.get("propId") or "").strip()
+            t_name = str(tp.get("attrName") or tp.get("propName") or "").strip().casefold()
             if cur_dim and t_dim == cur_dim:
                 twin = tp
                 break
@@ -3392,17 +3518,26 @@ def _merge_spec_translation(current_props, translated_props):
             # 数量不等：翻译接口有时只返回部分值（实测返回 1 个、本地 5 个），
             # 直接跳过会导致「只有第一个 SKU 翻译了、其余仍是中文」
             # （2026-11-12 负责人指出）。
-            # 不能按位置硬配（会张冠李戴），改成按 attrValueId 匹配，
-            # 匹配不到的保持中文 —— 宁可少翻，也不能把颜色配错。
-            by_id = {str(tv.get("attrValueId") or ""): tv for tv in twin_values}
-            for cv in cur_values:
-                vid = str(cv.get("attrValueId") or "")
-                tv = by_id.get(vid) if vid else None
-                if tv is None:
-                    continue
-                label = str(tv.get("attrValue") or "").strip()
-                if label:
-                    cv["attrValue"] = label
+            # 优先按 attrValueId 精确匹配；上游译文接口通常不回 id（全空），
+            # 此时退化成按位置顺序覆盖（上游与我们提交顺序一致）——宁可少翻
+            # min(len) 条，也不能把颜色配错。
+            by_id = {str(tv.get("attrValueId") or ""): tv for tv in twin_values
+                     if str(tv.get("attrValueId") or "")}
+            if by_id:
+                for cv in cur_values:
+                    vid = str(cv.get("attrValueId") or "")
+                    tv = by_id.get(vid) if vid else None
+                    if tv is None:
+                        continue
+                    label = str(tv.get("attrValue") or "").strip()
+                    if label:
+                        cv["attrValue"] = label
+            else:
+                # 上游没有回 id（译文接口常见）：按提交顺序逐位覆盖
+                for cv, tv in zip(cur_values, twin_values):
+                    label = str(tv.get("attrValue") or "").strip()
+                    if label:
+                        cv["attrValue"] = label
     return merged
 
 

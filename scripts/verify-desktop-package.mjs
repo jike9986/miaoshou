@@ -57,9 +57,12 @@ class BrowserWindow {
     window = this;
     windowOptions = options;
     this.webContents = { mainFrame: { url: "about:blank" },
-      setWindowOpenHandler() {}, on: (event, handler) => navigationHandlers.set(event, handler) };
+      setWindowOpenHandler() {}, on: (event, handler) => navigationHandlers.set(event, handler),
+      getZoomFactor: () => 1.0, setZoomFactor() {} };
   }
   once() {}
+  on() {}
+  getContentSize() { return [windowOptions.width, windowOptions.height]; }
   loadFile(file, options) {
     loadedFile = { file, options };
     this.webContents.mainFrame.url = pathToFileURL(file).href;

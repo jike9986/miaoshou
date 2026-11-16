@@ -4,10 +4,11 @@
 // 状态与进度在上，任务摘要在下；所有摘要行固定高度，切换文字/图片开关时
 // 只改文字，不改变卡片尺寸。
 
-import { useEffect, useState } from "react";
-import { Activity } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Activity, RotateCcw } from "lucide-react";
 import { cn, formatCount, formatDuration } from "@/lib/utils";
 import { Card, CardTitle, Progress, StatusBadge } from "@/components/ui";
+import { IconButton } from "@/components/ui";
 import {
   languageLabel,
   type AutomationSettings,
@@ -23,6 +24,8 @@ export interface ProgressPanelProps {
   visibleCount?: number;
   /** 发布目标店铺名；只拿到 id 时回退显示 id */
   publishShopName?: string;
+  /** 任务结束后清空状态面板（返回 idle） */
+  onReset?: () => void;
   className?: string;
 }
 
@@ -44,9 +47,13 @@ function useTickingElapsed(startedAt: number | null, active: boolean): number | 
 export function ProgressPanel({
   run,
   settings,
+  onReset,
   className,
 }: ProgressPanelProps) {
   const running = run.phase === "running";
+  // 计时器只在 phase === "running" 时走；任务停止/完成后立即冻结，
+  // 不再用 endedAt 是否为 null 判断（hydrateRun 恢复历史任务时 endedAt 可能短暂为 null）。
+  const timerActive = running;
   // 文字阶段：正在做什么。文字很快，但用户要求「处理到哪里就显示出来」。
   const textStageHint = !settings.textEnabled
     ? ""
@@ -59,6 +66,7 @@ export function ProgressPanel({
           : "";
   // 图片阶段：挑图 → 识别 → 提交翻译 → 写回。
   // 图片是独立后台线程，文字跑完它可能还在跑，必须单独显示当前步骤。
+  // 四个明确的状态：等待开始 / 识别中 / 翻译中 / 已完成
   const imageStageHint = !settings.imagesEnabled
     ? ""
     : run.imagePlanned === 0
@@ -68,34 +76,65 @@ export function ProgressPanel({
         : run.imageDone > 0
           ? "翻译中"
           : "已选图，等待提交";
-  const elapsed = useTickingElapsed(run.startedAt, running);
+  const elapsed = useTickingElapsed(run.startedAt, timerActive);
   const finalElapsed =
     run.startedAt !== null && run.endedAt !== null
       ? Math.max(0, Math.round((run.endedAt - run.startedAt) / 1000))
       : null;
-  const shownElapsed = running ? elapsed : finalElapsed;
-  const remaining =
-    running && shownElapsed !== null && run.done > 0 && run.total > run.done
-      ? Math.round((shownElapsed / run.done) * (run.total - run.done))
-      : null;
+  const shownElapsed = timerActive ? elapsed : finalElapsed;
 
-  const batchPercent = run.total > 0 ? (run.done / run.total) * 100 : 0;
-  // 图片进度条：
-  //   · 已提交任务 → 按张数算（真实翻译进度）；
-  //   · 还没提交（正在 OCR 挑图）→ 按已处理件数算，
-  //     否则整段 OCR 期间进度条一直是 0%，看着像卡死
-  //     （负责人口径 2026-11-12：「一直显示识别中」）。
-  const imagePercent = run.imagePlanned > 0
-    ? (run.imageDone / run.imagePlanned) * 100
-    : run.total > 0
-      ? (run.done / run.total) * 100
-      : 0;
   const textPercent = settings.textEnabled && run.total > 0 ? (run.done / run.total) * 100 : 0;
+  const imagePercent = run.imagePlanned > 0 ? (run.imageDone / run.imagePlanned) * 100 : 0;
+  // 批次进度 = 文字和图片都完成才到100：
+  //   - 两者都开启：平均
+  //   - 只开启一项：用那一项
+  //   - 都不开启：按件数
+  const bothEnabled = settings.textEnabled && settings.imagesEnabled;
+  const batchPercent = bothEnabled
+    ? (textPercent + imagePercent) / 2
+    : settings.imagesEnabled
+      ? imagePercent
+      : run.total > 0
+        ? (run.done / run.total) * 100
+        : 0;
 
+  // 进度条平滑动画：
+  //   1. hydrateRun 恢复历史任务时，从 0% 一步跳到 100%，CSS transition 来不及。
+  //      用双 rAF（先渲染 0 → 然后下帧渲染目标值）确保过渡动画跑完整。
+  //   2. 任务正在跑时，每次数值增加也走同样路径，让进度条平滑推进。
+  const rafRef = useRef<number>(0);
+  const [displayBatch, setDisplayBatch] = useState(0);
+  const [displayText, setDisplayText] = useState(0);
+  const [displayImage, setDisplayImage] = useState(0);
+  // track previous target so we can detect a reset (new run)
+  const prevBatchRef = useRef(batchPercent);
+  useEffect(() => {
+    cancelAnimationFrame(rafRef.current);
+    // If percent decreased significantly (reset/new run), jump to 0 first
+    if (batchPercent < prevBatchRef.current - 5) {
+      setDisplayBatch(0);
+      setDisplayText(0);
+      setDisplayImage(0);
+    }
+    prevBatchRef.current = batchPercent;
+    rafRef.current = requestAnimationFrame(() => {
+      setDisplayBatch(batchPercent);
+      setDisplayText(textPercent);
+      setDisplayImage(imagePercent);
+    });
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [batchPercent, textPercent, imagePercent]);
+
+  // 「已停止」只在真的被用户中断且还有未处理项时才显示。
+  // 若 done >= total（所有项都已完成），即使内部 phase 仍是 stopped，
+  // 也按「完成」来展示，避免用户看到自相矛盾的「已停止 + 全部完成」。
+  const effectivelyDone =
+    run.phase === "done" ||
+    (run.phase === "stopped" && run.total > 0 && run.done >= run.total);
   const phaseMeta =
     run.phase === "running"
       ? { label: "运行中", tone: "info" as const, dot: "info" as const, breathe: true }
-      : run.phase === "done"
+      : effectivelyDone
         ? run.failed > 0 || run.failures.length > 0 || (run.needsReview ?? 0) > 0
           ? { label: "需检查", tone: "warning" as const, dot: "warning" as const }
           : { label: "已完成", tone: "success" as const, dot: "success" as const }
@@ -111,29 +150,35 @@ export function ProgressPanel({
           <Activity className="size-4 text-fg-muted" strokeWidth={1.75} />
           <CardTitle>处理状态</CardTitle>
         </span>
-        <StatusBadge meta={phaseMeta} />
+        <span className="flex items-center gap-1.5">
+          {/* 任务结束后显示刷新按钮：点击清空状态、恢复初始界面 */}
+          {run.phase !== "idle" && run.phase !== "running" && onReset && (
+            <IconButton
+              size="sm"
+              label="清空记录，恢复初始状态"
+              title="清空记录，恢复初始状态"
+              icon={<RotateCcw />}
+              onClick={onReset}
+            />
+          )}
+          <StatusBadge meta={phaseMeta} />
+        </span>
       </div>
 
       <div className="mt-3 rounded-md border border-border-subtle bg-canvas-inset/45 p-2.5">
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-2xs text-fg-muted">当前阶段</span>
-          <span className="min-w-0 truncate text-[13px] font-medium text-fg" title={run.stage}>
-            {run.stage}
-          </span>
-        </div>
-        <div className="mt-2 grid grid-cols-3 gap-2">
+        <div className="mt-0 grid grid-cols-2 gap-2">
           <Stat label="批次" value={`${formatCount(run.done)} / ${formatCount(run.total)}`} />
           <Stat label="耗时" value={shownElapsed === null ? "—" : formatDuration(shownElapsed)} />
-          <Stat label="剩余" value={remaining === null ? "—" : formatDuration(remaining)} />
         </div>
-        <Progress className="mt-2" value={batchPercent} label="批次进度" showValue />
+        <Progress className="mt-2" value={displayBatch} label="批次进度" showValue />
       </div>
 
       {/* 两条真实进度：文字按件，图片按实际提交张数 */}
       <div className="mt-3 grid gap-2.5">
         <div>
           <Progress
-            value={textPercent}
+            value={displayText}
+            indeterminate={settings.textEnabled && running && run.done === 0}
             tone={settings.textEnabled ? "brand" : "warning"}
             label="商品设置与文字"
             showValue
@@ -150,7 +195,8 @@ export function ProgressPanel({
         </div>
         <div>
           <Progress
-            value={imagePercent}
+            value={displayImage}
+            indeterminate={settings.imagesEnabled && running && run.imagePlanned === 0}
             tone={settings.imagesEnabled ? "brand" : "warning"}
             label="图片处理"
             showValue
@@ -158,12 +204,14 @@ export function ProgressPanel({
           <p className="num mt-1 h-4 truncate text-2xs leading-4 text-fg-muted">
             {!settings.imagesEnabled
               ? "已关闭 · 不处理图片"
-              : run.phase === "done" && run.imagePlanned === 0
-                ? "无需翻译 · 图片已清理"
-                : run.imagePlanned === 0
-                  ? imageStageHint || "识别中…"
-                  : `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译` +
-                    (imageStageHint ? ` · ${imageStageHint}` : "")}
+              : run.phase === "idle"
+                ? "等待开始"
+                : run.phase === "done" && run.imagePlanned === 0
+                  ? "无需翻译 · 图片已清理"
+                  : run.imagePlanned === 0
+                    ? imageStageHint || "等待识别…"
+                    : `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译` +
+                      (imageStageHint ? ` · ${imageStageHint}` : "")}
           </p>
         </div>
       </div>

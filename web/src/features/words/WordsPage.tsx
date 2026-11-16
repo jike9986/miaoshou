@@ -74,7 +74,7 @@ const SITE_OPTIONS = Object.entries(SITE_LANGUAGES).map(([value]) => ({
   label: SITE_LABELS[value] ?? value,
 }));
 
-export function WordsPage() {
+export function WordsPage({ embedded = false }: { embedded?: boolean }) {
   const identity = useOperatorIdentity();
   const canExport = !identity || identity.role === "admin" || identity.role === "teacher";
   const store = useWordsStore();
@@ -358,12 +358,20 @@ export function WordsPage() {
 
   return (
     <>
-      <PageHeader
-        title="违规词库"
-        actions={headerActions}
-      />
+      {!embedded && (
+        <PageHeader
+          title="违规词库"
+          actions={headerActions}
+        />
+      )}
 
       <PageContent width="table">
+        {embedded && (
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <span className="text-[14px] font-semibold text-fg">违规词库</span>
+            <div className="flex items-center gap-2">{headerActions}</div>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <div className="min-w-[220px] flex-1">
             <SearchInput

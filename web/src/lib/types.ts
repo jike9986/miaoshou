@@ -1402,6 +1402,8 @@ export interface HealthResponse {
 export interface Operator {
   id: string;
   name: string;
+  /** 6 位随机字母数字 ID，便于快速找人 */
+  shortId?: string;
   username?: string | null;
   /** 已绑定邮箱的脱敏显示；完整地址只在用户输入时短暂存在前端表单。 */
   email?: string | null;

@@ -11,6 +11,7 @@ detailId 只在账号内唯一，所以跨店铺发布不能引用原商品。�
 from __future__ import annotations
 
 import logging
+import hashlib
 import queue
 import re
 import threading
@@ -28,6 +29,29 @@ from services import setting_service
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
 logger = logging.getLogger("aohuang.carrier")
+
+# -- 规格归一化公共辅助 -------------------------------------------------------
+# remap_sku_to_carrier / align_spec_names / normalize_spec_for_save 曾各自
+# 内联相同逻辑；统一提到模块顶层，消除重复。
+
+
+def _norm(text: Any) -> str:
+    """去空白、折叠大小写、去空格（规格值归一化用）。"""
+    return str(text or "").strip().casefold().replace(" ", "")
+
+
+_COLOR_WORDS: frozenset[str] = frozenset({"颜色", "色彩", "color", "colour", "warna"})
+_SIZE_WORDS: frozenset[str] = frozenset({"尺码", "尺寸", "size", "saiz", "ukuran"})
+
+
+def _kind(value: Any) -> str:
+    """返回维度语义类型：'color' / 'size' / ''（其他）。"""
+    text = _norm(value)
+    if text in _COLOR_WORDS:
+        return "color"
+    if text in _SIZE_WORDS:
+        return "size"
+    return ""
 
 _COST_FLOOR_PRICE = re.compile(
     r"(?:本地(?:显示|展示)价|售价展示(?:价)?)[^0-9]{0,16}"
@@ -859,19 +883,16 @@ def remap_sku_to_carrier(payload: dict[str, Any],
     if not our_props or not carrier_props:
         return data, ["载体或商品缺规格，跳过重映射"]
 
-    def norm(text: Any) -> str:
-        return str(text or "").strip().casefold().replace(" ", "")
-
     # 维度配对上：优先按 attrName/propName 匹配
     pairs: list[tuple[int, int]] = []
     used_carrier: set[int] = set()
     for our_dim, our_prop in enumerate(our_props):
-        our_name = norm(our_prop.get("propName") or our_prop.get("attrName"))
+        our_name = _norm(our_prop.get("propName") or our_prop.get("attrName"))
         matched = None
         for c_dim, c_prop in enumerate(carrier_props):
             if c_dim in used_carrier:
                 continue
-            c_name = norm(c_prop.get("propName") or c_prop.get("attrName"))
+            c_name = _norm(c_prop.get("propName") or c_prop.get("attrName"))
             if our_name and c_name and our_name == c_name:
                 matched = c_dim
                 break
@@ -903,13 +924,13 @@ def remap_sku_to_carrier(payload: dict[str, Any],
         for c_av in c_values:
             cid = str(c_av.get("attrValueId") or "").strip()
             if cid:
-                by_name[norm(c_av.get("attrValue"))] = cid
+                by_name[_norm(c_av.get("attrValue"))] = cid
 
         for index, our_av in enumerate(our_values):
             our_id = str(our_av.get("attrValueId") or "").strip()
             if not our_id:
                 continue
-            key = norm(our_av.get("attrValue"))
+            key = _norm(our_av.get("attrValue"))
             target = by_name.get(key)
             if target is None and key:
                 # 包含匹配
@@ -1008,24 +1029,9 @@ def align_spec_names(payload: dict[str, Any],
     if not our_props or not carrier_props:
         return data, []
 
-    def norm(text: Any) -> str:
-        return str(text or "").strip().casefold().replace(" ", "")
-
-    # 颜色维度名 / 尺码维度名的多语言集合，用来识别「哪个维度是颜色」
-    COLOR_WORDS = {"颜色", "色彩", "color", "colour", "warna"}
-    SIZE_WORDS = {"尺码", "尺寸", "size", "saiz", "ukuran"}
-
-    def kind(value: Any) -> str:
-        text = norm(value)
-        if text in COLOR_WORDS:
-            return "color"
-        if text in SIZE_WORDS:
-            return "size"
-        return ""
-
     carrier_by_kind: dict[str, Mapping[str, Any]] = {}
     for prop in carrier_props:
-        k = kind(prop.get("attrName") or prop.get("propName"))
+        k = _kind(prop.get("attrName") or prop.get("propName"))
         if k and k not in carrier_by_kind:
             carrier_by_kind[k] = prop
 
@@ -1033,7 +1039,7 @@ def align_spec_names(payload: dict[str, Any],
         our_name = prop.get("attrName") or prop.get("propName")
         # 优先按语义类型配，退化到按顺序
         target = None
-        k = kind(our_name)
+        k = _kind(our_name)
         if k:
             target = carrier_by_kind.get(k)
         if target is None and index < len(carrier_props):
@@ -1054,7 +1060,30 @@ def align_spec_names(payload: dict[str, Any],
     return data, notes
 
 
-_CATEGORY_ATTR_CACHE: dict[tuple[str, str, int], dict[str, str]] = {}
+class _TtlCache:
+    """简单 TTL 字典：超期自动失效，不依赖外部库。过期条目在下次访问时惰性清除。"""
+
+    def __init__(self, ttl_seconds: float) -> None:
+        self._data: dict = {}
+        self._ts: dict = {}
+        self._ttl = ttl_seconds
+
+    def get(self, key: Any) -> Any:
+        ts = self._ts.get(key)
+        if ts is None:
+            return None
+        if time.monotonic() - ts > self._ttl:
+            self._data.pop(key, None)
+            self._ts.pop(key, None)
+            return None
+        return self._data.get(key)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._data[key] = value
+        self._ts[key] = time.monotonic()
+
+
+_CATEGORY_ATTR_CACHE: _TtlCache = _TtlCache(ttl_seconds=3600)  # 1 小时 TTL，防止类目数据过时
 
 
 def category_sale_attrs(client: MiaoshouClient, cid: Any, site: str,
@@ -1182,18 +1211,6 @@ def normalize_spec_for_save(payload: dict[str, Any],
     if not our_props:
         return data, ["无规格"]
 
-    # 维度归类：颜色 / 尺码
-    COLOR_WORDS = {"颜色", "色彩", "color", "colour", "warna"}
-    SIZE_WORDS = {"尺码", "尺寸", "size", "saiz", "ukuran"}
-
-    def kind(value: Any) -> str:
-        text = str(value or "").strip().casefold().replace(" ", "")
-        if text in COLOR_WORDS:
-            return "color"
-        if text in SIZE_WORDS:
-            return "size"
-        return ""
-
     def looks_like_size(values: list[Mapping[str, Any]]) -> bool:
         """尺码判定：必须认 36-37、38-39 这类区间写法（实测常见）。
 
@@ -1218,7 +1235,7 @@ def normalize_spec_for_save(payload: dict[str, Any],
     for prop in (clean.get("skuPropertyList") or []):
         if not isinstance(prop, Mapping):
             continue
-        k = kind(prop.get("attrName") or prop.get("propName"))
+        k = _kind(prop.get("attrName") or prop.get("propName"))
         if not k:
             # 草稿维度名可能只剩英文（Warna/Saiz）或中文（颜色/尺码），
             # 也可能被 _fill_spec_attr_ids 改过名。按 attrId 兜底判定，
@@ -1235,7 +1252,7 @@ def normalize_spec_for_save(payload: dict[str, Any],
     strict_props: list[dict[str, Any]] = []
     for dim, prop in enumerate(our_props):
         values = [av for av in (prop.get("attrValueList") or []) if isinstance(av, Mapping)]
-        k = kind(prop.get("attrName") or prop.get("propName"))
+        k = _kind(prop.get("attrName") or prop.get("propName"))
         if not k:
             k = "size" if looks_like_size(values) else "color"
         src = carrier_by_kind.get(k) or {}
@@ -1282,11 +1299,6 @@ def normalize_spec_for_save(payload: dict[str, Any],
         # 它按**草稿原文逐字匹配**，提交清洗值就报「SKU【白绿色-41】不存在」
         # （2026-11-10 实测：3522040694 两色全挂）。
         # 归属判定：草稿原文包含我们的值（去空白后），就沿用草稿的原文与 id。
-        [str(dv.get("attrValue") or "").strip()
-                        for dv in (src.get("attrValueList") or [])
-                        if isinstance(dv, Mapping)]
-
-        _is_color_dim = k == "color"
 
         # 颜色 id 由 normalize_colors 生成并同步进 skuMap key —— 是「我们这
         # 份提交」的身份标识。位置匹配只允许换显示文案，**绝不换 id**：
@@ -1332,9 +1344,7 @@ def normalize_spec_for_save(payload: dict[str, Any],
             our_id = str(av.get("attrValueId") or "").strip()
             if not our_id:
                 # 没有 id 就生成一个稳定的（妙手接受任意非空值）
-                import hashlib as _hash
-
-                our_id = _hash.md5(
+                our_id = hashlib.md5(
                     ("%s|%s" % (attr_id, label)).encode("utf-8")).hexdigest()[:10]
             img = (av.get("imgUrl")
                    or av.get("imageUrl")

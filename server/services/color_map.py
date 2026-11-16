@@ -61,6 +61,132 @@ ENGLISH_COLORS = {
 }
 
 
+# ------------------------------------------------------------------
+# 中文颜色词 → 目标语言（备用翻译：当妙手 API 不返回颜色翻译时使用）
+# ------------------------------------------------------------------
+# 长词优先，避免 "深蓝色" 被 "蓝" 先匹配到
+_ZH_COLOR_MAP: dict[str, dict[str, str]] = {
+    # 三字及以上（先匹配）
+    "玫瑰金": {"ms": "Emas Ros", "en": "Rose Gold"},
+    "荧光绿": {"ms": "Hijau Neon", "en": "Neon Green"},
+    "荧光黄": {"ms": "Kuning Neon", "en": "Neon Yellow"},
+    "海军蓝": {"ms": "Biru Tua", "en": "Navy Blue"},
+    "象牙白": {"ms": "Putih Gading", "en": "Ivory White"},
+    "奶油白": {"ms": "Putih Krim", "en": "Cream White"},
+    "香槟金": {"ms": "Emas Champagne", "en": "Champagne Gold"},
+    "天空蓝": {"ms": "Biru Langit", "en": "Sky Blue"},
+    "草坪绿": {"ms": "Hijau Rumput", "en": "Grass Green"},
+    "巧克力": {"ms": "Coklat", "en": "Chocolate"},
+    "卡其色": {"ms": "Khaki", "en": "Khaki"},
+    "深紫色": {"ms": "Ungu Tua", "en": "Dark Purple"},
+    "淡紫色": {"ms": "Ungu Muda", "en": "Light Purple"},
+    "浅灰色": {"ms": "Kelabu Muda", "en": "Light Grey"},
+    "暗灰色": {"ms": "Kelabu Gelap", "en": "Dark Grey"},
+    "深棕色": {"ms": "Coklat Tua", "en": "Dark Brown"},
+    "咖啡色": {"ms": "Coklat", "en": "Coffee Brown"},
+    "米黄色": {"ms": "Krim Kuning", "en": "Cream Yellow"},
+    "肤色":   {"ms": "Warna Kulit", "en": "Skin"},
+    "肉色":   {"ms": "Warna Kulit", "en": "Flesh"},
+    # 两字
+    "黑红": {"ms": "Hitam Merah", "en": "Black Red"},
+    "黑白": {"ms": "Hitam Putih", "en": "Black White"},
+    "黑蓝": {"ms": "Hitam Biru", "en": "Black Blue"},
+    "黑灰": {"ms": "Hitam Kelabu", "en": "Black Grey"},
+    "黑绿": {"ms": "Hitam Hijau", "en": "Black Green"},
+    "白蓝": {"ms": "Putih Biru", "en": "White Blue"},
+    "米白": {"ms": "Putih Susu", "en": "Off White"},
+    "米色": {"ms": "Krim", "en": "Cream"},
+    "米黄": {"ms": "Krim Kuning", "en": "Cream Yellow"},
+    "奶白": {"ms": "Putih Susu", "en": "Milk White"},
+    "象牙": {"ms": "Gading", "en": "Ivory"},
+    "玫红": {"ms": "Merah Ros", "en": "Rose Red"},
+    "玫瑰": {"ms": "Ros", "en": "Rose"},
+    "香槟": {"ms": "Champagne", "en": "Champagne"},
+    "深蓝": {"ms": "Biru Tua", "en": "Dark Blue"},
+    "藏蓝": {"ms": "Biru Tua", "en": "Navy Blue"},
+    "藏青": {"ms": "Biru Tua", "en": "Navy"},
+    "浅蓝": {"ms": "Biru Muda", "en": "Light Blue"},
+    "天蓝": {"ms": "Biru Langit", "en": "Sky Blue"},
+    "宝蓝": {"ms": "Biru Royal", "en": "Royal Blue"},
+    "深绿": {"ms": "Hijau Tua", "en": "Dark Green"},
+    "墨绿": {"ms": "Hijau Tua", "en": "Dark Green"},
+    "草绿": {"ms": "Hijau Rumput", "en": "Grass Green"},
+    "浅绿": {"ms": "Hijau Muda", "en": "Light Green"},
+    "深红": {"ms": "Merah Tua", "en": "Dark Red"},
+    "粉红": {"ms": "Merah Jambu", "en": "Pink"},
+    "粉色": {"ms": "Merah Jambu", "en": "Pink"},
+    "卡其": {"ms": "Khaki", "en": "Khaki"},
+    "咖啡": {"ms": "Coklat", "en": "Brown"},
+    "深灰": {"ms": "Kelabu Gelap", "en": "Dark Grey"},
+    "浅灰": {"ms": "Kelabu Muda", "en": "Light Grey"},
+    "银灰": {"ms": "Kelabu Perak", "en": "Silver Grey"},
+    "荧光": {"ms": "Neon", "en": "Neon"},
+    "透明": {"ms": "Telus", "en": "Transparent"},
+    # 单字基色（最后匹配）
+    "黑": {"ms": "Hitam", "en": "Black"},
+    "白": {"ms": "Putih", "en": "White"},
+    "红": {"ms": "Merah", "en": "Red"},
+    "蓝": {"ms": "Biru", "en": "Blue"},
+    "绿": {"ms": "Hijau", "en": "Green"},
+    "黄": {"ms": "Kuning", "en": "Yellow"},
+    "橙": {"ms": "Oren", "en": "Orange"},
+    "紫": {"ms": "Ungu", "en": "Purple"},
+    "粉": {"ms": "Merah Jambu", "en": "Pink"},
+    "灰": {"ms": "Kelabu", "en": "Grey"},
+    "棕": {"ms": "Coklat", "en": "Brown"},
+    "金": {"ms": "Emas", "en": "Gold"},
+    "银": {"ms": "Perak", "en": "Silver"},
+    "米": {"ms": "Krim", "en": "Cream"},
+}
+
+# 按键长降序排列，确保长词优先匹配（"深蓝" 先于 "蓝"）
+_ZH_SORTED_KEYS = sorted(_ZH_COLOR_MAP.keys(), key=len, reverse=True)
+
+
+def translate_chinese_color(text: str, language: str = "ms") -> str | None:
+    """把中文颜色名翻译为目标语言（ms=马来语 / en=英语）。
+
+    仅处理含有 CJK 字符的字符串；翻译不出时返回 None。
+    支持复合色：「黑红」→「Hitam Merah」。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return None
+    # 只处理含中文的字符串
+    if not any("一" <= c <= "鿿" for c in s):
+        return None
+
+    lang = (language or "ms").lower()[:2]
+    if lang not in ("ms", "en"):
+        lang = "ms"
+
+    # 直接命中（含「黑色」→ strip 掉尾部「色」后再试一次）
+    for candidate in (s, s.rstrip("色")):
+        entry = _ZH_COLOR_MAP.get(candidate)
+        if entry:
+            return entry.get(lang)
+
+    # 逐段最长前缀匹配，拼接复合译名
+    parts: list[str] = []
+    remaining = s.rstrip("色")          # 去掉末尾助词「色」
+    while remaining:
+        matched = False
+        for key in _ZH_SORTED_KEYS:
+            if remaining.startswith(key):
+                val = _ZH_COLOR_MAP[key].get(lang)
+                if val:
+                    parts.append(val)
+                remaining = remaining[len(key):]
+                matched = True
+                break
+        if not matched:
+            remaining = remaining[1:]   # 跳过无法识别的字符
+
+    if parts:
+        return " ".join(parts)
+    return None
+
+
 def to_standard_color(raw: str) -> str | None:
     """把任意颜色写法转成标准英文色；转不出返回 None（表示这不是颜色）。"""
     text = str(raw or "").strip()

@@ -630,7 +630,7 @@ export function WarehousePage() {
               <ErrorState title="自动化结果加载失败" description={apiErrorMessage(automationQuery.error)} onRetry={() => void automationQuery.refetch()} retrying={automationQuery.isFetching} />
             )}
             {isTeacher && !automationQuery.isLoading && !automationQuery.isError && automationQuery.data?.items.length === 0 && (
-              <Card><EmptyState title="暂无待入仓的自动化结果" description="自动化处理成功的商品会保存在这里，由老师选择后加入成品仓库。" minHeight={220} /></Card>
+              <Card><EmptyState title="暂无待入仓的自动化结果" minHeight={220} /></Card>
             )}
             {isTeacher && automationQuery.data && automationQuery.data.items.length > 0 && (
               <>
@@ -651,7 +651,7 @@ export function WarehousePage() {
                 {/* 卡片网格：与成品仓库完全一致（同一个 ProductCard）。
                     负责人口径 2026-11-11：自动化结果也要像成品仓库那样
                     卡片显示名字 / 价格 / 类目，而不是一行文字。 */}
-                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 3xl:grid-cols-7">
                   {automationQuery.data.items.map((item, index) => (
                     <ProductCard
                       key={item.id}
@@ -895,7 +895,7 @@ export function WarehousePage() {
                   animate={reduced ? undefined : "show"}
                   className={cn(
                     "grid gap-4",
-                    "grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5",
+                    "grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6",
                     listQuery.isFetching && "opacity-90"
                   )}
                 >
@@ -1239,7 +1239,15 @@ export function WarehousePage() {
         defaultShopId={currentShopId}
         connected={connected}
         allowClaimOnly={!isMember}
-        onSubmitted={clearWarehouseSelection}
+        onSubmitted={(result) => {
+          clearWarehouseSelection();
+          // 发布提交后自动关闭弹窗、切到批次标签，让用户能看到任务进度
+          if (result.publishRequested || (result.published?.length ?? 0) > 0) {
+            setPublishOpen(false);
+            setTab("batch");
+            void claimJobs.refetch();
+          }
+        }}
       />
     </>
   );

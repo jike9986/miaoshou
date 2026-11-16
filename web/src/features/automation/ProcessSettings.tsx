@@ -24,7 +24,6 @@ import { useRef, useState } from "react";
 import {
   ImagePlus,
   Images,
-  Link2,
   Maximize2,
   RefreshCw,
   Ruler,
@@ -80,6 +79,8 @@ export interface ProcessSettingsProps {
   publishShopName: string;
   /** 共享尺码图库的增删只供老师和管理员使用，学员可以选用。 */
   canManageSharedAssets?: boolean;
+  /** 学员模式：隐藏并发数设置，固定为1。 */
+  isMember?: boolean;
   /** 运行中：全部控件禁用 */
   disabled?: boolean;
   className?: string;
@@ -92,6 +93,7 @@ export function ProcessSettings({
   onOpenTemplates,
   publishShopName,
   canManageSharedAssets = false,
+  isMember = false,
   disabled = false,
   className,
 }: ProcessSettingsProps) {
@@ -110,10 +112,7 @@ export function ProcessSettings({
   // 尺码图：本地文件真上传（POST /size-charts/upload 二进制分支）
   // 或只给地址（同一接口的 JSON 分支）
   const [addOpen, setAddOpen] = useState(false);
-  /** 添加弹窗的当前模式：file = 选本地图片，url = 用链接添加 */
-  const [addMode, setAddMode] = useState<"file" | "url">("file");
   const [addName, setAddName] = useState("");
-  const [addUrl, setAddUrl] = useState("");
   const [addFile, setAddFile] = useState<File | null>(null);
   const [addError, setAddError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -300,22 +299,22 @@ export function ProcessSettings({
               全部塞进一行（负责人 2026-11-09 要求）：每个框收窄到 74px，
               不再 flex-wrap —— 换行会让「包裹高」掉到第三行，看着像另一个分组。 */}
           <div className="flex flex-nowrap items-end gap-x-2">
-            {/* 商品并行数：单件瓶颈全在妙手接口往返与 AI 翻译，本地不到 1 秒，
-                所以多件并行是唯一有效的提速手段（负责人 2026-11-12
-                「可以多件商品并行处理」）。默认 1，与改造前行为一致。 */}
-            <Field label="并行件数" htmlFor="item-concurrency" className="w-[74px] shrink-0">
-              <NumberInput
-                id="item-concurrency"
-                value={settings.itemConcurrency}
-                onChange={(value) => onChange({ itemConcurrency: value ?? 1 })}
-                min={1}
-                max={5}
-                step={1}
-                decimals={0}
-                suffix="件" 
-                disabled={disabled}
-              />
-            </Field>
+            {/* 商品并行数：学员固定为1，只有老师/管理员可以调整 */}
+            {!isMember && (
+              <Field label="并行件数" htmlFor="item-concurrency" className="w-[74px] shrink-0">
+                <NumberInput
+                  id="item-concurrency"
+                  value={settings.itemConcurrency}
+                  onChange={(value) => onChange({ itemConcurrency: value ?? 1 })}
+                  min={1}
+                  max={5}
+                  step={1}
+                  decimals={0}
+                  suffix="件"
+                  disabled={disabled}
+                />
+              </Field>
+            )}
             <Field label="主图数量" htmlFor="main-image-count" className="w-[74px] shrink-0">
               <NumberInput
                 id="main-image-count"
@@ -438,10 +437,8 @@ export function ProcessSettings({
                 disabled={locked}
                 onClick={() => {
                   setAddName("");
-                  setAddUrl("");
                   setAddFile(null);
                   setAddError(null);
-                  setAddMode("file");
                   setAddOpen(true);
                 }}
               >
@@ -555,7 +552,7 @@ export function ProcessSettings({
             )}
 
           {connected && charts.length > 0 && (
-            <div className="flex min-h-[84px] flex-1 flex-wrap content-start gap-2">
+            <div className="flex min-h-[88px] flex-1 flex-nowrap gap-2 overflow-x-auto pb-1 [scrollbar-gutter:stable]">
               {charts.map((chart) => {
                 const active = chart.id === settings.sizeChartId;
                 return (
@@ -629,20 +626,15 @@ export function ProcessSettings({
         </div>
       </div>
 
-      {/* 添加尺码图：两条分支同一个接口（POST /size-charts/upload），
-          选文件走二进制分支，用链接添加走 JSON 分支。 */}
+      {/* 添加尺码图：只支持本地文件上传（POST /size-charts/upload 二进制分支）。 */}
       <Dialog
         open={addOpen}
         onOpenChange={(open) => {
           if (!open) setAddOpen(false);
         }}
-        size="md"
+        size="sm"
         title="添加尺码图"
-        description={
-          addMode === "file"
-            ? "选择本地图片会直接上传到图床。单张不超过 8 MB，支持 PNG / JPEG / WebP。"
-            : "贴一个已经在图床上的图片地址。地址需以 http:// 或 https:// 开头，内网地址后端会拒绝。"
-        }
+        description="选择本地图片直接上传。单张不超过 8 MB，支持 PNG / JPEG / WebP。"
         footer={
           <>
             <Button variant="ghost" onClick={() => setAddOpen(false)}>
@@ -651,93 +643,32 @@ export function ProcessSettings({
             <Button
               variant="primary"
               loading={uploadPending}
-              disabled={addMode === "file" ? !addFile : !addUrl.trim()}
+              disabled={!addFile}
               onClick={() => {
                 setAddError(null);
-
-                // --- 分支一：本地文件上传 ---
-                if (addMode === "file") {
-                  if (!addFile) return setAddError("请选择一张图片");
-                  const name = addName.trim() || addFile.name.replace(/\.[^.]+$/, "");
-                  if (!name) return setAddError("请填写名称");
-                  uploadChart.mutate(
-                    { file: addFile, name },
-                    {
-                      onSuccess: (chart) => {
-                        toast.success(`已上传尺码图「${chart.name}」`);
-                        setAddOpen(false);
-                        setAddFile(null);
-                      },
-                      // 后端 422 的 message（「文件类型与声明不一致：声明 X，实际 Y」）
-                      // 原样显示，吞成「上传失败」会让用户朝错误的方向重试
-                      onError: (error) => setAddError(sizeChartErrorMessage(error)),
-                    }
-                  );
-                  return;
-                }
-
-                // --- 分支二：只给地址（JSON 分支，后端做内网拦截） ---
-                const url = addUrl.trim();
-                // 前端只挡「明显不是 http(s) 地址」这一层，内网判断交给后端
-                if (!/^https?:\/\//i.test(url)) {
-                  return setAddError("图片地址需以 http:// 或 https:// 开头");
-                }
-                const name = addName.trim();
+                if (!addFile) return setAddError("请选择一张图片");
+                const name = addName.trim() || addFile.name.replace(/\.[^.]+$/, "");
+                if (!name) return setAddError("请填写名称");
                 uploadChart.mutate(
-                  { url, ...(name ? { name } : {}) },
+                  { file: addFile, name },
                   {
                     onSuccess: (chart) => {
-                      toast.success(`已添加尺码图「${chart.name}」`);
+                      toast.success(`已上传尺码图「${chart.name}」`);
                       setAddOpen(false);
+                      setAddFile(null);
                     },
                     onError: (error) => setAddError(sizeChartErrorMessage(error)),
                   }
                 );
               }}
             >
-              {addMode === "file" ? "上传" : "添加"}
+              上传
             </Button>
           </>
         }
       >
         <div className="flex flex-col gap-3">
-          {/* 两个入口并排：默认选文件，点「用链接添加」切到 URL 输入。
-              后端两条分支共用一个接口，这里切模式只是换输入框。 */}
-          <div className="flex items-center gap-1.5">
-            <Button
-              size="sm"
-              variant={addMode === "file" ? "secondary" : "ghost"}
-              icon={<ImagePlus className="size-3.5" />}
-              disabled={uploadPending}
-              onClick={() => {
-                setAddMode("file");
-                setAddError(null);
-              }}
-            >
-              上传本地图片
-            </Button>
-            <Button
-              size="sm"
-              variant={addMode === "url" ? "secondary" : "ghost"}
-              icon={<Link2 className="size-3.5" />}
-              disabled={uploadPending}
-              onClick={() => {
-                setAddMode("url");
-                setAddError(null);
-              }}
-            >
-              用链接添加
-            </Button>
-          </div>
-
-          <Field
-            label="名称"
-            hint={
-              addMode === "file"
-                ? "留空则用文件名"
-                : "留空则由后端按地址末段取名"
-            }
-          >
+          <Field label="名称" hint="留空则用文件名">
             <Input
               value={addName}
               onChange={(event) => setAddName(event.target.value)}
@@ -747,78 +678,52 @@ export function ProcessSettings({
             />
           </Field>
 
-          {addMode === "file" ? (
-            <Field label="本地图片" hint="选中后会直接上传到图床">
-              <div className="flex items-center gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  className="hidden"
-                  onChange={(event) => {
-                    const picked = event.target.files?.[0] ?? null;
-                    setAddError(null);
-                    if (!picked) {
-                      setAddFile(null);
-                      return;
-                    }
-                    if (!SIZE_CHART_ACCEPT.includes(picked.type)) {
-                      setAddError("请选择 PNG、JPEG 或 WebP 图片");
-                      setAddFile(null);
-                      return;
-                    }
-                    if (picked.size > SIZE_CHART_MAX_BYTES) {
-                      setAddError("尺码图须为不超过 8 MB 的图片");
-                      setAddFile(null);
-                      return;
-                    }
-                    setAddFile(picked);
-                    if (!addName.trim()) {
-                      setAddName(picked.name.replace(/\.[^.]+$/, ""));
-                    }
-                  }}
-                />
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<ImagePlus className="size-3.5" />}
-                  disabled={uploadPending}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  选择图片
-                </Button>
-                <span className="min-w-0 flex-1 truncate text-xs text-fg-muted">
-                  {addFile
-                    ? `${addFile.name}（${(addFile.size / 1024).toFixed(0)} KB）`
-                    : "未选择文件"}
-                </span>
-                {addFile && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={uploadPending}
-                    onClick={() => setAddFile(null)}
-                  >
-                    移除
-                  </Button>
-                )}
-              </div>
-            </Field>
-          ) : (
-            <Field
-              label="图片地址"
-              hint="只能填公网 http(s) 地址；内网 / 本机地址后端会拒绝并给出原因"
-            >
-              <Input
-                value={addUrl}
-                onChange={(event) => setAddUrl(event.target.value)}
-                placeholder="https://..."
-                maxLength={2048}
-                disabled={uploadPending}
-                invalid={Boolean(addError)}
+          <Field label="本地图片">
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={(event) => {
+                  const picked = event.target.files?.[0] ?? null;
+                  setAddError(null);
+                  if (!picked) { setAddFile(null); return; }
+                  if (!SIZE_CHART_ACCEPT.includes(picked.type)) {
+                    setAddError("请选择 PNG、JPEG 或 WebP 图片");
+                    setAddFile(null);
+                    return;
+                  }
+                  if (picked.size > SIZE_CHART_MAX_BYTES) {
+                    setAddError("尺码图须为不超过 8 MB 的图片");
+                    setAddFile(null);
+                    return;
+                  }
+                  setAddFile(picked);
+                  if (!addName.trim()) setAddName(picked.name.replace(/\.[^.]+$/, ""));
+                }}
               />
-            </Field>
-          )}
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<ImagePlus className="size-3.5" />}
+                disabled={uploadPending}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                选择图片
+              </Button>
+              <span className="min-w-0 flex-1 truncate text-xs text-fg-muted">
+                {addFile
+                  ? `${addFile.name}（${(addFile.size / 1024).toFixed(0)} KB）`
+                  : "未选择文件"}
+              </span>
+              {addFile && (
+                <Button size="sm" variant="ghost" disabled={uploadPending} onClick={() => setAddFile(null)}>
+                  移除
+                </Button>
+              )}
+            </div>
+          </Field>
 
           {addError && <InlineError>{addError}</InlineError>}
         </div>

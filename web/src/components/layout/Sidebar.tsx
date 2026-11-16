@@ -12,10 +12,9 @@ import {
   PackageSearch,
   PanelLeft,
   Play,
-  ShieldBan,
-  ChevronRight,
-  LogOut,
   Settings,
+  ShieldBan,
+  LogOut,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -509,6 +508,8 @@ export interface SidebarProps {
   account?: SidebarAccount | null;
   onAccountClick?: () => void;
   onAccountLogout?: () => void;
+  /** 点击齿轮图标跳到设置页 */
+  onSettingsClick?: () => void;
   collapseTogglePosition?: "top" | "bottom";
   /** 移动端抽屉内使用时关闭折叠按钮 */
   showCollapseToggle?: boolean;
@@ -523,8 +524,8 @@ export function Sidebar({
   onCollapsedChange,
   brand,
   account,
-  onAccountClick,
   onAccountLogout,
+  onSettingsClick,
   collapseTogglePosition = "bottom",
   showCollapseToggle = true,
   className,
@@ -631,7 +632,7 @@ export function Sidebar({
 
       <div className="shrink-0">
         {showCollapseToggle && collapseTogglePosition === "bottom" && (
-          <div className={cn("flex pb-1", collapsed ? "justify-center px-2" : "justify-end px-2")}>
+          <div className={cn("flex items-center pb-1", collapsed ? "justify-center px-2" : "justify-end px-2")}>
             <IconButton
               label={collapsed ? "展开侧边栏" : "收起侧边栏"}
               size="sm"
@@ -648,11 +649,10 @@ export function Sidebar({
                 ref={accountMenuRef}
                 role="menu"
                 aria-label="账号菜单"
-                style={{ left: accountMenuPosition.left, bottom: accountMenuPosition.bottom, width: 224 }}
+                style={{ left: accountMenuPosition.left, bottom: accountMenuPosition.bottom, width: 220 }}
                 className="fixed z-[100] rounded-md border border-border bg-elevated p-1.5 shadow-2"
               >
                 <div className="border-b border-border-subtle px-2.5 py-2">
-                  <span className="block text-[11px] leading-4 text-fg-muted">当前账号</span>
                   <span className="block truncate text-[13px] font-semibold leading-5 text-fg">
                     {account.name}
                   </span>
@@ -662,26 +662,22 @@ export function Sidebar({
                     </span>
                   )}
                 </div>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setAccountMenuOpen(false);
-                    onAccountClick?.();
-                  }}
-                  className="flex h-9 w-full items-center gap-2 rounded-sm px-2.5 text-left text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
-                >
-                  <Settings aria-hidden className="size-4 text-fg-muted" />
-                  账号与设置
-                </button>
+                {onSettingsClick && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { setAccountMenuOpen(false); onSettingsClick(); }}
+                    className="flex h-9 w-full items-center gap-2 rounded-sm px-2.5 text-left text-[13px] text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32"
+                  >
+                    <Settings aria-hidden className="size-4 text-fg-muted" />
+                    设置
+                  </button>
+                )}
                 {onAccountLogout && (
                   <button
                     type="button"
                     role="menuitem"
-                    onClick={() => {
-                      setAccountMenuOpen(false);
-                      onAccountLogout();
-                    }}
+                    onClick={() => { setAccountMenuOpen(false); onAccountLogout(); }}
                     className="flex h-9 w-full items-center gap-2 rounded-sm px-2.5 text-left text-[13px] text-danger-700 transition-colors hover:bg-danger-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger-600/32"
                   >
                     <LogOut aria-hidden className="size-4" />
@@ -691,6 +687,7 @@ export function Sidebar({
               </div>,
               document.body
             )}
+            {/* 账号按钮：点击弹出菜单 */}
             <button
               ref={accountButtonRef}
               type="button"
@@ -698,15 +695,15 @@ export function Sidebar({
               aria-label={`当前账号：${account.name}，打开账号菜单`}
               aria-expanded={accountMenuOpen}
               aria-haspopup="menu"
-              title={`当前账号：${account.name}`}
+              title={`${account.name} · 点击打开菜单`}
               className={cn(
-                "flex h-16 w-full items-center border-t border-border bg-sidebar px-3 text-left",
+                "flex w-full items-center border-t border-border bg-sidebar text-left",
                 "transition-colors duration-fast hover:bg-surface-hover",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-600/32",
-                collapsed ? "justify-center px-0" : "gap-2.5"
+                collapsed ? "justify-center px-2 py-2" : "gap-2.5 px-3 py-2.5"
               )}
             >
-              <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-100 text-[12px] font-semibold text-brand-800 ring-2 ring-brand-50">
+              <span className="grid size-7 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-100 text-[11px] font-semibold text-brand-800 ring-1 ring-brand-200">
                 {account.avatarUrl ? (
                   <img src={account.avatarUrl} alt="" className="size-full object-cover" loading="lazy" />
                 ) : (
@@ -714,20 +711,16 @@ export function Sidebar({
                 )}
               </span>
               {!collapsed && (
-                <>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[11px] leading-4 text-fg-muted">当前账号</span>
-                    <span className="block truncate text-[13px] font-semibold leading-5 text-fg">
-                      {account.name}
-                    </span>
-                    {account.detail && (
-                      <span className="block truncate text-[11px] leading-4 text-fg-muted">
-                        {account.detail}
-                      </span>
-                    )}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[12px] font-semibold leading-4 text-fg">
+                    {account.name}
                   </span>
-                  <ChevronRight aria-hidden className="size-4 shrink-0 text-fg-muted" strokeWidth={1.8} />
-                </>
+                  {account.detail && (
+                    <span className="block truncate text-[11px] leading-[14px] text-fg-muted">
+                      {account.detail}
+                    </span>
+                  )}
+                </span>
               )}
             </button>
           </div>

@@ -779,7 +779,11 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                             </Badge>
                           )}
                         </span>
-                        <p className="mt-0.5 truncate font-mono text-2xs text-fg-muted">{item.id}</p>
+                        {item.shortId ? (
+                          <p className="mt-0.5 font-mono text-2xs text-fg-muted">#{item.shortId}</p>
+                        ) : (
+                          <p className="mt-0.5 truncate font-mono text-2xs text-fg-muted">{item.id}</p>
+                        )}
                       </td>
                       <td className="px-3 py-2.5">
                         {item.role === "admin" || item.role === "teacher" ? (

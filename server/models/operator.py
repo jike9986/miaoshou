@@ -52,6 +52,13 @@ class Operator(Base):
     # 每次请求都会 touch，但节流到 60 秒一次（见 operator_service.touch）：
     # 一个批量流程能打上百个请求，不节流就是上百次 UPDATE 抢写锁。
     last_seen_at: Mapped[float | None] = mapped_column(Float)
+    # 6 位随机字母数字 ID（大写 + 数字），便于在列表中快速找人。
+    # 创建账号时自动生成，唯一约束由数据库保证。
+    short_id: Mapped[str | None] = mapped_column(String(8), unique=True)
+    # 允许同一账号在多台设备同时登录：登录时不撤销旧 token，
+    # 而是把新 token 写入 operator_tokens 附加表。
+    multi_device: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False)
 
     __table_args__ = (
         Index("ix_operators_name", "name"),

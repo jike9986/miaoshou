@@ -13,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import random
 import secrets
+import string
 from typing import Any
 
 from sqlalchemy import func, or_, text
@@ -24,8 +26,20 @@ from core import errors
 from core.config import get_settings
 from core.utils import clean_text, is_valid_email_address, now_ts
 from models.operator import Operator
+from models.operator_token import OperatorToken
 
 logger = logging.getLogger(__name__)
+
+_SHORT_ID_CHARS = string.digits
+
+
+def _generate_short_id(db: Session) -> str:
+    """生成一个唯一的 6 位纯数字 ID。"""
+    for _ in range(20):
+        sid = "".join(random.choices(_SHORT_ID_CHARS, k=6))
+        if not db.query(Operator).filter(Operator.short_id == sid).one_or_none():
+            return sid
+    return "".join(random.choices(_SHORT_ID_CHARS, k=8))  # 实在碰撞就用 8 位
 
 # X-Operator 可以声明显示名或 token；登录凭据只认 token（见 resolve/resolve_declared）
 OPERATOR_HEADER = "X-Operator"
@@ -316,7 +330,16 @@ def resolve(db: Session, supplied: str) -> Operator | None:
     text = (supplied or "").strip()
     if not text:
         return None
-    row = db.query(Operator).filter(Operator.token == hash_token(text)).one_or_none()
+    digest = hash_token(text)
+    # 先查多设备附加 token 表（multi_device 账号的附加会话）
+    extra = (db.query(OperatorToken)
+             .filter(OperatorToken.token_hash == digest)
+             .one_or_none())
+    if extra is not None:
+        row = db.query(Operator).filter(Operator.id == extra.operator_id).one_or_none()
+        if row is not None:
+            return row
+    row = db.query(Operator).filter(Operator.token == digest).one_or_none()
     if row is not None:
         return row
     # Existing installations are migrated on startup; this fallback also covers
@@ -407,7 +430,8 @@ def create(db: Session, name: Any, *, is_admin: bool = False,
     row = Operator(name=text, token=hash_token(token), enabled=True,
                    email=normalized_email,
                    is_admin=(resolved_role == ROLE_ADMIN),
-                   role=resolved_role, created_at=now_ts())
+                   role=resolved_role, created_at=now_ts(),
+                   short_id=_generate_short_id(db))
     db.add(row)
     db.flush()
     return row, token
@@ -437,6 +461,7 @@ def create_student(db: Session, name: Any, username: Any, password: str,
         token=hash_token(secrets.token_urlsafe(32)),
         enabled=True, is_admin=False, role=ROLE_MEMBER,
         must_change_password=True, created_at=now_ts(),
+        short_id=_generate_short_id(db),
     )
     db.add(row)
     db.flush()
@@ -486,7 +511,11 @@ def authenticate_password(db: Session, username: Any, password: str) -> tuple[Op
     if row is None or not row.enabled or not password_matches:
         return None
     token = secrets.token_urlsafe(32)
-    row.token = hash_token(token)
+    if row.multi_device:
+        # 多设备模式：保留旧 token，把新 token 写入附加表，所有设备同时有效。
+        db.add(OperatorToken(operator_id=row.id, token_hash=hash_token(token)))
+    else:
+        row.token = hash_token(token)
     return row, token
 
 
@@ -550,6 +579,7 @@ def serialize(row: Operator) -> dict[str, Any]:
     return {
         "id": str(row.id),
         "name": display_name,
+        "shortId": row.short_id or "",
         "username": row.username,
         "email": mask_email(row.email),
         "hasEmail": bool(row.email),

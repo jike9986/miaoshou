@@ -3,7 +3,7 @@
 ; AohuangShangpin），中文名在 ISCC/cmd 下会被按 GBK 误解码。用户看到的中文
 ; 来自快捷方式名与窗口标题，不受影响。
 #define MyAppName "奥皇上品"
-#define MyAppVersion "0.1.17"
+#define MyAppVersion "0.1.21"
 #define MyAppPublisher "AOHUANG"
 #define MyAppExeName "AohuangShangpin.exe"
 
@@ -17,9 +17,9 @@ AppPublisher={#MyAppPublisher}
 ; 会让安装进程降为低完整性，导致正常桌面和 HKCU 写入被系统拒绝。
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
-; 升级时沿用上次安装目录，同时保留目录选择页供用户确认。
+; 升级时沿用上次安装目录，静默安装时不弹目录选择页。
 UsePreviousAppDir=yes
-DisableDirPage=no
+DisableDirPage=yes
 ; 安装/卸载列表里显示的名字：中文 + 版本，避免出现英文或纯版本号
 AppVerName={#MyAppName} {#MyAppVersion}
 UninstallDisplayName={#MyAppName}

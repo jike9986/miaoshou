@@ -14,7 +14,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { cn, formatCount, formatRelative } from "@/lib/utils";
+import { cn, formatRelative } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
 import {
   LIMITS,
@@ -186,7 +186,6 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
       <>
         <PageHeader
           title="定时发布"
-          description="每一轮执行的结果，新的在前"
         />
         <PageContent width="table" padding="p-0" scroll={false}>
           <div className="border-b border-border-subtle px-6 pt-3">
@@ -217,7 +216,7 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
     <>
       <PageHeader
         title="定时发布"
-        description={schedulesQuery.data ? `共 ${formatCount(schedulesQuery.data.total)} 个任务` : undefined}
+        description={schedulesQuery.data ? `共 ${schedulesQuery.data.total} 个任务` : undefined}
         actions={
           <>
             <IconButton
@@ -274,7 +273,6 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
             <EmptyState
               icon={<CalendarClock strokeWidth={1.5} />}
               title="连接妙手后才能使用定时发布"
-              description="定时任务会按频率把仓库里未上架的商品自动发布到指定店铺。"
               action={{
                 label: "去连接妙手",
                 onClick: () => navigate("/unlock", { state: { from: "/schedules" } }),
@@ -304,7 +302,6 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
             <EmptyState
               icon={<CalendarClock strokeWidth={1.5} />}
               title="还没有定时任务"
-              description="创建任务后，系统会按设定的频率自动把仓库商品发布到指定店铺。"
               action={{
                 label: "新建任务",
                 onClick: () => {
@@ -328,19 +325,16 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
                     <th className="sticky top-0 border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
                       任务
                     </th>
-                    <th className="sticky top-0 w-[16%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
+                    <th className="sticky top-0 w-[18%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
                       频率 / 时间
                     </th>
-                    <th className="sticky top-0 w-[8%] border-b border-border px-3 text-right text-xs font-medium text-fg-muted">
-                      每次
+                    <th className="sticky top-0 w-[14%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
+                      店铺
                     </th>
-                    <th className="sticky top-0 w-[16%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
-                      店铺 / 模板
+                    <th className="sticky top-0 w-[18%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
+                      状态
                     </th>
-                    <th className="sticky top-0 w-[17%] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
-                      下次执行
-                    </th>
-                    <th className="sticky top-0 w-[22%] border-b border-border px-3 pr-4 text-right text-xs font-medium text-fg-muted">
+                    <th className="sticky top-0 w-[18%] border-b border-border px-3 pr-4 text-right text-xs font-medium text-fg-muted">
                       操作
                     </th>
                   </tr>
@@ -363,8 +357,8 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
                         <p className="truncate text-[13px] font-medium text-fg">{task.name}</p>
                         <p className="truncate font-mono text-2xs text-fg-muted">
                           {task.selectedProductIds?.length
-                            ? `已选 ${task.selectedProductIds.length} 件 · 共 ${task.plannedRuns ?? 0} 轮`
-                            : `自动选品 · ${task.id}`}
+                            ? `已选 ${task.selectedProductIds.length} 件 · 每次 ${task.perRun} 件 · 共 ${task.plannedRuns ?? 0} 轮`
+                            : `自动选品 · 每次 ${task.perRun} 件`}
                           {task.claimOnly ? " · 仅认领" : ""}
                         </p>
                       </td>
@@ -372,14 +366,8 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
                         <p className="text-[13px] text-fg">{frequencyText(task)}</p>
                         <p className="num text-2xs text-fg-muted">{task.time}</p>
                       </td>
-                      <td className="px-3 py-2.5 text-right">
-                        <span className="num text-[13px] text-fg">{formatCount(task.perRun)}</span>
-                      </td>
                       <td className="px-3 py-2.5">
                         <p className="truncate text-[13px] text-fg">{task.shopName || task.shopId}</p>
-                        <p className="truncate text-2xs text-fg-muted">
-                          {task.template || "未设模板"}
-                        </p>
                       </td>
                       <td className="px-3 py-2.5">
                         <p className="flex items-center gap-1.5 text-[13px] text-fg">
@@ -395,9 +383,11 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
                               ? "已完成"
                               : !task.enabled
                                 ? "已暂停"
-                                : !task.lastRunDate
-                                  ? "未开始"
-                                  : "进行中"}
+                                : !task.lastRunDate && task.nextDueAt && task.nextDueAt * 1000 <= Date.now()
+                                  ? "即将开始"
+                                  : !task.lastRunDate
+                                    ? "未开始"
+                                    : "进行中"}
                         </p>
                         <p className="truncate text-2xs text-fg-muted">
                           {task.running
@@ -406,27 +396,27 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
                               ? task.nextDueText || "等待执行"
                               : "可重新启用"}
                         </p>
-                        {/* lastResult.status 为空（从未跑过）时不渲染「上次」行，避免出现孤零零的 0/20 */}
-                        {task.lastResult?.status && (
+                        {/* 只在有实际结果时显示上次行，避免全零噪音 */}
+                        {task.lastResult?.status && (task.lastResult.count > 0 || task.lastResult.failed > 0 || (task.lastResult.submitted ?? 0) > 0) && (
                           <p className="flex items-center gap-1 text-2xs text-fg-muted">
-                            <span>上次</span>
                             <StatusBadge
                               meta={
                                 task.lastResult.status === "ok"
-                                  ? { label: "成功", tone: "success", dot: "success" }
+                                  ? { label: "上次成功", tone: "success", dot: "success" }
                                   : task.lastResult.status === "submitted"
-                                    ? { label: "待回执", tone: "neutral", dot: "muted" }
+                                    ? { label: "上次待回执", tone: "neutral", dot: "muted" }
                                   : task.lastResult.status === "partial"
-                                    ? { label: "部分", tone: "warning", dot: "warning" }
+                                    ? { label: "上次部分", tone: "warning", dot: "warning" }
                                     : task.lastResult.status === "empty"
-                                      ? { label: "无商品", tone: "neutral", dot: "muted" }
-                                      : { label: "失败", tone: "danger", dot: "danger" }
+                                      ? { label: "上次无商品", tone: "neutral", dot: "muted" }
+                                      : { label: "上次失败", tone: "danger", dot: "danger" }
                               }
                             />
                             <span className="num">
-                              成功 {task.lastResult.count} · 待回执 {task.lastResult.submitted ?? 0}
+                              {task.lastResult.count > 0 && `成功 ${task.lastResult.count}`}
+                              {(task.lastResult.submitted ?? 0) > 0 && ` · 待回执 ${task.lastResult.submitted}`}
+                              {task.lastResult.failed > 0 && ` · 失败 ${task.lastResult.failed}`}
                             </span>
-                            <span className="text-fg-muted">{formatRelative(task.lastResult.at)}</span>
                           </p>
                         )}
                       </td>
@@ -1163,7 +1153,6 @@ function ScheduleHistoryPanel() {
           <EmptyState
             icon={<History strokeWidth={1.5} />}
             title="还没有执行记录"
-            description="定时任务每跑一轮就会在这里留一条记录，能看到选中几个、成功几个、失败原因。"
           />
         </Card>
       )}

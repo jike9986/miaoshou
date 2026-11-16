@@ -537,6 +537,33 @@ export function usePatchProduct(): UseMutationResult<
   });
 }
 
+export interface ProductImagesPatchRequest {
+  imgUrls?: string[];
+  notes?: string;
+  skuPropertyList?: Array<Record<string, unknown>>;
+  confirm: true;
+  expectedRevision?: number;
+}
+
+export function usePatchProductImages(): UseMutationResult<
+  { product: { id: string; revision: number } },
+  Error,
+  { id: string; patch: ProductImagesPatchRequest }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }) =>
+      api.patch<{ product: { id: string; revision: number } }, ProductImagesPatchRequest>(
+        `/warehouse/${encodeURIComponent(id)}/images`,
+        patch
+      ),
+    onSuccess: (_, { id }) => {
+      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+      void client.invalidateQueries({ queryKey: ["product-detail", id] });
+    },
+  });
+}
+
 export function useReviewProductQuality(): UseMutationResult<
   { id: string; revision: number },
   Error,
@@ -568,6 +595,31 @@ export function useDeleteProduct(): UseMutationResult<DeleteProductResult, Error
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
       void client.invalidateQueries({ queryKey: queryKeys.groups.all });
+    },
+  });
+}
+
+export interface TranslateColorsResult {
+  ok: boolean;
+  language: string;
+  colorsAfter: string[];
+}
+
+export function useTranslateProductColors(): UseMutationResult<
+  TranslateColorsResult,
+  Error,
+  { id: string; language: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, language }: { id: string; language: string }) =>
+      api.post<TranslateColorsResult, { language: string }>(
+        `/warehouse/${encodeURIComponent(id)}/translate-colors`,
+        { language },
+      ),
+    onSuccess: (_data, { id }) => {
+      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+      void client.invalidateQueries({ queryKey: ["productDetail", id] });
     },
   });
 }
@@ -1048,7 +1100,8 @@ export function useAutomationRunHistory(
       query: { accountId, shopId, limit },
     }),
     enabled: Boolean(accountId) && enabled,
-    staleTime: 10_000,
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
   });
 }
 /** 删除一条执行历史（只删记录，不动已入库商品与妙手草稿）。 */

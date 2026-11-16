@@ -7,6 +7,7 @@ import {
   ChevronRight,
   ChevronUp,
   Images,
+  Languages,
   PencilLine,
   Ruler,
   Save,
@@ -29,7 +30,7 @@ import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 
 import { RemoteImage } from "@/features/shared/RemoteImage";
 import { CategoryPicker, type PickerNode } from "@/features/warehouse/CategoryPicker";
-import { useBatchCategory, useCategoryTree, useProductDetail, usePatchProduct, useReviewProductQuality } from "@/lib/queries";
+import { useBatchCategory, useCategoryTree, useProductDetail, usePatchProduct, usePatchProductImages, useTranslateProductColors, useReviewProductQuality } from "@/lib/queries";
 import { apiErrorMessage } from "@/lib/api";
 import { useOperatorIdentity } from "@/lib/operator";
 import { formatCount, formatDate, formatPrice } from "@/lib/utils";
@@ -62,7 +63,9 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 function detailImageUrls(payload: Record<string, unknown> | null | undefined): string[] {
   const notes = String(payload?.notes ?? "");
   if (!notes) return [];
-  const matches = notes.match(/https?:\/\/[^\s"'<>\\]+/gi) ?? [];
+  const matches = notes.match(/https?:\/\/[^\s"'<>\\]+/gi)
+    ?.map(url => url.replace(/[),;\]]+$/, ""))
+    ?? [];
   return [...new Set(matches)];
 }
 
@@ -100,50 +103,62 @@ function skuDimensions(payload: Record<string, unknown> | null | undefined): Sku
 
 /** 各 SKU 的价格与库存（用于第 ⑤ 节）。 */
 interface SkuPriceRow {
-  name: string;
-  price: string;
+  dims: string[];
+  skuCode: string;
   purchasePrice: string;
   stock: string;
 }
 
-function skuPrices(payload: Record<string, unknown> | null | undefined): SkuPriceRow[] {
+interface SkuPriceData {
+  dimNames: string[];
+  rows: SkuPriceRow[];
+}
+
+const DIM_NAME_ZH: Record<string, string> = {
+  color: "颜色", colour: "颜色", warna: "颜色",
+  size: "尺码", ukuran: "尺码",
+};
+function dimLabel(name: string): string {
+  return DIM_NAME_ZH[name.trim().toLowerCase()] ?? name;
+}
+
+function skuPrices(payload: Record<string, unknown> | null | undefined): SkuPriceData {
   const map = payload?.skuMap;
-  if (!map || typeof map !== "object") return [];
-  const dimensions = skuDimensions(payload);
-  // skuMap 的 key 是 `;值1;值2;`，段顺序与维度顺序一致
-  const idToLabel = new Map<string, string>();
-  for (const dimension of dimensions) {
-    // attrValueId 不在 values 里（上面只留了 label），这里从原始 payload 补
-    void dimension;
-  }
-  const props = Array.isArray(payload?.skuPropertyList) ? payload!.skuPropertyList : [];
+  if (!map || typeof map !== "object") return { dimNames: [], rows: [] };
+  const props = Array.isArray(payload?.skuPropertyList)
+    ? (payload!.skuPropertyList as Record<string, unknown>[])
+    : [];
+  const dimNames: string[] = [];
+  const dimIdToLabel: Map<string, string>[] = [];
   for (const prop of props) {
     const record = (prop ?? {}) as Record<string, unknown>;
+    const name = String(record.attrName ?? record.propName ?? "").trim();
     const values = Array.isArray(record.attrValueList) ? record.attrValueList : [];
+    const idToLabel = new Map<string, string>();
     for (const value of values) {
       const item = (value ?? {}) as Record<string, unknown>;
       const id = String(item.attrValueId ?? "").trim();
       const label = String(item.attrValue ?? "").trim();
       if (id && label) idToLabel.set(id, label);
     }
+    dimNames.push(dimLabel(name || "规格"));
+    dimIdToLabel.push(idToLabel);
   }
   const rows: SkuPriceRow[] = [];
   for (const [key, value] of Object.entries(map as Record<string, unknown>)) {
     const sku = (value ?? {}) as Record<string, unknown>;
     if (String(sku.isDelete ?? "0") === "1") continue;
-    const parts = String(key)
-      .split(";")
-      .map((part) => part.trim())
-      .filter(Boolean);
-    const name = parts.map((part) => idToLabel.get(part) ?? part).join(" / ");
+    const parts = String(key).split(";").map((p) => p.trim()).filter(Boolean);
+    const dims = parts.map((part, i) => dimIdToLabel[i]?.get(part) ?? part);
+    while (dims.length < dimNames.length) dims.push("—");
     rows.push({
-      name: name || key,
-      price: String(sku.price ?? ""),
+      dims: dims.slice(0, Math.max(dimNames.length, 1)),
+      skuCode: String(sku.outSkuId ?? sku.skuId ?? sku.skuCode ?? ""),
       purchasePrice: String(sku.originPrice ?? ""),
       stock: String(sku.stock ?? sku.quantity ?? "0"),
     });
   }
-  return rows;
+  return { dimNames, rows };
 }
 
 export function ProductDetailPage() {
@@ -169,6 +184,7 @@ export function ProductDetailPage() {
   // 这些都在 payload 里（列表接口不带 payload，体积太大）。
   const detail = useProductDetail(ident ?? null, true);
   const update = usePatchProduct();
+  const patchImages = usePatchProductImages();
   const reviewQuality = useReviewProductQuality();
   const batchCategory = useBatchCategory();
   // 类目三栏选择器需要的树。带 accountId —— 类目缓存按妙手账号隔离存，
@@ -180,6 +196,23 @@ export function ProductDetailPage() {
 
   const product = detail.data?.product;
   const payload = (product?.payload ?? null) as Record<string, unknown> | null;
+
+  const deleteDetailImage = useCallback((urlToDelete: string) => {
+    if (!product?.id || !payload) return;
+    const notes = String(payload.notes ?? "");
+    const escaped = urlToDelete.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const newNotes = notes
+      .replace(new RegExp(`<img[^>]*src=["']?${escaped}["']?[^>]*/?>`, "gi"), "")
+      .replace(/<p[^>]*>\s*<\/p>/g, "")
+      .trim();
+    patchImages.mutate(
+      { id: String(product.id), patch: { notes: newNotes, confirm: true, expectedRevision: product.revision } },
+      {
+        onSuccess: () => { toast.success("已删除详情图"); void detail.refetch(); },
+        onError: (error) => toast.error("删除失败", { description: apiErrorMessage(error) }),
+      }
+    );
+  }, [product, payload, patchImages, detail]);
 
   // 当前类目的中文路径（product.categoryName 是叶子名，看不出层级）
   const categoryLabel = useMemo(() => {
@@ -233,7 +266,7 @@ export function ProductDetailPage() {
 
   const images = useMemo(() => detailImageUrls(payload), [payload]);
   const dimensions = useMemo(() => skuDimensions(payload), [payload]);
-  const prices = useMemo(() => skuPrices(payload), [payload]);
+  const priceData = useMemo(() => skuPrices(payload), [payload]);
 
   const mainImage = product?.image ?? "";
   const allImages = useMemo(
@@ -241,15 +274,24 @@ export function ProductDetailPage() {
     [mainImage, images]
   );
 
-  // 大图查看器用「主图 + 详情图 + 尺码图」的合集。
-  // 尺码图原先不在 allImages 里，点它只能 window.open 兜底 ——
+  // 大图查看器用「主图 + 详情图 + 颜色规格图 + 尺码图」的合集。
+  // 尺码图、颜色规格图原先不在 allImages 里，点它们只能 window.open 兜底 ——
   // 而主进程的 setWindowOpenHandler 会把非可信地址交给 shell.openExternal，
-  // 于是尺码图跑到浏览器里打开了。放进合集后点它就走应用内查看器。
+  // 于是图片跑到浏览器里打开了。放进合集后点它就走应用内查看器。
   const sizeChartUrl = String(payload?.sizeChart ?? "");
+  const skuImageUrls = useMemo(() => {
+    const urls: string[] = [];
+    for (const dim of dimensions) {
+      for (const val of dim.values) {
+        if (val.imageUrl && !urls.includes(val.imageUrl)) urls.push(val.imageUrl);
+      }
+    }
+    return urls;
+  }, [dimensions]);
   const viewerImages = useMemo(() => {
-    if (!sizeChartUrl || allImages.includes(sizeChartUrl)) return allImages;
-    return [...allImages, sizeChartUrl];
-  }, [allImages, sizeChartUrl]);
+    const extra = [...skuImageUrls, sizeChartUrl].filter((u) => u && !allImages.includes(u));
+    return extra.length > 0 ? [...allImages, ...extra] : allImages;
+  }, [allImages, skuImageUrls, sizeChartUrl]);
   // 查看器当前显示的是哪一张；开尺码图时用它定位
   const openInViewer = (url: string): void => {
     const index = viewerImages.indexOf(url);
@@ -335,6 +377,38 @@ export function ProductDetailPage() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [lightbox, stepLightbox]);
+
+  // 检测颜色值里是否还有中文（妙手 API 有时不返回颜色翻译，需要手动重触发）
+  const hasChineseColors = useMemo(() => {
+    if (!payload?.skuPropertyList) return false;
+    const colorIds = new Set(["100000"]);
+    const colorNames = new Set(["颜色", "色彩", "color", "colour", "warna"]);
+    for (const prop of Array.isArray(payload.skuPropertyList) ? payload.skuPropertyList as Record<string, unknown>[] : []) {
+      const dimId = String(prop.attrId ?? prop.propId ?? "");
+      const dimName = String(prop.attrName ?? prop.propName ?? "").trim().toLowerCase();
+      if (!colorIds.has(dimId) && !colorNames.has(dimName)) continue;
+      for (const val of Array.isArray(prop.attrValueList) ? prop.attrValueList as Record<string, unknown>[] : []) {
+        if (/[一-鿿]/.test(String(val.attrValue ?? ""))) return true;
+      }
+    }
+    return false;
+  }, [payload]);
+
+  const retranslateColors = useTranslateProductColors();
+
+  const handleRetranslateColors = async () => {
+    if (!product) return;
+    try {
+      await retranslateColors.mutateAsync({
+        id: String(product.id),
+        language: product.language || "ms",
+      });
+      toast.success("颜色翻译完成");
+      void detail.refetch();
+    } catch (err) {
+      toast.error("翻译颜色失败", { description: apiErrorMessage(err) });
+    }
+  };
 
   if (detail.isLoading) {
     return (
@@ -450,23 +524,41 @@ export function ProductDetailPage() {
               // 单行横向滚动保持这一节高度固定，鼠标滚轮/触控板左右滑都能翻。
               <div className="mt-3 -mx-1 flex gap-2 overflow-x-auto px-1 pb-2">
                 {allImages.map((url, index) => (
-                  <button
-                    key={`${url}-${index}`}
-                    type="button"
-                    onClick={() => setLightbox(index)}
-                    className={cn(
-                      "group relative aspect-square w-[132px] shrink-0 overflow-hidden rounded-sm border border-border bg-canvas-inset",
-                      "transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/40"
+                  <div key={`${url}-${index}`} className="group relative shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setLightbox(index)}
+                      className={cn(
+                        "relative aspect-square w-[132px] overflow-hidden rounded-sm border border-border bg-canvas-inset",
+                        "transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/40"
+                      )}
+                      title={`第 ${index + 1} 张`}
+                    >
+                      <RemoteImage src={url} className="size-full object-cover" />
+                      {index === 0 && (
+                        <span className="absolute left-1 top-1 rounded-xs bg-brand-600/90 px-1 py-0.5 text-[10px] font-medium text-white">
+                          主图
+                        </span>
+                      )}
+                    </button>
+                    {/* × 删除按钮：只在详情图上显示（非主图），管理员/老师才能用 */}
+                    {index > 0 && !isMember && (
+                      <button
+                        type="button"
+                        title="删除此图"
+                        disabled={patchImages.isPending}
+                        onClick={(e) => { e.stopPropagation(); deleteDetailImage(url); }}
+                        className={cn(
+                          "absolute right-0.5 top-0.5 z-10 grid size-5 place-items-center rounded-full",
+                          "bg-inverse/80 text-fg-inverse opacity-0 transition-opacity duration-fast",
+                          "hover:bg-danger-600 group-hover:opacity-100",
+                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger-600/50 focus-visible:opacity-100"
+                        )}
+                      >
+                        <X className="size-3" strokeWidth={2.5} />
+                      </button>
                     )}
-                    title={`第 ${index + 1} 张`}
-                  >
-                    <RemoteImage src={url} className="size-full object-cover" />
-                    {index === 0 && (
-                      <span className="absolute left-1 top-1 rounded-xs bg-brand-600/90 px-1 py-0.5 text-[10px] font-medium text-white">
-                        主图
-                      </span>
-                    )}
-                  </button>
+                  </div>
                 ))}
               </div>
             )}
@@ -554,7 +646,21 @@ export function ProductDetailPage() {
           <Card padding="normal">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <SectionTitle>④ 规格（颜色 / 尺码）</SectionTitle>
-              <Badge variant="neutral" size="sm">{formatCount(product.skuCount)} 个 SKU</Badge>
+              <span className="flex items-center gap-2">
+                {/* 颜色还是中文时，提供一键翻译入口（老师/管理员可见） */}
+                {!isMember && hasChineseColors && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<Languages className="size-3.5" />}
+                    loading={retranslateColors.isPending}
+                    onClick={handleRetranslateColors}
+                  >
+                    翻译颜色
+                  </Button>
+                )}
+                <Badge variant="neutral" size="sm">{formatCount(product.skuCount)} 个 SKU</Badge>
+              </span>
             </div>
             {dimensions.length === 0 ? (
               <p className="mt-3 text-xs text-fg-muted">这件商品没有规格信息</p>
@@ -576,7 +682,7 @@ export function ProductDetailPage() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  if (value.imageUrl) window.open(value.imageUrl, "_blank");
+                                  if (value.imageUrl) openInViewer(value.imageUrl);
                                 }}
                                 aria-label={`放大查看 ${value.label}`}
                                 className={cn(
@@ -628,30 +734,28 @@ export function ProductDetailPage() {
                 其它信息的位置就稳定了。列宽用 table-fixed + 百分比均分，
                 不同商品 SKU 数量不同也不会左右跳动。 */}
             <div className="mt-3 max-h-[320px] overflow-y-auto rounded-md border border-border-subtle">
-              {prices.length === 0 ? (
+              {priceData.rows.length === 0 ? (
                 <p className="p-3 text-xs text-fg-muted">没有可展示的 SKU 价格</p>
               ) : (
-                <table className="w-full table-fixed text-sm">
-                  <colgroup>
-                    <col className="w-[40%]" />
-                    <col className="w-[20%]" />
-                    <col className="w-[20%]" />
-                    <col className="w-[20%]" />
-                  </colgroup>
+                <table className="w-full table-auto text-sm">
                   <thead className="sticky top-0 bg-canvas-inset">
                     <tr className="border-b border-border-subtle text-left text-2xs text-fg-muted">
-                      <th className="py-2 pl-3 pr-2 font-medium">规格</th>
-                      <th className="py-2 pr-2 text-right font-medium">售价</th>
-                      <th className="py-2 pr-2 text-right font-medium">采购价</th>
+                      {priceData.dimNames.map((name) => (
+                        <th key={name} className="py-2 pl-3 pr-4 font-medium">{name}</th>
+                      ))}
+                      <th className="py-2 pr-4 font-medium">商品SKU</th>
+                      <th className="py-2 pr-4 text-right font-medium">拿货价</th>
                       <th className="py-2 pr-3 text-right font-medium">库存</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {prices.map((row) => (
-                      <tr key={row.name} className="border-b border-border-subtle/60 last:border-0">
-                        <td className="truncate py-2 pl-3 pr-2 text-fg" title={row.name}>{row.name}</td>
-                        <td className="num truncate py-2 pr-2 text-right font-medium text-fg">{row.price || "—"}</td>
-                        <td className="num truncate py-2 pr-2 text-right text-fg-secondary">{row.purchasePrice || "—"}</td>
+                    {priceData.rows.map((row, i) => (
+                      <tr key={i} className="border-b border-border-subtle/60 last:border-0">
+                        {row.dims.map((dim, j) => (
+                          <td key={j} className="truncate py-2 pl-3 pr-4 text-fg">{dim || "—"}</td>
+                        ))}
+                        <td className="num truncate py-2 pr-4 text-xs text-fg-secondary">{row.skuCode || "—"}</td>
+                        <td className="num truncate py-2 pr-4 text-right text-fg-secondary">{row.purchasePrice || "—"}</td>
                         <td className="num truncate py-2 pr-3 text-right text-fg-secondary">{row.stock}</td>
                       </tr>
                     ))}

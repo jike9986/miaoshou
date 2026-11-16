@@ -185,7 +185,8 @@ export async function downloadInstaller(
  */
 export function launchInstaller(installerPath: string, silent = true): { ok: boolean; error?: string } {
   try {
-    const args = silent ? ["/S"] : [];
+    // Inno Setup 静默安装参数（/S 是 NSIS 的，Inno 用 /VERYSILENT）
+    const args = silent ? ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"] : [];
     const child = spawn(installerPath, args, {
       detached: true,
       stdio: "ignore",

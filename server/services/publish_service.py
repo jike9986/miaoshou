@@ -1187,10 +1187,7 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         _in_flight_blocker(db, account=account, keys=publish_keys,
                            operator_id=log_operator_id)
         if not claim_only:
-            _already_published_blocker(
-                db, account=account, entries=entries,
-                target_shop_id=str(target_shop_id),
-                operator_id=log_operator_id)
+            pass  # 不再阻止重复发布到同一店铺
         if claim_only:
             # A write with a lost response may still have reached Miaoshou.
             # Drop the target account's cached snapshot before any upstream call.
@@ -1536,7 +1533,8 @@ def _record_publish_batch(db: Session, *, batch_id: str, account_id: int,
         "at": row.last_requested_at,
     } for row in logs]
     status = "done" if all(r["status"] == "success" for r in results) else (
-        "failed" if results and all(r["status"] == "fail" for r in results)
+        "failed" if results and all(r["status"] in ("fail", "failed") for r in results)
+        else "processing" if results and any(r["status"] == "processing" for r in results)
         else "done")
     batch = Batch(
         id=batch_id,
@@ -1554,6 +1552,51 @@ def _record_publish_batch(db: Session, *, batch_id: str, account_id: int,
     )
     db.add(batch)
     db.flush()
+
+
+def sync_publish_batch_statuses(db: Session, account_id: int) -> int:
+    """刷新日志后，把对应的 pub_ 批次状态从 processing 更新到最终状态。
+
+    _record_publish_batch 只在发布时创建批次（existing is not None 则跳过），
+    之后即使平台回执到了、日志已改判，批次本身永远停在 processing。
+    此函数按 batch_id 拉取日志，只要所有日志都已落定（非 processing），
+    就把批次状态同步过来。
+    """
+    from models.batch import Batch
+    from models.publish_log import PublishLog
+
+    processing_batches = [
+        b for b in db.query(Batch).filter(
+            Batch.account_id == account_id,
+            Batch.status == "processing",
+        ).all()
+        if (b.settings or {}).get("kind") == "warehouse_claim"
+        and (b.settings or {}).get("mode") == "publish"
+    ]
+    synced = 0
+    for batch in processing_batches:
+        logs = db.query(PublishLog).filter(
+            PublishLog.batch_id == batch.id
+        ).all()
+        if not logs:
+            continue
+        statuses = [str(log.status or "") for log in logs]
+        if any(s == "processing" for s in statuses):
+            continue  # 仍有未确认，等下一次刷新
+        new_status = "done" if any(s == "success" for s in statuses) else "failed"
+        results = [{
+            "detailId": str(log.detail_id or ""),
+            "status": str(log.status or ""),
+            "message": str(log.reason or "")[:200],
+            "at": log.last_requested_at or log.finished_at,
+        } for log in logs]
+        batch.status = new_status
+        batch.results = results
+        batch.current_index = len(results)
+        batch.finished_at = now_ts()
+        batch.updated_at = now_ts()
+        synced += 1
+    return synced
 
 
 def _pair_entries(entries: list[dict[str, Any]], published: list[str],

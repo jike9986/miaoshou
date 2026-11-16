@@ -443,6 +443,56 @@ def delete_product(ident: str, db: DbSession,
     return result
 
 
+class TranslateColorsRequest(CamelModel):
+    language: str = "ms"
+
+
+@router.post("/{ident}/translate-colors", summary="补翻颜色（只改本地仓库，不重跑完整处理）",
+             dependencies=[require_permission("process")])
+def translate_colors(ident: str, body: TranslateColorsRequest,
+                     db: DbSession, operator: OperatorDep) -> dict[str, Any]:
+    """把仓库商品 payload 里仍为中文的颜色值翻成目标语言。
+
+    只改本地数据库的 skuPropertyList.attrValue，不调妙手、不重走完整处理流程，
+    不触发 readback_check。颜色已是目标语言的不动。
+    """
+    require_writable(db)
+    from copy import deepcopy
+
+    product = warehouse_service.resolve_product(db, ident)
+    payload = deepcopy(product.payload) if isinstance(product.payload, dict) else {}
+    language = str(body.language or "ms").strip() or "ms"
+
+    # 在 payload 副本上原地翻译
+    warehouse_service._apply_color_translation_fallback(payload, language)
+
+    # 读出翻译后的颜色供前端展示
+    colors_after = [
+        str(val.get("attrValue") or "")
+        for prop in (payload.get("skuPropertyList") or [])
+        if isinstance(prop, dict)
+        and str(prop.get("attrId") or prop.get("propId") or "") in {"100000"}
+        or str(prop.get("attrName") or prop.get("propName") or "").strip().casefold() in {"颜色", "色彩", "color", "colour", "warna"}
+        for val in (prop.get("attrValueList") or [])
+        if isinstance(val, dict)
+    ]
+
+    # 写回
+    product.payload = payload
+    product.sku_properties = product_service.sku_properties(payload)
+    from core.utils import now_ts
+    product.updated_at = now_ts()
+    # 注意：不推进 revision，也不清掉 draft_verified_revision。
+    # 颜色翻译只改本地展示字段，不影响妙手草稿——推进 revision 会导致
+    # draft_verified_revision != revision，商品从自动化结果列表消失，无法入库。
+    if operator is not None:
+        product.operator_id = getattr(operator, "id", None) or operator
+    db.flush()
+    db.commit()
+
+    return {"ok": True, "language": language, "colorsAfter": colors_after}
+
+
 @router.post("/automation-results/delete", summary="删除自动化结果记录",
              dependencies=[require_permission("process")])
 def delete_automation_results(payload: AutomationResultsImportRequest,

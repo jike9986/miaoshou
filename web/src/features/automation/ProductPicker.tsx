@@ -130,6 +130,9 @@ export function ProductPicker({
       <div className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-border-subtle px-3">
         <span className="flex min-w-0 items-center gap-2">
           <span className="truncate text-[13px] font-medium leading-5 text-fg">采集箱</span>
+          {total > 0 && (
+            <span className="text-[13px] text-fg-muted">/ {total}</span>
+          )}
           {selectedKeys.size > 0 && (
             <Badge variant="brand" size="sm">
               已选 {selectedKeys.size}
@@ -204,7 +207,7 @@ export function ProductPicker({
       )}
 
       {/* 列表体：只有图片 + 标题 */}
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-2">
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-2 [scrollbar-gutter:stable]">
         {!connected && (
           <EmptyState
             icon={<Unplug strokeWidth={1.5} />}
@@ -252,7 +255,7 @@ export function ProductPicker({
         {connected && items.length > 0 && (
           <ul
             className="grid min-w-0 content-start gap-2.5
-                       [grid-template-columns:repeat(auto-fill,minmax(128px,1fr))]"
+                       [grid-template-columns:repeat(auto-fill,minmax(clamp(128px,20%,200px),1fr))]"
           >
             {items.map((item) => {
               const stage = stages[item.key];

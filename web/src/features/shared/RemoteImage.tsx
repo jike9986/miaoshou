@@ -66,7 +66,7 @@ export function RemoteImage({
           onError={() => setFailed(true)}
           className={cn(
             "size-full object-cover transition-transform duration-image ease-out",
-            zoomOnHover && "group-hover:scale-[1.02]",
+            zoomOnHover && "group-hover:scale-[1.02] will-change-transform",
             loaded ? "opacity-100" : "opacity-0",
             className
           )}

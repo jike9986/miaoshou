@@ -113,6 +113,8 @@ class Settings(BaseSettings):
     request_timeout: float = 30.0
     # 请求体上限（图片 base64 走 JSON 时放宽）
     max_body_bytes: int = 40 * 1024 * 1024
+    # DeepSeek API key（颜色翻译兜底，支持全语言；空则不调用）
+    deepseek_api_key: str = ""
 
     @property
     def db_path(self) -> Path:

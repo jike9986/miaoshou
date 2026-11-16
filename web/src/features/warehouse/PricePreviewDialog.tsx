@@ -130,7 +130,7 @@ export function PricePreviewDialog({ open, onOpenChange, ids }: PricePreviewDial
               onChange={(value) => setTemplate(value)}
               disabled={preview.isPending || templatesQuery.isLoading}
               options={[
-                { value: "", label: "使用默认模板" },
+                { value: "", label: "——" },
                 ...templates.map((item) => ({
                   value: item.name,
                   label: item.invalid ? `${item.name}（不可用）` : item.name,
