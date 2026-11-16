@@ -96,7 +96,7 @@ WORD_LIMIT = 500
 
 # 图片翻译计费（毫央）
 UNIT_MILLIYUAN = 24
-IMAGE_BUDGET_MILLIYUAN = 10000
+IMAGE_BUDGET_MILLIYUAN = 100000
 IMAGE_MAX_BYTES = 15 * 1024 * 1024
 # 图片翻译用的模型。2026-11-09 实测（每个模型各 3 次，真实商品图）：
 #   gpt-image-2    平均 56.7s（波动 46s），文案偏直译
