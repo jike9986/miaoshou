@@ -30,7 +30,7 @@ CUSTOM_CATEGORIES_KEY = "warehouse.customCategories"
 DEFAULT_SETTINGS: dict[str, Any] = {
     READ_ONLY_KEY: False,
     PUBLISH_ENABLED_KEY: False,
-    IMAGE_LIMITS_KEY: {"minute": 600, "hour": 6000, "day": 60000, "budgetMilliyuan": 10000},
+    IMAGE_LIMITS_KEY: {"minute": 600, "hour": 6000, "day": 60000, "budgetMilliyuan": 100000},
     WORKFLOW_DEFAULTS_KEY: {
         "languages": ["ms"],
         "mainLimit": 9,
