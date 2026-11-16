@@ -185,8 +185,11 @@ export async function downloadInstaller(
  */
 export function launchInstaller(installerPath: string, silent = true): { ok: boolean; error?: string } {
   try {
-    // Inno Setup 静默安装参数（/S 是 NSIS 的，Inno 用 /VERYSILENT）
-    const args = silent ? ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"] : [];
+    // NSIS 静默安装参数（/S，注意是大写 S）。
+    // 注意：早期版本误用了 Inno Setup 的 /VERYSILENT /SUPPRESSMSGBOXES，
+    // NSIS 不认识这些参数会忽略并以 GUI 模式运行，导致用户看到安装界面、
+    // 可以改路径，改完快捷方式就指向旧目录了。
+    const args = silent ? ["/S"] : [];
     const child = spawn(installerPath, args, {
       detached: true,
       stdio: "ignore",
