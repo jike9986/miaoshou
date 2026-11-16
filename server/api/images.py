@@ -102,27 +102,31 @@ def review_gate(payload: ImageReviewGateRequest, db: DbSession,
 
 @router.post("/translate", status_code=202, summary="批量提交图片翻译（幂等 + 预算）",
              dependencies=[require_permission("images")])
-def translate(payload: ImageTranslateRequest, db: DbSession,
-              operator: OperatorDep) -> dict[str, Any]:
+async def translate(payload: ImageTranslateRequest, db: DbSession,
+                    operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
     body = payload.model_dump(by_alias=False, exclude_none=True)
-    # 图片翻译是**按张扣费**的动作：谁提交的必须留痕，否则月底对账时
-    # 「这两千张是谁翻的」只能靠猜。
-    #
-    # target 先用入参里的 batchId（可能为空——不带批次时服务层会自己生成一个），
-    # 失败记录里也必须有它，否则那条 failed 就不知道是哪一批挂的。
     batch_key = str(payload.batchId or "")
+    # 在进入同步流程之前先异步等待限流槽：asyncio.sleep 只挂起协程而不占用
+    # 线程池名额。sync def 下 time.sleep(5) 最长重试 300 秒，高并发时会耗尽
+    # uvicorn 的线程池，导致所有路由无响应。
+    _all_kept = bool(payload.items) and all(
+        (getattr(item, "action", None) or "") == "keep" for item in (payload.items or []))
+    if not _all_kept:
+        await image_service._reserve_slot_async(db)
     with audit_service.guard(db, operator=operator, action="image.translate",
                              target_kind="image", target_id=batch_key):
         result = image_service.translate(
-            db, body, operator_id=getattr(operator, "id", None),
+            db, body,
+            operator_id=getattr(operator, "id", None),
             owner_operator_id=(operator.id
                                if operator_service.role_of(operator)
-                               == operator_service.ROLE_MEMBER else None))
+                               == operator_service.ROLE_MEMBER else None),
+            _skip_reserve=True,  # 限流已在上面完成
+        )
     db.commit()
     audit_service.record(db, operator=operator, action="image.translate",
                          target_kind="image",
-                         # 成功时才拿得到真实批次号（服务层可能新生成）
                          target_id=str(result.get("batchId") or batch_key),
                          detail={"requested": len(payload.items or []),
                                  "accepted": result.get("accepted") or 0,

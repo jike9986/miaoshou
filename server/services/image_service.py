@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 import threading
+import asyncio
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -230,6 +231,50 @@ def _reserve_slot(db: Session) -> None:
         db.expire_all()
 
 
+async def _reserve_slot_async(db: Session) -> None:
+    """_reserve_slot 的异步版本：用 asyncio.sleep 代替 time.sleep。
+
+    在 async 端点中调用此函数，asyncio.sleep 只挂起当前协程而不占用线程池名额。
+    同步版本的 time.sleep 在线程池中等待最多 300 秒，高并发时会耗尽线程池导致
+    所有路由无响应；异步版本解决了这个问题。
+    DB 查询（usage/expire_all）耗时极短（<10ms），短暂占用事件循环可接受。
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + RATE_WAIT_SECONDS
+    while True:
+        state = usage(db)
+        used = {
+            "minute": state["usedThisMinute"],
+            "hour": state["usedThisHour"],
+            "day": state["usedToday"],
+        }
+        blocking = [name for name in WINDOWS if used[name] >= state["budgets"][name]]
+        if not blocking:
+            return
+        if "day" in blocking:
+            raise errors.AppError(
+                "RATE_LIMITED",
+                f"图片翻译今日额度已用完（每天 {state['budgets']['day']} 张），"
+                "请在图片设置里调整额度或明天再试",
+                status=429,
+                details={"budgets": state["budgets"], "blocked": blocking},
+            )
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            raise errors.AppError(
+                "RATE_LIMITED",
+                f"图片翻译排队超过 {RATE_WAIT_SECONDS} 秒仍未轮到："
+                f"每分钟最多 {state['budgets']['minute']} 张、"
+                f"每小时 {state['budgets']['hour']} 张",
+                status=429,
+                details={"budgets": state["budgets"], "blocked": blocking,
+                         "waitedSeconds": RATE_WAIT_SECONDS},
+            )
+        await asyncio.sleep(min(RATE_WAIT_STEP, remaining))
+        db.expire_all()
+
+
 # --- 上游调用 -------------------------------------------------------------
 def _client() -> httpx.Client:
     return httpx.Client(timeout=httpx.Timeout(240.0, connect=15.0),
@@ -259,6 +304,9 @@ def _shrink(raw: bytes) -> bytes:
     老版注释原话：「images are shrunk before they are sent -- this is the
     single biggest bandwidth win」。**永不失败**：Pillow 没装、图坏了、
     压完反而更大，一律原样返回，不能因为优化把整批翻译搞挂。
+
+    带透明通道（RGBA / LA）的图不能直接转 RGB——Pillow 会把透明区域填成黑色，
+    导致商品图背景变黑而非白。这里把 alpha 合成到白底再压缩，保证视觉正确。
     """
     if len(raw) <= SHRINK_LIMIT:
         return raw
@@ -270,7 +318,17 @@ def _shrink(raw: bytes) -> bytes:
         with Image.open(io.BytesIO(raw)) as image:
             if max(image.size) <= SHRINK_MAX_SIDE:
                 return raw
-            image = image.convert("RGB")
+            # 处理带透明通道的图片：合成到白色背景，避免透明区域变黑
+            has_alpha = image.mode in ("RGBA", "LA") or (
+                image.mode == "P" and "transparency" in image.info)
+            if has_alpha:
+                if image.mode != "RGBA":
+                    image = image.convert("RGBA")
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                background.paste(image, mask=image.split()[3])
+                image = background
+            else:
+                image = image.convert("RGB")
             image.thumbnail((SHRINK_MAX_SIDE, SHRINK_MAX_SIDE), Image.LANCZOS)
             buffer = io.BytesIO()
             image.save(buffer, format="JPEG", quality=SHRINK_QUALITY, optimize=True)
@@ -690,7 +748,8 @@ def upload_job_result(db: Session, job_id: str) -> dict[str, Any]:
 
 def translate(db: Session, payload: Mapping[str, Any],
               *, operator_id: int | None = None,
-              owner_operator_id: int | None = None) -> dict[str, Any]:
+              owner_operator_id: int | None = None,
+              _skip_reserve: bool = False) -> dict[str, Any]:
     """POST /images/translate：批量提交（幂等 + 预算 + 限流）。
 
     `operator_id` 只落在**新建**的 job 上：一行 job 代表「这张图是谁先提交的」，
@@ -862,7 +921,8 @@ def translate(db: Session, payload: Mapping[str, Any],
         pending.append((job, raw))
 
     if pending:
-        _reserve_slot(db)
+        if not _skip_reserve:
+            _reserve_slot(db)
 
     # 并发提交：老版 IMAGE_CONCURRENCY=3。串行提交时 10 张图要 10 个往返，
     # 每张 20~60 秒，用户就盯着转圈。只把网络请求并行化，落库仍在主线程做

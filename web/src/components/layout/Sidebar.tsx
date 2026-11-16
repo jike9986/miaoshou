@@ -511,6 +511,7 @@ export interface SidebarProps {
   showCollapseToggle?: boolean;
   className?: string;
   onNavigate?: () => void;
+  onSettingsClick?: () => void;
 }
 
 export function Sidebar({

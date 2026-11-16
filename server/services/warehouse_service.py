@@ -804,10 +804,13 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
             query = query.filter(owned_claim if claimed else ~owned_claim)
     needle = str(q or "").strip()
     if needle:
-        pattern = f"%{needle}%"
-        query = query.filter(or_(Product.title.ilike(pattern),
-                                 Product.detail_id.like(pattern),
-                                 Product.category_name.ilike(pattern)))
+        # Escape LIKE special characters so a literal search for "%" or "_"
+        # doesn't become a wildcard and match everything.
+        escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        query = query.filter(or_(Product.title.ilike(pattern, escape="\\"),
+                                 Product.detail_id.like(pattern, escape="\\"),
+                                 Product.category_name.ilike(pattern, escape="\\")))
 
     total = query.count()
     rows = (query.order_by(*SORTS[sort])

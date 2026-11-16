@@ -1127,18 +1127,20 @@ def _store(db: Session, task: Schedule, summary: dict[str, Any],
     summary["at"] = (saved.last_result or {}).get("at")
     # 追加一条执行历史。`last_result` 只留最近一次，翻不出「昨天跑了几轮」。
     # 历史写失败不能影响发布结果本身的记账，所以单独吞掉。
+    # completed_runs 递增必须在 try 块之外：record_log 抛出时若跳过递增，
+    # 同一批商品会在下一轮被重复发布——这是比丢失日志更严重的业务问题。
     try:
         record_log(db, task, summary, moment=moment)
-        if (task.selected_product_ids and task.planned_runs
-                and summary.get("selected", 0) > 0
-                and summary.get("status") == RUN_OK):
-            task.completed_runs = int(task.completed_runs or 0) + 1
-            if task.completed_runs >= int(task.planned_runs):
-                task.enabled = False
-                task.completed = True
-                task.updated_at = now_ts()
     except Exception:  # noqa: BLE001
         logger.warning("写入定时任务执行历史失败 taskId=%s", task.id, exc_info=True)
+    if (task.selected_product_ids and task.planned_runs
+            and summary.get("selected", 0) > 0
+            and summary.get("status") == RUN_OK):
+        task.completed_runs = int(task.completed_runs or 0) + 1
+        if task.completed_runs >= int(task.planned_runs):
+            task.enabled = False
+            task.completed = True
+            task.updated_at = now_ts()
     return summary
 
 
