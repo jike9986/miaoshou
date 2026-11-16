@@ -126,14 +126,14 @@ def main() -> int:
           f"（唯一约束 {model_uniques} + 字符串主键 {model_text_pks}）")
     print(f"    外键：库里 {fk_count} / 模型 {model_fks}")
     if explicit_indexes != model_indexes:
-        # 部分索引（带 WHERE 子句）在 SQLite 里计数行为与 PostgreSQL 不一致，
-        # 视为警告不阻断 CI，生产跑 PostgreSQL 时才有意义。
-        print(f"    ⚠ 显式索引 {explicit_indexes} != 模型 Index {model_indexes}（部分索引 SQLite 计数差异，警告）",
+        # 部分索引（带 WHERE 子句）在 SQLite 里计数与 PostgreSQL 不同，警告即可。
+        print(f"    ⚠ 显式索引 {explicit_indexes} != 模型 Index {model_indexes}"
+              f"（部分索引 SQLite 计数差异，警告）",
               file=sys.stderr)
     if auto_indexes != expected_autoindexes:
-        print(
-            f"    ⚠ autoindex {auto_indexes} != 期望 {expected_autoindexes}（部分索引 SQLite 计数差异，警告）",
-            file=sys.stderr)
+        print(f"    ⚠ autoindex {auto_indexes} != 期望 {expected_autoindexes}"
+              f"（部分索引 SQLite 计数差异，警告）",
+              file=sys.stderr)
     if fk_count != model_fks:
         failures.append(f"外键 {fk_count} != 模型 {model_fks}，迁移漏建外键")
 
