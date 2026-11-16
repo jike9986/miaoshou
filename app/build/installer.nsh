@@ -36,11 +36,6 @@
   Delete "$TEMP\_ah_sc.ps1"
 !macroend
 
-!macro customInstallEnd
-  ; 安装完成后自动重启程序（静默更新后无需用户手动点快捷方式）
-  Exec '"$INSTDIR\AohuangShangpin.exe" --no-sandbox'
-!macroend
-
 !macro customUnInstall
   FileOpen $R0 "$TEMP\_ah_rm.ps1" w
   FileWrite $R0 "$$n = [char]0x5965+[char]0x7687+[char]0x4E0A+[char]0x54C1$\r$\n"

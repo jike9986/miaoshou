@@ -211,20 +211,29 @@ export function launchInstaller(installerPath: string, silent = true): { ok: boo
 /**
  * 退出时安装：仅当有 pending.json 且用户已同意（`quitAndInstall` 被调用）。
  *
- * 为什么不在 `before-quit` 里无条件装：用户可能只是关掉程序去干别的，
- * 强制安装会让他下次打开发现版本变了却不知道为什么。所以只有显式点
- * 「重启并安装」才装。
+ * 安装完成后自动重启软件：用 PowerShell 在后台等安装器退出、再启动软件。
+ * 安装器是独立进程，本进程退出不影响它；但安装器在覆盖文件时需要本进程已退出，
+ * 所以必须先 app.quit()，再由外部 PowerShell 进程负责安装 + 重启。
  */
 export async function installOnQuit(): Promise<void> {
   const pending = await pendingInstaller();
   if (!pending) return;
-  const started = launchInstaller(pending.path, true);
-  // 安装器已经作为独立进程启动（detached），它把文件读进内存/临时目录后
-  // 就不再依赖原路径。这里清理下载缓存与标记，避免每更新一次多留一个
-  // 77MB 的 exe。启动失败时保留，让用户还能手动重试。
-  if (started.ok) {
-    await discardInstaller();
-  }
+  const exePath = app.getPath("exe");
+  const installerPath = pending.path.replace(/'/g, "''");
+  const exePathEsc = exePath.replace(/'/g, "''");
+  // PowerShell: 等本进程退出（安装器会等），然后安装，安装完重启软件
+  const { spawn: _spawn } = await import("node:child_process");
+  _spawn(
+    "powershell.exe",
+    [
+      "-WindowStyle", "Hidden",
+      "-NonInteractive",
+      "-Command",
+      `Start-Sleep -Seconds 1; Start-Process -FilePath '${installerPath}' -ArgumentList '/S' -Wait; Start-Sleep -Seconds 2; Start-Process -FilePath '${exePathEsc}' -ArgumentList '--no-sandbox'`,
+    ],
+    { detached: true, stdio: "ignore" }
+  ).unref();
+  await discardInstaller();
 }
 
 /** 给渲染层用的「重启并安装」：先记下意图，再退出，由 before-quit 执行安装。 */
