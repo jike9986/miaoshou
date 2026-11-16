@@ -756,6 +756,16 @@ function ScheduleFormDrawer({
       setCheckedAccountIds((prev) => prev.filter((id) => id !== accId));
     }
   };
+
+  // 当 checkedAccountIds 变化时，自动加载还没有店铺数据的账号
+  useEffect(() => {
+    for (const accId of checkedAccountIds) {
+      if (!(accId in shopsByAccount)) {
+        void fetchShopsForAccount(accId);
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkedAccountIds]);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -797,8 +807,7 @@ function ScheduleFormDrawer({
     // 多账号模式：默认全选所有账号（老师新建任务）
     if (isTeacher && !task && accounts.length > 1) {
       setCheckedAccountIds(accounts.map((a) => a.id));
-      // 预加载第一页账号的店铺（其余在勾选时懒加载）
-      for (const a of accounts.slice(0, 5)) void fetchShopsForAccount(a.id);
+      // 不预加载——账号渲染后 useEffect 会按需触发
     } else {
       setCheckedAccountIds([]);
     }
@@ -975,7 +984,8 @@ function ScheduleFormDrawer({
                 {accounts.map((account) => {
                   const checked = checkedAccountIds.includes(account.id);
                   const accShopsRaw = shopsByAccount[account.id];
-                  const accShopsLoading = accShopsRaw === null || (checked && !(account.id in shopsByAccount));
+                  // null = 加载中（已触发请求），undefined = 还没触发，[] = 加载完无店铺
+                  const accShopsLoading = accShopsRaw === null || (checked && accShopsRaw === undefined);
                   const accShops = accShopsRaw ?? [];
                   const accShopId = selectedShopByAccount[account.id] ?? accShops[0]?.shopId ?? "";
                   return (

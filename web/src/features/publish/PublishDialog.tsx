@@ -130,6 +130,16 @@ export function PublishDialog({
     }
   };
 
+  // 当 checkedAccountIds 变化后，自动加载还没有店铺数据的账号
+  useEffect(() => {
+    for (const accId of checkedAccountIds) {
+      if (!(accId in shopsByAccount)) {
+        void fetchShopsForAccount(accId);
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkedAccountIds]);
+
   // 打开时重置为默认店铺
   useEffect(() => {
     if (!open) return;
@@ -144,12 +154,11 @@ export function PublishDialog({
     setLanguage("");
     setShopId(defaultShopId);
     setResult(null);
-    // 老师多账号：默认全选
+    // 老师多账号：打开时默认全选，重置状态，让 useEffect 按需加载
     if (isTeacher && accounts.length > 1) {
       setCheckedAccountIds(accounts.map((a) => a.id));
       setShopsByAccount({});
       setSelectedShopByAccount({});
-      for (const a of accounts.slice(0, 5)) void fetchShopsForAccount(a.id);
     } else {
       setCheckedAccountIds([]);
     }
@@ -427,7 +436,8 @@ export function PublishDialog({
                     {accounts.map((account) => {
                       const checked = checkedAccountIds.includes(account.id);
                       const accShopsRaw = shopsByAccount[account.id];
-                      const accShopsLoading = accShopsRaw === null || (checked && !(account.id in shopsByAccount));
+                      // null = 加载中，undefined = 还没触发，[] = 已加载无店铺
+                      const accShopsLoading = accShopsRaw === null || (checked && accShopsRaw === undefined);
                       const accShops = accShopsRaw ?? [];
                       const accShopId = selectedShopByAccount[account.id] ?? accShops[0]?.shopId ?? "";
                       return (
