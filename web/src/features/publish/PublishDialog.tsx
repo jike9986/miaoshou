@@ -61,10 +61,9 @@ export function PublishDialog({
 }: PublishDialogProps) {
   const navigate = useNavigate();
   const identity = useOperatorIdentity();
-  // 多账号模式只给老师/管理员；用 identity.role 判断，
-  // identity 可能还没加载，此时 accounts.length > 1 是充分条件（学员看不到多账号）
-  const isTeacher = identity?.role === "teacher" || identity?.role === "admin"
-    || (identity?.role === undefined && accounts.length > 1);
+  // 多账号模式只给老师/管理员；role 可能是 null/undefined（还没加载），
+  // 只要不是明确的 "member" 且有多账号，就显示多账号选择器
+  const isTeacher = identity?.role !== "member" && accounts.length > 1;
   const { data: auth } = useAuthStatus();
   const shopsQuery = useShops(auth?.accountId, { enabled: open && connected });
   const templatesQuery = useTemplates(open && connected);
@@ -427,9 +426,24 @@ export function PublishDialog({
               {/* 老师多账号模式：账号复选 + 各账号店铺选择 */}
               {isTeacher && accounts.length > 1 ? (
                 <div>
-                  <div className="mb-1 flex items-baseline gap-1">
-                    <span className="text-sm font-medium text-fg">发布账号</span>
-                    <span className="text-xs text-fg-secondary">（老师模式：每个账号独立发布）</span>
+                  <div className="mb-1 flex items-baseline justify-between gap-1">
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-sm font-medium text-fg">发布账号</span>
+                      <span className="text-xs text-fg-secondary">（老师模式：每个账号独立发布）</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="text-xs text-brand-600 hover:underline"
+                      onClick={() => {
+                        if (checkedAccountIds.length === accounts.length) {
+                          setCheckedAccountIds([]);
+                        } else {
+                          setCheckedAccountIds(accounts.map((a) => a.id));
+                        }
+                      }}
+                    >
+                      {checkedAccountIds.length === accounts.length ? "取消全选" : "全选"}
+                    </button>
                   </div>
                   <div className="max-h-56 overflow-y-auto rounded-md border border-border-subtle p-2">
                     <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">

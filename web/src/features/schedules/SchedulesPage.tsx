@@ -694,7 +694,8 @@ function ScheduleFormDrawer({
 
   // 老师多账号模式：同时为多个账号创建同一套定时任务。
   const identity = useOperatorIdentity();
-  const isTeacher = identity?.role === "teacher" || identity?.role === "admin";
+  // 只要不是明确的学员且有多账号，就显示多账号选择器
+  const isTeacher = identity?.role !== "member" && accounts.length > 1;
   // 多账号模式下勾选的账号 id 列表
   const [checkedAccountIds, setCheckedAccountIds] = useState<string[]>([]);
   // 各账号的店铺列表（首次勾选时懒加载）；null = 加载中，[] = 已加载但无店铺，[...] = 有数据
@@ -929,8 +930,11 @@ function ScheduleFormDrawer({
         const accShops = shopsByAccount[accId] ?? [];
         const accShopId = selectedShopByAccount[accId] ?? accShops[0]?.shopId ?? shopId;
         return { ...basePayload, accountId: accId, shopId: accShopId };
-      }).filter((p) => Boolean(p.shopId));
-      if (payloads.length === 0) return;
+      }).filter((p) => Boolean(p.shopId)); // 跳过没有店铺的账号
+      if (payloads.length === 0) {
+        setErrors({ shopId: "所选账号均无可用店铺" });
+        return;
+      }
       onSubmit(payloads);
       return;
     }
@@ -975,9 +979,24 @@ function ScheduleFormDrawer({
           {/* 老师新建任务时：多账号复选，可同时为多个账号创建同一套定时任务 */}
           {isTeacher && !task && accounts.length > 1 ? (
             <div className="sm:col-span-2">
-              <div className="mb-1 flex items-baseline gap-1">
-                <span className="text-sm font-medium text-fg">发布账号</span>
-                <span className="text-xs text-fg-secondary">（老师模式：每个勾选账号创建一条独立任务）</span>
+              <div className="mb-1 flex items-baseline justify-between gap-1">
+                <div className="flex items-baseline gap-1">
+                  <span className="text-sm font-medium text-fg">发布账号</span>
+                  <span className="text-xs text-fg-secondary">（老师模式：每个勾选账号创建一条独立任务）</span>
+                </div>
+                <button
+                  type="button"
+                  className="text-xs text-brand-600 hover:underline"
+                  onClick={() => {
+                    if (checkedAccountIds.length === accounts.length) {
+                      setCheckedAccountIds([]);
+                    } else {
+                      setCheckedAccountIds(accounts.map((a) => a.id));
+                    }
+                  }}
+                >
+                  {checkedAccountIds.length === accounts.length ? "取消全选" : "全选"}
+                </button>
               </div>
               <div className="max-h-56 overflow-y-auto rounded-md border border-border-subtle p-2">
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
