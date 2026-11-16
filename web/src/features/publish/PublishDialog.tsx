@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, PackageCheck, RefreshCw, Send } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { apiErrorMessage } from "@/lib/api";
+import { apiErrorMessage, api } from "@/lib/api";
 import { isLanguageMismatch, toPublishItems } from "@/lib/constants";
 import {
   useAuthStatus,
@@ -17,7 +17,8 @@ import {
   useTemplates,
   useSelectTemplate,
 } from "@/lib/queries";
-import type { PublishResponse, RepricedEntry } from "@/lib/types";
+import type { PublishResponse, RepricedEntry, Shop } from "@/lib/types";
+import { useOperatorIdentity } from "@/lib/operator";
 import {
   Badge,
   Button,
@@ -44,6 +45,8 @@ export interface PublishDialogProps {
   sourceShopIds?: Record<string, string>;
   connected: boolean;
   onSubmitted?: (result: PublishResponse) => void;
+  /** 老师多账号模式：同时向多个账号发布 */
+  accounts?: Array<{ id: string; name: string }>;
 }
 
 export function PublishDialog({
@@ -54,14 +57,23 @@ export function PublishDialog({
   allowClaimOnly = true,
   connected,
   onSubmitted,
+  accounts = [],
 }: PublishDialogProps) {
   const navigate = useNavigate();
+  const identity = useOperatorIdentity();
+  const isTeacher = identity?.role === "teacher" || identity?.role === "admin";
   const { data: auth } = useAuthStatus();
   const shopsQuery = useShops(auth?.accountId, { enabled: open && connected });
   const templatesQuery = useTemplates(open && connected);
   const selectTemplate = useSelectTemplate();
   const publish = usePublish();
   const refreshLogs = useRefreshPublishLogs();
+
+  // 老师多账号状态
+  const [checkedAccountIds, setCheckedAccountIds] = useState<string[]>([]);
+  const [shopsByAccount, setShopsByAccount] = useState<Record<string, Shop[]>>({});
+  const [selectedShopByAccount, setSelectedShopByAccount] = useState<Record<string, string>>({});
+  const [multiPublishing, setMultiPublishing] = useState(false);
 
   const shops = useMemo(() => shopsQuery.data?.shops ?? [], [shopsQuery.data?.shops]);
   const templates = templatesQuery.data?.templates ?? [];
@@ -94,6 +106,26 @@ export function PublishDialog({
     return !Number.isFinite(parsed) || parsed <= 0 || parsed > 1000;
   })();
 
+  // 老师多账号：勾选账号时懒加载店铺
+  const fetchShopsForAccount = async (accId: string): Promise<void> => {
+    if (shopsByAccount[accId]) return;
+    try {
+      const result = await api.get<{ shops: Shop[] }>(`/shops?accountId=${encodeURIComponent(accId)}`);
+      setShopsByAccount((prev) => ({ ...prev, [accId]: result.shops ?? [] }));
+    } catch {
+      setShopsByAccount((prev) => ({ ...prev, [accId]: [] }));
+    }
+  };
+
+  const toggleAccount = (accId: string, checked: boolean): void => {
+    if (checked) {
+      setCheckedAccountIds((prev) => [...prev, accId]);
+      void fetchShopsForAccount(accId);
+    } else {
+      setCheckedAccountIds((prev) => prev.filter((id) => id !== accId));
+    }
+  };
+
   // 打开时重置为默认店铺
   useEffect(() => {
     if (!open) return;
@@ -108,6 +140,15 @@ export function PublishDialog({
     setLanguage("");
     setShopId(defaultShopId);
     setResult(null);
+    // 老师多账号：默认全选
+    if (isTeacher && accounts.length > 1) {
+      setCheckedAccountIds(accounts.map((a) => a.id));
+      setShopsByAccount({});
+      setSelectedShopByAccount({});
+      for (const a of accounts.slice(0, 5)) void fetchShopsForAccount(a.id);
+    } else {
+      setCheckedAccountIds([]);
+    }
   }, [open, defaultShopId, auth?.accountId, templatesQuery.data?.selected]);
 
   // 店铺列表到手后校验默认值 / 语言默认取站点首语言
@@ -146,7 +187,7 @@ export function PublishDialog({
     });
   };
 
-  const submit = (): void => {
+  const submit = async (): Promise<void> => {
     setError(null);
     if (warehouseIds.length === 0) {
       setError("请选择要发布的商品");
@@ -154,10 +195,6 @@ export function PublishDialog({
     }
     if (warehouseIds.length > 200) {
       setError("一次最多发布 200 件商品");
-      return;
-    }
-    if (!shopId) {
-      setError("请选择目标店铺");
       return;
     }
     if (requiresTemplate && !hasValidTemplate) {
@@ -173,6 +210,56 @@ export function PublishDialog({
       return;
     }
 
+    // 老师多账号：逐账号 fan-out 发布
+    if (isTeacher && checkedAccountIds.length > 1) {
+      setMultiPublishing(true);
+      let ok = 0;
+      const failMsgs: string[] = [];
+      const items = toPublishItems(warehouseIds.map((id) => ({ warehouseId: id })));
+      for (const accId of checkedAccountIds) {
+        const accShops = shopsByAccount[accId] ?? [];
+        const accShopId = selectedShopByAccount[accId] ?? accShops[0]?.shopId ?? shopId;
+        if (!accShopId) {
+          failMsgs.push(`${accId}：无可用店铺`);
+          continue;
+        }
+        try {
+          const publishResult = await publish.mutateAsync({
+            items,
+            shopId: accShopId,
+            accountId: accId,
+            template: template || null,
+            allowMismatch,
+            confirmUnverifiedSpecifications: true,
+            claimOnly: effectiveClaimOnly,
+            confirm: true,
+          });
+          ok++;
+          onSubmitted?.(publishResult);
+        } catch (mutationError) {
+          failMsgs.push(apiErrorMessage(mutationError));
+        }
+      }
+      setMultiPublishing(false);
+      if (ok > 0) {
+        toast.success(`已为 ${ok} 个账号提交发布`, {
+          description: "已提交，平台回执稍后更新",
+        });
+      }
+      if (failMsgs.length > 0) {
+        toast.error(`${failMsgs.length} 个账号发布失败`, { description: failMsgs[0] });
+      }
+      if (ok > 0) {
+        onOpenChange(false);
+      }
+      return;
+    }
+
+    // 单账号模式（原有逻辑）
+    if (!shopId) {
+      setError("请选择目标店铺");
+      return;
+    }
     publish.mutate(
       {
         items: toPublishItems(warehouseIds.map((id) => ({ warehouseId: id }))),
@@ -266,13 +353,20 @@ export function PublishDialog({
             <Button
               variant="primary"
               icon={<Send />}
-              loading={publish.isPending}
+              loading={publish.isPending || multiPublishing}
               loadingText="正在提交…"
-              disabled={!confirmed || !shopId || rateInvalid
-                || (requiresTemplate && !hasValidTemplate)}
-              onClick={submit}
+              disabled={!confirmed || rateInvalid
+                || (requiresTemplate && !hasValidTemplate)
+                || (isTeacher && accounts.length > 1 ? checkedAccountIds.length === 0 : !shopId)}
+              onClick={() => { void submit(); }}
             >
-              {effectiveClaimOnly ? "只认领进采集箱" : `发布 ${warehouseIds.length} 件`}
+              {effectiveClaimOnly
+                ? (isTeacher && checkedAccountIds.length > 1
+                    ? `认领到 ${checkedAccountIds.length} 个账号`
+                    : "只认领进采集箱")
+                : (isTeacher && checkedAccountIds.length > 1
+                    ? `向 ${checkedAccountIds.length} 个账号发布 ${warehouseIds.length} 件`
+                    : `发布 ${warehouseIds.length} 件`)}
             </Button>
           </>
         )
@@ -316,18 +410,71 @@ export function PublishDialog({
               {apiErrorMessage(shopsQuery.error)}
             </InlineError>
           ) : (
-            <Field label="目标店铺" required hint={shopsQuery.data?.degraded ? "当前展示的是上次缓存的店铺列表" : undefined}>
-              <Select
-                value={shopId ?? ""}
-                onChange={(value) => setShopId(value)}
-                options={shops.map((shop) => ({
-                  value: shop.shopId,
-                  label: `${shop.name} · ${shop.siteName || shop.site}`,
-                }))}
-                placeholder={shops.length === 0 ? "当前账号下没有店铺" : "选择目标店铺"}
-                disabled={shops.length === 0}
-              />
-            </Field>
+            <>
+              {/* 老师多账号模式：账号复选 + 各账号店铺选择 */}
+              {isTeacher && accounts.length > 1 ? (
+                <div>
+                  <div className="mb-1 flex items-baseline gap-1">
+                    <span className="text-sm font-medium text-fg">发布账号</span>
+                    <span className="text-xs text-fg-secondary">（老师模式：每个账号独立发布）</span>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto rounded-md border border-border-subtle p-2">
+                    {accounts.map((account) => {
+                      const checked = checkedAccountIds.includes(account.id);
+                      const accShops = shopsByAccount[account.id] ?? [];
+                      const accShopId = selectedShopByAccount[account.id] ?? accShops[0]?.shopId ?? "";
+                      return (
+                        <div key={account.id} className="mb-2 last:mb-0">
+                          <label className="flex cursor-pointer items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 cursor-pointer rounded border-border accent-brand-500"
+                              checked={checked}
+                              onChange={(e) => toggleAccount(account.id, e.target.checked)}
+                            />
+                            <span className="font-medium text-fg">{account.name}</span>
+                          </label>
+                          {checked && accShops.length > 1 && (
+                            <div className="ml-6 mt-1">
+                              <Select
+                                value={accShopId}
+                                onChange={(val) =>
+                                  setSelectedShopByAccount((prev) => ({ ...prev, [account.id]: val }))
+                                }
+                                options={accShops.map((shop) => ({
+                                  value: shop.shopId,
+                                  label: `${shop.name} · ${shop.siteName || shop.site}`,
+                                }))}
+                                placeholder="选择店铺"
+                              />
+                            </div>
+                          )}
+                          {checked && accShops.length === 1 && (
+                            <p className="ml-6 mt-0.5 text-xs text-fg-secondary">→ {accShops[0].name}</p>
+                          )}
+                          {checked && accShops.length === 0 && (
+                            <p className="ml-6 mt-0.5 text-xs text-danger-600">加载店铺中…</p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <Field label="目标店铺" required hint={shopsQuery.data?.degraded ? "当前展示的是上次缓存的店铺列表" : undefined}>
+                  <Select
+                    value={shopId ?? ""}
+                    onChange={(value) => setShopId(value)}
+                    options={shops.map((shop) => ({
+                      value: shop.shopId,
+                      label: `${shop.name} · ${shop.siteName || shop.site}`,
+                    }))}
+                    placeholder={shops.length === 0 ? "当前账号下没有店铺" : "选择目标店铺"}
+                    disabled={shops.length === 0}
+                  />
+                </Field>
+              )}
+            </>
           )}
 
           <div className="grid gap-3 sm:grid-cols-2">

@@ -15,11 +15,12 @@ import {
   Trash2,
 } from "lucide-react";
 import { cn, formatRelative } from "@/lib/utils";
-import { ApiError, apiErrorMessage } from "@/lib/api";
+import { ApiError, apiErrorMessage, api } from "@/lib/api";
 import {
   LIMITS,
   SCHEDULE_FREQUENCY_OPTIONS
 } from "@/lib/constants";
+import { useOperatorIdentity } from "@/lib/operator";
 import {
   useAuthStatus,
   useCreateSchedule,
@@ -32,7 +33,7 @@ import {
   useScheduleLogs,
   useWarehouseList,
 } from "@/lib/queries";
-import type { Schedule, ScheduleFrequency } from "@/lib/types";
+import type { Schedule, ScheduleFrequency, Shop } from "@/lib/types";
 import { EMPTY_SCHEDULE_FORM, type ScheduleFormDraft } from "@/features/stores";
 import { ConnectHintBar } from "@/features/shared";
 import { useConnectionState } from "@/features/auth/guard";
@@ -471,8 +472,11 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
         templates={templates}
         selectedTemplates={templatesQuery.data?.selected}
         submitting={createSchedule.isPending || patchSchedule.isPending}
-        onSubmit={(payload) => {
+        onSubmit={async (payloads) => {
           if (editing) {
+            // 编辑时始终是单条任务
+            const payload = payloads[0];
+            if (!payload) return;
             // 只提交真正改过的字段（api.md §9.3 局部更新）
             const patch: Record<string, unknown> = {};
             if (payload.name !== editing.name) patch.name = payload.name;
@@ -512,13 +516,34 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
             );
             return;
           }
-          createSchedule.mutate(payload, {
-            onSuccess: () => {
-              toast.success("已创建定时任务");
+          // 新建：逐账号 fan-out
+          if (payloads.length === 1) {
+            createSchedule.mutate(payloads[0], {
+              onSuccess: () => {
+                toast.success("已创建定时任务");
+                setFormOpen(false);
+              },
+              onError: (error) => toast.error("创建失败", { description: apiErrorMessage(error) }),
+            });
+          } else {
+            let created = 0;
+            const failMsgs: string[] = [];
+            for (const payload of payloads) {
+              try {
+                await createSchedule.mutateAsync(payload);
+                created++;
+              } catch (error) {
+                failMsgs.push(apiErrorMessage(error));
+              }
+            }
+            if (created > 0) {
+              toast.success(`已为 ${created} 个账号创建定时任务`);
               setFormOpen(false);
-            },
-            onError: (error) => toast.error("创建失败", { description: apiErrorMessage(error) }),
-          });
+            }
+            if (failMsgs.length > 0) {
+              toast.error(`${failMsgs.length} 个账号创建失败`, { description: failMsgs[0] });
+            }
+          }
         }}
       />
 
@@ -615,7 +640,7 @@ interface ScheduleFormDrawerProps {
   /** 账号 → 当前模板名；新建任务时用它当默认值 */
   selectedTemplates?: Record<string, string>;
   submitting: boolean;
-  onSubmit: (payload: {
+  onSubmit: (payloads: Array<{
     name: string;
     enabled: boolean;
     accountId: string;
@@ -631,7 +656,7 @@ interface ScheduleFormDrawerProps {
     selectedProductIds: string[];
     plannedRuns: number | null;
     claimOnly: boolean;
-  }) => void;
+  }>) => void;
 }
 
 function ScheduleFormDrawer({
@@ -667,6 +692,16 @@ function ScheduleFormDrawer({
   // 一旦切账号，老任务就会用错账号。默认跟随当前账号。
   const [runAccountId, setRunAccountId] = useState(accountId);
 
+  // 老师多账号模式：同时为多个账号创建同一套定时任务。
+  const identity = useOperatorIdentity();
+  const isTeacher = identity?.role === "teacher" || identity?.role === "admin";
+  // 多账号模式下勾选的账号 id 列表
+  const [checkedAccountIds, setCheckedAccountIds] = useState<string[]>([]);
+  // 各账号的店铺列表（首次勾选时懒加载）
+  const [shopsByAccount, setShopsByAccount] = useState<Record<string, Shop[]>>({});
+  // 各账号手动选的店铺；未选时默认取该账号第一个店铺
+  const [selectedShopByAccount, setSelectedShopByAccount] = useState<Record<string, string>>({});
+
   // 切了账号就要换店铺列表：店铺属于账号，拿错账号的店铺建任务会 422
   const switched = Boolean(runAccountId) && runAccountId !== accountId;
   const scopedShopsQuery = useShops(switched ? runAccountId : null, {
@@ -700,6 +735,26 @@ function ScheduleFormDrawer({
     if (shopOptions.some((item) => item.shopId === shopId)) return;
     setShopId(shopOptions[0].shopId);
   }, [switched, shopOptions, shopId]);
+
+  // 老师多账号：勾选账号时懒加载该账号的店铺。
+  const fetchShopsForAccount = async (accId: string): Promise<void> => {
+    if (shopsByAccount[accId]) return;
+    try {
+      const result = await api.get<{ shops: Shop[] }>(`/shops?accountId=${encodeURIComponent(accId)}`);
+      setShopsByAccount((prev) => ({ ...prev, [accId]: result.shops ?? [] }));
+    } catch {
+      setShopsByAccount((prev) => ({ ...prev, [accId]: [] }));
+    }
+  };
+
+  const toggleAccount = (accId: string, checked: boolean): void => {
+    if (checked) {
+      setCheckedAccountIds((prev) => [...prev, accId]);
+      void fetchShopsForAccount(accId);
+    } else {
+      setCheckedAccountIds((prev) => prev.filter((id) => id !== accId));
+    }
+  };
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -738,8 +793,18 @@ function ScheduleFormDrawer({
     setProductPage(1);
     setShopId(shops[0]?.shopId ?? "");
     setRunAccountId(accountId);
+    // 多账号模式：默认全选所有账号（老师新建任务）
+    if (isTeacher && !task && accounts.length > 1) {
+      setCheckedAccountIds(accounts.map((a) => a.id));
+      // 预加载第一页账号的店铺（其余在勾选时懒加载）
+      for (const a of accounts.slice(0, 5)) void fetchShopsForAccount(a.id);
+    } else {
+      setCheckedAccountIds([]);
+    }
+    setShopsByAccount({});
+    setSelectedShopByAccount({});
     // 模板默认值单独一个 effect（见下），因为它依赖异步回来的 selectedTemplates
-  }, [open, task, accountId, shops]);
+  }, [open, task, accountId, shops]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * 新建任务时把模板默认值设成「该账号当前的定价模板」。
@@ -828,10 +893,9 @@ function ScheduleFormDrawer({
 
   const submit = (): void => {
     if (!validate()) return;
-    onSubmit({
+    const basePayload = {
       name: draft.name.trim() || defaultScheduleName(),
       enabled,
-      accountId: runAccountId || accountId,
       shopId,
       template,
       frequency: draft.frequency,
@@ -847,7 +911,22 @@ function ScheduleFormDrawer({
         ? Math.ceil(selectedProductIds.length / Math.max(1, draft.perRun))
         : null,
       claimOnly: false,
-    });
+    };
+
+    // 老师多账号模式：同时为多个账号创建任务（每个账号一条）
+    if (isTeacher && !task && checkedAccountIds.length > 1) {
+      const payloads = checkedAccountIds.map((accId) => {
+        const accShops = shopsByAccount[accId] ?? [];
+        const accShopId = selectedShopByAccount[accId] ?? accShops[0]?.shopId ?? shopId;
+        return { ...basePayload, accountId: accId, shopId: accShopId };
+      }).filter((p) => Boolean(p.shopId));
+      if (payloads.length === 0) return;
+      onSubmit(payloads);
+      return;
+    }
+
+    // 单账号模式（原有逻辑）
+    onSubmit([{ ...basePayload, accountId: runAccountId || accountId }]);
   };
 
   const toggleNumber = (list: number[], value: number): number[] =>
@@ -883,15 +962,68 @@ function ScheduleFormDrawer({
         </Field>
 
         <div className="grid gap-3 sm:grid-cols-2">
-          {accounts.length > 1 && (
-            <Field label="账号" hint="任务按这个账号执行，切账号不影响它">
-              <Select
-                value={runAccountId}
-                onChange={setRunAccountId}
-                options={accounts.map((item) => ({ value: item.id, label: item.name }))}
-                placeholder="选择账号"
-              />
-            </Field>
+          {/* 老师新建任务时：多账号复选，可同时为多个账号创建同一套定时任务 */}
+          {isTeacher && !task && accounts.length > 1 ? (
+            <div className="sm:col-span-2">
+              <div className="mb-1 flex items-baseline gap-1">
+                <span className="text-sm font-medium text-fg">发布账号</span>
+                <span className="text-xs text-fg-secondary">（老师模式：每个勾选账号创建一条独立任务）</span>
+              </div>
+              <div className="max-h-48 overflow-y-auto rounded-md border border-border-subtle p-2">
+                {accounts.map((account) => {
+                  const checked = checkedAccountIds.includes(account.id);
+                  const accShops = shopsByAccount[account.id] ?? [];
+                  const accShopId = selectedShopByAccount[account.id] ?? accShops[0]?.shopId ?? "";
+                  return (
+                    <div key={account.id} className="mb-2 last:mb-0">
+                      <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded border-border accent-brand-500 cursor-pointer"
+                          checked={checked}
+                          onChange={(e) => toggleAccount(account.id, e.target.checked)}
+                        />
+                        <span className="font-medium text-fg">{account.name}</span>
+                      </label>
+                      {checked && accShops.length > 1 && (
+                        <div className="ml-6 mt-1">
+                          <Select
+                            value={accShopId}
+                            onChange={(val) =>
+                              setSelectedShopByAccount((prev) => ({ ...prev, [account.id]: val }))
+                            }
+                            options={accShops.map((shop) => ({
+                              value: shop.shopId,
+                              label: `${shop.name} · ${shop.siteName || shop.site}`,
+                            }))}
+                            placeholder="选择店铺"
+                          />
+                        </div>
+                      )}
+                      {checked && accShops.length === 1 && (
+                        <p className="ml-6 mt-0.5 text-xs text-fg-secondary">
+                          → {accShops[0].name}
+                        </p>
+                      )}
+                      {checked && accShops.length === 0 && (
+                        <p className="ml-6 mt-0.5 text-xs text-danger-600">暂无店铺（加载中或未绑定）</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            accounts.length > 1 && (
+              <Field label="账号" hint="任务按这个账号执行，切账号不影响它">
+                <Select
+                  value={runAccountId}
+                  onChange={setRunAccountId}
+                  options={accounts.map((item) => ({ value: item.id, label: item.name }))}
+                  placeholder="选择账号"
+                />
+              </Field>
+            )
           )}
 
           <Field label="目标店铺" required error={errors.shopId ?? null}>

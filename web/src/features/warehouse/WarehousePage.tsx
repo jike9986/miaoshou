@@ -1239,6 +1239,7 @@ export function WarehousePage() {
         defaultShopId={currentShopId}
         connected={connected}
         allowClaimOnly={!isMember}
+        accounts={auth?.accounts?.map((item) => ({ id: item.id, name: item.name })) ?? []}
         onSubmitted={(result) => {
           clearWarehouseSelection();
           // 发布提交后自动关闭弹窗、切到批次标签，让用户能看到任务进度
