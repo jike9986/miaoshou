@@ -27,7 +27,7 @@ def _package_version() -> str:
     # 打包后读不到仓库里的 package.json，用这里的值兜底。
     # 必须和 app/package.json、web/package.json 的 version 手动保持一致：
     # 兜底值偏小会让已装的新版永远判定「有更新」，侧栏挂一个永不消失的角标。
-    return "0.1.21"
+    return "0.1.22"
 
 
 APP_VERSION = _package_version()
@@ -73,7 +73,7 @@ LANGUAGE_LABELS = {
 MAIN_IMAGE_LIMIT = 9
 DETAIL_IMAGE_LIMIT = 9
 DETAIL_IMAGE_HARD_LIMIT = 30
-IMAGE_CONCURRENCY = 3
+IMAGE_CONCURRENCY = 1000
 COLLECT_BOX_MAX_ITEMS = 100
 # 妙手上游单次最多给 20 条，但本服务会按页向上游翻，直到凑够一页。
 # 因此对外每页上限放开到 100（= COLLECT_BOX_MAX_ITEMS），与 API 层 le=100 对齐。
