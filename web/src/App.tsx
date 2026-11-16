@@ -4,11 +4,13 @@
 // 未连接妙手时自动跳 /unlock（features/auth/guard），用户选择「稍后连接」后不再强跳。
 
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import {
   CalendarClock,
   KeyRound,
   PackageSearch,
+  Settings,
+  ShieldBan,
   Zap,
 } from "lucide-react";
 import { AppShell, BrandMark } from "@/components/layout/AppShell";
@@ -23,6 +25,7 @@ import { WarehousePage } from "@/features/warehouse/WarehousePage";
 import { ProductDetailPage } from "@/features/warehouse/ProductDetailPage";
 import { AutomationPage } from "@/features/automation/AutomationPage";
 import { SchedulesPage } from "@/features/schedules/SchedulesPage";
+import { WordsPage } from "@/features/words/WordsPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { useAuthStatus, useVersion } from "@/lib/queries";
 import { useOperatorSession } from "@/features/auth/guard";
@@ -40,28 +43,24 @@ import { UpdateDialog } from "@/components/layout/UpdateDialog";
  * 左侧导航（与路由一一对应）
  * ------------------------------------------------------------------ */
 
-const NAV_ALL: SidebarNavGroup[] = [
+// 四项板块，与老版侧边栏一致：自动化 / 违规词库 / 成品仓库 / 定时发布，加「连接妙手」。
+// 采集箱是自动化页商品列表的数据源，图片翻译是处理设置里的开关 —— 都不是独立页面。
+const NAV: SidebarNavGroup[] = [
   {
     title: "功能",
     items: [
       { to: "/automation", label: "自动化上品", icon: Zap },
       { to: "/warehouse", label: "成品仓库", icon: PackageSearch },
       { to: "/schedules", label: "定时发布", icon: CalendarClock },
+      { to: "/words", label: "违规词库", icon: ShieldBan },
       { to: "/unlock", label: "连接妙手", icon: KeyRound },
     ],
   },
-];
-
-/** 学员只看成品仓库 / 定时发布 / 连接妙手；不显示也不能访问自动化与违规词库 */
-const NAV_MEMBER: SidebarNavGroup[] = [
   {
-    title: "功能",
-    items: [
-      { to: "/automation", label: "自动化上品", icon: Zap },
-      { to: "/warehouse", label: "成品仓库", icon: PackageSearch },
-      { to: "/schedules", label: "定时发布", icon: CalendarClock },
-      { to: "/unlock", label: "连接妙手", icon: KeyRound },
-    ],
+    // 设置是一件「正经入口」，不该只藏在标题栏一个像用户名的按钮后面。
+    // 放进侧边栏「系统」组：看得见、点得到、说得清里面是什么。
+    title: "系统",
+    items: [{ to: "/settings", label: "设置", icon: Settings }],
   },
 ];
 
@@ -76,7 +75,6 @@ function Shell() {
   const navigate = useNavigate();
   const location = useLocation();
   const operatorIdentity = useOperatorIdentity();
-  const [currentShortId, setCurrentShortId] = useState<string | null>(null);
   // 单机模式：不再等「有人登录」才查状态 —— 本机令牌就能查，否则未登录时
   // 侧栏永远显示「妙手未连接」、版本检查也不跑。
   const { data: status } = useAuthStatus(true);
@@ -90,13 +88,14 @@ function Shell() {
     if (!operatorIdentity?.token) return;
     let alive = true;
     void api
-      .get<{ current?: { name?: string; role?: "admin" | "teacher" | "member"; shortId?: string } }>("/operators")
+      .get<{ current?: { name?: string; role?: "admin" | "teacher" | "member" } }>("/operators")
       .then((data) => {
         if (!alive || !data?.current) return;
         refreshOperatorProfile({ name: data.current.name, role: data.current.role });
-        if (data.current.shortId) setCurrentShortId(data.current.shortId);
       })
-      .catch(() => {});
+      .catch(() => {
+        // 网络或权限问题不打扰用户：角色沿用本地的，业务请求自己有兜底
+      });
     return () => { alive = false; };
   }, [operatorIdentity?.token]);
 
@@ -137,22 +136,18 @@ function Shell() {
     navigate("/login", { replace: true });
   };
 
-  const isMember = operatorIdentity?.role === "member";
-  const nav = isMember ? NAV_MEMBER : NAV_ALL;
-
   return (
     <>
       <TokenNotice />
       <AppShell
-        nav={nav}
+        nav={NAV}
         brand={{ icon: <BrandMark className="size-4" />, name: "奥皇上品" }}
         account={SHOW_ACCOUNT_UI ? {
           name: operatorLabel,
-          detail: `${roleLabel}${currentShortId ? ` #${currentShortId}` : ""} · 妙手${connected ? "已连接" : "未连接"}`,
+          detail: `${roleLabel} · 妙手${connected ? "已连接" : "未连接"}`,
         } : null}
         onAccountClick={SHOW_ACCOUNT_UI ? () => navigate("/settings") : undefined}
         onAccountLogout={SHOW_ACCOUNT_UI ? logout : undefined}
-        onSettingsClick={() => navigate("/settings")}
         // 标题栏不再放账号/店铺切换：账号和店铺已经挪到「开始处理」旁边，
         // 这里再放一份就是两套重复控件，只会占掉标题栏高度。
         // 也不传 routeMeta：标题栏中部不显示「功能 / 板块名」面包屑。
@@ -173,7 +168,6 @@ function RequireSoftwareLogin() {
   if (!SHOW_ACCOUNT_UI || identity) return <Outlet />;
   return <Navigate to="/login" replace state={{ from: location.pathname }} />;
 }
-
 
 function WorkspaceHome() {
   const identity = useOperatorIdentity();
@@ -265,14 +259,14 @@ export default function App() {
                 <Route path="warehouse" element={<WarehousePage />} />
                 <Route path="warehouse/:ident" element={<ProductDetailPage />} />
                 <Route path="schedules" element={<SchedulesPage />} />
+                <Route path="words" element={<WordsPage />} />
+                <Route path="words/*" element={<WordsPage />} />
                 <Route path="settings" element={<SettingsPage />} />
                 <Route path="collect" element={<Navigate to="/automation" replace />} />
                 <Route path="collect-box" element={<Navigate to="/automation" replace />} />
                 <Route path="images" element={<Navigate to="/automation" replace />} />
                 <Route path="carrier" element={<Navigate to="/warehouse" replace />} />
                 <Route path="publish" element={<Navigate to="/schedules" replace />} />
-                <Route path="words" element={<Navigate to="/settings?tab=words" replace />} />
-                <Route path="words/*" element={<Navigate to="/settings?tab=words" replace />} />
               </Route>
               <Route path="*" element={<NotFoundPage />} />
             </Route>
