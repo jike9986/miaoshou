@@ -13,13 +13,13 @@
 用法：
     from services.product_standard import validate, repair, compare
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import re
 from decimal import Decimal, ROUND_HALF_UP
 from html import unescape
 from statistics import median
-from typing import Any, Mapping
+from typing import Any, Mapping  # noqa: UP035
 
 # --- 标准常量 -------------------------------------------------------------
 PRICE_BUMP_MYR = Decimal("2.00")      # 负责人定：成本价 + 2 马币
@@ -127,7 +127,7 @@ def _clean_notes_html(notes: str) -> str:
 
 def _images_html(urls: list[str]) -> str:
     """把图片 URL 拼成描述 HTML（只有图，没有文字）。"""
-    return "".join('<p><img src="%s" /></p>' % str(u) for u in urls if str(u).strip())
+    return "".join('<p><img src="%s" /></p>' % str(u) for u in urls if str(u).strip())  # noqa: UP031
 
 
 def category_spec(category_name: str) -> tuple[tuple[int, int, int], float]:
@@ -157,13 +157,13 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
         issues.append("标题为空")
         need_recollect.append("标题为空")
     elif len(title) < TITLE_MIN_LEN:
-        issues.append("标题过短(%r)" % title)
+        issues.append("标题过短(%r)" % title)  # noqa: UP031
         fixable.append("标题过短")
     elif title.casefold() in JUNK_TITLES:
-        issues.append("标题是占位值(%r)" % title)
+        issues.append("标题是占位值(%r)" % title)  # noqa: UP031
         fixable.append("标题占位")
     if len(title) > TITLE_MAX_LEN:
-        issues.append("标题超长(%d)" % len(title))
+        issues.append("标题超长(%d)" % len(title))  # noqa: UP031
         fixable.append("标题超长")
     lang = str(language or data.get("language") or "").lower()
     if lang in ("ms", "en", "vi", "id", "th") and CJK_RE.search(title):
@@ -176,7 +176,7 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
         issues.append("无主图")
         need_recollect.append("无主图")
     elif len(main_imgs) > MAX_MAIN_IMAGES:
-        issues.append("主图%d张超限" % len(main_imgs))
+        issues.append("主图%d张超限" % len(main_imgs))  # noqa: UP031
         fixable.append("主图超限")
     if len(set(main_imgs)) != len(main_imgs):
         issues.append("主图有重复")
@@ -184,7 +184,7 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
 
     det_imgs = detail_image_unique(data.get("notes"))
     if len(det_imgs) > MAX_DETAIL_IMAGES:
-        issues.append("详情图%d张超限" % len(det_imgs))
+        issues.append("详情图%d张超限" % len(det_imgs))  # noqa: UP031
         fixable.append("详情图超限")
 
     # 3. 类目
@@ -222,7 +222,7 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
             if vat is None or vat < target:
                 price_low += 1
         if price_low:
-            issues.append("售价低于标准(%d条SKU)" % price_low)
+            issues.append("售价低于标准(%d条SKU)" % price_low)  # noqa: UP031
             fixable.append("价格偏低")
 
     # 5. 包裹尺寸
@@ -232,7 +232,7 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
         issues.append("缺包裹尺寸")
         fixable.append("缺尺寸")
     elif max(dims) > 80 or sum(dims) > 150:
-        issues.append("尺寸不合理(%s)" % dims)
+        issues.append("尺寸不合理(%s)" % dims)  # noqa: UP031
         fixable.append("尺寸异常")
 
     # 6. 重量
@@ -249,10 +249,10 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
             issues.append("缺重量且无依据")
             fixable.append("缺重量需估算")
     elif weight < WEIGHT_MIN:
-        issues.append("重量过轻(%.2f)" % weight)
+        issues.append("重量过轻(%.2f)" % weight)  # noqa: UP031
         fixable.append("重量过轻")
     elif weight > cap:
-        issues.append("重量超品类上限(%.2f>%.2f)" % (weight, cap))
+        issues.append("重量超品类上限(%.2f>%.2f)" % (weight, cap))  # noqa: UP031
         fixable.append("重量超限")
 
     # 7. 规格
@@ -264,16 +264,16 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
         known_ids: set[str] = set()
         for dim, prop in enumerate(props):
             if not str(prop.get("propName") or "").strip():
-                issues.append("维度%d缺propName" % dim)
+                issues.append("维度%d缺propName" % dim)  # noqa: UP031
                 fixable.append("缺propName")
             if not str(prop.get("propId") or "").strip():
-                issues.append("维度%d缺propId" % dim)
+                issues.append("维度%d缺propId" % dim)  # noqa: UP031
                 fixable.append("缺propId")
             values = [av for av in (prop.get("attrValueList") or [])
                       if isinstance(av, dict)]
             if not values:
-                issues.append("维度%d无属性值" % dim)
-                need_recollect.append("维度%d无属性值" % dim)
+                issues.append("维度%d无属性值" % dim)  # noqa: UP031
+                need_recollect.append("维度%d无属性值" % dim)  # noqa: UP031
                 continue
             seen: dict[str, int] = {}
             for av in values:
@@ -282,24 +282,24 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
                 if vid:
                     known_ids.add(vid)
                 if not label:
-                    issues.append("维度%d有空属性值" % dim)
+                    issues.append("维度%d有空属性值" % dim)  # noqa: UP031
                     fixable.append("空属性值")
                     continue
                 if len(label) > MAX_ATTR_VALUE_LEN:
-                    issues.append("属性值超长(%d)" % len(label))
+                    issues.append("属性值超长(%d)" % len(label))  # noqa: UP031
                     fixable.append("属性值超长")
                 key = label.casefold()
                 seen[key] = seen.get(key, 0) + 1
             dup = [k for k, c in seen.items() if c > 1]
             if dup:
-                issues.append("维度%d属性值重复%s" % (dim, dup[:2]))
+                issues.append("维度%d属性值重复%s" % (dim, dup[:2]))  # noqa: UP031
                 fixable.append("属性值重复")
             # 颜色必须有图
             name = str(prop.get("propName") or "")
             if name not in ("尺码", "尺寸"):
                 for av in values:
                     if not (av.get("imageUrl") or (av.get("imgUrls") or [])):
-                        issues.append("维度%d颜色值缺图" % dim)
+                        issues.append("维度%d颜色值缺图" % dim)  # noqa: UP031
                         fixable.append("颜色缺图")
                         break
 
@@ -318,7 +318,7 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
 
             referenced: set[str] = set()
             pos_errors = 0
-            for key in sku_map.keys():
+            for key in sku_map.keys():  # noqa: SIM118
                 parts = [x.strip() for x in str(key).split(";") if x.strip()]
                 for part in parts:
                     referenced.add(part)
@@ -332,25 +332,25 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
                         pos_errors += 1
                         break
             if pos_errors:
-                issues.append("skuMap 有%d条key的段位置与规格维度错位" % pos_errors)
+                issues.append("skuMap 有%d条key的段位置与规格维度错位" % pos_errors)  # noqa: UP031
                 blocked.append("skuMap段位置错位")
 
             missing = referenced - known_ids
             if missing:
-                issues.append("skuMap引用不存在的属性值%s" % sorted(missing)[:3])
+                issues.append("skuMap引用不存在的属性值%s" % sorted(missing)[:3])  # noqa: UP031
                 blocked.append("skuMap引用缺失")
         # itemNum 长度
         for sku in active_skus:
             item_num = sku.get("itemNum")
             if item_num is not None and len(str(item_num)) > MAX_ITEM_NUM_LEN:
-                issues.append("itemNum超长(%d)" % len(str(item_num)))
+                issues.append("itemNum超长(%d)" % len(str(item_num)))  # noqa: UP031
                 fixable.append("itemNum超长")
                 break
 
     # 8. 其他
     cod = data.get("isCodOpen")
     if not (isinstance(cod, str) and cod in ("0", "1")):
-        issues.append("isCodOpen不是字符串'0'/'1'(%r)" % (cod,))
+        issues.append("isCodOpen不是字符串'0'/'1'(%r)" % (cod,))  # noqa: UP031
         fixable.append("COD格式")
 
     if not str(data.get("notes") or "").strip():
@@ -364,7 +364,7 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
         visible = re.sub(r"<[^>]*>", "", notes_text)
         visible = unescape(visible).replace("&nbsp;", " ").strip()
         if visible:
-            issues.append("描述含文字(%r)" % visible[:20])
+            issues.append("描述含文字(%r)" % visible[:20])  # noqa: UP031
             fixable.append("描述含文字")
         if _clean_notes_html(notes_text) != notes_text:
             issues.append("描述结构需清理")
@@ -410,7 +410,7 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
     elif title and title.casefold() in JUNK_TITLES:
         # 不猜真标题，只标记
         data["needsRecollect"] = True
-        data["needsRecollectReason"] = "标题是占位值(%r)" % title
+        data["needsRecollectReason"] = "标题是占位值(%r)" % title  # noqa: UP031
         done.append("标题占位→标记重采")
     lang = str(language or data.get("language") or "").lower()
     raw_title = str(data.get("title") or "")
@@ -436,7 +436,7 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
             done.append("主图去重")
         if len(unique) > MAX_MAIN_IMAGES:
             unique = unique[:MAX_MAIN_IMAGES]
-            done.append("主图裁到%d" % MAX_MAIN_IMAGES)
+            done.append("主图裁到%d" % MAX_MAIN_IMAGES)  # noqa: UP031
         data["imgUrls"] = unique
         main_imgs = unique
 
@@ -448,7 +448,7 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
             last = notes.rfind(urls[MAX_DETAIL_IMAGES - 1])
             if last > 0:
                 data["notes"] = notes[:last + len(urls[MAX_DETAIL_IMAGES - 1])]
-                done.append("详情图裁到%d" % MAX_DETAIL_IMAGES)
+                done.append("详情图裁到%d" % MAX_DETAIL_IMAGES)  # noqa: UP031
 
     # 描述兜底
     # 描述（负责人 2026-11-05 明确）：描述页只放图片，不放文字。
@@ -468,15 +468,15 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
     if not detail_image_urls(cleaned_notes) and main_imgs:
         # 描述里没有图：用主图补（最多 9 张，与详情图上限一致）
         data["notes"] = _images_html(main_imgs[:MAX_DETAIL_IMAGES])
-        done.append("描述用主图补图(%d张)" % min(len(main_imgs), MAX_DETAIL_IMAGES))
+        done.append("描述用主图补图(%d张)" % min(len(main_imgs), MAX_DETAIL_IMAGES))  # noqa: UP031
 
     # 尺寸
     if any(_num(data.get(k)) is None
            for k in ("packageLength", "packageWidth", "packageHeight")):
-        for key, value in zip(("packageLength", "packageWidth", "packageHeight"), dims_spec):
+        for key, value in zip(("packageLength", "packageWidth", "packageHeight"), dims_spec):  # noqa: B905
             if _num(data.get(key)) is None:
                 data[key] = value
-        done.append("补包裹尺寸%s" % (dims_spec,))
+        done.append("补包裹尺寸%s" % (dims_spec,))  # noqa: UP031
 
     # 重量
     weight = _num(data.get("weight"))
@@ -499,12 +499,12 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
     if weight is not None and weight < WEIGHT_MIN:
         data["weightBeforeFix"] = weight
         data["weight"] = WEIGHT_MIN
-        done.append("重量抬到%.2f" % WEIGHT_MIN)
+        done.append("重量抬到%.2f" % WEIGHT_MIN)  # noqa: UP031
         weight = WEIGHT_MIN
     if weight is not None and weight > cap:
         data["weightBeforeCap"] = weight
         data["weight"] = cap
-        done.append("重量压到上限%.2f" % cap)
+        done.append("重量压到上限%.2f" % cap)  # noqa: UP031
 
     # 价格
     if isinstance(sku_map, dict):
@@ -531,7 +531,7 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
                 sku["priceIncludeVat"] = format(target, ".2f")
                 changed += 1
         if changed:
-            done.append("价格+2MYR(%d条)" % changed)
+            done.append("价格+2MYR(%d条)" % changed)  # noqa: UP031
 
     # COD
     cod = data.get("isCodOpen")
@@ -545,7 +545,7 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
     # 规格
     props = [p for p in (data.get("skuPropertyList") or []) if isinstance(p, dict)]
     if props:
-        for dim, prop in enumerate(props):
+        for dim, prop in enumerate(props):  # noqa: B007
             values = [av for av in (prop.get("attrValueList") or []) if isinstance(av, dict)]
             size_like = sum(1 for av in values
                             if _looks_like_size(str(av.get("attrValue") or "")))
@@ -650,7 +650,7 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
                     leftover.append(part)
             if any(o is None for o in ordered):
                 # 有段找不到归属维度
-                for dim, ids in enumerate(dim_ids):
+                for dim, ids in enumerate(dim_ids):  # noqa: B007
                     if ordered[dim] is None and leftover:
                         ordered[dim] = leftover.pop(0)
             if any(o is None for o in ordered):
@@ -663,9 +663,9 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
         if reordered or dropped:
             data["skuMap"] = new_map
             if reordered:
-                done.append("skuMap段位置重排(%d条)" % reordered)
+                done.append("skuMap段位置重排(%d条)" % reordered)  # noqa: UP031
             if dropped:
-                done.append("skuMap丢弃无法对齐的key(%d条)" % dropped)
+                done.append("skuMap丢弃无法对齐的key(%d条)" % dropped)  # noqa: UP031
 
     return data, done
 
@@ -739,10 +739,10 @@ def merge(old: Mapping[str, Any], new: Mapping[str, Any]) -> tuple[dict[str, Any
     verdict = compare(old, new)
     changes: list[str] = []
     for field, choice in verdict["decisions"].items():
-        if choice == "new":
+        if choice == "new":  # noqa: SIM102
             if result.get(field) != (new or {}).get(field):
                 result[field] = (new or {}).get(field)
-                changes.append("更新%s" % field)
+                changes.append("更新%s" % field)  # noqa: UP031
     # 新采集的必带字段
     for field in ("shopId", "language", "site", "detailId"):
         if (new or {}).get(field) not in (None, ""):

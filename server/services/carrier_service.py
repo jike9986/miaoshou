@@ -8,7 +8,7 @@ detailId 只在账号内唯一，所以跨店铺发布不能引用原商品。�
 第 3 步是关键：标题、图片、SKU、类目、描述、价格全部来自仓库副本，
 所以不需要再付一次翻译费。
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import logging
 import hashlib
@@ -1002,9 +1002,9 @@ def remap_sku_to_carrier(payload: dict[str, Any],
         rebuilt_props.append(our_prop)
     data["skuPropertyList"] = rebuilt_props
 
-    notes.append("规格id重映射%d个" % len(id_maps))
+    notes.append("规格id重映射%d个" % len(id_maps))  # noqa: UP031
     if merged_dup:
-        notes.append("合并重复SKU%d条" % merged_dup)
+        notes.append("合并重复SKU%d条" % merged_dup)  # noqa: UP031
     return data, notes
 
 
@@ -1050,7 +1050,7 @@ def align_spec_names(payload: dict[str, Any],
         carrier_prop_name = target.get("propName")
         if carrier_name and prop.get("attrName") != carrier_name:
             prop["attrName"] = carrier_name
-            notes.append("attrName→%s" % carrier_name)
+            notes.append("attrName→%s" % carrier_name)  # noqa: UP031
         if carrier_prop_name and prop.get("propName") != carrier_prop_name:
             prop["propName"] = carrier_prop_name
         if target.get("attrId") not in (None, ""):
@@ -1223,7 +1223,7 @@ def normalize_spec_for_save(payload: dict[str, Any],
             if not label:
                 continue
             upper = label.upper()
-            if upper in ("XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL",
+            if upper in ("XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL",  # noqa: SIM114
                          "3XL", "FREE", "F"):
                 hits += 1
             elif _SIZE_PATTERN.match(label):
@@ -1317,13 +1317,13 @@ def normalize_spec_for_save(payload: dict[str, Any],
             完全相同的文案，此时沿用草稿那条的 id 更稳。
             """
             # 草稿里有完全相同的文案：沿用草稿的 id（最稳）
-            for dav in (src.get("attrValueList") or []):
+            for dav in (src.get("attrValueList") or []):  # noqa: B023
                 if not isinstance(dav, Mapping):
                     continue
                 if str(dav.get("attrValue") or "").strip() == label:
                     return label, str(dav.get("attrValueId") or "").strip()
             # 否则：文案与 id 都用自己的（配套，skuMap key 才对得上）
-            own_id = str(av.get("attrValueId") or "").strip()
+            own_id = str(av.get("attrValueId") or "").strip()  # noqa: B023
             return label, own_id
 
         _pos = -1
@@ -1345,7 +1345,7 @@ def normalize_spec_for_save(payload: dict[str, Any],
             if not our_id:
                 # 没有 id 就生成一个稳定的（妙手接受任意非空值）
                 our_id = hashlib.md5(
-                    ("%s|%s" % (attr_id, label)).encode("utf-8")).hexdigest()[:10]
+                    ("%s|%s" % (attr_id, label)).encode("utf-8")).hexdigest()[:10]  # noqa: UP031
             img = (av.get("imgUrl")
                    or av.get("imageUrl")
                    or (av.get("imgUrls") or [None])[0]
@@ -1367,11 +1367,11 @@ def normalize_spec_for_save(payload: dict[str, Any],
                 "imgUrl": str(img or "") if _is_color_dim else "",
             })
         if not entry["attrValueList"]:
-            notes.append("维度%d规格值为空，跳过" % dim)
+            notes.append("维度%d规格值为空，跳过" % dim)  # noqa: UP031
             continue
         strict_props.append(entry)
         if not attr_id:
-            notes.append("维度%d缺attrId" % dim)
+            notes.append("维度%d缺attrId" % dim)  # noqa: UP031
 
     # skuMap：key 里的 id 必须都在 strict_props 里，且按 ID 升序排列
     #
@@ -1465,11 +1465,11 @@ def normalize_spec_for_save(payload: dict[str, Any],
     for junk in ("colorMap", "sizeMap", "colorPropName", "sizePropName"):
         data.pop(junk, None)
 
-    notes.append("规格SKU规范化%d条" % len(new_map))
+    notes.append("规格SKU规范化%d条" % len(new_map))  # noqa: UP031
     if dropped:
-        notes.append("丢弃无法对齐%d条" % dropped)
+        notes.append("丢弃无法对齐%d条" % dropped)  # noqa: UP031
     if merged:
-        notes.append("合并重复%d条" % merged)
+        notes.append("合并重复%d条" % merged)  # noqa: UP031
     return data, notes
 
 

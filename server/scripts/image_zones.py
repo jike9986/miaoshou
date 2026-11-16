@@ -49,20 +49,20 @@ def main() -> int:
     auto_dir = Path(os.environ.get("AOHUANG_IMAGE_LOCAL_DIR",
                                    image_upload.DEFAULT_SFTP_REMOTE_DIR))
     product_dir = Path(image_upload.PRODUCT_REMOTE_DIR)
-    for label, path in (("auto-temp（临时，%d 天清理）" % args.days, auto_dir),
+    for label, path in (("auto-temp（临时，%d 天清理）" % args.days, auto_dir),  # noqa: UP031
                         ("products（成品，永久保留）", product_dir)):
         files, size = _zone_size(path)
-        print("%-32s %6d 个文件  %8.1f MB  %s"
+        print("%-32s %6d 个文件  %8.1f MB  %s"  # noqa: UP031
               % (label, files, size / 1048576, path))
 
     report = image_upload.cleanup_auto_temp(days=args.days, dry_run=not args.clean)
     action = "删除" if args.clean else "将删除"
     print()
-    print("临时区扫描 %d 个文件，%s %d 个（%.1f MB），保留 %d 个"
+    print("临时区扫描 %d 个文件，%s %d 个（%.1f MB），保留 %d 个"  # noqa: UP031
           % (report.get("scanned", 0), action, report.get("deleted", 0),
              report.get("freedBytes", 0) / 1048576, report.get("kept", 0)))
     if report.get("error"):
-        print("跳过原因：%s" % report["error"])
+        print("跳过原因：%s" % report["error"])  # noqa: UP031
     if not args.clean:
         print("（只报告模式，加 --clean 才会真删）")
     return 0

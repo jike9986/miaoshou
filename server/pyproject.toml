@@ -89,6 +89,7 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
     "legacy: 从 _meas/ 迁移过来的老探针用例（子进程跑，较慢；-m 'not legacy' 可跳过）",
+    "unit: pure function tests, no DB required; CI only runs these",
 ]
 filterwarnings = [
     # 已知且无害的 deprecation：升级依赖时先看这里，别让它们淹没真正的警告

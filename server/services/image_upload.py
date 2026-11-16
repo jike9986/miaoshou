@@ -16,7 +16,7 @@
   · 返回的 URL 不接受 localhost / 内网地址
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import contextlib
 import hashlib
@@ -434,7 +434,7 @@ def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
 
     # 本机模式：直接复制文件
     if local_auto and local_product:
-        from pathlib import Path as _Path
+        from pathlib import Path as _Path  # noqa: I001
         import shutil
 
         source = _Path(local_auto) / name

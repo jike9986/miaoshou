@@ -619,9 +619,9 @@ def _limit_claim_images(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     # 标签残缺到抽不出 URL：整段丢掉，留着只会在平台侧报错
                     return ""
                 url = urls[0].strip()
-                if url in detail_seen or kept >= DETAIL_IMAGE_HARD_LIMIT:
+                if url in detail_seen or kept >= DETAIL_IMAGE_HARD_LIMIT:  # noqa: B023
                     return ""
-                detail_seen.add(url)
+                detail_seen.add(url)  # noqa: B023
                 kept += 1
                 return pre_save_check.detail_images_only([url])
 
@@ -899,7 +899,7 @@ def prepare_claim_payloads(
     # 图片转自有图床 + 重量压品类上限（负责人 2026-11-05 定）。
     # 这两项链路1（1688 采集入库）已经有，链路2（仓库→采集箱）必须一致，
     # 否则新入库时漏转的图、超限的重量会带着一起认领过去。
-    from services import image_store, product_standard, product_service
+    from services import image_store, product_standard, product_service  # noqa: I001
 
     for index, item in enumerate(prepared):
         # 1) 图片转自有图床：幂等，已在自己图床的不会重复下载。

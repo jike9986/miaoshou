@@ -3,7 +3,7 @@
 注意：/system/health 另有 /api/system/health 别名（Electron 探活用），
 见 main.py。
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from fastapi import APIRouter, Depends
 

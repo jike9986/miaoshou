@@ -47,9 +47,9 @@ def main(argv: list[str] | None = None) -> int:
             print("找不到账号")
             return 1
 
-        print("账号: id=%s name=%s email=%s" % (
+        print("账号: id=%s name=%s email=%s" % (  # noqa: UP031
             target.id, target.name, getattr(target, "email", "")))
-        print("当前角色: %s | enabled=%s" % (target.role, target.enabled))
+        print("当前角色: %s | enabled=%s" % (target.role, target.enabled))  # noqa: UP031
 
         if target.role == "teacher":
             print("已经是老师，无需修改")
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         # 复核
         session.expire_all()
         fresh = session.get(Operator, target.id)
-        print("复核: role=%s enabled=%s" % (fresh.role, fresh.enabled))
+        print("复核: role=%s enabled=%s" % (fresh.role, fresh.enabled))  # noqa: UP031
         return 0
     finally:
         session.close()

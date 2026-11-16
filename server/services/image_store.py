@@ -14,7 +14,7 @@
 失败策略：单张图失败不阻断入库（记进 report），但**绝不用坏地址覆盖原地址**。
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import hashlib
 import os
@@ -110,7 +110,7 @@ class ImageStore:
             raw = _download(text)
             # 用内容哈希当文件名：同一张图（哪怕 URL 不同）只传一次
             digest = hashlib.sha256(raw).hexdigest()[:32]
-            from pathlib import Path
+            from pathlib import Path  # noqa: I001
             import tempfile
 
             suffix = ".jpg"

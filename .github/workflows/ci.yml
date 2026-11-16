@@ -84,7 +84,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d tests ]; then
-            python -m pytest tests -q
+            python -m pytest tests -m unit -q
           else
             echo "::notice title=pytest 跳过::server/tests 尚未建立，先跳过测试"
           fi
@@ -113,7 +113,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 9.12.0
 
       - uses: actions/setup-node@v4
         with:

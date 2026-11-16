@@ -1,6 +1,9 @@
 """成品仓库：纯函数测试（不需要数据库）。"""
+import pytest
 
 from services.warehouse_service import category_default_weight, category_package_spec
+
+pytestmark = pytest.mark.unit
 
 
 class TestCategoryDefaultWeight:

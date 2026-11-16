@@ -72,7 +72,7 @@ def version(db: DbSession, request: Request, refresh: str | None = None) -> dict
     channel = setting_service.update_channel(db)
     manifest = str(channel.get("manifestUrl") or "") if isinstance(channel, dict) else ""
     return system_service.version_payload(refresh=refresh_flag, manifest_url=manifest,
-                                         current_version=request.headers.get("X-Client-Version", ""))
+                                         current_version=request.headers.get("X-Client-Version", ""))  # noqa: E501
 
 
 @router.post("/update-check", summary="检查更新（等价 GET /system/version）")
@@ -84,7 +84,7 @@ def update_check(db: DbSession, request: Request,
     channel = setting_service.update_channel(db)
     manifest = str(channel.get("manifestUrl") or "") if isinstance(channel, dict) else ""
     return system_service.version_payload(refresh=refresh_flag, manifest_url=manifest,
-                                         current_version=request.headers.get("X-Client-Version", ""))
+                                         current_version=request.headers.get("X-Client-Version", ""))  # noqa: E501
 
 
 @router.get("/update", summary="查询是否有新版本（只查询，不下载）")
@@ -97,7 +97,7 @@ def update_status(db: DbSession, request: Request) -> dict[str, Any]:
     channel = setting_service.update_channel(db)
     manifest = str(channel.get("manifestUrl") or "") if isinstance(channel, dict) else ""
     payload = system_service.version_payload(refresh=True, manifest_url=manifest,
-                                            current_version=request.headers.get("X-Client-Version", ""))
+                                            current_version=request.headers.get("X-Client-Version", ""))  # noqa: E501
     last = update_service.last_downloaded()
     return {
         "ok": bool(payload.get("ok")),

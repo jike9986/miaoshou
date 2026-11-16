@@ -10,7 +10,7 @@
 同账号请求必须经过 `Pacer`（默认 1.5s 间隔）：实测 1.0s 会触发
 `accountApiQpsRateLimit`，1.5s 不触发。不同账号可并行。
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import hashlib
 import hmac
@@ -692,4 +692,4 @@ def _is_transient_gateway(message: str) -> bool:
     text = str(message or "")
     return any(marker in text for marker in (
         "下游服务响应超时", "下游服务繁忙", "下游服务超时",
-        "系统繁忙", "服务暂不可用", "gateway timeout"));
+        "系统繁忙", "服务暂不可用", "gateway timeout"));  # noqa: E703

@@ -12,6 +12,8 @@ from services.price_template import (
     normalize_template,
 )
 
+pytestmark = pytest.mark.unit
+
 TEMPLATE = dict(DEFAULT_TEMPLATE)  # 马来站默认模板
 
 

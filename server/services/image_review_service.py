@@ -10,7 +10,7 @@
     调用会报 `Operation is not supported on this platform (0x80131539)`；
   · OCR 不可用时返回 error=True + action=review，不抛错阻断整批。
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import contextlib
 import logging
@@ -36,7 +36,7 @@ OCR_MAX_BYTES = 15 * 1024 * 1024
 # OCR 并发。RapidOCR 是纯 CPU（onnxruntime），4 核机器上并发超过核数
 # 只会互相抢 CPU，反而更慢（实测 4 并发 0.44s/张 比串行 0.36s/张 还慢）。
 # 所以这个值跟着 CPU 核数走，不跟上游并发走。
-import os as _os
+import os as _os  # noqa: E402, I001
 OCR_CONCURRENCY = max(2, min(8, (_os.cpu_count() or 4)))
 # 缓存版本：OCR 脚本从 StorageFile 改为 ReadAllBytes 后识别结果才可靠，
 # 旧的失败缓存（version 2 及以前，全是「本地 OCR 未完成」）必须失效，

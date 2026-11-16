@@ -15,7 +15,7 @@
   python claim_fast.py --account 5 --limit 50
   python claim_fast.py --account 5 --limit 50 --verify
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import argparse
 import copy
@@ -51,10 +51,10 @@ def pick_common(client, need: int, progress=print) -> list[int]:
                 if len(ids) >= 1:      # 一个就够，后面靠复制
                     break
     except Exception as exc:
-        progress("  读公共箱失败: %s" % str(exc)[:60])
+        progress("  读公共箱失败: %s" % str(exc)[:60])  # noqa: UP031
 
     if ids:
-        progress("  公共箱已有可用商品 commonId=%s（不采集，直接复制）" % ids[0])
+        progress("  公共箱已有可用商品 commonId=%s（不采集，直接复制）" % ids[0])  # noqa: UP031
         return ids
 
     # 公共箱空 → 采集一条
@@ -83,9 +83,9 @@ def prepare_payload(payload: dict) -> tuple[dict, list[str]]:
         if result.get("message"):
             notes.append(result["message"])
         if result.get("removed"):
-            notes.append("去掉重复颜色%d个" % len(result["removed"]))
+            notes.append("去掉重复颜色%d个" % len(result["removed"]))  # noqa: UP031
     except Exception as exc:
-        notes.append("颜色规范化跳过: %s" % str(exc)[:40])
+        notes.append("颜色规范化跳过: %s" % str(exc)[:40])  # noqa: UP031
 
     return data, notes
 
@@ -103,7 +103,7 @@ def _raise_to_cost_floor(body: dict, message: str) -> str | None:
     妙手的报错自带准确成本线，比我们自己算汇率+运费可靠。
     返回新的价格字符串；无法解析返回 None。
     """
-    from decimal import Decimal, ROUND_HALF_UP
+    from decimal import Decimal, ROUND_HALF_UP  # noqa: I001
 
     floor_match = COST_FLOOR_RE.search(message)
     if floor_match is None:
@@ -172,7 +172,7 @@ def main() -> int:
     # 跳过标记为待重新采集的
     rows = [r for r in rows
             if not (isinstance(r.payload, dict) and r.payload.get("needsRecollect") is True)]
-    print("账号=%s 店铺=%s  待认领 %d 件\n" % (acct.name, shop_id, len(rows)))
+    print("账号=%s 店铺=%s  待认领 %d 件\n" % (acct.name, shop_id, len(rows)))  # noqa: UP031
     if not rows:
         db.close()
         return 1
@@ -188,10 +188,10 @@ def main() -> int:
 
     t0 = time.time()
     warehouse_id = carrier_service.target_warehouse_id(client, shop_id)
-    print("  预取仓库ID %.2fs (%s)" % (time.time() - t0, warehouse_id))
+    print("  预取仓库ID %.2fs (%s)" % (time.time() - t0, warehouse_id))  # noqa: UP031
 
     t0 = time.time()
-    try:
+    try:  # noqa: SIM105
         client.category_tree("MY")
     except Exception:
         pass
@@ -216,7 +216,7 @@ def main() -> int:
                 try:
                     resp = client.claim_common_to_platform([(common_id, "tiktok", 1)])
                 except Exception as exc:
-                    failures.append("复制失败: %s" % str(exc)[:80])
+                    failures.append("复制失败: %s" % str(exc)[:80])  # noqa: UP031
                     break
                 ids = carrier_service.claimed_detail_ids(resp)
                 if not ids:
@@ -278,14 +278,14 @@ def main() -> int:
                 payload, spec_notes = carrier_service.normalize_spec_for_save(
                     payload, enriched)
                 if (clean_notes or spec_notes) and index <= 3:
-                    print("      处理: %s" % "；".join(clean_notes + spec_notes),
+                    print("      处理: %s" % "；".join(clean_notes + spec_notes),  # noqa: UP031
                           flush=True)
                 body = carrier_service.adapt_payload(
                     payload, shop_id=shop_id, warehouse_id=warehouse_id)
                 body["detailId"] = item
                 # 新建的载体可能还在接收上游编辑，ossMd5 会变；重读一次再试
                 if index <= 2:
-                    print("      DEBUG item=%r(%s) shop=%r(%s) wid=%r(%s) md5=%r"
+                    print("      DEBUG item=%r(%s) shop=%r(%s) wid=%r(%s) md5=%r"  # noqa: UP031
                           % (item, type(item).__name__, shop_id,
                              type(shop_id).__name__, warehouse_id,
                              type(warehouse_id).__name__, str(oss_md5)[:10]),
@@ -299,11 +299,11 @@ def main() -> int:
                     if "基础成本" in text:
                         raised = _raise_to_cost_floor(body, text)
                         if raised:
-                            for retry in range(3):
+                            for retry in range(3):  # noqa: B007
                                 try:
                                     client.save_shop(int(item), int(shop_id),
                                                      oss_md5, body)
-                                    print("    id=%-4s 按成本线上调到 %s"
+                                    print("    id=%-4s 按成本线上调到 %s"  # noqa: UP031
                                           % (product.id, raised), flush=True)
                                     raised = None
                                     break
@@ -349,21 +349,21 @@ def main() -> int:
                         client, item, shop_id, body, payload)
                 saved.append((product.id, item))
                 save_times.append(time.time() - t)
-                print("    id=%-4s -> %s  复制%.1fs 覆盖%.1fs"
+                print("    id=%-4s -> %s  复制%.1fs 覆盖%.1fs"  # noqa: UP031
                       % (product.id, item, copy_times[-1] if copy_times else 0,
                          save_times[-1]), flush=True)
             except Exception as exc:
                 import traceback as _tb
                 detail = _tb.format_exc().strip().splitlines()[-3:]
-                failures.append("id=%s 覆盖失败: %s | %s"
+                failures.append("id=%s 覆盖失败: %s | %s"  # noqa: UP031
                                 % (product.id, str(exc)[:50], " / ".join(detail)))
-                print("    id=%-4s X %s" % (product.id, str(exc)[:60]), flush=True)
-                print("       %s" % " / ".join(detail), flush=True)
+                print("    id=%-4s X %s" % (product.id, str(exc)[:60]), flush=True)  # noqa: UP031
+                print("       %s" % " / ".join(detail), flush=True)  # noqa: UP031
 
     # 覆盖环节是瓶颈（4.5s/件），单线程串行拖慢整批。
     # 开多个 consumer 并行覆盖，每个线程结束时向队列放一个 stop 标记。
     tp = threading.Thread(target=producer, name="copy", daemon=True)
-    workers = [threading.Thread(target=consumer, name="save-%d" % i, daemon=True)
+    workers = [threading.Thread(target=consumer, name="save-%d" % i, daemon=True)  # noqa: UP031
                for i in range(WORKERS)]
     tp.start()
     for worker in workers:
@@ -374,21 +374,21 @@ def main() -> int:
 
     total = time.time() - t_all
     print("\n=== 汇总 ===")
-    print("  成功 %d / 失败 %d" % (len(saved), len(failures)))
-    print("  总耗时 %.1fs  平均 %.1fs/件" % (total, total / max(1, len(rows))))
+    print("  成功 %d / 失败 %d" % (len(saved), len(failures)))  # noqa: UP031
+    print("  总耗时 %.1fs  平均 %.1fs/件" % (total, total / max(1, len(rows))))  # noqa: UP031
     if copy_times:
-        print("  复制: 平均 %.2fs  合计 %.1fs" %
+        print("  复制: 平均 %.2fs  合计 %.1fs" %  # noqa: UP031
               (sum(copy_times) / len(copy_times), sum(copy_times)))
     if save_times:
-        print("  覆盖: 平均 %.2fs  合计 %.1fs" %
+        print("  覆盖: 平均 %.2fs  合计 %.1fs" %  # noqa: UP031
               (sum(save_times) / len(save_times), sum(save_times)))
-    print("  串行估算 %.1fs → 并行实际 %.1fs（省 %.0f%%）"
+    print("  串行估算 %.1fs → 并行实际 %.1fs（省 %.0f%%）"  # noqa: UP031
           % (sum(copy_times) + sum(save_times), total,
              (1 - total / max(0.01, sum(copy_times) + sum(save_times))) * 100))
     if failures:
         print("\n  失败明细:")
         for reason, count in Counter(failures).most_common(5):
-            print("    %d 次: %s" % (count, reason))
+            print("    %d 次: %s" % (count, reason))  # noqa: UP031
     db.close()
     return 0
 

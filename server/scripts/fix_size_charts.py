@@ -29,7 +29,7 @@ def _default_chart(session) -> str:
     from services import setting_service, size_chart_service
 
     try:
-        configured = str(setting_service.workflow_defaults(session).get("sizeChartUrl") or "").strip()
+        configured = str(setting_service.workflow_defaults(session).get("sizeChartUrl") or "").strip()  # noqa: E501
         if configured.startswith("http"):
             return configured
     except Exception:  # noqa: BLE001 - 读设置失败就走下一级兜底
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             if not current or "aohuang888.com" in current:
                 continue
             affected.append(product)
-            print("p%s | %s | 旧=%s" % (
+            print("p%s | %s | 旧=%s" % (  # noqa: UP031
                 product.id, str(product.title or "")[:40], current[:70]))
             if not args.apply:
                 continue
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
             product.payload = mutated
 
         print("---")
-        print("命中 %d 件" % len(affected))
+        print("命中 %d 件" % len(affected))  # noqa: UP031
         if args.apply:
             session.commit()
             print("已写库")

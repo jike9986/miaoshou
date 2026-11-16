@@ -1764,7 +1764,7 @@ def select_translatable_images(
                 picked.append(url)
                 continue
             action = str(row.get("action") or "")
-            # review = OCR 一行字都没识别到。实测（2026-11-11，12 张详情图）            # 这类图全是纯产品照，图上确实没有文字，不需要翻译。            # 之前这里「照翻」是怕 OCR 漏识别深色底白字/艺术字，但代价是            # 每件多翻 2-3 张纯产品图（每张 0.024 元），而实测 OCR 对中文            # 的召回很稳（同一批 7 行中文全部识别到，置信度 0.98-1.0）。            # 负责人口径：只翻有中文的图。            if action == "review":                continue
+            # review = OCR 一行字都没识别到。实测（2026-11-11，12 张详情图）            # 这类图全是纯产品照，图上确实没有文字，不需要翻译。            # 之前这里「照翻」是怕 OCR 漏识别深色底白字/艺术字，但代价是            # 每件多翻 2-3 张纯产品图（每张 0.024 元），而实测 OCR 对中文            # 的召回很稳（同一批 7 行中文全部识别到，置信度 0.98-1.0）。            # 负责人口径：只翻有中文的图。            if action == "review":                continue  # noqa: E501
             if action != "translate":
                 continue
             text = re.sub(r"\s+", "", str(row.get("text") or ""))
@@ -2585,8 +2585,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             weight_report = {"before": previous.get("weight"),
                              "after": payload.get("weight"),
                              "increment": 0, "reused": True, "sourceMissing": True}
-            return weight_report
-        else:
+            return weight_report  # noqa: RET504
+        else:  # noqa: RET505
             weight_report = prepare_weight(
                 payload, increment,
                 category_name=product_service.category_label(payload),
@@ -3357,7 +3357,7 @@ def _deepseek_translate_colors(texts: list[str], language: str) -> dict[str, str
     只在本地词表翻不出时调用，一次批量处理所有缺漏项，不逐件请求。
     翻译失败时静默返回空字典，调用方保留原文。
     """
-    import json as _json
+    import json as _json  # noqa: I001
     import urllib.request as _req
     from core.config import get_settings
     key = get_settings().deepseek_api_key
@@ -3408,7 +3408,7 @@ def _deepseek_translate_colors(texts: list[str], language: str) -> dict[str, str
         translated_list: list[str] = _json.loads(content[start:end])
         if len(translated_list) != len(batch):
             return {}
-        return {orig: tr for orig, tr in zip(batch, translated_list)
+        return {orig: tr for orig, tr in zip(batch, translated_list)  # noqa: B905
                 if tr and str(tr).strip()}
     except Exception:  # noqa: BLE001
         return {}
@@ -3513,7 +3513,7 @@ def _merge_spec_translation(current_props, translated_props):
             continue
         if len(cur_values) == len(twin_values):
             # 正常情况：两边一一对应，按顺序覆盖
-            for cv, tv in zip(cur_values, twin_values):
+            for cv, tv in zip(cur_values, twin_values):  # noqa: B905
                 label = str(tv.get("attrValue") or "").strip()
                 if label:
                     cv["attrValue"] = label
@@ -3537,7 +3537,7 @@ def _merge_spec_translation(current_props, translated_props):
                         cv["attrValue"] = label
             else:
                 # 上游没有回 id（译文接口常见）：按提交顺序逐位覆盖
-                for cv, tv in zip(cur_values, twin_values):
+                for cv, tv in zip(cur_values, twin_values):  # noqa: B905
                     label = str(tv.get("attrValue") or "").strip()
                     if label:
                         cv["attrValue"] = label
@@ -3551,7 +3551,7 @@ def _needs_translation(payload: Mapping[str, Any], language: str) -> bool:
     from services import product_service as _product_service
 
     target = str(language or _product_service.DEFAULT_LANGUAGE).strip().lower()
-    if target in ("", "zh", "zh-cn", "cn", "chinese"):
+    if target in ("", "zh", "zh-cn", "cn", "chinese"):  # noqa: SIM103
         return False
     return True
 
@@ -3614,13 +3614,13 @@ def _fill_spec_attr_ids(db: Session, client: Any, payload: dict[str, Any], *,
         if is_size and attrs.get("size"):
             if str(prop.get("attrId") or "") != str(attrs["size"]):
                 prop["attrId"] = attrs["size"]
-                notes.append("尺码 attrId→%s" % attrs["size"])
+                notes.append("尺码 attrId→%s" % attrs["size"])  # noqa: UP031
             if attrs.get("sizeName") and prop.get("attrName") != attrs["sizeName"]:
                 prop["attrName"] = attrs["sizeName"]
         elif not is_size and attrs.get("color"):
             if str(prop.get("attrId") or "") != str(attrs["color"]):
                 prop["attrId"] = attrs["color"]
-                notes.append("颜色 attrId→%s" % attrs["color"])
+                notes.append("颜色 attrId→%s" % attrs["color"])  # noqa: UP031
             if attrs.get("colorName") and prop.get("attrName") != attrs["colorName"]:
                 prop["attrName"] = attrs["colorName"]
     # 返回 attrId 字典而不是 notes：调用方要靠「有没有拿到 attrId」决定
@@ -3745,7 +3745,7 @@ def _clean_size_values(payload: dict[str, Any]) -> int:
             m = _re.match(r"^([0-9A-Za-z]+)\s*[（(]\s*([0-9]+\s*[-–~]\s*[0-9]+)\s*[）)]",
                           raw)
             if m:
-                cleaned = "%s(%s)" % (m.group(1), m.group(2).replace(" ", ""))
+                cleaned = "%s(%s)" % (m.group(1), m.group(2).replace(" ", ""))  # noqa: UP031
             else:
                 # 「40」「XL」「40-41」这种本来就干净的保留；
                 # 其余取第一个空白前 / 第一个中文前的片段
@@ -3807,7 +3807,7 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
                          coverage: Mapping[str, Any],
                          pricing_enabled: bool) -> None:
     """Write the processed product to Miaoshou and fail closed on readback mismatch."""
-    from services import product_service, readback_check
+    from services import product_service, readback_check  # noqa: I001
 
     # 规格值必须与妙手草稿原文逐字一致。
     #

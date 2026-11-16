@@ -472,7 +472,7 @@ def translate_colors(ident: str, body: TranslateColorsRequest,
         for prop in (payload.get("skuPropertyList") or [])
         if isinstance(prop, dict)
         and str(prop.get("attrId") or prop.get("propId") or "") in {"100000"}
-        or str(prop.get("attrName") or prop.get("propName") or "").strip().casefold() in {"颜色", "色彩", "color", "colour", "warna"}
+        or str(prop.get("attrName") or prop.get("propName") or "").strip().casefold() in {"颜色", "色彩", "color", "colour", "warna"}  # noqa: E501
         for val in (prop.get("attrValueList") or [])
         if isinstance(val, dict)
     ]

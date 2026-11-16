@@ -1,5 +1,5 @@
 """类目路由：树查询与同步。"""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from typing import Any
 
@@ -10,7 +10,7 @@ from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permissi
 from api.helpers import parse_bool
 from core import errors
 from schemas.requests import CategorySyncRequest
-from services import account_service, audit_service, category_service, operator_service, product_service
+from services import account_service, audit_service, category_service, operator_service, product_service  # noqa: E501
 from services.account_service import account_client, map_upstream_error
 from services.miaoshou import MiaoshouError
 

@@ -296,7 +296,7 @@ def clean_color_strict(value: Any) -> str:
     # （2026-11-12 实测：3527923061 六个颜色全挂）。
     stripped = original.strip()
     stripped = re.sub(r"^[【\[（(]?\s*(?:男款|女款|男|女|情侣|中性)\s*[】\]）)]?", "", stripped)
-    stripped = re.sub(r"[（(]\s*(?:标准码|加大码|小码|均码|偏大一码|偏小一码)\s*[）)]", "", stripped)
+    stripped = re.sub(r"[（(]\s*(?:标准码|加大码|小码|均码|偏大一码|偏小一码)\s*[）)]", "", stripped)  # noqa: E501
     stripped = stripped.strip()
     if stripped and stripped != original.strip():
         try:
@@ -421,7 +421,7 @@ def _derived_value_id(attr_id: Any, label: str) -> str:
     """
     import hashlib
 
-    seed = "%s|%s" % (str(attr_id or ""), str(label or ""))
+    seed = "%s|%s" % (str(attr_id or ""), str(label or ""))  # noqa: UP031
     return hashlib.md5(seed.encode("utf-8")).hexdigest()[:10]
 
 
@@ -542,7 +542,7 @@ def normalize_colors(props: Any, sku_map: Mapping[str, Any] | None = None, *,
     if not groups:
         # 一个颜色都没剩下：这不再是「备注混进来」，而是颜色根本认不出，
         # 必须报错——静默产出无颜色商品，上架时平台会拒，线索更难查。
-        detail = "；".join(f"{text}（{why}）" for text, why in dropped_remarks[:3]) or "颜色属性为空"
+        detail = "；".join(f"{text}（{why}）" for text, why in dropped_remarks[:3]) or "颜色属性为空"  # noqa: E501
         raise ColorError(f"颜色全部无法识别，需要人工确认：{detail}")
 
     # 每组挑一个代表：优先取「原文本来就是这个写法」的那个，改写量最小，
@@ -578,7 +578,7 @@ def normalize_colors(props: Any, sku_map: Mapping[str, Any] | None = None, *,
     messages: list[str] = []
     if dropped_remarks:
         messages.append(
-            "颜色里混入 %d 条非颜色备注，已剔除：%s" % (
+            "颜色里混入 %d 条非颜色备注，已剔除：%s" % (  # noqa: UP031
                 len(dropped_remarks),
                 "、".join(text for text, _ in dropped_remarks[:5])))
     if len(groups) > MAX_COLORS:

@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any, Mapping  # noqa: UP035
 
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
@@ -213,9 +213,9 @@ def push_products_to_common_box(client: MiaoshouClient,
             fail += 1
             results.append({"index": index, "title": title,
                             "status": "fail",
-                            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:100])})
+                            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:100])})  # noqa: UP031
         if progress is not None:
-            try:
+            try:  # noqa: SIM105
                 progress({"index": index, "total": len(payloads),
                           "ok": ok, "fail": fail,
                           "title": title})

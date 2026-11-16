@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                         fixed["imgUrls"] = []
                         rewritten.append(fixed)
                         changed = True
-                        print("p%s | %s | %s -> 清空（无兜底图）" % (
+                        print("p%s | %s | %s -> 清空（无兜底图）" % (  # noqa: UP031
                             product.id, prop.get("attrName"), value.get("attrValue")))
                         continue
                     fixed = dict(value)
@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
                         value.get("imgUrl") or value.get("imageUrl") or "")
                     rewritten.append(fixed)
                     changed = True
-                    print("p%s | %s | %s -> %s" % (
+                    print("p%s | %s | %s -> %s" % (  # noqa: UP031
                         product.id, prop.get("attrName"), value.get("attrValue"),
                         fallback[:70]))
                 new_props.append({**prop, "attrValueList": rewritten})
@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
                     product.payload = mutated
 
         print("---")
-        print("命中 %d 件" % touched)
+        print("命中 %d 件" % touched)  # noqa: UP031
         if args.apply:
             session.commit()
             print("已写库")

@@ -4,6 +4,7 @@ import pytest
 from core import errors
 from services.collect_box_service import listing_rows
 
+pytestmark = pytest.mark.unit
 
 def _response(rows):
     """构造最简的 collect_box_list 响应体。"""

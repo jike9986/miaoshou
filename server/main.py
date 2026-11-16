@@ -165,7 +165,7 @@ async def _image_reconcile_loop(stop: asyncio.Event) -> None:
             logger.exception("图片任务回收失败 type=%s：%s", type(exc).__name__, exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=20)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError:  # noqa: UP041
             # 必须写 asyncio.TimeoutError：Python 3.10 它等同于
             # concurrent.futures.TimeoutError，**不是**内置 TimeoutError
             # （3.11 才合并）。写成 except TimeoutError 在 3.10 上一个都抓不到，
@@ -213,7 +213,7 @@ async def _image_cleanup_loop(stop: asyncio.Event) -> None:
             logger.exception("临时图床清理失败 type=%s：%s", type(exc).__name__, exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=24 * 3600)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError:  # noqa: UP041
             continue
 
 
@@ -245,7 +245,7 @@ async def _schedule_loop(stop: asyncio.Event) -> None:
             logger.exception("定时发布扫描失败 type=%s：%s", type(exc).__name__, exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=60)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError:  # noqa: UP041
             # 同上：3.10 必须用 asyncio.TimeoutError。这一行写错就是
             # 「定时任务设置好了不执行」的本体 —— 调度协程 60 秒后自己死掉。
             continue
