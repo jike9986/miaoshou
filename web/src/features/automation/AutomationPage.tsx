@@ -1,4 +1,4 @@
-// features/automation —— 自动化上品（老版第一个板块，一屏布局重做）
+﻿// features/automation —— 自动化上品（老版第一个板块，一屏布局重做）
 //
 // 版面（对齐老版 0.1.4，一屏内全部可见）：
 //   ┌──────────────────────────────────────┬──────────────┐
@@ -91,6 +91,30 @@ import {
   type RunFailure,
   type RunState,
 } from "@/features/automation/types";
+
+/**
+ * 用户手动点击「刷新」清空后，这个集合记下那个 run id。
+ * 模块级变量：页面内切换 Tab 会卸载再挂载组件，但不会刷新页面，
+ * 模块级变量在整个 SPA 生命周期内保持，能让 hydrateRun 知道
+ * 「这条记录用户已经主动清掉，不要再自动恢复它」。
+ * 同时持久化到 localStorage，确保重启软件后仍然有效。
+ */
+const RESET_IDS_KEY = "miaoshou:reset-run-ids";
+function _loadResetIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(RESET_IDS_KEY);
+    if (raw) return new Set(JSON.parse(raw) as string[]);
+  } catch { /* ignore */ }
+  return new Set<string>();
+}
+const userResetRunIds = _loadResetIds();
+function markRunReset(id: string): void {
+  userResetRunIds.add(id);
+  try {
+    const arr = Array.from(userResetRunIds).slice(-50); // 最多保留 50 条
+    localStorage.setItem(RESET_IDS_KEY, JSON.stringify(arr));
+  } catch { /* ignore */ }
+}
 
 /** 已勾选商品的快照：跨页勾选后仍能拿到 detailId / shopId 去处理 */
 interface SelectionEntry {
@@ -314,6 +338,47 @@ export function AutomationPage() {
 
   /* ---------------- 本地处理态 ---------------- */
   const [stages, setStages] = useState<Record<string, ItemStage>>({});
+
+  // stages 持久化：重启软件后恢复"已完成/待核对"标记，避免用户困惑
+  // key = miaoshou:stages:{accountId}，存 { stages, savedAt, runId }
+  const stagesAccountRef = useRef<string | null>(null);
+  const stagesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 恢复：只在 stages 还是空且有保存的 accountId 时读一次
+  useEffect(() => {
+    const accountId = status?.accountId ?? null;
+    if (!accountId || stagesAccountRef.current === accountId) return;
+    stagesAccountRef.current = accountId;
+    try {
+      const raw = localStorage.getItem(`miaoshou:stages:${accountId}`);
+      if (!raw) return;
+      const { stages: saved, savedAt } = JSON.parse(raw) as { stages: Record<string, ItemStage>; savedAt: number };
+      // 只恢复 24 小时内的记录
+      if (Date.now() - savedAt > 24 * 60 * 60 * 1000) return;
+      // 只恢复非 idle 的阶段
+      const filtered = Object.fromEntries(
+        Object.entries(saved).filter(([, v]) => v === "done" || v === "needs_review")
+      );
+      if (Object.keys(filtered).length > 0) {
+        setStages((prev) => ({ ...filtered, ...prev }));
+      }
+    } catch { /* ignore */ }
+  }, [status?.accountId]);
+
+  // 保存：stages 变化后防抖 500ms 写 localStorage
+  useEffect(() => {
+    const accountId = status?.accountId ?? null;
+    if (!accountId) return;
+    if (stagesSaveTimerRef.current) clearTimeout(stagesSaveTimerRef.current);
+    stagesSaveTimerRef.current = setTimeout(() => {
+      const hasData = Object.values(stages).some((v) => v === "done" || v === "needs_review");
+      if (!hasData) return;
+      try {
+        localStorage.setItem(`miaoshou:stages:${accountId}`, JSON.stringify({ stages, savedAt: Date.now() }));
+      } catch { /* ignore */ }
+    }, 500);
+    return () => { if (stagesSaveTimerRef.current) clearTimeout(stagesSaveTimerRef.current); };
+  }, [stages, status?.accountId]);
   // 每件商品完成了哪几步（老版 productStatus 的 textCompleted / imagesCompleted）
   const [progress, setProgress] = useState<Record<string, ItemProgress>>({});
   const [run, setRun] = useState<RunState>(IDLE_RUN);
@@ -513,7 +578,21 @@ export function AutomationPage() {
     const isInFlight = saved.status === "running";
     const keepHistory = isInFlight || saved.status === "queued" || resumableCount > 0;
     if (!keepHistory) {
-      setStages({});
+      // 恢复终态标记，让卡片重启或切换标签页回来后仍显示"完成/失败/待核对"徽章。
+      // 之前这里直接 setStages({}) 会把所有徽章清掉，导致用户看到的结果消失。
+      const terminalStages: Record<string, ItemStage> = {};
+      for (const item of saved.items) {
+        const stage: ItemStage =
+          item.processStatus === "failed" || item.publishStatus === "failed" ? "failed"
+          : item.processStatus === "needs_review" || item.publishStatus === "needs_review"
+            || item.publishStatus === "running" ? "needs_review"
+          : item.processStatus === "succeeded" ? "done"
+          : "queued";
+        if (stage === "done" || stage === "needs_review" || stage === "failed") {
+          terminalStages[item.key] = stage;
+        }
+      }
+      setStages(terminalStages);
       setProgress({});
       setRun({
         phase: "idle",
@@ -596,7 +675,7 @@ export function AutomationPage() {
 
   useEffect(() => {
     const saved = latestRunQuery.data?.run;
-    if (running || startingRunRef.current || !saved || hydratedRunId.current === saved.id || recoveringRunId.current === saved.id) return;
+    if (running || startingRunRef.current || !saved || hydratedRunId.current === saved.id || recoveringRunId.current === saved.id || userResetRunIds.has(saved.id)) return;
     if (saved.status === "queued") {
       hydrateRun(saved);
       return;
@@ -1504,6 +1583,14 @@ export function AutomationPage() {
             failedKeys,
           }));
           if (failures.length > 0) toast.warning(`${failures.length} 件处理未完成，请查看处理状态`);
+          setRun((prev) => ({
+            ...prev,
+            phase: "done",
+            total: prev.total, done: prev.done, failed: prev.failed,
+            endedAt: Date.now(),
+            failures: prev.failures,
+            needsReview: prev.needsReview,
+          }));
           return;
         }
       }
@@ -1738,9 +1825,6 @@ export function AutomationPage() {
                 <div className="flex items-center justify-between gap-2">
                   <span className="flex min-w-0 items-center gap-2">
                     <CardTitle>处理设置</CardTitle>
-                    <Badge variant="neutral" size="sm">
-                      已选 {formatCount(selection.size)} 件
-                    </Badge>
                   </span>
                 </div>
 
@@ -1752,6 +1836,7 @@ export function AutomationPage() {
                     onOpenTemplates={() => setTemplatesOpen(true)}
                     publishShopName={publishShopName}
                     canManageSharedAssets={canManageSharedAssets}
+                    isMember={!canManageSharedAssets}
                     disabled={running}
                   />
                 </div>
@@ -1810,13 +1895,23 @@ export function AutomationPage() {
                 selectedCount={selection.size}
                 visibleCount={visibleItems.length}
                 publishShopName={shopsQuery.data?.shops.find((shop) => shop.shopId === currentShopId)?.name}
-                onReset={() => { setRun(IDLE_RUN); setStages({}); setProgress({}); }}
+                onReset={() => {
+                  // 记住这个 run id，防止 hydrateRun 在重新挂载时把它再恢复回来（包括重启软件后）
+                  if (persistentRunId.current) markRunReset(persistentRunId.current);
+                  const saved = latestRunQuery.data?.run;
+                  if (saved) markRunReset(saved.id);
+                  // 同时清除 localStorage 中保存的 stages
+                  try {
+                    if (status?.accountId) localStorage.removeItem(`miaoshou:stages:${status.accountId}`);
+                  } catch { /* ignore */ }
+                  setRun(IDLE_RUN); setStages({}); setProgress({});
+                }}
               />
               {/* 执行历史：把「上一次怎么坏的」从常驻状态卡里挪出来，
                   状态卡只显示当前这一批的进度。每批留档，跑完自动刷新。 */}
               <RunHistoryPanel
                 accountId={status?.accountId ?? null}
-                shopId={currentShopId ?? null}
+                shopId={null}
                 running={run.phase === "running"}
               />
             </div>
@@ -1830,7 +1925,7 @@ export function AutomationPage() {
         onOpenChange={setTemplatesOpen}
         size="md"
         title="定价模板"
-        description={canManageSharedAssets ? "选一个模板用在这一批上，或者点「编辑模板」改参数。" : "选择用于这一批商品的定价模板。"}
+        
         footer={
           <>
             <Button variant="ghost" onClick={() => setTemplatesOpen(false)}>

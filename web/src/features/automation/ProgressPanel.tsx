@@ -83,24 +83,40 @@ export function ProgressPanel({
       : null;
   const shownElapsed = timerActive ? elapsed : finalElapsed;
 
-  const batchPercent = run.total > 0 ? (run.done / run.total) * 100 : 0;
-  // 图片进度条：只按真实提交的翻译张数算，imagePlanned=0 时显示为 0%
-  // （indeterminate 动画会在 OCR 识别阶段自动生效）。
-  // 之前的 fallback (run.done / run.total) 让图片进度条跟着文字进度走，
-  // 导致文字完成时图片也显示 100%，但图片其实还在翻译（负责人 2026-11-13 指出）。
-  const imagePercent = run.imagePlanned > 0 ? (run.imageDone / run.imagePlanned) * 100 : 0;
   const textPercent = settings.textEnabled && run.total > 0 ? (run.done / run.total) * 100 : 0;
+  const imagePercent = run.imagePlanned > 0 ? (run.imageDone / run.imagePlanned) * 100 : 0;
+  // 批次进度 = 文字和图片都完成才到100：
+  //   - 两者都开启：平均
+  //   - 只开启一项：用那一项
+  //   - 都不开启：按件数
+  const bothEnabled = settings.textEnabled && settings.imagesEnabled;
+  const batchPercent = bothEnabled
+    ? (textPercent + imagePercent) / 2
+    : settings.imagesEnabled
+      ? imagePercent
+      : run.total > 0
+        ? (run.done / run.total) * 100
+        : 0;
 
-  // 进度条平滑动画：当 hydrateRun 恢复历史任务时，从 0% 一步跳到 100%，
-  // CSS transition 来不及生效（整个变化在同一帧里完成）。
-  // 用 requestAnimationFrame 把「真实值」延迟到下一帧写入，
-  // 确保浏览器先画一次当前值、再动画到目标值。
+  // 进度条平滑动画：
+  //   1. hydrateRun 恢复历史任务时，从 0% 一步跳到 100%，CSS transition 来不及。
+  //      用双 rAF（先渲染 0 → 然后下帧渲染目标值）确保过渡动画跑完整。
+  //   2. 任务正在跑时，每次数值增加也走同样路径，让进度条平滑推进。
   const rafRef = useRef<number>(0);
-  const [displayBatch, setDisplayBatch] = useState(batchPercent);
-  const [displayText, setDisplayText] = useState(textPercent);
-  const [displayImage, setDisplayImage] = useState(imagePercent);
+  const [displayBatch, setDisplayBatch] = useState(0);
+  const [displayText, setDisplayText] = useState(0);
+  const [displayImage, setDisplayImage] = useState(0);
+  // track previous target so we can detect a reset (new run)
+  const prevBatchRef = useRef(batchPercent);
   useEffect(() => {
     cancelAnimationFrame(rafRef.current);
+    // If percent decreased significantly (reset/new run), jump to 0 first
+    if (batchPercent < prevBatchRef.current - 5) {
+      setDisplayBatch(0);
+      setDisplayText(0);
+      setDisplayImage(0);
+    }
+    prevBatchRef.current = batchPercent;
     rafRef.current = requestAnimationFrame(() => {
       setDisplayBatch(batchPercent);
       setDisplayText(textPercent);
@@ -162,6 +178,7 @@ export function ProgressPanel({
         <div>
           <Progress
             value={displayText}
+            indeterminate={settings.textEnabled && running && run.done === 0}
             tone={settings.textEnabled ? "brand" : "warning"}
             label="商品设置与文字"
             showValue
@@ -179,7 +196,7 @@ export function ProgressPanel({
         <div>
           <Progress
             value={displayImage}
-            indeterminate={settings.imagesEnabled && running && run.done < run.total}
+            indeterminate={settings.imagesEnabled && running && run.imagePlanned === 0}
             tone={settings.imagesEnabled ? "brand" : "warning"}
             label="图片处理"
             showValue
