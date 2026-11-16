@@ -1,8 +1,8 @@
 """采集箱：listing_rows 解析和过滤测试。"""
 import pytest
 
-from services.collect_box_service import listing_rows
 from core import errors
+from services.collect_box_service import listing_rows
 
 
 def _response(rows):

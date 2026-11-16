@@ -1,10 +1,7 @@
 """定时任务：到期判断纯函数测试。"""
 from datetime import date, datetime
 
-import pytest
-
-from services.schedule_service import is_scheduled_day, is_due, should_run
-
+from services.schedule_service import is_due, is_scheduled_day, should_run
 
 # ---------------------------------------------------------------------------
 # is_scheduled_day

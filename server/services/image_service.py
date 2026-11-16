@@ -12,17 +12,17 @@ task_id，由 GET /images/jobs/{id}?refresh=true 查询（不重复提交、不�
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 import httpx
-import threading
-import asyncio
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -920,9 +920,8 @@ def translate(db: Session, payload: Mapping[str, Any],
             db.flush()
         pending.append((job, raw))
 
-    if pending:
-        if not _skip_reserve:
-            _reserve_slot(db)
+    if pending and not _skip_reserve:
+        _reserve_slot(db)
 
     # 并发提交：老版 IMAGE_CONCURRENCY=3。串行提交时 10 张图要 10 个往返，
     # 每张 20~60 秒，用户就盯着转圈。只把网络请求并行化，落库仍在主线程做

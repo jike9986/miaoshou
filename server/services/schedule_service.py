@@ -178,7 +178,8 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
         raise errors.validation("选择商品后，请设置计划发布天数", field="plannedRuns")
     if selected_product_ids and len(selected_product_ids) > per_run * (planned_runs or 0):
         raise errors.validation(
-            f"已选 {len(selected_product_ids)} 件，但 {planned_runs} 天最多发布 {per_run * (planned_runs or 0)} 件",
+            f"已选 {len(selected_product_ids)} 件，"
+            f"但 {planned_runs} 天最多发布 {per_run * (planned_runs or 0)} 件",
             field="selectedProductIds")
 
     time_value = pick("time", "timeOfDay")
