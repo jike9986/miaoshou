@@ -37,14 +37,14 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  createDesktopShortcut: true
-  createStartMenuShortcut: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: false
   shortcutName: 奥皇上品
   deleteAppDataOnUninstall: false
   language: "2052"
   installerLanguages:
     - zh_CN
-  # 关键：本机 Electron 沙箱在原生层就崩（JS 都没执行），必须让进程命令行
-  # 一开始就带 --no-sandbox。双击 exe 不带参数，所以把参数写进快捷方式里，
-  # 用户点的还是正常的奥皇图标。详见 build/installer.nsh 顶部说明。
+  # 快捷方式通过 customInstall 宏用 PowerShell 创建（见 build/installer.nsh）：
+  # 1. 保证带 --no-sandbox 参数（这里没有内置选项支持自定义快捷方式参数）
+  # 2. 避免 makensis 在中文路径环境下对 CJK 字符的 GBK 误解码
   include: build/installer.nsh
