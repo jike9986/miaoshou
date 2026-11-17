@@ -457,7 +457,6 @@ export function PublishDialog({
                       // null = 加载中，undefined = 还没触发，[] = 已加载无店铺
                       const accShopsLoading = accShopsRaw === null || (checked && accShopsRaw === undefined);
                       const accShops = accShopsRaw ?? [];
-                      const accShopId = selectedShopByAccount[account.id] ?? accShops[0]?.shopId ?? "";
                       return (
                         <div key={account.id} className="rounded-md border border-border-subtle bg-canvas-inset/40 p-2">
                           <label className="flex cursor-pointer items-center gap-2 text-sm">
