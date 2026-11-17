@@ -217,6 +217,9 @@ function createWindow(): void {
 
   mainWindow.once("ready-to-show", () => mainWindow?.show());
 
+  // 禁止 Chromium 保存每页缩放级别（防止 per_host_zoom_levels 污染 Preferences）
+  mainWindow.webContents.setVisualZoomLevelLimits(1, 1);
+
   // 根据窗口宽度自动缩放，解决大屏下 UI 比例偏小的问题。
   // 用 setZoomFactor（Electron 级缩放）而非 CSS zoom：前者让 100vh/媒体查询等
   // 都按缩放后的逻辑像素计算，不会出现内容溢出屏幕底部的情况。

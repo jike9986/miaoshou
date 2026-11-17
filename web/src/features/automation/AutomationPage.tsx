@@ -617,6 +617,8 @@ export function AutomationPage() {
     );
     // 用函数式更新：若当前 run.phase 已是 "running"（用户刚点了「开始处理」
     // 而 latestRunQuery 恰好在此时回来），绝不用历史快照覆盖正在跑的状态。
+    const anyImageCompleted = saved.settings.imagesEnabled === true
+      && saved.items.some((item) => item.processResult?.images?.completed === true);
     setRun((prev) => {
       if (prev.phase === "running") return prev;
       return {
@@ -626,6 +628,7 @@ export function AutomationPage() {
         startedAt: saved.createdAt * 1000,
         endedAt: saved.finishedAt ? saved.finishedAt * 1000 : Date.now(),
         imageDone, imagePlanned: planned, textDone,
+        imagingComplete: anyImageCompleted || undefined,
         stage: needsReview ? `${needsReview} 项待核对` : "已恢复上次运行",
         failedKeys: failures.map((failure) => failure.key), failures,
       };
@@ -668,7 +671,15 @@ export function AutomationPage() {
       }
       if (scope === executionScopeRef.current && persistentRunId.current === saved.id
         && (total > 0 || hasDurableImages)) {
-        setRun((prev) => ({ ...prev, imageDone: ready, imagePlanned: total, imageFailed: failedJobs }));
+        setRun((prev) => ({
+          ...prev,
+          imageDone: ready, imagePlanned: total, imageFailed: failedJobs,
+          // hasDurableImages が true = 画像スレッドが実際に完了した証拠（submitted=0 も含む）。
+          // これがないと imagePlanned=0 → imagesDone=false のまま batchPercent が 100% にならない。
+          // 中国語注释：hasDurableImages=true はimage线程明确写了 completed 字段，
+          // 即使实际提交 0 张也算真的「完成」，区别于还没跑的初始状态。
+          ...(hasDurableImages ? { imagingComplete: true } : {}),
+        }));
       }
     })();
   }, [updateSettings]);
@@ -676,7 +687,11 @@ export function AutomationPage() {
   useEffect(() => {
     const saved = latestRunQuery.data?.run;
     if (running || startingRunRef.current || !saved || hydratedRunId.current === saved.id || recoveringRunId.current === saved.id || userResetRunIds.has(saved.id)) return;
-    if (saved.status === "queued") {
+    // queued 或已终态（failed/done/stopped/needs_review）→ 直接 hydrate，不走 recover API。
+    // recover API 只在任务真正被中断（status === "running"）时才有意义：
+    // 它的工作是把卡在 running 的 item 重置为 failed，对已终态的任务是纯 no-op，
+    // 但调用本身要等一次网络往返，就是用户看到「正在恢复」卡住的原因。
+    if (saved.status !== "running") {
       hydrateRun(saved);
       return;
     }
@@ -976,8 +991,8 @@ export function AutomationPage() {
     const savedRun = latestRunQuery.data?.run;
     if (latestRunQuery.isLoading || recoverRunMutation.isPending
       || recoveringRunId.current !== null
-      || (savedRun && hydratedRunId.current !== savedRun.id)) {
-      toast.info("正在恢复上次任务，请稍后再开始");
+      || (savedRun && savedRun.status === "running" && hydratedRunId.current !== savedRun.id)) {
+      toast.info("正在恢复上次任务，请稍后再开始", { id: "run-recovering" });
       return;
     }
     const resumable = savedRun?.items.filter((item) => pendingAutomationPublishAction(item) !== null) ?? [];
@@ -1033,9 +1048,9 @@ export function AutomationPage() {
         toast.warning("所选商品已有成功处理记录，请取消已完成商品后再开始新任务");
         return;
       }
-      // 可复用的旧任务条目：queued（还没跑）或 needs_review（跑过但结果不确定，允许重跑）
+      // 可复用的旧任务条目：queued（还没跑）、needs_review（结果不确定）、failed（失败可重试）
       const reusable = new Set(savedRun.items
-        .filter((item) => item.processStatus === "queued" || item.processStatus === "needs_review")
+        .filter((item) => item.processStatus === "queued" || item.processStatus === "needs_review" || item.processStatus === "failed")
         .map((item) => item.key));
       const resumesSavedRun = targets.length > 0 && targets.every((target) => reusable.has(target.key));
       if (resumesSavedRun) {
@@ -1193,6 +1208,8 @@ export function AutomationPage() {
             // 用 allowImageReview（放行复核但保留 OCR 删图），
             // 不能用 skipImageReview（那是连 OCR 都不跑，会把 27 张全提交去翻译）。
             allowImageReview: true,
+            // 把并行件数告诉后端，让图片线程信号量与文字阶段一致
+            itemConcurrency: parallel,
           },
         });
         if (scope !== executionScopeRef.current) { batchAborted = true; break; }
@@ -1583,6 +1600,8 @@ export function AutomationPage() {
             failedKeys,
           }));
           if (failures.length > 0) toast.warning(`${failures.length} 件处理未完成，请查看处理状态`);
+          void queryClient.invalidateQueries({ queryKey: queryKeys.automationRuns.all });
+          void queryClient.invalidateQueries({ queryKey: queryKeys.warehouse.all });
           setRun((prev) => ({
             ...prev,
             phase: "done",
@@ -1590,6 +1609,7 @@ export function AutomationPage() {
             endedAt: Date.now(),
             failures: prev.failures,
             needsReview: prev.needsReview,
+            imagingComplete: true,
           }));
           return;
         }
@@ -1602,6 +1622,12 @@ export function AutomationPage() {
     }
 
     const succeeded = targets.length - failed;
+    // 任务结束时主动刷新自动化历史和成品仓库的查询缓存。
+    // 每件处理完的 recordProcessMutation.onSuccess 只会 invalidate automationRuns，
+    // 仓库的 automation-results 列表是独立缓存，不会跟着刷新，
+    // 导致「处理状态显示完成，成品仓库看不到商品」（2026-11-17 实测）。
+    void queryClient.invalidateQueries({ queryKey: queryKeys.automationRuns.all });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.warehouse.all });
     setRun((prev) => ({
       ...prev,
       phase: "done",
@@ -1611,6 +1637,7 @@ export function AutomationPage() {
       imagePlanned: imagePlannedActual,
       textDone,
       failedKeys,
+      imagingComplete: true,
       stage: failures.length > 0
         ? `处理完成，${failures.length} 项需检查`
         : publishSubmitted > 0
@@ -1895,16 +1922,16 @@ export function AutomationPage() {
                 selectedCount={selection.size}
                 visibleCount={visibleItems.length}
                 publishShopName={shopsQuery.data?.shops.find((shop) => shop.shopId === currentShopId)?.name}
+                recovering={recoverRunMutation.isPending || (latestRunQuery.data?.run != null && latestRunQuery.data.run.status === "running" && hydratedRunId.current !== latestRunQuery.data.run.id && !running)}
                 onReset={() => {
                   // 记住这个 run id，防止 hydrateRun 在重新挂载时把它再恢复回来（包括重启软件后）
                   if (persistentRunId.current) markRunReset(persistentRunId.current);
                   const saved = latestRunQuery.data?.run;
                   if (saved) markRunReset(saved.id);
-                  // 同时清除 localStorage 中保存的 stages
-                  try {
-                    if (status?.accountId) localStorage.removeItem(`miaoshou:stages:${status.accountId}`);
-                  } catch { /* ignore */ }
-                  setRun(IDLE_RUN); setStages({}); setProgress({});
+                  // 只重置进度面板，不清除商品的处理状态徽章（stages）。
+                  // 用户点这个按钮只是把进度条归零，不是要抹掉哪些商品已经处理过了。
+                  // localStorage 里的 stages 也保留：重启后仍能看到哪些件已完成/待核对。
+                  setRun(IDLE_RUN); setProgress({});
                 }}
               />
               {/* 执行历史：把「上一次怎么坏的」从常驻状态卡里挪出来，

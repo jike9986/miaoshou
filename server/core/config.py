@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     bind_host: str = ""
     # 开发模式：打开 /api/docs 与 /openapi.json
     dev: bool = False
-    request_timeout: float = 30.0
+    request_timeout: float = 90.0
     # 请求体上限（图片 base64 走 JSON 时放宽）
     max_body_bytes: int = 40 * 1024 * 1024
     # DeepSeek API key（颜色翻译兜底，支持全语言；空则不调用）

@@ -64,6 +64,14 @@ const isFileProtocol =
   typeof window !== "undefined" && window.location.protocol === "file:";
 const Router = isFileProtocol ? HashRouter : BrowserRouter;
 
+// Electron/Chromium 下 Ctrl+Scroll（以及触控板双指捏合）会缩放整个页面。
+// 桌面应用没有「用户需要缩放网页」的场景，全局拦截掉，防止误操作。
+if (typeof window !== "undefined") {
+  document.addEventListener("wheel", (e) => {
+    if (e.ctrlKey) e.preventDefault();
+  }, { passive: false });
+}
+
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("#root not found");
 

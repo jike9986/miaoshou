@@ -256,6 +256,9 @@ class ProcessRequest(CamelModel):
     allowImageReview: bool = False
     # 跳过主图 OCR：批量入仓时用，一件最多 9 张、冷跑几十秒。
     skipImageReview: bool = False
+    # 本批次的图片后台线程并发上限（与前端「并行件数」一致，最高 5）。
+    # 服务端用它重置图片线程信号量，限制同时写回妙手的件数，防 OOM。
+    itemConcurrency: int = Field(default=5, ge=1, le=5)
 
 
 class CustomCategoryRequest(CamelModel):

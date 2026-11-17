@@ -133,7 +133,7 @@ export function Progress({
             切换时 transition 才不会被打断、进度才能平滑增加
             （两个条件渲染的 div 切换时旧节点被卸载，transition 无从跑）。*/}
         <div
-          className={cn("h-full rounded-full transition-[width] duration-700 ease-out", PROGRESS_TONE[tone])}
+          className={cn("h-full rounded-full transition-[width] duration-150 ease-out", PROGRESS_TONE[tone])}
           style={indeterminate
             ? { width: "30%", animation: "progress-slide 1.2s ease-in-out infinite" }
             : { width: `${clamped}%` }}

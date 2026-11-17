@@ -1089,7 +1089,11 @@ def patch_product_images(ident: str, payload: ProductImagesPatch,
         product.cover = ""
     # 「谁最后改的」：列表页要显示「14:32 由张三修改」
     product.operator_id = getattr(operator, "id", None)
-    # 版本号已由上面的 revision_guard 推到下一版（条件 UPDATE），这里不能再推一次
+    # 版本号已由上面的 revision_guard 推到下一版（条件 UPDATE），这里不能再推一次。
+    # 图片只改本地 payload，不动妙手草稿，所以 draft_verified_revision 随版本号
+    # 一起推进，避免商品从自动化结果列表消失（该列表要求两者一致）。
+    if product.automation_result and product.draft_verified_revision is not None:
+        product.draft_verified_revision = int(product.revision or 0)
     db.flush()
 
     from core.utils import now_ts

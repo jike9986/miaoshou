@@ -26,6 +26,8 @@ export interface ProgressPanelProps {
   publishShopName?: string;
   /** 任务结束后清空状态面板（返回 idle） */
   onReset?: () => void;
+  /** 正在从服务端恢复上次任务记录 */
+  recovering?: boolean;
   className?: string;
 }
 
@@ -48,6 +50,7 @@ export function ProgressPanel({
   run,
   settings,
   onReset,
+  recovering = false,
   className,
 }: ProgressPanelProps) {
   const running = run.phase === "running";
@@ -66,7 +69,7 @@ export function ProgressPanel({
           : "";
   // 图片阶段：挑图 → 识别 → 提交翻译 → 写回。
   // 图片是独立后台线程，文字跑完它可能还在跑，必须单独显示当前步骤。
-  // 四个明确的状态：等待开始 / 识别中 / 翻译中 / 已完成
+  // 四个明确的状态：等待开始 / 排队中（等并发位）/ 识别中 / 翻译中 / 已完成
   const imageStageHint = !settings.imagesEnabled
     ? ""
     : run.imagePlanned === 0
@@ -75,7 +78,7 @@ export function ProgressPanel({
         ? "已翻译完"
         : run.imageDone > 0
           ? "翻译中"
-          : "已选图，等待提交";
+          : "翻译中，等待结果";
   const elapsed = useTickingElapsed(run.startedAt, timerActive);
   const finalElapsed =
     run.startedAt !== null && run.endedAt !== null
@@ -83,54 +86,121 @@ export function ProgressPanel({
       : null;
   const shownElapsed = timerActive ? elapsed : finalElapsed;
 
-  const textPercent = settings.textEnabled && run.total > 0 ? (run.done / run.total) * 100 : 0;
-  const imagePercent = run.imagePlanned > 0 ? (run.imageDone / run.imagePlanned) * 100 : 0;
-  // 批次进度 = 文字和图片都完成才到100：
-  //   - 两者都开启：平均
-  //   - 只开启一项：用那一项
-  //   - 都不开启：按件数
-  const bothEnabled = settings.textEnabled && settings.imagesEnabled;
-  const batchPercent = bothEnabled
-    ? (textPercent + imagePercent) / 2
-    : settings.imagesEnabled
-      ? imagePercent
-      : run.total > 0
-        ? (run.done / run.total) * 100
-        : 0;
-
-  // 进度条平滑动画：
-  //   1. hydrateRun 恢复历史任务时，从 0% 一步跳到 100%，CSS transition 来不及。
-  //      用双 rAF（先渲染 0 → 然后下帧渲染目标值）确保过渡动画跑完整。
-  //   2. 任务正在跑时，每次数值增加也走同样路径，让进度条平滑推进。
-  const rafRef = useRef<number>(0);
-  const [displayBatch, setDisplayBatch] = useState(0);
-  const [displayText, setDisplayText] = useState(0);
-  const [displayImage, setDisplayImage] = useState(0);
-  // track previous target so we can detect a reset (new run)
-  const prevBatchRef = useRef(batchPercent);
-  useEffect(() => {
-    cancelAnimationFrame(rafRef.current);
-    // If percent decreased significantly (reset/new run), jump to 0 first
-    if (batchPercent < prevBatchRef.current - 5) {
-      setDisplayBatch(0);
-      setDisplayText(0);
-      setDisplayImage(0);
-    }
-    prevBatchRef.current = batchPercent;
-    rafRef.current = requestAnimationFrame(() => {
-      setDisplayBatch(batchPercent);
-      setDisplayText(textPercent);
-      setDisplayImage(imagePercent);
-    });
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [batchPercent, textPercent, imagePercent]);
-
   // 「已停止」只在真的被用户中断且还有未处理项时才显示。
   // 若 done >= total（所有项都已完成），即使内部 phase 仍是 stopped，
   // 也按「完成」来展示，避免用户看到自相矛盾的「已停止 + 全部完成」。
   const effectivelyDone =
     run.phase === "done" ||
     (run.phase === "stopped" && run.total > 0 && run.done >= run.total);
+
+  const textPercent = settings.textEnabled && run.total > 0 ? (run.done / run.total) * 100 : 0;
+  // 图片真正完成的判断：imagePlanned>0 且 imageDone>=imagePlanned，或者无需图片翻译
+  const imagesDone = !settings.imagesEnabled
+    || (run.imagePlanned > 0 && run.imageDone >= run.imagePlanned)
+    || run.imagingComplete === true; // 图片线程明确完成（含提交 0 张的情况）
+  // 图片进度：
+  //   - idle 态（没有任务）→ 0%
+  //   - 已完成态且图片也完成 → 锁定 100%，防止状态重置后显示 0%
+  //   - 有提交任务时按完成比例
+  //   - 任务已结束且一张都没提交（无需翻译）视为 100%
+  const imagePercent = run.phase === "idle"
+    ? 0
+    : effectivelyDone && settings.imagesEnabled && imagesDone
+      ? 100
+      : run.imagePlanned > 0
+        ? (run.imageDone / run.imagePlanned) * 100
+        : !running && run.imagePlanned === 0
+          ? 100
+          : 0;
+  // 批次进度 = 文字和图片都完成才到100：
+  //   - idle 态 → 0%
+  //   - 已完成态且图片也完成 → 直接 100%
+  //   - 两者都开启：平均
+  //   - 只开启一项：用那一项
+  //   - 都不开启：按件数
+  const bothEnabled = settings.textEnabled && settings.imagesEnabled;
+  const batchPercent = run.phase === "idle"
+    ? 0
+    : effectivelyDone && imagesDone
+      ? 100
+      : bothEnabled
+        ? (textPercent + imagePercent) / 2
+        : settings.imagesEnabled
+          ? imagePercent
+          : run.total > 0
+            ? (run.done / run.total) * 100
+            : 0;
+
+  // 进度条平滑动画：
+  //   - 每 50ms 向目标值逼近 1%，让进度条逐格计数（1→2→3…），
+  //     而不是一下跳 10-20%（flushSync 并发多件商品时的老问题）。
+  //   - 任务新开时（batchPercent 大幅下降），直接重置到 0 再开始计数。
+  //   - 目标值只通过 ref 传递，避免 setInterval 闭包引用旧值。
+  const TICK_MS = 50;
+  const STEP_PCT = 1;
+  const [displayBatch, setDisplayBatch] = useState(0);
+  const [displayText, setDisplayText] = useState(0);
+  const [displayImage, setDisplayImage] = useState(0);
+  const prevBatchRef = useRef(batchPercent);
+  const displayBatchRef = useRef(0);
+  const displayTextRef = useRef(0);
+  const displayImageRef = useRef(0);
+  const targetBatchRef = useRef(batchPercent);
+  const targetTextRef = useRef(textPercent);
+  const targetImageRef = useRef(imagePercent);
+  // 每次渲染同步目标值（不触发重渲染）
+  targetBatchRef.current = batchPercent;
+  targetTextRef.current = textPercent;
+  targetImageRef.current = imagePercent;
+  // 检测新任务：目标大幅下降时立即归零
+  useEffect(() => {
+    if (batchPercent < prevBatchRef.current - 5) {
+      displayBatchRef.current = 0;
+      displayTextRef.current = 0;
+      displayImageRef.current = 0;
+      setDisplayBatch(0);
+      setDisplayText(0);
+      setDisplayImage(0);
+    }
+    prevBatchRef.current = batchPercent;
+  }, [batchPercent]);
+  // 匀速逼近：每 50ms +1%，只涨不降（降只在上面的重置里处理）
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const tB = targetBatchRef.current;
+      const tT = targetTextRef.current;
+      const tI = targetImageRef.current;
+      let changed = false;
+      if (displayBatchRef.current < tB) {
+        displayBatchRef.current = Math.min(tB, displayBatchRef.current + STEP_PCT);
+        changed = true;
+      } else if (displayBatchRef.current !== tB) {
+        displayBatchRef.current = tB;
+        changed = true;
+      }
+      if (displayTextRef.current < tT) {
+        displayTextRef.current = Math.min(tT, displayTextRef.current + STEP_PCT);
+        changed = true;
+      } else if (displayTextRef.current !== tT) {
+        displayTextRef.current = tT;
+        changed = true;
+      }
+      if (displayImageRef.current < tI) {
+        displayImageRef.current = Math.min(tI, displayImageRef.current + STEP_PCT);
+        changed = true;
+      } else if (displayImageRef.current !== tI) {
+        displayImageRef.current = tI;
+        changed = true;
+      }
+      if (changed) {
+        setDisplayBatch(displayBatchRef.current);
+        setDisplayText(displayTextRef.current);
+        setDisplayImage(displayImageRef.current);
+      }
+    }, TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const phaseMeta =
     run.phase === "running"
       ? { label: "运行中", tone: "info" as const, dot: "info" as const, breathe: true }
@@ -164,6 +234,11 @@ export function ProgressPanel({
           <StatusBadge meta={phaseMeta} />
         </span>
       </div>
+
+      {/* 正在从服务器读取上次任务记录 */}
+      {recovering && (
+        <p className="mt-2 text-2xs leading-4 text-fg-muted">正在读取上次任务记录…</p>
+      )}
 
       <div className="mt-3 rounded-md border border-border-subtle bg-canvas-inset/45 p-2.5">
         <div className="mt-0 grid grid-cols-2 gap-2">
@@ -204,10 +279,12 @@ export function ProgressPanel({
           <p className="num mt-1 h-4 truncate text-2xs leading-4 text-fg-muted">
             {!settings.imagesEnabled
               ? "已关闭 · 不处理图片"
-              : run.phase === "idle"
-                ? "等待开始"
-                : run.phase === "done" && run.imagePlanned === 0
-                  ? "无需翻译 · 图片已清理"
+              : effectivelyDone
+                ? run.imagePlanned > 0
+                  ? `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译 · 已完成`
+                  : "已完成"
+                : run.phase === "idle"
+                  ? "等待开始"
                   : run.imagePlanned === 0
                     ? imageStageHint || "等待识别…"
                     : `${formatCount(run.imageDone)} / ${formatCount(run.imagePlanned)} 张已翻译` +

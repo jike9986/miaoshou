@@ -540,8 +540,21 @@ def normalize_colors(props: Any, sku_map: Mapping[str, Any] | None = None, *,
             continue
         groups.setdefault(name.replace("色", ""), []).append((index, value, name))
     if not groups:
-        # 一个颜色都没剩下：这不再是「备注混进来」，而是颜色根本认不出，
-        # 必须报错——静默产出无颜色商品，上架时平台会拒，线索更难查。
+        # 所有值都没能识别出颜色词（例如商品把「网面」「布面」这类材质描述
+        # 放在颜色属性里）。这种商品不是靠颜色词区分 SKU，而是靠材质/工艺，
+        # 颜色词表无法覆盖所有供应商自造的命名。
+        # 回退：原样保留原始值（去多余空白），让后续流程继续；
+        # 整件失败的代价是所有 SKU 都丢掉，远比多一个非标颜色名更糟。
+        for index, value in enumerate(values):
+            raw_name = " ".join(str(value.get("attrValue") or "").split())
+            if raw_name:
+                groups.setdefault(raw_name, []).append((index, value, raw_name))
+        if groups:
+            # 回退成功：值本身就是颜色名（非标命名），没有东西真的被剔除，
+            # 清空 dropped_remarks 避免下面生成误导性「已剔除」消息。
+            dropped_remarks.clear()
+    if not groups:
+        # 原值也全部为空：这才是真正的「颜色全部无法识别」。
         detail = "；".join(f"{text}（{why}）" for text, why in dropped_remarks[:3]) or "颜色属性为空"  # noqa: E501
         raise ColorError(f"颜色全部无法识别，需要人工确认：{detail}")
 

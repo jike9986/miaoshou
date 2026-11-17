@@ -21,6 +21,67 @@ PROCESS_STATUSES = {"queued", "running", "succeeded", "failed", "needs_review"}
 PUBLISH_STATUSES = {"not_requested", "queued", "running", "succeeded", "failed", "needs_review"}
 
 
+def recover_interrupted_runs_on_startup(db: Session) -> int:
+    """服务重启时把所有卡在 running 状态的 item/run 标记为 failed。
+
+    服务被 OOM-kill 或部署重启时，正在处理的 item 的 process_status 会永远停在
+    'running'，前端收到后认为任务仍在进行，显示「正在恢复」且无法开始新任务。
+    启动时一次性清理，让用户可以直接重试失败的件。
+
+    同时把这些 item 关联的 Product.automation_images.queued 重置为 False，
+    防止紧随其后的 _resume_stuck_image_jobs 看到 queued=True 而重新拉起
+    图片线程 —— 那会导致用户重试时因线程持锁而报「正在处理中」。
+    """
+    import logging
+    logger = logging.getLogger("aohuang.api")
+
+    items = db.query(AutomationRunItem).filter(
+        AutomationRunItem.process_status == "running"
+    ).all()
+    if not items:
+        return 0
+
+    run_ids: set[str] = set()
+    product_ids: set[int] = set()
+    for item in items:
+        item.process_status = "failed"
+        item.process_reason = "处理过程中断（服务重启），请重试这一件。"
+        item.updated_at = now_ts()
+        run_ids.add(str(item.run_id))
+        if item.product_id:
+            product_ids.add(int(item.product_id))
+
+    # Also fix publish_status=running
+    pub_items = db.query(AutomationRunItem).filter(
+        AutomationRunItem.publish_status == "running"
+    ).all()
+    for item in pub_items:
+        item.publish_status = "failed"
+        item.publish_reason = "发布过程中断（服务重启），请重试发布。"
+        item.updated_at = now_ts()
+        run_ids.add(str(item.run_id))
+
+    # 重置中断商品的图片排队状态：queued=True 的产品会被 _resume_stuck_image_jobs
+    # 在启动末尾重新拉起图片线程，导致线程持锁、用户重试时报「正在处理中」。
+    # 把这些产品的 automation_images.queued 置 False 来阻止恢复。
+    if product_ids:
+        prods = db.query(Product).filter(Product.id.in_(list(product_ids))).all()
+        for prod in prods:
+            ai = prod.automation_images
+            if isinstance(ai, dict) and ai.get("queued") is True:
+                prod.automation_images = {**ai, "queued": False, "completed": False}
+
+    # Recompute run status for all affected runs
+    for run_id in run_ids:
+        run = db.query(AutomationRun).filter(AutomationRun.id == run_id).one_or_none()
+        if run is not None:
+            _recompute(run, _items(db, run_id))
+
+    logger.info("启动恢复：重置 %d 件中断的自动化处理 item（清除 %d 件图片排队状态）",
+                len(items), len(product_ids))
+    return len(items)
+
+
 def _teacher_or_admin(operator: Operator) -> bool:
     return operator_service.role_of(operator) in {
         operator_service.ROLE_ADMIN, operator_service.ROLE_TEACHER}
@@ -354,14 +415,25 @@ def start_item(db: Session, run: AutomationRun, item_id: Any) -> dict[str, Any]:
     ).one_or_none()
     if row is None:
         raise errors.not_found("自动化运行商品不存在", itemId=str(item_id))
+    # needs_review 和 failed 都允许重新开始：这类商品上次处理结果不确定或已失败，
+    # 客户端会把它加入「可复用」集合并重跑；server 侧必须同步允许这个转换。
+    # 只有 running / succeeded 才真正拦，不让重复启动。
     changed = (db.query(AutomationRunItem).filter(
         AutomationRunItem.id == row.id,
-        AutomationRunItem.process_status == "queued",
+        AutomationRunItem.process_status.in_(["queued", "needs_review", "failed"]),
     ).update({"process_status": "running", "process_reason": "",
               "updated_at": now_ts()}, synchronize_session="fetch"))
     if changed != 1:
         raise errors.AppError("CONFLICT", "该商品已开始或已有处理结果，不会重复启动",
                               status=409)
+    # 重跑时同步把已终态的发布状态还原为 queued，让本次处理成功后可以正常进入发布流程。
+    # 只还原「曾经因处理失败而被动设成终态」的状态（failed/needs_review）；
+    # 还没开始（queued）和不需要（not_requested）不动。
+    db.query(AutomationRunItem).filter(
+        AutomationRunItem.id == row.id,
+        AutomationRunItem.publish_status.in_(["failed", "needs_review"]),
+    ).update({"publish_status": "queued", "publish_reason": "",
+              "updated_at": now_ts()}, synchronize_session="fetch")
     run.status = "running"
     run.finished_at = None
     run.updated_at = now_ts()
@@ -483,8 +555,13 @@ def finish_process(db: Session, run: AutomationRun, item_id: Any, *, status: str
         images = image_processing_result(product) if product is not None else None
         pending_images = images is not None and images.get("queued") is True
         failed_images = images is not None and images.get("failed", 0) != 0
+        # 图片处理进行中（queued=True）或已完成/失败（queued=False 但 automation_images 存在）
+        # 时，draft_verified_revision 可能还未由后台线程写回 —— 后台线程负责最终核验，
+        # 此处只要商品存在、时间戳合理即可。只在纯文字路径（imagesEnabled=False 或商品
+        # 根本没有 automation_images）时才严格要求 draft_verified_revision 已匹配。
+        images_in_progress = images is not None  # 任何图片任务都算「图片流程进行中」
         if (product is None or product.updated_at < row.updated_at
-                or (not pending_images and not failed_images
+                or (not pending_images and not failed_images and not images_in_progress
                     and (product.draft_verified_revision is None
                     or product.draft_verified_revision != product.revision))):
             raise errors.AppError(

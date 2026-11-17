@@ -129,28 +129,42 @@ function skuPrices(payload: Record<string, unknown> | null | undefined): SkuPric
     ? (payload!.skuPropertyList as Record<string, unknown>[])
     : [];
   const dimNames: string[] = [];
-  const dimIdToLabel: Map<string, string>[] = [];
-  for (const prop of props) {
+  // 全局 id→label 映射
+  const flatIdToLabel = new Map<string, string>();
+  // id→所属维度下标：用于把 key 的每段放进正确的列
+  const idToDimIndex = new Map<string, number>();
+  for (const [dimIdx, prop] of props.entries()) {
     const record = (prop ?? {}) as Record<string, unknown>;
     const name = String(record.attrName ?? record.propName ?? "").trim();
     const values = Array.isArray(record.attrValueList) ? record.attrValueList : [];
-    const idToLabel = new Map<string, string>();
     for (const value of values) {
       const item = (value ?? {}) as Record<string, unknown>;
       const id = String(item.attrValueId ?? "").trim();
       const label = String(item.attrValue ?? "").trim();
-      if (id && label) idToLabel.set(id, label);
+      if (id && label) {
+        flatIdToLabel.set(id, label);
+        idToDimIndex.set(id, dimIdx);
+      }
     }
     dimNames.push(dimLabel(name || "规格"));
-    dimIdToLabel.push(idToLabel);
   }
   const rows: SkuPriceRow[] = [];
   for (const [key, value] of Object.entries(map as Record<string, unknown>)) {
     const sku = (value ?? {}) as Record<string, unknown>;
     if (String(sku.isDelete ?? "0") === "1") continue;
     const parts = String(key).split(";").map((p) => p.trim()).filter(Boolean);
-    const dims = parts.map((part, i) => dimIdToLabel[i]?.get(part) ?? part);
-    while (dims.length < dimNames.length) dims.push("—");
+    // 按维度顺序分槽：每段 ID 查所属维度下标，放进对应槽位
+    const dims = new Array<string>(Math.max(dimNames.length, 1)).fill("—");
+    for (const part of parts) {
+      const idx = idToDimIndex.get(part);
+      if (idx !== undefined && idx < dims.length) {
+        dims[idx] = flatIdToLabel.get(part) ?? part;
+      } else if (idx === undefined) {
+        // 找不到归属时，放到第一个还是"—"的槽
+        const slot = dims.findIndex((d) => d === "—");
+        if (slot >= 0) dims[slot] = flatIdToLabel.get(part) ?? part;
+      }
+    }
     rows.push({
       dims: dims.slice(0, Math.max(dimNames.length, 1)),
       skuCode: String(sku.outSkuId ?? sku.skuId ?? sku.skuCode ?? ""),
@@ -737,26 +751,26 @@ export function ProductDetailPage() {
               {priceData.rows.length === 0 ? (
                 <p className="p-3 text-xs text-fg-muted">没有可展示的 SKU 价格</p>
               ) : (
-                <table className="w-full table-auto text-sm">
+                <table className="w-full table-fixed text-sm">
                   <thead className="sticky top-0 bg-canvas-inset">
                     <tr className="border-b border-border-subtle text-left text-2xs text-fg-muted">
                       {priceData.dimNames.map((name) => (
-                        <th key={name} className="py-2 pl-3 pr-4 font-medium">{name}</th>
+                        <th key={name} className="py-2 pl-3 pr-3 font-medium">{name}</th>
                       ))}
-                      <th className="py-2 pr-4 font-medium">商品SKU</th>
-                      <th className="py-2 pr-4 text-right font-medium">拿货价</th>
-                      <th className="py-2 pr-3 text-right font-medium">库存</th>
+                      <th className="py-2 pl-3 pr-3 font-medium">拿货价</th>
+                      <th className="py-2 pl-3 pr-3 font-medium">库存</th>
+                      <th className="py-2 pl-3 pr-3 font-medium text-fg-muted">商品SKU</th>
                     </tr>
                   </thead>
                   <tbody>
                     {priceData.rows.map((row, i) => (
                       <tr key={i} className="border-b border-border-subtle/60 last:border-0">
                         {row.dims.map((dim, j) => (
-                          <td key={j} className="truncate py-2 pl-3 pr-4 text-fg">{dim || "—"}</td>
+                          <td key={j} className="truncate py-2.5 pl-3 pr-3 text-fg">{dim || "—"}</td>
                         ))}
-                        <td className="num truncate py-2 pr-4 text-xs text-fg-secondary">{row.skuCode || "—"}</td>
-                        <td className="num truncate py-2 pr-4 text-right text-fg-secondary">{row.purchasePrice || "—"}</td>
-                        <td className="num truncate py-2 pr-3 text-right text-fg-secondary">{row.stock}</td>
+                        <td className="num truncate py-2.5 pl-3 pr-3 text-fg">{row.purchasePrice || "—"}</td>
+                        <td className="num truncate py-2.5 pl-3 pr-3 text-fg">{row.stock}</td>
+                        <td className="num truncate py-2.5 pl-3 pr-3 text-xs text-fg-muted">{row.skuCode || "—"}</td>
                       </tr>
                     ))}
                   </tbody>

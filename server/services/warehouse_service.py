@@ -1543,6 +1543,10 @@ def review_product_quality(db: Session, ident: Any, *, weight_kg: float,
         "verifiedByOperatorName": operator_name,
     }
     product.operator_id = operator_id
+    # 重量/尺寸核验只改本地字段，不动妙手草稿，所以 draft_verified_revision 随版本号
+    # 一起推进，避免商品从自动化结果列表消失（该列表要求两者一致）。
+    if product.automation_result and product.draft_verified_revision is not None:
+        product.draft_verified_revision = int(product.revision or 0)
     db.flush()
     return {"id": str(product.id), "revision": int(product.revision),
             "qualityReview": product.quality_review}
@@ -1599,6 +1603,10 @@ def update(db: Session, ident: Any, *, category_id: Any = None, cid: Any = None,
     # 版本号不在这里推：revision_guard 已经把它原子地推到下一版了
     # （带 expected_revision 走条件 UPDATE，不带走内存 +1）。
     # 这里再来一次就会变成一次保存 +2，前端的版本号立刻过期。
+    # 类目/分组/标题只改本地字段，不动妙手草稿，所以 draft_verified_revision
+    # 随版本号一起推进，避免商品从自动化结果列表消失。
+    if product.automation_result and product.draft_verified_revision is not None:
+        product.draft_verified_revision = int(product.revision or 0)
     db.flush()
     names = account_names(db)
     operators = operator_names(db)
@@ -2451,7 +2459,14 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             status=403)
     if (automation_result and existing is not None
             and (existing.automation_images or {}).get("queued") is True):
-        raise errors.busy("该商品的图片仍在处理，请等待完成后再操作")
+        # 若能走到这里说明已经拿到了 warehouse 锁 —— 锁是由图片线程持有的，
+        # 能拿到就说明那个线程已经结束（进程被杀、异常中断等），只是没来得及
+        # 把 queued 写回 False 就死了。把它清掉，本次处理从零开始，不再 busy。
+        existing.automation_images = {
+            **(existing.automation_images or {}),
+            "queued": False, "completed": False,
+        }
+        db.flush()
 
     try:
         response = client.shop_detail(detail_id, shop_id)

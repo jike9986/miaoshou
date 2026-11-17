@@ -242,6 +242,10 @@ export interface RunState {
   imagePlanned: number;
   /** 后台图片翻译失败/结果未知的张数（轮询回填，可选） */
   imageFailed?: number;
+  /** 后台图片线程已明确完成（submitted+failed 有收据，可能 submitted=0）。
+      用于区分「图片还没开始」和「图片跑完但没有需要翻译的图」：
+      两种情况 imagePlanned 都是 0，但只有后者应该视为 imagesDone。 */
+  imagingComplete?: boolean;
   /** 当前阶段文案 */
   stage: string;
   failedKeys: string[];

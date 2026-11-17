@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import threading
 from collections.abc import Mapping
 from typing import Any
 
@@ -18,6 +19,18 @@ from services import account_service, audit_service, collect_box_service
 logger = logging.getLogger("aohuang.api")
 
 router = APIRouter(prefix="/collect-box", tags=["采集箱"])
+
+# 图片后台线程并发信号量。每件商品的图片线程（OCR→翻译→写回妙手）在启动时
+# acquire，全部工作完成后 release。上限由该批次的 itemConcurrency 决定（最高 5）。
+# 默认 5；每次批次启动时用 _reset_image_semaphore() 更新。
+_image_semaphore: threading.Semaphore = threading.Semaphore(5)
+_image_semaphore_lock = threading.Lock()
+
+def _reset_image_semaphore(concurrency: int) -> None:
+    """在每个批次开始前调用，把信号量重置为本批次的并行数。"""
+    global _image_semaphore  # noqa: PLW0603
+    with _image_semaphore_lock:
+        _image_semaphore = threading.Semaphore(max(1, min(5, int(concurrency or 1))))
 
 
 @router.get("", summary="分页查询采集箱（扫描即查询）")
@@ -193,6 +206,7 @@ def process(
     db.commit()
     # 文字+价格+入仓已落库，先把结果返回给前端（几秒），图片翻译后台继续。
     if bg_image_job is not None:
+        _reset_image_semaphore(payload.itemConcurrency)
         _spawn_image_translation(bg_image_job)
     return {"saved": True, "product": product, "images": image_result}
 
@@ -284,8 +298,14 @@ def _resume_stuck_image_jobs() -> list[int]:
 def _spawn_image_translation(job: dict[str, Any]) -> None:
     import threading
 
-    threading.Thread(target=_run_image_translation, args=(job,),
+    threading.Thread(target=_run_image_translation_guarded, args=(job,),
                      name=f"imgtr-{job.get('productId')}", daemon=True).start()
+
+
+def _run_image_translation_guarded(job: dict[str, Any]) -> None:
+    """Acquire the concurrency semaphore then run the actual image translation."""
+    with _image_semaphore:
+        _run_image_translation(job)
 
 
 def _run_image_translation(job: dict[str, Any]) -> None:

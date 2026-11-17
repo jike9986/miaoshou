@@ -286,8 +286,12 @@ async def lifespan(_app: FastAPI):
 
     recover_interrupted_on_startup()
     from db.session import SessionLocal
+    from services.automation_run_service import recover_interrupted_runs_on_startup
     from services.operator_service import migrate_legacy_tokens
 
+    with SessionLocal() as db:
+        recover_interrupted_runs_on_startup(db)
+        db.commit()
     with SessionLocal() as db:
         migrate_legacy_tokens(db)
         db.commit()

@@ -295,6 +295,8 @@ export interface ProcessCollectRequest {
   allowImageReview?: boolean;
   /** 放行标题复核词但不阻断（批量用） */
   allowTitleReview?: boolean;
+  /** 本批次图片后台线程并发上限（与「并行件数」一致，最高 5） */
+  itemConcurrency?: number;
 }
 
 /** 图片翻译提交结果：submitted 才是真的提交了几张，不是商品有几张图 */

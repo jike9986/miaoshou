@@ -58,7 +58,7 @@ export function RunHistoryPanel({ accountId, shopId, running = false, className 
       ) : runs.length === 0 ? (
         <p className="mt-3 text-2xs text-fg-muted">暂无执行记录。</p>
       ) : (
-        <ul className="mt-2.5 flex max-h-72 flex-col gap-1.5 overflow-y-auto pr-1">
+        <ul className="mt-2.5 flex flex-col gap-1.5 overflow-y-auto pr-1" style={{ maxHeight: "16rem" }}>
           {runs.map((run) => {
             const expanded = openId === run.id;
             const hasIssue = run.failed > 0 || run.needsReview > 0;
