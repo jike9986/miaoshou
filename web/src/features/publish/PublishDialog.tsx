@@ -157,7 +157,7 @@ export function PublishDialog({
     if (isTeacher && accounts.length > 1) {
       setCheckedAccountIds(accounts.map((a) => a.id));
       setShopsByAccount({});
-      setSelectedShopByAccount({});
+      setSelectedShopIdsByAccount({});
     } else {
       setCheckedAccountIds([]);
     }
