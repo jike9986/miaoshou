@@ -74,7 +74,6 @@ export function PublishDialog({
   // 老师多账号状态
   const [checkedAccountIds, setCheckedAccountIds] = useState<string[]>([]);
   const [shopsByAccount, setShopsByAccount] = useState<Record<string, Shop[] | null>>({});
-  const [selectedShopByAccount, setSelectedShopByAccount] = useState<Record<string, string>>({});
   const [selectedShopIdsByAccount, setSelectedShopIdsByAccount] = useState<Record<string, string[]>>({});
   const [multiPublishing, setMultiPublishing] = useState(false);
 
