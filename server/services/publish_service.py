@@ -1105,10 +1105,11 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     batch_id = str(payload.get("batchId") or "").strip() or new_batch_id("pub")
     language = payload.get("language")
     language_warning: str | None = None
-    if not claim_only:
-        language_warning = check_language(
-            language, str(target_shop.get("site") or ""),
-            allow_mismatch=payload.get("allowMismatch") is True)
+    # Language check disabled - allow cross-site publishing without restriction
+    # if not claim_only:
+    #     language_warning = check_language(
+    #         language, str(target_shop.get("site") or ""),
+    #         allow_mismatch=payload.get("allowMismatch") is True)
 
     # 发布互斥的键：每件商品在**目标店铺**上的仓库键。
     # 用目标店铺而不是源店铺，是因为「同一件发到同一个店铺」才是真正重复的
