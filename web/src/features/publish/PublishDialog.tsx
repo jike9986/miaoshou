@@ -75,6 +75,7 @@ export function PublishDialog({
   const [checkedAccountIds, setCheckedAccountIds] = useState<string[]>([]);
   const [shopsByAccount, setShopsByAccount] = useState<Record<string, Shop[] | null>>({});
   const [selectedShopByAccount, setSelectedShopByAccount] = useState<Record<string, string>>({});
+  const [selectedShopIdsByAccount, setSelectedShopIdsByAccount] = useState<Record<string, string[]>>({});
   const [multiPublishing, setMultiPublishing] = useState(false);
 
   const shops = useMemo(() => shopsQuery.data?.shops ?? [], [shopsQuery.data?.shops]);
@@ -222,7 +223,7 @@ export function PublishDialog({
       return;
     }
 
-    // 老师多账号：逐账号 fan-out 发布
+    // 老师多账号：逐账号 fan-out 发布，每个账号可发多个店铺
     if (isTeacher && checkedAccountIds.length > 1) {
       setMultiPublishing(true);
       let ok = 0;
@@ -230,36 +231,39 @@ export function PublishDialog({
       const items = toPublishItems(warehouseIds.map((id) => ({ warehouseId: id })));
       for (const accId of checkedAccountIds) {
         const accShops = shopsByAccount[accId] ?? [];
-        const accShopId = selectedShopByAccount[accId] ?? accShops[0]?.shopId ?? shopId;
-        if (!accShopId) {
-          failMsgs.push(`${accId}：无可用店铺`);
-          continue;
-        }
-        try {
-          const publishResult = await publish.mutateAsync({
-            items,
-            shopId: accShopId,
-            accountId: accId,
-            template: template || null,
-            allowMismatch,
-            confirmUnverifiedSpecifications: true,
-            claimOnly: effectiveClaimOnly,
-            confirm: true,
-          });
-          ok++;
-          onSubmitted?.(publishResult);
-        } catch (mutationError) {
-          failMsgs.push(apiErrorMessage(mutationError));
+        const targetShopIds = selectedShopIdsByAccount[accId] ?? [];
+
+        // 如果没有勾选店铺，用第一个作为默认
+        const shopsToPublish = targetShopIds.length > 0 ? targetShopIds : [accShops[0]?.shopId];
+
+        for (const publishShopId of shopsToPublish) {
+          if (!publishShopId) continue;
+          try {
+            const publishResult = await publish.mutateAsync({
+              items,
+              shopId: publishShopId,
+              accountId: accId,
+              template: template || null,
+              allowMismatch,
+              confirmUnverifiedSpecifications: true,
+              claimOnly: effectiveClaimOnly,
+              confirm: true,
+            });
+            ok++;
+            onSubmitted?.(publishResult);
+          } catch (mutationError) {
+            failMsgs.push(apiErrorMessage(mutationError));
+          }
         }
       }
       setMultiPublishing(false);
       if (ok > 0) {
-        toast.success(`已为 ${ok} 个账号提交发布`, {
+        toast.success(`已为 ${ok} 个店铺提交发布`, {
           description: "已提交，平台回执稍后更新",
         });
       }
       if (failMsgs.length > 0) {
-        toast.error(`${failMsgs.length} 个账号发布失败`, { description: failMsgs[0] });
+        toast.error(`${failMsgs.length} 个店铺发布失败`, { description: failMsgs[0] });
       }
       if (ok > 0) {
         onOpenChange(false);
@@ -469,18 +473,31 @@ export function PublishDialog({
                             <p className="mt-0.5 text-xs text-fg-muted">加载店铺中…</p>
                           )}
                           {checked && !accShopsLoading && accShops.length > 1 && (
-                            <div className="mt-1">
-                              <Select
-                                value={accShopId}
-                                onChange={(val) =>
-                                  setSelectedShopByAccount((prev) => ({ ...prev, [account.id]: val }))
-                                }
-                                options={accShops.map((shop) => ({
-                                  value: shop.shopId,
-                                  label: `${shop.name} · ${shop.siteName || shop.site}`,
-                                }))}
-                                placeholder="选择店铺"
-                              />
+                            <div className="mt-2 space-y-1">
+                              {accShops.map((shop) => (
+                                <label key={shop.shopId} className="flex cursor-pointer items-center gap-2 text-xs">
+                                  <input
+                                    type="checkbox"
+                                    className="h-3 w-3 cursor-pointer rounded border-border accent-brand-500"
+                                    checked={(selectedShopIdsByAccount[account.id] ?? []).includes(shop.shopId)}
+                                    onChange={(e) => {
+                                      const prev = selectedShopIdsByAccount[account.id] ?? [];
+                                      if (e.target.checked) {
+                                        setSelectedShopIdsByAccount((s) => ({
+                                          ...s,
+                                          [account.id]: [...prev, shop.shopId],
+                                        }));
+                                      } else {
+                                        setSelectedShopIdsByAccount((s) => ({
+                                          ...s,
+                                          [account.id]: prev.filter((id) => id !== shop.shopId),
+                                        }));
+                                      }
+                                    }}
+                                  />
+                                  <span className="truncate text-fg-secondary">{shop.name}</span>
+                                </label>
+                              ))}
                             </div>
                           )}
                           {checked && !accShopsLoading && accShops.length === 1 && (
