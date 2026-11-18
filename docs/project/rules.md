@@ -26,19 +26,34 @@
 ### 版本号格式
 `0.MINOR.PATCH` — 修 bug 加 PATCH，新功能加 MINOR，不用 MAJOR。
 
-### 四处必须同步
+### 五处必须同步
 ```
 package.json                     "version": "0.1.xx"
 web/package.json                 "version": "0.1.xx"
 app/package.json                 "version": "0.1.xx"
-server/core/constants.py         return "0.1.xx"
+server/core/constants.py         return "0.1.xx"（实际读根 package.json，此为兜底）
+installer/setup.iss              #define MyAppVersion "0.1.xx"
 ```
 
-验证命令（输出应全部一致）：
+> 第 5 处是 2026-11-18 补的：`installer/setup.iss` 的 `MyAppVersion` 决定安装包文件名和
+> 控制面板里显示的版本，漏改它 `scripts/build.ps1` 第一步就 throw。`server/core/constants.py`
+> 的 `APP_VERSION = _package_version()` 优先读仓库根 `package.json`，只有打包后读不到才用字面量。
+
+验证命令（一条命令查全部五处，不一致直接非零退出）：
+```bash
+python -X utf8 scripts/check_version.py      # exit 0 = 五处一致
+```
 ```bash
 grep '"version"' package.json web/package.json app/package.json
 grep 'return "0\.' server/core/constants.py
+grep 'MyAppVersion' installer/setup.iss
 ```
+
+### 打包事实（勿把正常行为当 bug）
+- 正式客户端 **只连远程** `https://aohuang888.com/miaoshou-platform`（`app/src/main.ts` 的 `REMOTE_API_BASE`），`app.isPackaged` 时 `useRemoteServer()` 恒为 true。
+- `app/electron-builder.yml` 的 `extraResources` 只有 `../web/dist → web`，**不分发本地后端**。`release/win-unpacked/resources/` 下没有 `server/` 是设计如此，`scripts/verify-desktop-package.mjs` 也是反向断言。
+- 本地后端只在 dev 或 `AOHUANG_LOCAL_BACKEND=1` 时启动。
+- 只替换 `release/win-unpacked/resources/web/` 等于「换了前端」，不是完成打包。`app.asar` 版本会停在旧值，`node scripts/verify-desktop-package.mjs` 会报 `Packaged app version is stale`。完整打包走 `scripts/build.ps1` 或 `cd app && pnpm exec electron-builder --win --dir`。
 
 ---
 

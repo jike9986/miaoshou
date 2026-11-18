@@ -58,7 +58,10 @@ class BrowserWindow {
     windowOptions = options;
     this.webContents = { mainFrame: { url: "about:blank" },
       setWindowOpenHandler() {}, on: (event, handler) => navigationHandlers.set(event, handler),
-      getZoomFactor: () => 1.0, setZoomFactor() {} };
+      getZoomFactor: () => 1.0, setZoomFactor() {},
+      // main.ts:createWindow 会调它把捏合缩放固定成 1（Electron 31 的 API）。
+      // mock 少了这个方法，脚本会抛 TypeError 而不是报告真正的产物问题。
+      setVisualZoomLevelLimits() {} };
   }
   once() {}
   on() {}

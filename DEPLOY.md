@@ -60,6 +60,39 @@ ssh root@38.95.75.47 'systemctl restart aohuang-listing-v2'
 
 ## 更新客户端安装包
 
+> **先读这条**：正式客户端只连远程 `https://aohuang888.com/miaoshou-platform`，
+> `app/electron-builder.yml` 的 `extraResources` 只放 `../web/dist → web`，
+> **不分发本地后端**。`release/win-unpacked/resources/` 下没有 `server/` 是设计如此。
+>
+> 只把 `web/dist` 复制进 `release/win-unpacked/resources/web/` **不等于打完包**：
+> `app.asar` 里的版本会停在旧值，`node scripts/verify-desktop-package.mjs` 会报
+> `Packaged app version is stale`。这种「半手工替换」只能用于本机快速验证前端改动。
+
+### 发版前置：五处版本号
+
+```bash
+python -X utf8 scripts/check_version.py     # exit 0 才继续
+```
+涉及 `package.json` / `web/package.json` / `app/package.json` /
+`server/core/constants.py` / `installer/setup.iss`（`MyAppVersion`）。
+漏掉最后一处，`scripts/build.ps1` 第一步就 throw。
+
+### 完整打包（推荐）
+
+```bash
+bash scripts/build.ps1        # 校验 → build → electron-builder --win --dir → 校验目录包 → Inno 安装程序
+```
+
+或手工分步：
+
+```bash
+pnpm build
+cd app && pnpm exec electron-builder --win --dir && cd ..
+node scripts/verify-desktop-package.mjs     # 必须通过
+```
+
+### 旧流程（仅供手工排查）
+
 1. 本地构建：`npm run build`，再 `npx electron-builder build --win --publish never`
 2. 生成文件在 `release/` 目录：`奥皇上品-x.y.z-Setup.exe` + `.blockmap`
 3. 计算新安装包的 sha256（用于 version.json）

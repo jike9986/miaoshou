@@ -219,8 +219,12 @@ export function PublishDialog({
       return;
     }
 
-    // 老师多账号：逐账号 fan-out 发布，每个账号可发多个店铺
-    if (isTeacher && checkedAccountIds.length > 1) {
+    // 多账号模式：逐账号 fan-out 发布，每个账号可发多个店铺。
+    //
+    // 条件必须是 `> 0`（不是 `> 1`）：只勾 1 个账号时也要走这条分支。
+    // 走单账号分支的话用的是 shopId（当前连接账号的店铺）且不传 accountId，
+    // 结果是「勾了账号 B，实际发到了账号 A」——用户完全看不出来。
+    if (isTeacher && checkedAccountIds.length > 0) {
       setMultiPublishing(true);
       let ok = 0;
       const failMsgs: string[] = [];
@@ -229,11 +233,20 @@ export function PublishDialog({
         const accShops = shopsByAccount[accId] ?? [];
         const targetShopIds = selectedShopIdsByAccount[accId] ?? [];
 
-        // 如果没有勾选店铺，用第一个作为默认
-        const shopsToPublish = targetShopIds.length > 0 ? targetShopIds : [accShops[0]?.shopId];
+        // 没勾任何店铺时回落到该账号第一个店铺（多店铺账号才可能有多选，
+        // 单店铺账号 UI 上根本没有复选框，这里也是唯一的取值路径）。
+        const shopsToPublish = targetShopIds.length > 0
+          ? targetShopIds
+          : [accShops[0]?.shopId];
 
+        const accName = accounts.find((item) => item.id === accId)?.name ?? accId;
         for (const publishShopId of shopsToPublish) {
-          if (!publishShopId) continue;
+          if (!publishShopId) {
+            failMsgs.push(`${accName}：未选择店铺`);
+            continue;
+          }
+          const shopName = accShops.find((shop) => shop.shopId === publishShopId)?.name
+            ?? publishShopId;
           try {
             const publishResult = await publish.mutateAsync({
               items,
@@ -248,7 +261,9 @@ export function PublishDialog({
             ok++;
             onSubmitted?.(publishResult);
           } catch (mutationError) {
-            failMsgs.push(apiErrorMessage(mutationError));
+            // 失败原因必须带上是「哪个账号的哪个店铺」：只报条数，
+            // 用户面对 10 个账号时无从判断该去重试谁。
+            failMsgs.push(`${accName} / ${shopName}：${apiErrorMessage(mutationError)}`);
           }
         }
       }
@@ -259,7 +274,13 @@ export function PublishDialog({
         });
       }
       if (failMsgs.length > 0) {
-        toast.error(`${failMsgs.length} 个店铺发布失败`, { description: failMsgs[0] });
+        toast.error(`${failMsgs.length} 个店铺发布失败`, {
+          // 前三条逐条列出，更多的折叠成「等 N 条」
+          description: failMsgs.length > 3
+            ? `${failMsgs.slice(0, 3).join("；")}；等 ${failMsgs.length} 条`
+            : failMsgs.join("；"),
+          duration: 12000,
+        });
       }
       if (ok > 0) {
         onOpenChange(false);
@@ -372,13 +393,25 @@ export function PublishDialog({
                 || (isTeacher && accounts.length > 1 ? checkedAccountIds.length === 0 : !shopId)}
               onClick={() => { void submit(); }}
             >
-              {effectiveClaimOnly
-                ? (isTeacher && checkedAccountIds.length > 1
-                    ? `认领到 ${checkedAccountIds.length} 个账号`
-                    : "只认领进采集箱")
-                : (isTeacher && checkedAccountIds.length > 1
-                    ? `向 ${checkedAccountIds.length} 个账号发布 ${warehouseIds.length} 件`
-                    : `发布 ${warehouseIds.length} 件`)}
+              {(() => {
+                // 按钮文案按「实际会提交多少条」算，而不是按账号数：
+                // 10 个账号各勾 2 个店铺时，说「向 10 个账号发布」会严重低估工作量。
+                if (isTeacher && checkedAccountIds.length > 0) {
+                  const targets = checkedAccountIds.reduce((sum, accId) => {
+                    const picked = selectedShopIdsByAccount[accId] ?? [];
+                    if (picked.length > 0) return sum + picked.length;
+                    // 没勾店铺时回落到第一个，和 submit 的分支保持一致
+                    return sum + ((shopsByAccount[accId]?.[0]?.shopId) ? 1 : 0);
+                  }, 0);
+                  if (targets === 0) {
+                    return effectiveClaimOnly ? "认领到采集箱" : `发布 ${warehouseIds.length} 件`;
+                  }
+                  return effectiveClaimOnly
+                    ? `认领到 ${targets} 个店铺`
+                    : `向 ${targets} 个店铺发布 ${warehouseIds.length} 件`;
+                }
+                return effectiveClaimOnly ? "只认领进采集箱" : `发布 ${warehouseIds.length} 件`;
+              })()}
             </Button>
           </>
         )
@@ -429,7 +462,9 @@ export function PublishDialog({
                   <div className="mb-1 flex items-baseline justify-between gap-1">
                     <div className="flex items-baseline gap-1">
                       <span className="text-sm font-medium text-fg">发布账号</span>
-                      <span className="text-xs text-fg-secondary">（老师模式：每个账号独立发布）</span>
+                      <span className="text-xs text-fg-secondary">
+                        （每个账号独立发布；多店铺账号可勾选多个店铺一起发）
+                      </span>
                     </div>
                     <button
                       type="button"

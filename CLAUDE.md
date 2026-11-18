@@ -36,18 +36,32 @@
 
 ## 必须遵守的规则（不可绕过）
 
-### 1. 版本号必须四处同步
+### 1. 版本号必须五处同步
 
-每次发版，必须同时更新以下 4 个文件，版本号保持完全一致：
+每次发版，必须同时更新以下 5 个文件，版本号保持完全一致：
 
 ```
 package.json                   # 根
 web/package.json               # 前端
 app/package.json               # Electron
-server/core/constants.py       # 后端（return "x.y.z"）
+server/core/constants.py       # 后端（APP_VERSION 兜底，优先读根 package.json）
+installer/setup.iss            # MyAppVersion（安装包文件名与控制面板版本）
 ```
 
-用 grep 核实：`grep -r '"version"' package.json app/package.json web/package.json`
+一条命令核实（exit 0 才算过）：
+
+```bash
+python -X utf8 scripts/check_version.py
+```
+
+> 2026-11-18 补：`installer/setup.iss` 之前一直漏在同步清单外，导致 0.1.25 时它停在 0.1.23，
+> `scripts/build.ps1` 第一步「版本与静态检查」直接 throw，整条打包链走不下去。
+
+### 1.1 打包事实（别把正常设计当 bug）
+
+- 正式客户端**只连远程** `https://aohuang888.com/miaoshou-platform`，`app.isPackaged` 时 `useRemoteServer()` 恒 true。
+- `app/electron-builder.yml` 的 `extraResources` 只放 `../web/dist → web`，**不分发本地后端**。`release/win-unpacked/resources/` 没有 `server/` 是正常的。
+- 只替换 `resources/web/` ≠ 打完包。`app.asar` 里的版本会留在旧值，`node scripts/verify-desktop-package.mjs` 会报 `Packaged app version is stale`。要出可发包必须重跑 `scripts/build.ps1` 或 `cd app && pnpm exec electron-builder --win --dir`。
 
 ### 2. 部署流程（不要手动 scp）
 
