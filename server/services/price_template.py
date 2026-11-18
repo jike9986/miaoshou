@@ -19,10 +19,50 @@ FALLBACK_EXCHANGE_RATE = Decimal("1.6393")
 DEFAULT_FREIGHT_TABLE = {
     "currency": "MYR",
     "firstWeightGrams": 30,
-    "firstWeightPrice": 0.18,
+    "firstWeightPrice": 0.06,
     "continuedUnitGrams": 10,
-    "continuedUnitPrice": 0.12,
+    "continuedUnitPrice": 0.08,
 }
+
+# 官方跨境物流运费价格表（妙手「查看官方运价表」弹窗，2026-11-18 负责人提供）。
+#
+# 每个站点一套，**币种各不相同**，这是关键：
+#   MY→MYR  PH→PHP  TH→THB  VN→VND  SG→SGD
+# 原来只有一张 MYR 表，其余四国若没单独配表就会拿 MYR 的数字当本币算，
+# 报价整体失真（菲律宾/泰国/越南/新加坡全错）。
+#
+# 表内数值含义（与妙手界面一致）：
+#   firstWeightGrams    起重重量(g)
+#   firstWeightPrice    起重价格（本币）
+#   continuedUnitGrams  续重单位(g)
+#   continuedUnitPrice  续重价格（每续重单位，本币）
+#
+# 马来有西马/东马两个区，渠道 Standard。此处取西马（Zone A，主要发货区）；
+# 东马起重价 0.06、续重 0.08 与西马相同，仅「买家支付运费」不同，不影响成本。
+OFFICIAL_FREIGHT_TABLES: dict[str, dict[str, Any]] = {
+    "MY": {"currency": "MYR", "firstWeightGrams": 30,
+           "firstWeightPrice": 0.06, "continuedUnitGrams": 10,
+           "continuedUnitPrice": 0.08},
+    "PH": {"currency": "PHP", "firstWeightGrams": 10,
+           "firstWeightPrice": 5.00, "continuedUnitGrams": 10,
+           "continuedUnitPrice": 4.50},
+    "TH": {"currency": "THB", "firstWeightGrams": 10,
+           "firstWeightPrice": 0.40, "continuedUnitGrams": 10,
+           "continuedUnitPrice": 0.40},
+    "VN": {"currency": "VND", "firstWeightGrams": 10,
+           "firstWeightPrice": 500, "continuedUnitGrams": 10,
+           "continuedUnitPrice": 500},
+    "SG": {"currency": "SGD", "firstWeightGrams": 40,
+           "firstWeightPrice": 0.98, "continuedUnitGrams": 10,
+           "continuedUnitPrice": 0.15},
+}
+
+
+def official_freight_table(site: Any) -> dict[str, Any]:
+    """按站点取官方运费表；未知站点退回马来表（历史默认）。"""
+    key = str(site or "MY").strip().upper()
+    table = OFFICIAL_FREIGHT_TABLES.get(key) or OFFICIAL_FREIGHT_TABLES["MY"]
+    return dict(table)
 
 DEFAULT_TEMPLATE: dict[str, Any] = {
     "name": "马来",
@@ -53,8 +93,22 @@ DEFAULT_TEMPLATE: dict[str, Any] = {
     "eCommerceGrowthChargePercent": 0.0,
     "consumptionTaxChargePercent": 0.0,
     "localConsumptionTaxChargePercent": 0.0,
+    # 这两项 2026-11-18 补：妙手模板界面有，代码里原来没有，
+    # normalize_template 不认识的键会被静默丢掉，于是菲律宾/越南的报价
+    # 比官方试算低一截（菲律宾少算 0.52 CNY 订单处理费、越南少算 1% 代扣税）。
+    # 单位与妙手一致：订单处理服务费是固定 CNY 金额，代扣税是售价百分比。
+    "orderProcessCny": None,
+    "enterpriseWithholdPercent": 0.0,
     "freightTable": dict(DEFAULT_FREIGHT_TABLE),
 }
+
+# 固定 CNY 金额的费用项（不是百分比）：算价时先换算成本币再计入成本。
+FIXED_CNY_FIELDS = (
+    "lastMileFreightCny",
+    "platformSupportCny",
+    "otherChargeCny",
+    "orderProcessCny",
+)
 
 # 这六项与原有八项一样是「售价的百分比」，校验与合计口径必须一致。
 EXTRA_CHARGE_FIELDS = (
@@ -105,12 +159,11 @@ def _money(value: Decimal) -> Decimal:
 def normalize_template(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """校验操作者给的模板并补默认值。"""
     template = dict(DEFAULT_TEMPLATE)
+    explicit_table: Mapping[str, Any] | None = None
     if isinstance(raw, Mapping):
         for key, value in raw.items():
             if key == "freightTable" and isinstance(value, Mapping):
-                table = dict(DEFAULT_FREIGHT_TABLE)
-                table.update(value)
-                template["freightTable"] = table
+                explicit_table = value
             elif key in DEFAULT_TEMPLATE:
                 template[key] = value
     name = str(template.get("name") or "马来").strip()
@@ -128,7 +181,8 @@ def normalize_template(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                   "bcpChargePercent"):
         template[field] = float(_percent(template.get(field), field))
     for field in ("platformCommissionPercent", "sfpChargePercent",
-                  "affiliateChargePercent", "lastMileFreightServiceTaxPercent"):
+                  "affiliateChargePercent", "lastMileFreightServiceTaxPercent",
+                  "enterpriseWithholdPercent"):
         template[field] = float(_percent(template.get(field), field))
     for field in EXTRA_CHARGE_FIELDS:
         template[field] = float(_percent(template.get(field), field))
@@ -138,8 +192,21 @@ def normalize_template(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         _optional_decimal(template.get("platformSupportCny"), "平台支持费"))
     template["otherChargeCny"] = float(
         _optional_decimal(template.get("otherChargeCny"), "其他费用"))
+    template["orderProcessCny"] = float(
+        _optional_decimal(template.get("orderProcessCny"), "订单处理服务费"))
 
-    table = template.get("freightTable") or {}
+    # 运费表优先级：模板显式给的 > 按站点取的官方表 > 默认表。
+    #
+    # 这一步必须在 site 解析之后：原来 freightTable 在循环里就用
+    # DEFAULT_FREIGHT_TABLE（写死 MYR）兜底，于是菲律宾/泰国/越南/新加坡
+    # 全都拿 MYR 的运价当本币算，报价整体失真。
+    if explicit_table is not None:
+        table = dict(official_freight_table(site))
+        table.update(explicit_table)
+    else:
+        table = official_freight_table(site)
+    template["freightTable"] = dict(table)
+
     first_g = _decimal(table.get("firstWeightGrams"), "起重重量")
     first_price = _optional_decimal(table.get("firstWeightPrice"), "起重价格")
     unit_g = _decimal(table.get("continuedUnitGrams"), "续重单位")
@@ -160,6 +227,7 @@ def normalize_template(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                 + template["platformCommissionPercent"]
                 + template["sfpChargePercent"] + template["affiliateChargePercent"]
                 + template["lastMileFreightServiceTaxPercent"]
+                + template["enterpriseWithholdPercent"]
                 + sum(template[field] for field in EXTRA_CHARGE_FIELDS))
     if template["profitType"] == "bySalePriceProfit":
         vat = Decimal(str(template["vatChargePercent"]))
@@ -282,7 +350,15 @@ def display_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
     last_mile_myr = Decimal(str(template.get("lastMileFreightCny") or 0)) / rate_d
     support_myr = _money(Decimal(str(template.get("platformSupportCny") or 0)) / rate_d)
     other_myr = _money(Decimal(str(template.get("otherChargeCny") or 0)) / rate_d)
+    order_process_myr = _money(
+        Decimal(str(template.get("orderProcessCny") or 0)) / rate_d)
     purchase_myr = _money(purchase / rate_d)
+    # 币种跟着模板站点走，不再写死 MYR（菲律宾 PHP / 泰国 THB / 越南 VND / 新加坡 SGD）
+    currency = str(
+        (template.get("freightTable") or {}).get("currency")
+        or {"MY": "MYR", "PH": "PHP", "TH": "THB", "VN": "VND", "SG": "SGD"}
+        .get(str(template.get("site") or "MY").upper(), "MYR")
+    )
 
     # 费率缺失时按 0 算会让报价偏低，但不该整单报错——运营的模板常常只填
     # 常用的那几项。这里把「缺了哪几项」记下来，报价标记为估算，
@@ -304,12 +380,20 @@ def display_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
     # 推导（老版 pricing.calculate_template_price 里也是同一处理）。
     extra_pct = {field: Decimal(str(template.get(field) or 0))
                  for field in EXTRA_CHARGE_FIELDS}
+    withhold_pct = Decimal(str(template.get("enterpriseWithholdPercent") or 0))
     profit_pct = Decimal(str(template.get("profitPercent") or 0))
     profit_by_sale = template.get("profitType", "bySalePriceProfit") == "bySalePriceProfit"
 
     def parts(price: Decimal) -> dict[str, Decimal]:
         vat = price * vat_pct / (Decimal("100") + vat_pct) if vat_pct else Decimal("0")
-        service_tax = (price * last_mile_tax_pct / (Decimal("100") + last_mile_tax_pct)
+        # 尾程服务税的基数是**尾程运费**，不是售价。
+        #
+        # 2026-11-18 用马来官方试算反推确认：40CNY/0.8kg 展示价 47.56 MYR 时，
+        # 截图里「尾程运费服务税率」对应金额是 0.60 MYR；
+        # 尾程运费 16.17 CNY ÷ 1.6164 = 10.00 MYR，10.00 × 6% = 0.60 ✓
+        # 而按售价算会得到 47.56 × 6/106 = 2.69，与截图差 4 倍多。
+        # 原来是拿 price 当基数，把整份报价抬高了一截。
+        service_tax = (last_mile_myr * last_mile_tax_pct / Decimal("100")
                        if last_mile_tax_pct else Decimal("0"))
         payment = payment_pct / Decimal("100") * (price + last_mile_myr + service_tax)
         commission = commission_pct / Decimal("100") * price
@@ -317,8 +401,39 @@ def display_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
         sfp = sfp_pct / Decimal("100") * price
         affiliate = affiliate_pct / Decimal("100") * price
         pretax = price - vat - freight
+        # 关税是价内税：税率 10% 指「完税价 × 10%」，而完税价 = 税前价 - 关税。
+        #   关税 = 完税价 × r  →  关税 = 税前价 × r / (1 + r)
+        #
+        # 泰国官方试算核对：411.27 THB 展示价里关税 34.94，
+        # 税前价 = 411.27 - 增值税 26.91 = 384.36，
+        # 384.36 × 10/110 = 34.94 ✓
+        # 按售价直接乘 10% 得 41.13，高估 18%。
+        tariff_rate = extra_pct.get("tariffChargePercent") or Decimal("0")
+        tariff = (pretax * tariff_rate / (Decimal("100") + tariff_rate)
+                  if tariff_rate else Decimal("0"))
+        # 企业商家代扣税：按售价百分比，与 withdraw 同口径进成本
+        withhold = withhold_pct / Decimal("100") * price if withhold_pct else Decimal("0")
+        # 提现手续费的基数是「扣完所有其他费用后的余额」。
+        #
+        # 2026-11-18 用泰国官方试算反推确认：411.27 THB 的展示价里，
+        # 提现 2.68 = 1% × 267.58，而
+        #   411.27 - 增值税26.91 - 运费32.00 - 交易15.74 - 关税34.94
+        #          - 电商增长33.03 - 平台基础1.07 = 267.58 ✓
+        # 原来基数里漏了关税、电商增长、尾程税等项，提现费被高估。
+        # 提现基数 = 售价 - 增值税 - 运费 - 交易手续费 - 关税 - 代扣税 - 订单处理费
+        #            - 佣金 - SFP - 达人佣金 - BCP - 平台支持
+        #
+        # 2026-11-18 越南官方试算核对（30CNY/0.6kg，220312.85 VND）：
+        #   220312.85 - 20028.44(增值税) - 30000(运费) - 15018.45(交易)
+        #             - 3003.31(订单处理) - 2203.13(代扣税) = 150059.52
+        #   150059.52 × 1% = 1500.60 ✓ 与截图完全一致
+        #
+        # 注意：**不含**尾程服务税和「按售价百分比的附加费」——
+        # 这些项本来就不是从售价里扣出来的现金流。
+        # 原来把它们也减掉了，提现费被低估（越南差 30 VND，泰国差 0.6 THB）。
         withdraw = withdraw_pct / Decimal("100") * (
-            pretax - payment - bcp - support_myr - commission - sfp - affiliate)
+            pretax - payment - bcp - support_myr - commission - sfp - affiliate
+            - tariff - withhold - order_process_myr)
         profit = (profit_pct / Decimal("100") * price if profit_by_sale
                   else profit_pct / Decimal("100") * (purchase_myr + freight))
         lines = {
@@ -334,18 +449,35 @@ def display_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
             "lastMileTax": service_tax,
             "platformSupport": support_myr,
             "otherCharge": other_myr,
+            "orderProcess": order_process_myr,
+            "enterpriseWithhold": withhold,
             "profit": profit,
             "pretaxPrice": pretax,
         }
         # 六个附加费率即使为 0 也要写进拆分：cost_keys 会按固定键名求和，
         # 缺键直接 KeyError。顺手让拆分结构稳定 —— 前端不必判断键是否存在。
         for field, pct in extra_pct.items():
-            lines[field] = price * pct / Decimal("100") if pct else Decimal("0")
+            if not pct:
+                lines[field] = Decimal("0")
+                continue
+            # 消费税/本地消费税是价内税（税率含在价格里），和增值税同口径：
+            #   税额 = 含税价 × r / (100 + r)
+            # 新加坡官方试算核对：27.54 SGD 展示价里消费税 2.27，
+            # 27.54 × 9/109 = 2.27 ✓；按 27.54 × 9% 得 2.48，偏高。
+            if field in ("consumptionTaxChargePercent",
+                         "localConsumptionTaxChargePercent"):
+                lines[field] = price * pct / (Decimal("100") + pct)
+            else:
+                lines[field] = price * pct / Decimal("100")
+        # 关税用上面算好的价内税值覆盖（extra_pct 循环里按售价乘出来的那个不准）
+        if tariff_rate:
+            lines["tariffChargePercent"] = tariff
         return lines
 
     cost_keys = ("purchasePrice", "merchantFreight", "vat", "paymentCharge",
                  "platformCommission", "withdrawCharge", "bcpCharge", "sfpCharge",
                  "affiliateCharge", "lastMileTax", "platformSupport", "otherCharge",
+                 "orderProcess", "enterpriseWithhold",
                  *EXTRA_CHARGE_FIELDS)
 
     def residual(price: Decimal) -> Decimal:
@@ -365,7 +497,7 @@ def display_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
     lines = parts(price)
     return {
         "price": float(price),
-        "currency": "MYR",
+        "currency": currency,
         "rate": float(rate_d),
         "purchasePriceCny": float(purchase),
         "packageWeightKg": float(weight),

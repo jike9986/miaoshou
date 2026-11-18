@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import time
 from collections.abc import Mapping
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -749,6 +750,20 @@ def claim_carrier_batch(db: Session, account: Account, *,
                     })
                 payloads, adjustments = publish_service.prepare_claim_payloads(
                     db, payloads, claim_entries, operator_id=operator_id)
+                # 认领到采集箱：价格必须是「拿货价换算成目标站点币种」，
+                # 不能套定价模板。
+                #
+                # 负责人口径（2026-11-18）：
+                #   「从成品仓库认领到采集箱的，后面会在妙手套定价模板再改价的」
+                #   「成品仓库显示的价格都是拿货价，导入采集箱应该也是拿货价」
+                #
+                # 原来这里直接用仓库 payload 里已有的 skuMap.price —— 那个价是
+                # **入仓时套模板算出来的售价**（马来模板会把 22 CNY 算成 40+ MYR），
+                # 于是「认领」看起来像「莫名其妙涨到 50 多」。
+                # 真正的定价发生在妙手那边套模板，不在这里。
+                adjustments = list(adjustments) + _reset_claim_prices_to_purchase(
+                    db, account, payloads, claim_entries,
+                    target_shop_id=str(target_shop_id))
                 stamp = now_ts()
                 for source_index in payload_indexes:
                     detail_id, source_shop_id = normalized[source_index]
@@ -1058,6 +1073,90 @@ def claim_carrier_batch(db: Session, account: Account, *,
         invalidate_account(account)
         db.flush()
         return results
+
+
+
+
+def _reset_claim_prices_to_purchase(
+        db: Session, account: Account, payloads: list[dict[str, Any]],
+        entries: list[dict[str, Any]], *, target_shop_id: str
+) -> list[dict[str, Any]]:
+    """认领前把 skuMap.price 重置成「拿货价按目标站点汇率换算」的结果。
+
+    为什么必须重置（负责人 2026-11-18）：
+      · 成品仓库卡片显示的是拿货价（purchasePriceMin/Max，币种 CNY）；
+      · 但仓库 payload 里的 skuMap.price 是**入仓时套定价模板算出的售价**；
+      · 认领直接沿用 payload，于是「拿货价 22 CNY 的商品」进采集箱后变成
+        40+ MYR（≈67 CNY），看起来像凭空涨价。
+
+    真正的定价发生在妙手那边套模板，认领这一步只需要把拿货价换算成
+    目标站点币种。妙手若判定低于成本下限会自己报错，调用方再按
+    「下限 + 0.01」兜底（见 carrier_service._raise_price_to_reported_floor）。
+
+    换算规则：
+      · 目标币种 = 目标店铺站点对应币种（MY→MYR / PH→PHP / TH→THB ...）；
+      · 拿货价优先取 originPrice（CNY），缺失时退回采购价字段；
+      · priceIncludeVat 同步成同一个数（妙手按含税价展示）。
+    """
+    from services import exchange_rate
+
+    adjustments: list[dict[str, Any]] = []
+    try:
+        shop = require_shop(db, account, target_shop_id)
+    except Exception:  # noqa: BLE001 - 拿不到站点就退回 MYR，不阻断认领
+        shop = None
+    site = str((shop or {}).get("site") or "MY").strip().upper()
+    currency = exchange_rate.currency_for_site(site)
+
+    rate, rate_source = exchange_rate.cached_rate(currency=currency)
+    if rate is None:
+        rate, rate_source = exchange_rate.live_rate(currency=currency)
+    if rate is None:
+        rate = exchange_rate.fallback_rate(currency)
+        rate_source = "内置兜底"
+    rate_d = Decimal(str(rate))
+
+    for index, payload in enumerate(payloads):
+        sku_map = payload.get("skuMap")
+        if not isinstance(sku_map, dict) or not sku_map:
+            continue
+        changed = 0
+        for sku in sku_map.values():
+            if not isinstance(sku, dict) or str(sku.get("isDelete", "0")) == "1":
+                continue
+            purchase = sku.get("originPrice")
+            if purchase in (None, ""):
+                continue
+            try:
+                purchase_d = Decimal(str(purchase))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if purchase_d <= 0:
+                continue
+            local = (purchase_d / rate_d).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+            old = sku.get("price")
+            try:
+                old_d = Decimal(str(old))
+            except (InvalidOperation, TypeError, ValueError):
+                old_d = None
+            if old_d is not None and old_d == local:
+                continue
+            sku["price"] = format(local, ".2f")
+            sku["priceIncludeVat"] = format(local, ".2f")
+            changed += 1
+        if changed:
+            entry = entries[index] if index < len(entries) else {}
+            adjustments.append({
+                "warehouseId": entry.get("warehouseId"),
+                "stage": "claimPrice",
+                "site": site,
+                "currency": currency,
+                "rate": str(rate_d),
+                "rateSource": rate_source,
+                "skuCount": changed,
+            })
+    return adjustments
 
 
 def _stored_claim_payload(product: Product | None) -> dict[str, Any]:

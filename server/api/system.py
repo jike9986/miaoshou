@@ -246,8 +246,15 @@ def _bootstrap_templates(db: DbSession,
     """模板库 + 当前选中名，单独成函数便于上面那段 try/except 包住。"""
     stored = setting_service.price_templates(db)
     items = []
-    for name in stored:
-        items.append({"name": name})
+    for name, raw in stored.items():
+        item: dict[str, Any] = {"name": name}
+        # 带上站点，前端才能「按目标店铺站点自动选对应模板」：
+        # 一个马来模板套到菲律宾店铺会按 MYR 费率算出 PHP 价，必错。
+        if isinstance(raw, dict):
+            site = str(raw.get("site") or "").strip().upper()
+            if site:
+                item["site"] = site
+        items.append(item)
     selected = setting_service.selected_templates(db)
     selected_account_id = None
     if (isinstance(operator, Operator)

@@ -3,7 +3,7 @@
 // 提交成功后不关窗：结果区常驻展示 repriced 明细表与 warning 告警块（可回看），
 // 直到用户主动关闭弹窗；「刷新回执」直接放在结果区，不再只靠 8 秒 toast。
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, PackageCheck, RefreshCw, Send } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -48,6 +48,18 @@ export interface PublishDialogProps {
   accounts?: Array<{ id: string; name: string }>;
 }
 
+/** 五国站点固定顺序：马来 / 菲律宾 / 泰国 / 越南 / 新加坡。 */
+const SITE_ORDER: string[] = ["MY", "PH", "TH", "VN", "SG"];
+
+/** 站点码 → 中文名（勾选框上显示）。 */
+const SITE_LABELS: Record<string, string> = {
+  MY: "马来",
+  PH: "菲律宾",
+  TH: "泰国",
+  VN: "越南",
+  SG: "新加坡",
+};
+
 export function PublishDialog({
   open,
   onOpenChange,
@@ -80,10 +92,105 @@ export function PublishDialog({
   const requiresTemplate = !allowClaimOnly;
 
   const [shopId, setShopId] = useState<string | null>(defaultShopId);
-  const [template, setTemplate] = useState<string>("");
-  // 注意顺序：hasValidTemplate 依赖 template 状态，必须写在 useState 之后，
-  // 否则会命中「Cannot access 'Q' before initialization」的 TDZ 崩溃。
-  const hasValidTemplate = usableTemplates.some((item) => item.name === template);
+
+  /** 模板名 → 站点。用于「按目标店铺站点自动选对应模板」。 */
+  const templateSiteByName = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const item of usableTemplates) {
+      const site = String(
+        (item.template as { site?: unknown } | undefined)?.site ?? ""
+      ).trim().toUpperCase();
+      if (site) map[item.name] = site;
+    }
+    return map;
+  }, [usableTemplates]);
+
+  /** 站点 → 该站点的模板名（一个站点一套，取第一个）。 */
+  const templateNameBySite = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const item of usableTemplates) {
+      const site = templateSiteByName[item.name];
+      if (site && !map[site]) map[site] = item.name;
+    }
+    return map;
+  }, [usableTemplates, templateSiteByName]);
+
+  /** 有模板的站点，按固定顺序 —— 决定一行显示哪几个勾选框。 */
+  const templateSites = useMemo(
+    () => SITE_ORDER.filter((site) => templateNameBySite[site]),
+    [templateNameBySite]
+  );
+
+  /**
+   * 上方选中的店铺覆盖了哪些站点（决定哪些国家的模板可勾）。
+   *
+   * 多账号：勾选账号 × 该账号下勾选的店铺；没勾店铺时按「回落第一个」算，
+   *         和 submit 的分支保持一致。
+   * 单账号：就是当前「目标店铺」那个站点。
+   */
+  const selectedShopSites = useMemo(() => {
+    const sites = new Set<string>();
+    if (isTeacher) {
+      for (const accId of checkedAccountIds) {
+        const accShops = shopsByAccount[accId] ?? [];
+        const picked = selectedShopIdsByAccount[accId] ?? [];
+        const targets = picked.length > 0
+          ? accShops.filter((shop) => picked.includes(shop.shopId))
+          : accShops.slice(0, 1);
+        for (const shop of targets) {
+          const site = String(shop.site ?? "").trim().toUpperCase();
+          if (site) sites.add(site);
+        }
+      }
+    } else {
+      const target = shops.find((shop) => shop.shopId === shopId) ?? shops[0];
+      const site = String(target?.site ?? "").trim().toUpperCase();
+      if (site) sites.add(site);
+    }
+    return SITE_ORDER.filter((site) => sites.has(site));
+  }, [isTeacher, checkedAccountIds, shopsByAccount, selectedShopIdsByAccount,
+      shops, shopId]);
+
+  /** 用户勾了「这次要用模板」的站点。 */
+  const [useTemplateSites, setUseTemplateSites] = useState<string[]>([]);
+  /** 用户主动取消的站点：自动默认勾选时不能把它又勾回来。 */
+  const dismissedSitesRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!open) {
+      dismissedSitesRef.current.clear();
+      return;
+    }
+    setUseTemplateSites((prev) => {
+      const keep = prev.filter(
+        (site) => selectedShopSites.includes(site) && !dismissedSitesRef.current.has(site)
+      );
+      const add = selectedShopSites.filter(
+        (site) => templateNameBySite[site]
+          && !prev.includes(site)
+          && !dismissedSitesRef.current.has(site)
+      );
+      const next = [...keep, ...add];
+      const same = next.length === prev.length
+        && next.every((site, index) => site === prev[index]);
+      return same ? prev : next;
+    });
+  }, [open, selectedShopSites, templateNameBySite]);
+
+  /** 某个站点这次用哪套模板；没勾或没模板就返回 null（不套模板）。 */
+  const templateForSiteName = useCallback(
+    (site: string | null | undefined): string | null => {
+      const key = String(site ?? "").trim().toUpperCase();
+      if (!key || !useTemplateSites.includes(key)) return null;
+      return templateNameBySite[key] ?? null;
+    },
+    [useTemplateSites, templateNameBySite]
+  );
+  // 「本次要套模板的站点」是否都已经选好模板。
+  // 学员发布必填模板：一个站点都没勾就等于没选模板，必须拦住。
+  const hasValidTemplate = useTemplateSites.length > 0
+    && useTemplateSites.every((site) => Boolean(templateNameBySite[site]));
+
   // 汇率覆盖：留空由后端使用有效缓存或实时汇率。
   const [exchangeRate, setExchangeRate] = useState<string>("");
   const [language, setLanguage] = useState<string>("");
@@ -145,7 +252,7 @@ export function PublishDialog({
     setAllowMismatch(false);
     // 默认用该账号当前的定价模板（老版 refreshScheduleTemplates 的 result.current）。
     // 不填的话每次发布都得手动选一次，选漏了就是按原价上架。
-    setTemplate(templatesQuery.data?.selected?.[String(auth?.accountId ?? "")] ?? "");
+
     setExchangeRate("");
     setLanguage("");
     setShopId(defaultShopId);
@@ -177,12 +284,6 @@ export function PublishDialog({
     Boolean(targetShop) &&
     isLanguageMismatch(targetShop?.site ?? "", language, shopsQuery.data?.siteLanguages);
 
-
-  const templateOptions = templates.map((item) => ({
-    value: item.name,
-    label: item.invalid ? `${item.name}（不可用）` : item.name,
-    disabled: item.invalid,
-  }));
 
   /** 回源刷新平台回执（结果区与 toast 共用） */
   const refreshReceipts = (): void => {
@@ -252,7 +353,11 @@ export function PublishDialog({
               items,
               shopId: publishShopId,
               accountId: accId,
-              template: template || null,
+              // 每个店铺用它自己站点的模板：一个 MYR 模板套到 PH 店铺必错。
+              // 用户没勾那个国家的模板就传 null，不硬塞一套。
+              template: templateForSiteName(
+                accShops.find((s) => s.shopId === publishShopId)?.site
+              ),
               allowMismatch,
               confirmUnverifiedSpecifications: true,
               claimOnly: effectiveClaimOnly,
@@ -297,7 +402,9 @@ export function PublishDialog({
       {
         items: toPublishItems(warehouseIds.map((id) => ({ warehouseId: id }))),
         shopId,
-        template: template || null,
+        template: templateForSiteName(
+          (shops.find((shop) => shop.shopId === shopId) ?? shops[0])?.site
+        ),
         allowMismatch,
         confirmUnverifiedSpecifications: true,
         claimOnly: effectiveClaimOnly,
@@ -527,13 +634,27 @@ export function PublishDialog({
                                       });
                                     }}
                                   />
-                                  <span className="truncate text-fg-secondary">{shop.name}</span>
+                                  {/* 必须带站点：同一账号下常有同名的不同国家店铺
+                                      （如两个都叫「LJ&shop.」的马来西亚/菲律宾店），
+                                      只显示店名根本无法分辨该勾哪个。0.1.23 的下拉
+                                      里是「店名 · 站点名」,改复选框时漏掉了这个。 */}
+                                  <span className="truncate text-fg-secondary">
+                                    {shop.name}
+                                    <span className="ml-1 text-fg-muted">
+                                      · {shop.siteName || shop.site}
+                                    </span>
+                                  </span>
                                 </label>
                               ))}
                             </div>
                           )}
                           {checked && !accShopsLoading && accShops.length === 1 && (
-                            <p className="mt-0.5 truncate text-xs text-fg-secondary">→ {accShops[0].name}</p>
+                            <p className="mt-0.5 truncate text-xs text-fg-secondary">
+                              → {accShops[0].name}
+                              <span className="ml-1 text-fg-muted">
+                                · {accShops[0].siteName || accShops[0].site}
+                              </span>
+                            </p>
                           )}
                           {checked && !accShopsLoading && accShops.length === 0 && (
                             <p className="mt-0.5 text-xs text-danger-600">暂无店铺（未绑定）</p>
@@ -570,45 +691,74 @@ export function PublishDialog({
                   ? "正在读取定价模板…"
                   : templatesQuery.isError
                     ? undefined
-                    : requiresTemplate && usableTemplates.length === 0
+                    : usableTemplates.length === 0
                       ? "暂无可用模板，请先在仓库的定价模板中创建并保存模板。"
-                      : requiresTemplate
-                        ? "发布时将按所选模板重算售价"
-                        : templates.length === 0
-                          ? "还没有保存定价模板（可留空）"
-                          : "跨店铺发布时按模板重算售价"
+                      : selectedShopSites.length === 0
+                        ? "先在下方选择目标店铺，对应国家的模板才能勾选"
+                        : "勾选哪个国家就按该国模板重算售价；没勾的不改价"
               }
             >
-              <Select
-                value={template}
-                onChange={(name) => {
-                  setTemplate(name);
-                  // 记住这个账号用哪套：下次打开自动带出来，建定时任务也用它当默认。
-                  //
-                  // 这里是「顺手记住」的副作用写入，用户的主操作是选模板、不是存模板，
-                  // 所以失败**不能**把弹窗打断（他没要求保存，凭什么报错挡住他发布）。
-                  // 但也**不能什么都不做**：原来这个 mutate 完全没有 onError，
-                  // 失败时用户以为记住了，下次打开还是旧模板，而界面上一点提示都没有。
-                  // 折中：toast 说一句「这次没记住，但发布用的是你刚选的」——
-                  // 发布本身用的就是本地 state，不受这个写入影响。
-                  if (name && auth?.accountId) {
-                    selectTemplate.mutate(
-                      { name, account: String(auth.accountId) },
-                      {
-                        onError: (error) => {
-                          toast.warning("模板选择没保存住", {
-                            description: `${apiErrorMessage(error)}。本次发布会用你刚选的「${name}」，但下次打开可能还是旧的。`,
-                          });
-                        },
-                      }
-                    );
-                  }
-                }}
-                options={templateOptions}
-                placeholder={requiresTemplate ? "选择定价模板" : "不使用模板"}
-                disabled={templatesQuery.isLoading || (requiresTemplate && usableTemplates.length === 0)}
-                required={requiresTemplate}
-              />
+              {/*
+                一行显示五国模板复选框（负责人 2026-11-18：不要下拉）。
+                上方店铺选了哪个国家，这里对应国家的模板才能勾 ——
+                没选的国家灰掉，避免「勾了菲律宾却没有菲律宾店铺」这种无效配置。
+              */}
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 py-1">
+                {templateSites.map((site) => {
+                  const enabled = selectedShopSites.includes(site);
+                  const checked = enabled && useTemplateSites.includes(site);
+                  return (
+                    <label
+                      key={site}
+                      title={enabled
+                        ? `按「${templateNameBySite[site]}」模板重算 ${SITE_LABELS[site] || site} 店铺售价`
+                        : `上方没有选择${SITE_LABELS[site] || site}的店铺`}
+                      className={cn(
+                        "flex items-center gap-1.5 text-sm",
+                        enabled
+                          ? "cursor-pointer text-fg"
+                          : "cursor-not-allowed text-fg-muted opacity-50"
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 cursor-pointer rounded border-border accent-brand-500 disabled:cursor-not-allowed"
+                        checked={checked}
+                        disabled={!enabled || templatesQuery.isLoading}
+                        onChange={(e) => {
+                          const on = e.target.checked;
+                          setUseTemplateSites((prev) =>
+                            on ? [...prev.filter((s) => s !== site), site]
+                               : prev.filter((s) => s !== site)
+                          );
+                          // 记住用户的手动决定，别让默认勾选把它又勾回来
+                          if (on) dismissedSitesRef.current.delete(site);
+                          else dismissedSitesRef.current.add(site);
+                          const name = templateNameBySite[site];
+                          if (on && name && auth?.accountId) {
+                            selectTemplate.mutate(
+                              { name, account: String(auth.accountId) },
+                              {
+                                onError: (error) => {
+                                  toast.warning("模板选择没保存住", {
+                                    description: `${apiErrorMessage(error)}。本次发布会用「${name}」，但下次打开可能还是旧的。`,
+                                  });
+                                },
+                              }
+                            );
+                          }
+                        }}
+                      />
+                      <span>{SITE_LABELS[site] || site}</span>
+                    </label>
+                  );
+                })}
+                {templateSites.length === 0 && (
+                  <span className="text-xs text-fg-muted">
+                    暂无可用模板，请先在仓库的定价模板中创建
+                  </span>
+                )}
+              </div>
               {templatesQuery.isError && (
                 <InlineError onRetry={() => void templatesQuery.refetch()}>
                   定价模板读取失败：{apiErrorMessage(templatesQuery.error)}

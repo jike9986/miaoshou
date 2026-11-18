@@ -1009,6 +1009,40 @@ def _weight_of(payload: Mapping[str, Any]) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
+def _template_name_for_site(db: Session, name: Any, site: str) -> Any:
+    """模板站点与目标店铺站点不一致时，换成同站点的模板（找不到就原样返回）。
+
+    为什么需要：多店铺账号常常同时发 MY 和 PH，而模板是按国家配的
+    （马来模板用 MYR 费率、菲律宾模板用 PHP 费率）。拿马来模板去发菲律宾店，
+    算出来的数字套的是 MYR 的税率结构，报价一定不对。
+    """
+    wanted_site = str(site or "").strip().upper()
+    if not wanted_site:
+        return name
+    # 没选模板就保持没选：这里替用户"补一个"会绕过「学员必须选模板」的校验，
+    # 等于替他做了一个涉及钱的决定。
+    chosen = str(name or "").strip()
+    if not chosen:
+        return name
+    stored = setting_service.price_templates(db)
+    if not isinstance(stored, dict) or not stored:
+        return name
+    chosen_raw = stored.get(chosen)
+    chosen_site = ""
+    if isinstance(chosen_raw, Mapping):
+        chosen_site = str(chosen_raw.get("site") or "").strip().upper()
+    if chosen_site == wanted_site:
+        return name
+    for candidate, raw in stored.items():
+        if not isinstance(raw, Mapping):
+            continue
+        if str(raw.get("site") or "").strip().upper() == wanted_site:
+            logger.info("模板「%s」站点 %s 与目标店铺站点 %s 不一致，改用「%s」",
+                        chosen or "(未选)", chosen_site or "?", wanted_site, candidate)
+            return candidate
+    return name
+
+
 def _find_template(db: Session, name: str | None) -> Mapping[str, Any] | None:
     wanted = str(name or "").strip()
     if not wanted:
@@ -1103,13 +1137,9 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             logger.info("学员发布包含未核验规格商品 %s（不拦截）",
                         [item["warehouseId"] for item in unverified_specs])
     batch_id = str(payload.get("batchId") or "").strip() or new_batch_id("pub")
-    language = payload.get("language")
+    # 语言校验已停用（负责人 2026-11-17：允许跨站点发布，不再按站点语言拦截）。
+    # 原来这里还留着一个没被使用的 language 变量和注释掉的调用，ruff F841 一直报。
     language_warning: str | None = None
-    # Language check disabled - allow cross-site publishing without restriction
-    # if not claim_only:
-    #     language_warning = check_language(
-    #         language, str(target_shop.get("site") or ""),
-    #         allow_mismatch=payload.get("allowMismatch") is True)
 
     # 发布互斥的键：每件商品在**目标店铺**上的仓库键。
     # 用目标店铺而不是源店铺，是因为「同一件发到同一个店铺」才是真正重复的
@@ -1121,6 +1151,16 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     member_claimed_publish = member_publish and not member_automation_publish
     if member_claimed_publish and not str(template_name or "").strip():
         template_name = setting_service.selected_template_name(db, str(account.id))
+    # 模板站点必须和目标店铺站点一致，否则报价必错：
+    # 一个「马来」模板（MYR 费率、VAT 10%）套到菲律宾店铺，
+    # 会用 MYR 的费率结构算出一个 PHP 数字，既不是马来价也不是菲律宾价。
+    #
+    # 前端已经按站点自动选模板；这里再兜一道，是因为：
+    #   · 老版本客户端只会传一个全局模板名；
+    #   · 定时任务等非弹窗路径没有前端参与。
+    # 只在「传进来的模板站点 ≠ 目标站点」且「库里存在同站点模板」时才替换，
+    # 不做任何隐式猜测（找不到同站点模板就保持原样，让上游自己报错）。
+    template_name = _template_name_for_site(db, template_name, str(target_shop.get("site") or ""))
     template = _find_template(db, template_name)
     if member_claimed_publish and template is None:
         raise errors.AppError(errors.TEMPLATE_INVALID,
@@ -1402,10 +1442,20 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             failures.extend({"detailId": item.split(":", 1)[0], "reason": item}
                             for item in filled["failures"])
             if not filled["saved"]:
+                # 必须把真实原因一起带出去。原来是一句笼统的「载体全部写入失败」，
+                # 用户和运维都看不出是「账号 9 的两个店铺在妙手侧报了
+                # 未选择预发布店铺」（2026-11-18 实测），只能去翻日志。
+                # failureDetails 里是逐条原因，failures 是精简串，两者都带上。
+                reasons = [str(item) for item in (filled.get("failures") or [])]
+                headline = reasons[0] if reasons else "载体写入失败"
                 raise errors.AppError(
                     errors.CARRIER_UNAVAILABLE,
-                    "载体全部写入失败，本次没有发布任何商品",
-                    status=422, details={"failures": filled["failures"][:5]})
+                    f"载体全部写入失败，本次没有发布任何商品。原因：{headline}",
+                    status=422,
+                    details={"failures": reasons[:5],
+                             "failureDetails": (filled.get("failureDetails") or [])[:5],
+                             "shopId": str(target_shop_id),
+                             "accountId": str(account.id)})
             sources = filled.get("savedSources") or []
             filled_sources = [int(i) for i in sources if isinstance(i, int)
                               and 0 <= i < len(entries)]

@@ -744,3 +744,150 @@ def test_uncertain_copy_failure_is_not_retried():
     with pytest.raises(carrier_service.CarrierError, match="勿重复操作"):
         carrier_service.collect_carriers(None, client, count=1)
     assert len(client.calls) == 1
+
+
+def test_fill_falls_back_to_site_detail_for_site_model_carrier(monkeypatch):
+    """双店铺账号复制出来的载体是 site 维度，shop_detail 会报「未选择预发布店铺」。
+
+    真实对照（2026-11-18 实测）：
+      · 账号 9（2 个店铺）：载体 editModel="site"，shop_detail 报
+        「未选择预发布店铺」，site_detail 正常返回 ossMd5。
+      · 账号 4/5（1 个店铺）：载体 editModel="shop"，shop_detail 正常。
+    结论：不是账号配置问题，是读接口选错了。
+    """
+    class Client:
+        def __init__(self):
+            self.shop_reads = 0
+            self.site_reads = 0
+            self.saved = []
+
+        def shop_detail(self, *_args):
+            self.shop_reads += 1
+            raise MiaoshouError("妙手接口失败 [fail]：未选择预发布店铺")
+
+        def site_detail(self, detail_id, site):
+            self.site_reads += 1
+            return {"data": {"ossMd5": "site-md5", "site": site,
+                             "siteCollectItemInfo": {"title": "a"}}}
+
+        def save_shop(self, detail_id, _shop_id, md5, _body):
+            self.saved.append((detail_id, md5))
+
+    client = Client()
+    result = carrier_service.fill_carriers(
+        client, [7], [{"title": "a", "site": "MY", "skuMap": {
+            "sku-a": {"price": "9.19", "priceIncludeVat": "9.19"}}}],
+        shop_id=9, warehouse_id="w1", verify_readback=False)
+
+    assert result["saved"] == [7], "site 维度载体必须能写入"
+    assert result["failures"] == []
+    assert client.shop_reads == 1, "先试 shop 维度"
+    assert client.site_reads == 1, "失败后应退回 site 维度"
+    assert client.saved == [(7, "site-md5")]
+
+
+def test_fill_prefers_shop_detail_when_it_works():
+    """shop 维度（单店铺账号的常态）不能因为加了 site 回退就多付一次失败往返。"""
+    class Client:
+        def __init__(self):
+            self.site_reads = 0
+
+        def shop_detail(self, *_args):
+            return {"data": {"ossMd5": "shop-md5", "shopCollectItemInfo": {"title": "a"}}}
+
+        def site_detail(self, *_args):
+            self.site_reads += 1
+            raise AssertionError("shop 维度可用时不该读 site")
+
+        def save_shop(self, *_args):
+            pass
+
+    client = Client()
+    result = carrier_service.fill_carriers(
+        client, [8], [{"title": "a", "site": "MY", "skuMap": {
+            "sku-a": {"price": "9.19", "priceIncludeVat": "9.19"}}}],
+        shop_id=9, warehouse_id="w1", verify_readback=False)
+
+    assert result["saved"] == [8]
+    assert client.site_reads == 0
+
+
+def test_carrier_snapshot_surfaces_shop_error_when_both_fail():
+    """两个维度都读不出来时，抛 shop 维度的原始错误（信息量更大）。"""
+    class Client:
+        def shop_detail(self, *_args):
+            raise MiaoshouError("妙手接口失败 [fail]：未选择预发布店铺")
+
+        def site_detail(self, *_args):
+            raise MiaoshouError("妙手接口失败 [fail]：此产品在采集箱中已被删除")
+
+    try:
+        carrier_service._carrier_snapshot(Client(), 9, 1, "MY")
+    except MiaoshouError as exc:
+        assert "未选择预发布店铺" in str(exc)
+    else:
+        raise AssertionError("两个维度都失败时必须抛错")
+
+
+def test_fill_binds_carrier_to_target_shop_before_writing():
+    """多店铺账号的载体是 site 维度，写入前必须显式绑到目标店铺。
+
+    实测（2026-11-18，account 9 有 MY+PH 两个店铺）：
+      · claimed 复制出的草稿：editModel="site", collectBoxDetailShopList=[]
+      · 直接 save_shop → 「店铺ID【19956376】未设置为预发布店铺」
+      · 先 claim_to_shop([detailId], [shopId]) 再 save_shop → 成功
+    单店铺账号之所以没事，是妙手复制时自动绑了唯一那个店铺。
+    """
+    class Client:
+        def __init__(self):
+            self.bound = []
+            self.saved = []
+            self._bound = False
+
+        def claim_to_shop(self, detail_ids, shop_ids):
+            self.bound.append((list(detail_ids), list(shop_ids)))
+            self._bound = True
+            return {"data": None}
+
+        def shop_detail(self, detail_id, _shop_id):
+            if not self._bound:
+                raise MiaoshouError("妙手接口失败 [fail]：店铺ID【9】未设置为预发布店铺")
+            return {"data": {"ossMd5": "md5", "editModel": "shop",
+                             "shopCollectItemInfo": {"title": "a"}}}
+
+        def save_shop(self, detail_id, _shop_id, md5, _body):
+            self.saved.append((detail_id, md5))
+
+    client = Client()
+    result = carrier_service.fill_carriers(
+        client, [11], [{"title": "a", "site": "MY", "skuMap": {
+            "sku-a": {"price": "9.19", "priceIncludeVat": "9.19"}}}],
+        shop_id=19956376, warehouse_id="w1", verify_readback=False)
+
+    assert client.bound == [([11], [19956376])], "写入前必须先绑定目标店铺"
+    assert result["saved"] == [11]
+    assert result["failures"] == []
+    assert client.saved == [(11, "md5")]
+
+
+def test_fill_still_succeeds_when_binding_raises_for_already_bound_carrier():
+    """已绑定的载体重复 claim_to_shop 可能报错，不能因此判死。"""
+    class Client:
+        def __init__(self):
+            self.saved = []
+
+        def claim_to_shop(self, *_args):
+            raise MiaoshouError("该商品已在店铺中")
+
+        def shop_detail(self, *_args):
+            return {"data": {"ossMd5": "md5", "shopCollectItemInfo": {"title": "a"}}}
+
+        def save_shop(self, detail_id, _shop_id, md5, _body):
+            self.saved.append(detail_id)
+
+    result = carrier_service.fill_carriers(
+        Client(), [12], [{"title": "a", "site": "MY", "skuMap": {
+            "sku-a": {"price": "9.19", "priceIncludeVat": "9.19"}}}],
+        shop_id=9, warehouse_id="w1", verify_readback=False)
+
+    assert result["saved"] == [12], "绑定报错但载体可读时仍应写入"

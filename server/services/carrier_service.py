@@ -715,7 +715,10 @@ def _readback_mismatches(client: MiaoshouClient, detail_id: int, shop_id: int,
     from services import pre_save_check, readback_check
 
     try:
-        snapshot = client.shop_detail(detail_id, shop_id)
+        # site 维度的载体必须用站点接口读，否则报「未选择预发布店铺」，
+        # 会让读回核验把本来成功的发布判成失败。
+        snapshot, _block, _md5 = _carrier_snapshot(
+            client, detail_id, shop_id, str(product.get("site") or "MY"))
     except (MiaoshouError, ValueError, errors.AppError) as exc:
         # 读不回来就不算核验通过。返回原因而不是空列表，调用方会记失败。
         return [f"readbackUnavailable({type(exc).__name__}: {str(exc)[:60]})"]
@@ -1581,6 +1584,79 @@ def adapt_payload(payload: Mapping[str, Any], *, shop_id: int,
     return body
 
 
+def _ensure_carrier_bound_to_shop(client: MiaoshouClient, detail_id: int,
+                                  shop_id: int, site: str) -> None:
+    """确保载体已绑定到目标店铺（= 妙手说的「预发布店铺」）。
+
+    为什么必须显式绑：公共箱复制（claimed）出来的草稿是 site 维度，
+    collectBoxDetailShopList 为空。妙手在写入（save_shop_collect_item_info）
+    前要求存在预发布店铺，否则报「店铺ID【xxx】未设置为预发布店铺」。
+
+    单店铺账号从来不会遇到：复制时妙手会自动绑上唯一那个店铺。
+    多店铺账号没有唯一解，妙手不绑，于是**必然**发布失败。
+
+    claim_to_shop 是幂等的：已绑定的载体再调一次返回 data=null，不报错。
+    所以这里不先读状态，直接绑，少一次往返（每件省约 1s）。
+    """
+    try:
+        client.claim_to_shop([detail_id], [shop_id])
+        logger.info("载体 %s 已绑定预发布店铺 %s（站点 %s）", detail_id, shop_id, site)
+    except AttributeError:
+        # 调用方传进来的 client 没有 claim_to_shop（测试替身或别的上游实现）。
+        # 不能因为缺一个方法就让整批崩掉，交给后面的读取判定。
+        logger.debug("client 不支持 claim_to_shop，跳过预绑定 detailId=%s", detail_id)
+    except MiaoshouError as exc:
+        # 绑定失败不在这里判死：有可能是已经绑好了（某些账号下重复绑会报错）。
+        # 交给后面的 _carrier_snapshot 判定——它能读到 ossMd5 就说明可用，
+        # 读不到才真正失败，并且会带上更有信息量的原始错误。
+        logger.info("载体 %s 绑定店铺 %s 时上游返回：%s（继续尝试读取）",
+                    detail_id, shop_id, str(exc)[:120])
+
+
+def _carrier_snapshot(client: MiaoshouClient, detail_id: int, shop_id: int,
+                      site: str) -> tuple[dict[str, Any], Mapping[str, Any], Any]:
+    """按载体的 editModel 选对读接口，返回 (snapshot, block, ossMd5)。
+
+    公共箱复制出来的载体可能是两种维度之一：
+      · "shop"：已归属某个店铺 → 只能走 get_shop_collect_item_info(detailId, shopId)
+      · "site"：只归属站点     → 必须走 get_site_collect_item_info(detailId, site)
+
+    拿 shop 接口去读 site 维度的载体，妙手返回的是
+    「未选择预发布店铺」——文案像是在说店铺没配置，实际是读错了接口。
+    反过来（用 site 接口读 shop 维度）同样拿不到正确的 ossMd5。
+
+    做法：先按 shop 维度读；失败就退回 site 维度。两个都失败才抛原始错误。
+    先 shop 后 site 是因为 shop 维度是绝大多数情况（单店铺账号、已绑定的载体），
+    不该为了少数 site 维度让常见路径多付一次失败的往返。
+    """
+    shop_error: Exception | None = None
+    try:
+        snapshot = client.shop_detail(detail_id, shop_id)
+        block = snapshot.get("data") or {}
+        if block.get("ossMd5"):
+            return snapshot, block, block.get("ossMd5")
+        # 读到了但没有 ossMd5：可能是 site 维度，退回去再试
+        shop_error = CarrierError("载体缺少 ossMd5", detailId=str(detail_id))
+    except MiaoshouError as exc:
+        shop_error = exc
+
+    try:
+        snapshot = client.site_detail(detail_id, site)
+        block = snapshot.get("data") or {}
+        if block.get("ossMd5"):
+            logger.info("载体 %s 是 site 维度（%s），改用站点接口读取", detail_id, site)
+            return snapshot, block, block.get("ossMd5")
+        raise CarrierError("载体缺少 ossMd5", detailId=str(detail_id))
+    except (MiaoshouError, AttributeError):
+        # AttributeError：调用方传进来的 client 没有 site_detail（测试替身、
+        # 或将来换成别的上游实现）。这种情况下没有 site 维度可言，
+        # 按 shop 维度的错误处理即可，不要因为缺一个方法就崩掉整批。
+        #
+        # site 维度也读不出来时同样把 shop 维度的原始错误抛出去，
+        # 那条「未选择预发布店铺」对排查更有信息量。
+        raise shop_error from None
+
+
 def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                   payloads: Iterable[Mapping[str, Any]], *, shop_id: int,
                   progress: Callable[[dict[str, Any]], None] | None = None,
@@ -1616,13 +1692,25 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             progress({"stage": "fill" if verify_readback else "saving",
                       "detailId": detail_id})
         try:
-            snapshot = client.shop_detail(detail_id, shop_id)
-            block = snapshot.get("data") or {}
-            oss_md5 = block.get("ossMd5")
+            site = str(payload.get("site") or "MY")
+            # 公共箱复制出来的载体默认是 **site 维度**（collectBoxDetailShopList 为空）。
+            # 妙手要求写入前必须有一个「预发布店铺」，否则 save_shop 报
+            # 「店铺ID【xxx】未设置为预发布店铺」。
+            #
+            # 单店铺账号看不出来：妙手复制时会自动把唯一那个店铺绑上，
+            # 所以载体直接就是 shop 维度。**多店铺账号没有唯一解，不会自动绑**，
+            # 于是发布必然失败——这就是「一个店铺的账号能发、两个店铺的发不了」
+            # 的全部原因，跟账号有没有配过什么完全无关。
+            #
+            # 修法：写入前显式 claim_to_shop 把载体绑到本次的目标店铺。
+            # 已绑定的载体再绑一次是幂等的（妙手返回 data=null，不报错），
+            # 所以不用先读状态判断，省掉一次往返。
+            _ensure_carrier_bound_to_shop(client, detail_id, shop_id, site)
+            snapshot, block, oss_md5 = _carrier_snapshot(
+                client, detail_id, shop_id, site)
             if not oss_md5:
                 raise CarrierError("载体缺少 ossMd5", detailId=str(detail_id))
             # 每个商品的 cid 可能不同，逐个解析成目标站点可用的叶子类目
-            site = str(payload.get("site") or "MY")
             cached_tree = None
             if category_trees is not None:
                 if site not in category_trees:
@@ -1720,11 +1808,11 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                         logger.info("载体版本变动，重读 ossMd5 后重试 detailId=%s（第 %d/%d 轮）",
                                     detail_id, version_refresh_count, MAX_VERSION_REFRESH)
                         time.sleep(1.2)
-                        fresh = client.shop_detail(detail_id, shop_id)
-                        fresh_md5 = (fresh.get("data") or {}).get("ossMd5")
+                        # 同一批载体可能混着 shop / site 两种维度，重读也走同一套判定
+                        fresh, _fresh_block, fresh_md5 = _carrier_snapshot(
+                            client, detail_id, shop_id, site)
                         if not fresh_md5:
                             raise
-                        snapshot = fresh
                         oss_md5 = fresh_md5
                         continue
                     raise
