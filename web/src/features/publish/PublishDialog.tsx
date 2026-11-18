@@ -18,7 +18,6 @@ import {
   useSelectTemplate,
 } from "@/lib/queries";
 import type { PublishResponse, RepricedEntry, Shop } from "@/lib/types";
-import { useOperatorIdentity } from "@/lib/operator";
 import {
   Badge,
   Button,
@@ -60,10 +59,8 @@ export function PublishDialog({
   accounts = [],
 }: PublishDialogProps) {
   const navigate = useNavigate();
-  const identity = useOperatorIdentity();
-  // 多账号模式只给老师/管理员；role 可能是 null/undefined（还没加载），
-  // 只要不是明确的 "member" 且有多账号，就显示多账号选择器
-  const isTeacher = identity?.role !== "member" && accounts.length > 1;
+  // 多账号模式：只要有多个账号就显示多账号选择器
+  const isTeacher = accounts.length > 1;
   const { data: auth } = useAuthStatus();
   const shopsQuery = useShops(auth?.accountId, { enabled: open && connected });
   const templatesQuery = useTemplates(open && connected);
@@ -479,18 +476,20 @@ export function PublishDialog({
                                     className="h-3 w-3 cursor-pointer rounded border-border accent-brand-500"
                                     checked={(selectedShopIdsByAccount[account.id] ?? []).includes(shop.shopId)}
                                     onChange={(e) => {
-                                      const prev = selectedShopIdsByAccount[account.id] ?? [];
-                                      if (e.target.checked) {
-                                        setSelectedShopIdsByAccount((s) => ({
-                                          ...s,
-                                          [account.id]: [...prev, shop.shopId],
-                                        }));
-                                      } else {
-                                        setSelectedShopIdsByAccount((s) => ({
-                                          ...s,
-                                          [account.id]: prev.filter((id) => id !== shop.shopId),
-                                        }));
-                                      }
+                                      setSelectedShopIdsByAccount((s) => {
+                                        const prev = s[account.id] ?? [];
+                                        if (e.target.checked) {
+                                          return {
+                                            ...s,
+                                            [account.id]: [...prev, shop.shopId],
+                                          };
+                                        } else {
+                                          return {
+                                            ...s,
+                                            [account.id]: prev.filter((id) => id !== shop.shopId),
+                                          };
+                                        }
+                                      });
                                     }}
                                   />
                                   <span className="truncate text-fg-secondary">{shop.name}</span>
