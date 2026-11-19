@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import { api, apiErrorMessage } from "@/lib/api";
 import { queryKeys } from "@/lib/queryKeys";
@@ -40,6 +40,33 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
 }) {
   const [expanded, setExpanded] = useState<string | null>(focusJobId);
   const refreshLogs = useRefreshPublishLogs();
+  const queryClient = useQueryClient();
+
+  // 删除任务记录：只删本地批次台账，妙手侧已发出的商品不受影响。
+  const removeJob = useMutation({
+    mutationFn: (batchId: string) =>
+      api.del<{ deleted: number }>(
+        "/claim-jobs/" + encodeURIComponent(batchId),
+        undefined,
+        { query: { accountId } },
+      ),
+    onSuccess: () => {
+      toast.success("任务记录已删除");
+      void queryClient.invalidateQueries({ queryKey: queryKeys.claimJobs.all });
+      void list.refetch();
+    },
+    onError: (error: Error) => {
+      toast.error("删除失败", { description: apiErrorMessage(error) });
+    },
+  });
+
+  // 发布任务的 detailId 是「店铺:商品」，展示时拆开，让人看得出发到哪个店。
+  const renderDetailLabel = (detailId: string): string => {
+    const separator = detailId.indexOf(":");
+    if (separator <= 0) return "仓库商品 " + detailId;
+    return "店铺 " + detailId.slice(0, separator) + " · 商品 "
+      + detailId.slice(separator + 1);
+  };
   const detail = useQuery({
     queryKey: queryKeys.claimJobs.detail(operatorId, accountId, expanded ?? "none"),
     queryFn: () => api.get<BatchDetailResponse>(`/claim-jobs/${encodeURIComponent(expanded!)}`, { query: { accountId } }),
@@ -108,14 +135,29 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
               <Badge variant={job.status === "done" ? "success" : job.status === "failed" ? "danger" : job.status === "processing" ? "warning" : "info"}>{job.status === "failed" && succeeded > 0 ? "部分失败" : labels[job.status] ?? job.status}</Badge>
               <span>店铺 {job.shopId}</span>
               <span className="text-fg-muted">{formatDate(job.createdAt)}</span>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="ml-auto"
-                aria-expanded={expanded === job.id}
-                aria-controls={`claim-job-${job.id}`}
-                onClick={() => setExpanded(expanded === job.id ? null : job.id)}
-              >{expanded === job.id ? "收起明细" : "查看明细"}</Button>
+              <div className="ml-auto flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-expanded={expanded === job.id}
+                  aria-controls={`claim-job-${job.id}`}
+                  onClick={() => setExpanded(expanded === job.id ? null : job.id)}
+                >{expanded === job.id ? "收起明细" : "查看明细"}</Button>
+                {/* 只有已结束的任务能删：在跑的任务删掉会让后台线程写到一半没行可写。 */}
+                {!active && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-danger-600 hover:text-danger-700"
+                    loading={removeJob.isPending && removeJob.variables === job.id}
+                    onClick={() => {
+                      if (window.confirm("删除这条任务记录？（只删本地台账，妙手侧商品不受影响）")) {
+                        removeJob.mutate(job.id);
+                      }
+                    }}
+                  >删除</Button>
+                )}
+              </div>
             </div>
             <Progress
               className="mt-3"
@@ -157,7 +199,7 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
                 )}
                 {detail.data?.items.map((item) => (
                   <div key={item.id} className="flex flex-wrap gap-x-3 gap-y-1 border-t border-border-subtle py-2">
-                    <span className="min-w-0 flex-1 break-all">仓库商品 {item.detailId}</span>
+                    <span className="min-w-0 flex-1 break-all">{renderDetailLabel(item.detailId)}</span>
                     <span className="shrink-0">{labels[item.status] ?? item.status}</span>
                     {item.message && <span className="w-full break-words text-fg-muted">{item.message}</span>}
                   </div>

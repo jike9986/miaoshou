@@ -80,3 +80,65 @@ if (isTeacher && checkedAccountIds.length > 1) {
 - `usePublish` 每次 mutate 生成新的 `idempotencyKey("pub")`（`queries.ts:110-116`），扇出 N 个店铺 = N 个独立 key
 - 后端按「商品 × 目标店铺」的 `publish_keys` 去重（`publish_service.py` 内注释），所以并发发到不同店铺不会互相挡
 - 连点两次「发布」会产生全新 key，**重复上架不会被拦** —— 需批次级去重（见 tasks.md 待完成）
+
+---
+
+## 五国定价（2026-11-18）
+
+### 官方运费表（按站点分离，币种各异）
+
+| 站点 | 币种 | 起重 | 起重价 | 续重单位 | 续重价 |
+| --- | --- | --- | --- | --- | --- |
+| MY | MYR | 30g | 0.06 | 10g | 0.08 |
+| PH | PHP | 10g | 5.00 | 10g | 4.50 |
+| TH | THB | 10g | 0.40 | 10g | 0.40 |
+| VN | VND | 10g | 500 | 10g | 500 |
+| SG | SGD | 40g | 0.98 | 10g | 0.15 |
+
+代码：`price_template.OFFICIAL_FREIGHT_TABLES`，`official_freight_table(site)` 取表。
+模板里显式给了 `freightTable` 时以模板为准，否则按站点取官方表。
+
+### 五套模板参数（利润统一 15%）
+
+| 模板 | 站点 | 尾程运费CNY | 主要费率 |
+| --- | --- | --- | --- |
+| 马来 | MY | 16.17 | 交易3.78% / VAT10% / BCP3.24% / 平台支持0.81 / 尾程税6% |
+| 菲律宾 | PH | 6.29 | 交易2.24% / 包邮5.5% / 订单处理0.52 |
+| 泰国 | TH | 15.55 | 交易3.21% / VAT7% / 关税10% / 电商增长8.03% / 平台支持0.21 |
+| 越南 | VN | 7.79 | 交易6% / VAT10% / 订单处理0.78 / 代扣税1% |
+| 新加坡 | SG | 0 | 交易3.27% / 消费税9% |
+
+### 三处容易算错的基数
+
+1. **尾程服务税**：基数是尾程运费，不是售价
+   `service_tax = last_mile_local × rate`
+   （马来 47.56 MYR 展示价里该项 0.60；按售价算会得 2.69，差 4 倍）
+2. **关税**：价内税，`关税 = 税前价 × r / (100 + r)`
+   （泰国 411.27 里关税 34.94；按售价直乘得 41.13，高估 18%）
+3. **提现费基数**：扣完其他所有费用后的余额
+   `base = 税前价 - 交易 - BCP - 平台支持 - 佣金 - SFP - 达人 - 关税 - 代扣税 - 订单处理`
+   （越南 220312.85 里提现 1500.60，与该口径完全一致）
+
+### 按站点选模板
+
+前端：`PublishDialog` 一行五国复选框。`selectedShopSites` 算上方选中店铺的站点集合，
+只有该集合里的国家才可勾选；勾了才套模板，没勾传 `null` 不套模板。
+
+后端：`publish_service._template_name_for_site(db, name, site)` ——
+传进来的模板站点与目标店铺站点不一致时，换同站点模板（找不到就保持原样）。
+兜住老客户端与定时任务这类没有前端参与的路径。
+
+### 载体绑定预发布店铺
+
+多店铺账号从公共箱复制出的载体是 `editModel="site"`、`collectBoxDetailShopList=[]`，
+写入前必须 `claim_to_shop([detailId], [shopId])` 绑到目标店铺，否则报
+「店铺ID【xxx】未设置为预发布店铺」。单店铺账号妙手会自动绑，所以看不到这个问题。
+
+读载体也要按维度：`shop` 用 `get_shop_collect_item_info`，
+`site` 用 `get_site_collect_item_info`（`carrier_service._carrier_snapshot` 自动选）。
+
+### 认领价格
+
+认领到采集箱时 `skuMap.price` 重置为「拿货价 ÷ 目标站点汇率」，不套定价模板。
+真正的定价发生在妙手那边套模板（负责人 2026-11-18 明确）。
+函数：`collect_box_service._reset_claim_prices_to_purchase`。

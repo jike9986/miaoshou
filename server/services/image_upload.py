@@ -408,6 +408,122 @@ def referenced_temp_names(db: Any) -> set[str]:
     return names
 
 
+
+
+# --- 成品图优化：转 JPEG + 生成缩略图 -----------------------------------
+#
+# 背景（负责人 2026-11-18）：
+#   · 图床里 1,067 张商品图存成了 PNG，单张最大 3.8 MB —— PNG 是无损格式，
+#     为截图设计，照片用它纯属浪费。同尺寸 JPG 只有它的 1/20。
+#   · 列表页一张卡片显示 200×200，却加载 654 KB 原图，一页 20 件 = 13 MB 流量。
+#   · 用户看的是软件里的列表，这些图全走服务器带宽。
+#
+# 做法：只在「临时库 → 成品库」搬文件时转一次。
+#   · 不在翻译前转：翻译 API 返回什么格式不确定，前面转了可能白转；
+#   · 不在前端转：原图必须保真，发布到妙手用的就是原图。
+#
+# 缩略图放 products/thumbs/ 子目录，不另建顶级目录 —— 公开前缀不用改两套。
+PRODUCT_JPEG_QUALITY = 92      # 原图转码质量，视觉无损
+THUMB_MAX_SIDE = 200           # 缩略图最长边（列表卡片 200×200）
+THUMB_JPEG_QUALITY = 82        # 缩略图质量
+THUMB_SUBDIR = "thumbs"
+
+
+def _flatten_alpha(image: Any) -> Any:
+    """把带透明通道的图合成到白底上。
+
+    直接转 RGB 会把透明区域填成黑色，商品图背景就毁了（白底变黑底）。
+    image_service._shrink 里有一份同样的逻辑，这里复用同一个思路。
+    """
+    from PIL import Image
+
+    has_alpha = image.mode in ("RGBA", "LA") or (
+        image.mode == "P" and "transparency" in image.info)
+    if not has_alpha:
+        return image.convert("RGB")
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    background = Image.new("RGB", image.size, (255, 255, 255))
+    background.paste(image, mask=image.split()[3])
+    return background
+
+
+def _encode_jpeg(image: Any, quality: int) -> bytes:
+    """把 PIL Image 编码成 JPEG 字节。"""
+    import io
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=quality, optimize=True,
+                progressive=True)
+    return buffer.getvalue()
+
+
+def optimize_product_image(raw: bytes) -> tuple[bytes, str]:
+    """把原图转成 JPEG；返回 (字节, 扩展名)。已经是 JPEG 的原样返回。
+
+    **永不失败**：Pillow 没装、图损坏、转完反而更大 —— 一律返回原字节，
+    让入库继续。图片优化不能把商品入库搞挂。
+    """
+    if not raw:
+        return raw, ""
+    # 已经是 JPEG 的不重复压 —— 二次压缩只会掉画质，省不下多少体积
+    if raw.startswith(b"\xff\xd8\xff"):
+        return raw, ".jpg"
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            converted = _flatten_alpha(image)
+            encoded = _encode_jpeg(converted, PRODUCT_JPEG_QUALITY)
+        # 转完更大就保留原样（小图/已高度压缩的图会这样）
+        if len(encoded) >= len(raw):
+            return raw, ""
+        return encoded, ".jpg"
+    except Exception as exc:  # noqa: BLE001 - 优化失败绝不阻断入库
+        logger.warning("商品图转 JPEG 失败（保留原格式）：%s", str(exc)[:120])
+        return raw, ""
+
+
+def make_thumbnail(raw: bytes) -> bytes | None:
+    """生成最长边 THUMB_MAX_SIDE 的 JPEG 缩略图；失败返回 None。"""
+    if not raw:
+        return None
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            converted = _flatten_alpha(image)
+            converted.thumbnail((THUMB_MAX_SIDE, THUMB_MAX_SIDE), Image.LANCZOS)
+            return _encode_jpeg(converted, THUMB_JPEG_QUALITY)
+    except Exception as exc:  # noqa: BLE001 - 缩略图失败不影响原图
+        logger.warning("生成缩略图失败：%s", str(exc)[:120])
+        return None
+
+
+def thumb_url_of(url: str) -> str:
+    """成品区图片地址 → 对应缩略图地址；非成品区返回空串。
+
+    https://.../products/abc.jpg → https://.../products/thumbs/abc.jpg
+    前端拿这个字段做 src，取不到就回退原图。
+    """
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    _dir, product_base, _l, _b = _zone_paths("product")
+    if not text.startswith(product_base):
+        return ""
+    name = text[len(product_base):]
+    if not name or "/" in name:
+        return ""
+    stem = name.rsplit(".", 1)[0]
+    return f"{product_base}{THUMB_SUBDIR}/{stem}.jpg"
+
 def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
     """把临时区的图搬到成品区，返回新的公开地址。
 

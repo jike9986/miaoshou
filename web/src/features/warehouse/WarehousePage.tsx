@@ -1240,13 +1240,16 @@ export function WarehousePage() {
         connected={connected}
         allowClaimOnly={!isMember}
         accounts={auth?.accounts?.map((item) => ({ id: item.id, name: item.name })) ?? []}
-        onSubmitted={(result) => {
+        onJobsCreated={(batchIds) => {
           clearWarehouseSelection();
-          // 发布提交后自动关闭弹窗、切到批次标签，让用户能看到任务进度
-          if (result.publishRequested || (result.published?.length ?? 0) > 0) {
-            setPublishOpen(false);
-            setTab("batch");
-            void claimJobs.refetch();
+          // 任务已落库：立刻关窗并切到「批次」，用户在那里看每个店铺的进度。
+          // 发布本身在后台跑，这里不等待任何上游调用。
+          setPublishOpen(false);
+          setTab("batch");
+          void claimJobs.refetch();
+          if (batchIds.length > 0) {
+            // 把新任务放到查询缓存里，避免用户切过去时列表还是空的
+            void queryClient.invalidateQueries({ queryKey: queryKeys.claimJobs.all });
           }
         }}
       />

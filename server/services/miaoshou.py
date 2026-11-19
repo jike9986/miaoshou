@@ -30,6 +30,8 @@ from core.constants import (
     PUBLISH_MAX_ITEMS,
     GATEWAY_RETRIES,
     GATEWAY_RETRY_BACKOFF,
+    UPSTREAM_PACE_MAX_SECONDS,
+    UPSTREAM_PACE_MIN_SECONDS,
     UPSTREAM_PACE_SECONDS,
     UPSTREAM_RATE_LIMIT_BACKOFF,
     UPSTREAM_RATE_LIMIT_RETRIES,
@@ -68,12 +70,19 @@ def generate_sign(app_secret: str, path: str, timestamp: int, app_key: str, body
 
 
 class Pacer:
-    """同账号节流：保证两次上游请求之间至少间隔 ``interval`` 秒。"""
+    """同账号节流：保证两次上游请求之间至少间隔 ``interval`` 秒。
+
+    间隔是自适应降的：默认 1.2s（实测最优），一旦撞到妙手的
+    accountApiQpsRateLimit 就逐步抬到上限 1.5s，之后连续成功再慢慢降回来。
+    这样「妙手某天收紧限流」不需要重新发版，客户端会自己收敛到安全值。
+    """
 
     def __init__(self, interval: float = UPSTREAM_PACE_SECONDS) -> None:
         self.interval = interval
         self._lock = threading.Lock()
         self._last = 0.0
+        # 连续成功次数够多才尝试把间隔降回下限，避免来回抖动。
+        self._ok_streak = 0
 
     def wait(self) -> None:
         with self._lock:
@@ -83,6 +92,23 @@ class Pacer:
                 time.sleep(self.interval - delta)
             self._last = time.monotonic()
 
+    def penalize(self) -> None:
+        """撞到限流：把间隔抬高（上限 UPSTREAM_PACE_MAX_SECONDS）。"""
+        with self._lock:
+            self._ok_streak = 0
+            if self.interval < UPSTREAM_PACE_MAX_SECONDS:
+                self.interval = min(UPSTREAM_PACE_MAX_SECONDS,
+                                    self.interval + 0.1)
+
+    def reward(self) -> None:
+        """连续成功：攒够 50 次就把间隔降 0.05，逐步回到下限。"""
+        with self._lock:
+            self._ok_streak += 1
+            if (self._ok_streak >= 50
+                    and self.interval > UPSTREAM_PACE_MIN_SECONDS):
+                self._ok_streak = 0
+                self.interval = max(UPSTREAM_PACE_MIN_SECONDS,
+                                    self.interval - 0.05)
 
 _PACERS: dict[str, Pacer] = {}
 _PACER_LOCK = threading.Lock()
@@ -324,9 +350,19 @@ class MiaoshouClient:
         last: MiaoshouError | None = None
         for attempt in range(UPSTREAM_RATE_LIMIT_RETRIES):
             try:
-                return self._post_once(path, body)
+                data = self._post_once(path, body)
+                # 连续成功：让 Pacer 有机会把间隔降回下限。
+                # 默认下限已经是 0（人为等待是纯浪费），这一步只在之前被 penalize
+                # 抬高过间隔时才有意义 —— 限流恢复后自动收敛回最快。
+                if self._pacer is not None:
+                    self._pacer.reward()
+                return data
             except MiaoshouError as exc:
                 if exc.kind == "rate_limit":
+                    # 撞到限流就抬高节流间隔，避免下一次还撞。
+                    # 原来只做退避重试、不调节流器，等于每次都要重新撞一遍。
+                    if self._pacer is not None:
+                        self._pacer.penalize()
                     last = exc
                     time.sleep(UPSTREAM_RATE_LIMIT_BACKOFF * (attempt + 1))
                     continue

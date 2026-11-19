@@ -20,6 +20,7 @@ from api import (
     images,
     operators,
     publish,
+    publish_jobs,
     schedules,
     shops,
     size_charts,
@@ -57,8 +58,8 @@ _guarded = APIRouter(dependencies=[
 router.dependencies.append(Depends(track_client))
 
 for _module in (auth, automation_runs, shops, collect_box, warehouse, groups, categories,
-                images, publish, schedules, words, carrier, size_charts, titles,
-                sync, batch, claim_jobs, common_box):
+                images, publish, publish_jobs, schedules, words, carrier,
+                size_charts, titles, sync, batch, claim_jobs, common_box):
     _guarded.include_router(_module.router)
 
 # /words 是 /violation-words 的短路径别名（任务书用短名，契约用长名）

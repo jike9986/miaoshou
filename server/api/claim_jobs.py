@@ -48,3 +48,24 @@ def job_detail(batch_id: str, db: DbSession, operator: OperatorDep,
     return {"batch": batch_service.serialize(batch),
             "items": [batch_service.serialize_item(row)
                       for row in batch_service.items_of(db, batch.id)]}
+
+
+@router.delete("/{batch_id}")
+def delete_job(batch_id: str, db: DbSession, operator: OperatorDep,
+               accountId: str) -> dict[str, Any]:
+    """删除任务记录。发布任务与认领任务按 kind 分发到各自的 service。
+
+    只删本地的批次台账，妙手侧已发出的商品不受影响（那是不可撤销动作）。
+    """
+    require_writable(db)
+    account = account_service.require_account(db, accountId)
+    batch = claim_job_service.get(db, batch_id, account.id, operator=operator)
+    kind = str((batch.settings or {}).get("kind") or "")
+    if kind == "publish_job":
+        from services import publish_job_service
+
+        result = publish_job_service.delete(db, batch_id, account.id, operator=operator)
+    else:
+        result = claim_job_service.delete(db, batch_id, account.id, operator=operator)
+    db.commit()
+    return result

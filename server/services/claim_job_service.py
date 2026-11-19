@@ -24,6 +24,9 @@ from services import (
 
 logger = logging.getLogger(__name__)
 KIND = "warehouse_claim"
+# 发布到店铺的任务（publish_job_service）和认领任务共用同一个批次页与同一套
+# 批次表，只是 kind 不同。批次页要能同时看到两种，所以这里放行两个 kind。
+VISIBLE_KINDS = (KIND, "publish_job")
 MAX_ITEMS = 5000
 COPY_BATCH_SIZE = 100
 
@@ -216,7 +219,8 @@ def _claim_chunk_outcome(result: Any, chunk: list[dict[str, Any]]) -> tuple[
 def get(db: Session, batch_id: str, account_id: int,
         operator: Operator | None = None) -> Batch:
     batch = batch_service.get(db, batch_id)
-    if batch.account_id != account_id or (batch.settings or {}).get("kind") != KIND:
+    if (batch.account_id != account_id
+            or (batch.settings or {}).get("kind") not in VISIBLE_KINDS):
         raise errors.not_found("任务不存在", batchId=batch_id)
     _assert_job_owner(batch, operator)
     return batch
@@ -229,7 +233,7 @@ def list_jobs(db: Session, account_id: int, limit: int,
     if not _is_global_operator(operator):
         query = query.filter(Batch.operator_id == operator.id)
     rows = query.order_by(Batch.created_at.desc()).all()
-    jobs = [row for row in rows if (row.settings or {}).get("kind") == KIND]
+    jobs = [row for row in rows if (row.settings or {}).get("kind") in VISIBLE_KINDS]
     return {"items": [batch_service.serialize(row) for row in jobs[:limit]], "total": len(jobs)}
 
 
@@ -260,6 +264,19 @@ def recover_interrupted_on_startup() -> int:
         return count
     finally:
         db.close()
+
+
+def delete(db: Session, batch_id: str, account_id: int,
+           operator: Operator | None = None) -> dict[str, Any]:
+    """删掉一条已结束的任务记录（只删台账，不动妙手侧任何商品）。"""
+    batch = get(db, batch_id, account_id, operator)
+    if batch.status in {"pending", "running"}:
+        raise errors.busy("任务还在跑，等它结束再删", batchId=batch.id)
+    db.query(BatchItem).filter(BatchItem.batch_id == batch.id).delete(
+        synchronize_session=False)
+    db.delete(batch)
+    db.flush()
+    return {"deleted": 1, "batchId": batch_id}
 
 
 def run(batch_id: str) -> None:

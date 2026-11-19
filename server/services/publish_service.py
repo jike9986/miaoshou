@@ -1300,7 +1300,6 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                     if filled is None:
                         raise errors.unprocessable(
                             f"认领需要新建载体并写入商品，但失败了：{last_error}") from None
-                    carriers = filled.get("carriers") or []
                 except carrier_service.CarrierError as exc:
                     raise errors.unprocessable(
                         f"认领需要新建载体并写入商品，但失败了：{exc}") from None
@@ -1427,18 +1426,36 @@ def publish(db: Session, payload: Mapping[str, Any], *,
             payloads, repriced = _repricing(payloads, entries, template, rate)
             # 载体重建前先用待发布商品的货源补链接池（与旧实现 sync_source_links 一致）
             carrier_service.harvest_from_payloads(db, payloads)
+            # 串行两段：先把载体全复制出来，再逐个写入。
+            #
+            # 2026-11-18 试过改成流水线（collect_and_fill_carriers，边复制边写入），
+            # 同一批 10 件实测 **更慢**：串行 70.8s（复制17.9+写入53.0）vs 流水线 80.5s。
+            #
+            # 原因：MiaoshouClient 的 Pacer 是「按账号共享的一把锁 + 1.5s 间隔」。
+            # 生产者复制和消费者写入抢同一把锁，每个请求都要排队等满 1.5s；而串行时
+            # 上游响应本身（复制 1.8s / 写入 5.2s）已经超过 1.5s，排队等待被自然吸收。
+            # 换句话说：**并发在这里没有收益，只会多出净等待**。所以保持串行。
+            #
+            # 读回核验按负责人 2026-11-18 口径关闭：仓库商品在入仓阶段已完整质检，
+            # 发布时再逐件拉回详情核对（约 3s/件）属于重复劳动。
             carriers = carrier_service.collect_carriers(db, client, count=len(entries))
-            # 发布路径必须开读回核验（2026-11-07 修）。
-            # 之前这里没传 verify_readback，默认 False，等于「载体重建完直接发布」：
-            # 上游 save_shop 只要不抛异常就算成功，而妙手对字段是宽松的 ——
-            # 标题没写进去、价格被压、类目下沉失败都可能静默通过，
-            # 结果就是「发布成功」的商品实际是残缺的。
-            # 认领（claim_only）路径才允许跳过：那一步只是铺数据，
-            # 真正的发布在别处，读回代价（每件约 6s）不值得。
+            # 类目树在整批里只该查一次（1.8s/次）。
+            #
+            # 2026-11-18 负责人：「查类目树…不是这一批货都要的吗，重复处理不是麻烦吗」——
+            # 之前这里没传 category_trees，fill_carriers 收到 None 后
+            # resolve_leaf_cid(tree=None) 每件都会自己去查一次类目树，
+            # 10 件就白查 10 次（约 18 秒）。这里提前查好传进去，整批复用。
+            site_of_payload = str((payloads[0] or {}).get("site") or "MY").upper()
+            category_trees: dict[str, Any] = {}
+            try:
+                category_trees[site_of_payload] = client.category_tree(site_of_payload)
+            except Exception as exc:  # noqa: BLE001 - 查不到就保持原类目，不阻断发布
+                logger.warning("发布前查类目树失败（按原类目发布）：%s", exc)
+                category_trees[site_of_payload] = False
             filled = carrier_service.fill_carriers(client, carriers, payloads,
                                                    shop_id=int(target_shop_id),
-                                                   verify_readback=True,
-                                                   strict_readback=True)
+                                                   verify_readback=False,
+                                                   category_trees=category_trees)
             failures.extend({"detailId": item.split(":", 1)[0], "reason": item}
                             for item in filled["failures"])
             if not filled["saved"]:

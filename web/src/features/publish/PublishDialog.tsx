@@ -43,7 +43,10 @@ export interface PublishDialogProps {
   /** 每件商品自己的来源 shopId，用来判断跨店铺发布（要建载体） */
   sourceShopIds?: Record<string, string>;
   connected: boolean;
+  /** 保留给「发布结果区」用（任务化之后正常路径不再走它）。 */
   onSubmitted?: (result: PublishResponse) => void;
+  /** 发布任务创建成功：父组件据此刷新批次列表并切到批次页。 */
+  onJobsCreated?: (batchIds: string[]) => void;
   /** 老师多账号模式：同时向多个账号发布 */
   accounts?: Array<{ id: string; name: string }>;
 }
@@ -67,7 +70,7 @@ export function PublishDialog({
   defaultShopId,
   allowClaimOnly = true,
   connected,
-  onSubmitted,
+  onJobsCreated,
   accounts = [],
 }: PublishDialogProps) {
   const navigate = useNavigate();
@@ -194,8 +197,9 @@ export function PublishDialog({
   // 汇率覆盖：留空由后端使用有效缓存或实时汇率。
   const [exchangeRate, setExchangeRate] = useState<string>("");
   const [language, setLanguage] = useState<string>("");
-  const [claimOnly, setClaimOnly] = useState(false);
-  const effectiveClaimOnly = allowClaimOnly && claimOnly;
+  // 负责人 2026-11-18：去掉「只认领进采集箱，不上架」开关，发布就是发布。
+  // 认领走仓库页的「认领到采集箱」按钮，两条路不该混在一个弹窗里。
+  const effectiveClaimOnly = false;
   const [allowMismatch, setAllowMismatch] = useState(false);
   // 负责人 2026-11-05：发布不再需要二次确认勾选，默认视为已确认。
   const [confirmed, setConfirmed] = useState(true);
@@ -248,7 +252,6 @@ export function PublishDialog({
     if (!open) return;
     setError(null);
     setConfirmed(true);
-    setClaimOnly(false);
     setAllowMismatch(false);
     // 默认用该账号当前的定价模板（老版 refreshScheduleTemplates 的 result.current）。
     // 不填的话每次发布都得手动选一次，选漏了就是按原价上架。
@@ -320,135 +323,105 @@ export function PublishDialog({
       return;
     }
 
-    // 多账号模式：逐账号 fan-out 发布，每个账号可发多个店铺。
+    // 统一走后台任务：点发布只创建任务，真正的发布在后台线程里按店铺推进。
     //
-    // 条件必须是 `> 0`（不是 `> 1`）：只勾 1 个账号时也要走这条分支。
-    // 走单账号分支的话用的是 shopId（当前连接账号的店铺）且不传 accountId，
-    // 结果是「勾了账号 B，实际发到了账号 A」——用户完全看不出来。
+    // 为什么不能在前端串行 await（负责人 2026-11-18 反馈「正在提交然后没反应」）：
+    //   后端每个店铺都要在妙手重建载体，实测单店 30~60 秒；5 个店铺串行就是
+    //   几分钟，而 usePublish 的 timeoutMs 只有 180 秒 —— 前端先超时断开，
+    //   用户看到按钮一直停在「正在提交…」，实际后台还在跑。
+    //
+    // 任务化之后：创建请求只是落一条批次记录（几十毫秒），立刻返回；
+    // 进度由批次页轮询 /claim-jobs 显示，还能看每个店铺的成败原因。
+    const items = toPublishItems(warehouseIds.map((id) => ({ warehouseId: id })));
+    const jobs: Array<{
+      accountId: string;
+      label: string;
+      targets: Array<{ shopId: string; template: string | null }>;
+    }> = [];
+
     if (isTeacher && checkedAccountIds.length > 0) {
-      setMultiPublishing(true);
-      let ok = 0;
-      const failMsgs: string[] = [];
-      const items = toPublishItems(warehouseIds.map((id) => ({ warehouseId: id })));
       for (const accId of checkedAccountIds) {
         const accShops = shopsByAccount[accId] ?? [];
-        const targetShopIds = selectedShopIdsByAccount[accId] ?? [];
-
-        // 没勾任何店铺时回落到该账号第一个店铺（多店铺账号才可能有多选，
-        // 单店铺账号 UI 上根本没有复选框，这里也是唯一的取值路径）。
-        const shopsToPublish = targetShopIds.length > 0
-          ? targetShopIds
-          : [accShops[0]?.shopId];
-
-        const accName = accounts.find((item) => item.id === accId)?.name ?? accId;
-        for (const publishShopId of shopsToPublish) {
-          if (!publishShopId) {
-            failMsgs.push(`${accName}：未选择店铺`);
-            continue;
-          }
-          const shopName = accShops.find((shop) => shop.shopId === publishShopId)?.name
-            ?? publishShopId;
-          try {
-            const publishResult = await publish.mutateAsync({
-              items,
-              shopId: publishShopId,
-              accountId: accId,
-              // 每个店铺用它自己站点的模板：一个 MYR 模板套到 PH 店铺必错。
-              // 用户没勾那个国家的模板就传 null，不硬塞一套。
-              template: templateForSiteName(
-                accShops.find((s) => s.shopId === publishShopId)?.site
-              ),
-              allowMismatch,
-              confirmUnverifiedSpecifications: true,
-              claimOnly: effectiveClaimOnly,
-              confirm: true,
-            });
-            ok++;
-            onSubmitted?.(publishResult);
-          } catch (mutationError) {
-            // 失败原因必须带上是「哪个账号的哪个店铺」：只报条数，
-            // 用户面对 10 个账号时无从判断该去重试谁。
-            failMsgs.push(`${accName} / ${shopName}：${apiErrorMessage(mutationError)}`);
-          }
+        const picked = selectedShopIdsByAccount[accId] ?? [];
+        // 没勾店铺时回落到该账号第一个店铺（和 UI 上的显示口径一致）
+        const shopIds = picked.length > 0 ? picked : [accShops[0]?.shopId];
+        const targets = shopIds
+          .filter((value): value is string => Boolean(value))
+          .map((shopIdValue) => ({
+            shopId: shopIdValue,
+            // 每个店铺用它自己站点的模板：MYR 模板套到 PH 店铺必错。
+            template: templateForSiteName(
+              accShops.find((s) => s.shopId === shopIdValue)?.site),
+          }));
+        if (targets.length) {
+          jobs.push({
+            accountId: accId,
+            label: accounts.find((item) => item.id === accId)?.name ?? accId,
+            targets,
+          });
         }
       }
-      setMultiPublishing(false);
-      if (ok > 0) {
-        toast.success(`已为 ${ok} 个店铺提交发布`, {
-          description: "已提交，平台回执稍后更新",
-        });
+    } else {
+      if (!shopId) {
+        setError("请选择目标店铺");
+        return;
       }
-      if (failMsgs.length > 0) {
-        toast.error(`${failMsgs.length} 个店铺发布失败`, {
-          // 前三条逐条列出，更多的折叠成「等 N 条」
-          description: failMsgs.length > 3
-            ? `${failMsgs.slice(0, 3).join("；")}；等 ${failMsgs.length} 条`
-            : failMsgs.join("；"),
-          duration: 12000,
-        });
-      }
-      if (ok > 0) {
-        onOpenChange(false);
-      }
+      jobs.push({
+        accountId: String(auth?.accountId ?? ""),
+        label: String(auth?.connectionName ?? ""),
+        targets: [{ shopId, template: templateForSiteName(
+          (shops.find((shop) => shop.shopId === shopId) ?? shops[0])?.site) }],
+      });
+    }
+
+    if (jobs.length === 0) {
+      setError("没有可发布的店铺");
       return;
     }
 
-    // 单账号模式（原有逻辑）
-    if (!shopId) {
-      setError("请选择目标店铺");
-      return;
-    }
-    publish.mutate(
-      {
-        items: toPublishItems(warehouseIds.map((id) => ({ warehouseId: id }))),
-        shopId,
-        template: templateForSiteName(
-          (shops.find((shop) => shop.shopId === shopId) ?? shops[0])?.site
-        ),
-        allowMismatch,
-        confirmUnverifiedSpecifications: true,
-        claimOnly: effectiveClaimOnly,
-        // 三重保险：confirm 必须是字面量 true（api.md §8.1 CONFIRM_REQUIRED）
-        confirm: true,
-      },
-      {
-        onSuccess: (publishResult) => {
-          // 不关窗：结果区（含 repriced 明细与 warning）保留到用户主动关闭
-          setResult(publishResult);
-          setError(null);
-          onSubmitted?.(publishResult);
-          const failed = publishResult.failures.length;
-          if (failed > 0) {
-            toast.warning(
-              `已提交 ${publishResult.published.length} 件，${failed} 件失败`,
-              { description: "已提交，平台回执稍后更新" }
-            );
-          } else {
-            toast.success(
-              effectiveClaimOnly
-                ? `已认领 ${publishResult.claimed.length} 件进采集箱`
-                : `已提交 ${publishResult.published.length} 件`,
-              {
-                description: "已提交，平台回执稍后更新",
-                duration: 8000,
-                action: {
-                  label: "刷新回执",
-                  onClick: refreshReceipts,
-                },
-              }
-            );
-          }
-          // warning 仍给一次 toast 提醒，但真正的回看入口是结果区的常驻告警块
-          if (publishResult.warning) {
-            toast.warning("提示", { description: publishResult.warning, duration: 8000 });
-          }
-        },
-        onError: (mutationError) => {
-          setError(apiErrorMessage(mutationError));
-          toast.error("发布失败", { description: apiErrorMessage(mutationError) });
-        },
+    setMultiPublishing(true);
+    const created: string[] = [];
+    const failed: string[] = [];
+    try {
+      for (const job of jobs) {
+        try {
+          const response = await api.post<{ batch: { id: string } }, Record<string, unknown>>(
+            "/publish-jobs",
+            {
+              accountId: job.accountId,
+              items,
+              targets: job.targets,
+              allowMismatch,
+              confirmUnverifiedSpecifications: true,
+              confirm: true,
+            },
+            // 创建任务只是落库，正常几十毫秒；给 30 秒足够，且远小于发布本身的耗时。
+            { timeoutMs: 30_000 },
+          );
+          created.push(response.batch.id);
+        } catch (jobError) {
+          failed.push(`${job.label}：${apiErrorMessage(jobError)}`);
+        }
       }
-    );
+    } finally {
+      setMultiPublishing(false);
+    }
+
+    if (created.length > 0) {
+      const shopTotal = jobs.reduce((sum, job) => sum + job.targets.length, 0);
+      toast.success(`已创建 ${created.length} 个发布任务（共 ${shopTotal} 个店铺）`, {
+        description: "任务在后台执行，可到「批次」查看每个店铺的进度",
+        duration: 8000,
+      });
+      onJobsCreated?.(created);
+      onOpenChange(false);
+    }
+    if (failed.length > 0) {
+      toast.error(`${failed.length} 个任务创建失败`, {
+        description: failed.slice(0, 3).join("；"),
+        duration: 12000,
+      });
+    }
   };
 
   return (
@@ -569,9 +542,7 @@ export function PublishDialog({
                   <div className="mb-1 flex items-baseline justify-between gap-1">
                     <div className="flex items-baseline gap-1">
                       <span className="text-sm font-medium text-fg">发布账号</span>
-                      <span className="text-xs text-fg-secondary">
-                        （每个账号独立发布；多店铺账号可勾选多个店铺一起发）
-                      </span>
+
                     </div>
                     <button
                       type="button"
@@ -693,9 +664,7 @@ export function PublishDialog({
                     ? undefined
                     : usableTemplates.length === 0
                       ? "暂无可用模板，请先在仓库的定价模板中创建并保存模板。"
-                      : selectedShopSites.length === 0
-                        ? "先在下方选择目标店铺，对应国家的模板才能勾选"
-                        : "勾选哪个国家就按该国模板重算售价；没勾的不改价"
+                      : undefined
               }
             >
               {/*
@@ -703,7 +672,8 @@ export function PublishDialog({
                 上方店铺选了哪个国家，这里对应国家的模板才能勾 ——
                 没选的国家灰掉，避免「勾了菲律宾却没有菲律宾店铺」这种无效配置。
               */}
-              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 py-1">
+              {/* 一行五个，不换行：负责人 2026-11-18 明确「一行显示」 */}
+              <div className="flex flex-nowrap items-center justify-between gap-x-2 py-1">
                 {templateSites.map((site) => {
                   const enabled = selectedShopSites.includes(site);
                   const checked = enabled && useTemplateSites.includes(site);
@@ -714,7 +684,7 @@ export function PublishDialog({
                         ? `按「${templateNameBySite[site]}」模板重算 ${SITE_LABELS[site] || site} 店铺售价`
                         : `上方没有选择${SITE_LABELS[site] || site}的店铺`}
                       className={cn(
-                        "flex items-center gap-1.5 text-sm",
+                        "flex shrink-0 items-center gap-1 whitespace-nowrap text-xs",
                         enabled
                           ? "cursor-pointer text-fg"
                           : "cursor-not-allowed text-fg-muted opacity-50"
@@ -722,7 +692,7 @@ export function PublishDialog({
                     >
                       <input
                         type="checkbox"
-                        className="h-4 w-4 cursor-pointer rounded border-border accent-brand-500 disabled:cursor-not-allowed"
+                        className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-border accent-brand-500 disabled:cursor-not-allowed"
                         checked={checked}
                         disabled={!enabled || templatesQuery.isLoading}
                         onChange={(e) => {
@@ -780,16 +750,6 @@ export function PublishDialog({
                   />
                 </div>
               </div>
-            </div>
-          )}
-
-          {allowClaimOnly && (
-            <div className="rounded-md border border-border-subtle p-3">
-              <Switch
-                checked={claimOnly}
-                onChange={setClaimOnly}
-                label="只认领进采集箱，不上架"
-              />
             </div>
           )}
 

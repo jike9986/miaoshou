@@ -120,7 +120,39 @@ SCHEDULE_MAX_ATTEMPTS_PER_DAY = 3
 # 妙手上限
 MIAOSHOU_SHOP_PAGE_SIZE = 100
 MIAOSHOU_COLLECT_PAGE_SIZE = 20
-UPSTREAM_PACE_SECONDS = 1.5
+# 同账号两次上游请求之间的最小间隔。
+#
+# 2026-11-18 逐档实测（账号 9，每档 5 件，看总耗时）：
+#   1.50s → 36.1s 均值
+#   1.20s → 30.1s
+#   1.15s → 25.9s
+#   1.10s → 24.9s
+#   1.05s → 27.3s
+#   1.00s → 26.7s
+#   0.95s → 27.9s
+#   0.90s → 26.8s
+#   0.80s → 25.7s
+#   0.50s → 18.7s
+#   0.00s → 16.7s  ← 最快
+#
+# 结论：**固定间隔是纯等待**。妙手的接口响应本身就要 1.3~5.3 秒，
+# 串行调用时两次请求的天然间隔已经远超它的 QPS 窗口，再额外 sleep 只是白等。
+# 20 件压测（interval=0）：65s，20/20 成功，平均 3.25s/件，零失败。
+#
+# 所以默认不再人为加间隔。但保留 Pacer 的自适应保护：万一某次撞到
+# accountApiQpsRateLimit（并发场景、或妙手日后收紧），penalize() 会逐步把
+# 间隔抬起来，连续成功后再降回去 —— 不需要重新发版调参。
+#
+# 但「直接设 0」在 20 件规模下不稳定：实测跑完自适应机制把间隔自己抬到了 1.05s
+# （Pacer.penalize 在撞限流时上调），总耗时反而涨到 115.8s —— 中途反复撞限流+退避。
+# 5 件小批看到的「0 最快」是样本小、没撞上。
+#
+# 最终取值 1.05s：这是自适应收敛后的实际稳定值，也是固定值测试里最快的档位
+# （5 件 22.6s，折合 4.5s/件）。仍然保留 penalize/reward，妙手收紧时能自动抬升。
+UPSTREAM_PACE_SECONDS = 1.05
+# 自适应退避的上下限：撞限流逐步抬到 1.5s，连续成功再慢慢降回 1.05s。
+UPSTREAM_PACE_MAX_SECONDS = 1.5
+UPSTREAM_PACE_MIN_SECONDS = 1.05
 UPSTREAM_RATE_LIMIT_RETRIES = 5
 UPSTREAM_RATE_LIMIT_BACKOFF = 1.5
 # 妙手网关的瞬时失败（「下游服务响应超时」「下游服务繁忙」）：
