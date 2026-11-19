@@ -209,3 +209,55 @@ POST /publish-jobs  → publish_job_service.create()  只落库，几十毫秒�
 
 **保留的东西**：后端 `check_language` / `PublishRequest.allowMismatch` 字段不删，
 留给将来真要做站点语言强校验的路径（定时任务、开放接口），只是发布弹窗不再依赖它。
+
+---
+
+## 定时任务一次发多个店铺（2026-11-19）
+
+### 数据模型
+
+`schedules` 表加了一列 `targets`（JSON，可空），迁移 `20261119_0001`：
+
+```
+targets = [{"shopId": "111", "template": "马来模板"},
+           {"shopId": "222", "template": "菲律宾模板"}]
+```
+
+- **空值 = 老任务**，执行时回落到 `shop_id` + `template_name` 这一对，行为完全不变；
+- **非空 = 多店铺**，第一个店铺同时写回 `shop_id` / `template_name`，
+  列表、日志、回执这些只认老字段的地方一行都不用改。
+
+`schedule_service.targets_of(row)` 是唯一取值入口：targets 为空就回落单店铺，
+脏数据（连 shopId 都没有）返回空列表，不会凭空造一个店铺出来。
+
+### 为什么不是一个任务拆多条 schedule
+
+拆成 N 条之后：「改一次频率要改 N 条」「删任务要删 N 条」「算不算跑过」都要按组重算，
+比多一个字段复杂得多，而且组内不一致（改了一半）没法自愈。
+
+### 执行
+
+`_execute_locked` 选品**只选一次**，然后依次把同一批商品发到每个店铺：
+
+```
+pick_products()  →  items（比如 10 件）
+for target in targets_of(task):
+    publish_service.publish(..., shopId=target.shopId,
+                            template=target.template or task.template_name)
+```
+
+**所有店铺共用一个 batchId**，这是刻意的：回执核对 `_apply_receipt` 按 batchId
+匹配发布记录，每家店换一个新 id 的话，上一轮没回来的回执就匹配不上，
+任务会被当成「已提交」长期卡在 pending。
+
+摘要按「件 × 店铺数」累计（`selected = 件数 × 店铺数`），多店铺时额外带
+`summary["shops"]` 逐店结果。
+
+### 前端
+
+- 账号卡片里：店铺从「单选下拉」改成**复选**，必须带站点后缀
+  （同一账号下常有同名的不同国家店铺，只显示店名分不清）；
+- 单账号模式：店铺数 > 1 时同样给复选，= 1 时仍是下拉；
+- 每个店铺套**它自己站点**的模板（`templateNameBySite`），
+  找不到对应站点模板才回落到全局选的模板 —— 拿马来模板发菲律宾店必算错价；
+- 列表「店铺」列多一行「共 N 个店铺」。

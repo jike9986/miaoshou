@@ -18,6 +18,18 @@
       `products/` 从 2,733 MB 降到 959 MB（省 1,774 MB，约 65%）。
 - [x] **nginx 缓存头**：`location ^~ /tk-product-automation/` 早已发
       `Cache-Control: public, max-age=31536000, immutable`，2026-11-19 用 `curl -I` 复核确认。
+- [x] **BUG：转换后 `automation_images` 列漏改**（v0.1.26，我自己引入的）：
+      `optimize_product_images.py` 的 convert 只重写了 6 列（cover / images /
+      detail_images / sku_properties / payload / collected），漏掉
+      `products.automation_images`，导致 31 个在用商品在自动化结果页
+      229 处图片地址指向已删除的 .png（挂图）。
+      修法：列清单改成 `information_schema` 动态发现；另写
+      `scripts/fix_converted_image_refs.py` 扫全库补漏（按「旧文件不存在 且
+      新 .jpg 存在」才改，带 --dry-run），已跑完，229 处清零。
+- [x] **审计口径修正**：判断「孤儿图片」不能只扫 `products` 表 ——
+      `image_jobs`（翻译任务）也存图片地址，900 条引用会被误判成孤儿。
+      全库扫（161 个文本/JSON 列）后真实孤儿 **38 个文件 / 7.0 MB**，
+      不是最初报告的 848 个。
 
 ## 待完成
 
