@@ -44,6 +44,11 @@ PRODUCT_DIR_DEFAULT = "/var/www/tk-product-automation/products"
 THUMB_SUBDIR = "thumbs"
 THUMB_MAX_SIDE = 200
 THUMB_JPEG_QUALITY = 82
+# 详情页中等图：900px，体积约原图 1/3。负责人 2026-11-19「都是国内用户」，
+# 详情页平均 15 张原图 ＝ 3.3 MB，跨境带宽吃不住。
+MID_SUBDIR = "mid"
+MID_MAX_SIDE = 900
+MID_JPEG_QUALITY = 80
 PRODUCT_JPEG_QUALITY = 92
 # 不要写死列名清单。
 # 2026-11-19 实测踩过：当时写死了 6 列，漏掉 products.automation_images，
@@ -110,6 +115,22 @@ def make_thumb(raw: bytes) -> bytes:
     with Image.open(io.BytesIO(data)) as check:
         if max(check.size) != THUMB_MAX_SIDE and max(check.size) > THUMB_MAX_SIDE:
             raise ValueError(f"缩略图尺寸异常 {check.size}")
+    return data
+
+
+def make_mid(raw: bytes) -> bytes:
+    """详情页中等图：最长边 900，本来更小的不放大。"""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(raw)) as image:
+        image.load()
+        converted = _flatten_alpha(image)
+        if max(converted.size) > MID_MAX_SIDE:
+            converted.thumbnail((MID_MAX_SIDE, MID_MAX_SIDE), Image.LANCZOS)
+        data = _encode_jpeg(converted, MID_JPEG_QUALITY)
+    with Image.open(io.BytesIO(data)) as check:
+        if max(check.size) > MID_MAX_SIDE:
+            raise ValueError(f"中等图尺寸异常 {check.size}")
     return data
 
 
@@ -235,7 +256,12 @@ def write_atomic(path: Path, data: bytes) -> None:
 # --- 三种模式 --------------------------------------------------------------
 
 def run_thumbs(args, product_dir: Path) -> int:
+    """生成派生图：200px 缩略图（列表页）+ 900px 中等图（详情页）。
+
+    只读原图、只写派生目录，不动原图也不动数据库 —— 幂等、可随时重跑。
+    """
     thumb_dir = product_dir / THUMB_SUBDIR
+    mid_dir = product_dir / MID_SUBDIR
     files = product_files(product_dir)
     if args.limit:
         files = files[: args.limit]
@@ -245,18 +271,25 @@ def run_thumbs(args, product_dir: Path) -> int:
     started = time.time()
     for index, path in enumerate(files, start=1):
         stem = path.stem
-        if has_thumb(thumb_dir, stem):
+        need_thumb = not has_thumb(thumb_dir, stem)
+        need_mid = not has_thumb(mid_dir, stem)
+        if not need_thumb and not need_mid:
             skipped += 1
         else:
             try:
                 raw = path.read_bytes()
-                data = make_thumb(raw)
-                if args.dry_run:
+                if need_thumb:
+                    data = make_thumb(raw)
                     saved_bytes += max(0, len(raw) - len(data))
-                else:
-                    thumb_dir.mkdir(parents=True, exist_ok=True)
-                    write_atomic(thumb_dir / f"{stem}.jpg", data)
-                    saved_bytes += max(0, len(raw) - len(data))
+                    if not args.dry_run:
+                        thumb_dir.mkdir(parents=True, exist_ok=True)
+                        write_atomic(thumb_dir / f"{stem}.jpg", data)
+                if need_mid:
+                    mid_data = make_mid(raw)
+                    saved_bytes += max(0, len(raw) - len(mid_data))
+                    if not args.dry_run:
+                        mid_dir.mkdir(parents=True, exist_ok=True)
+                        write_atomic(mid_dir / f"{stem}.jpg", mid_data)
                 done += 1
             except Exception as exc:  # noqa: BLE001 - 单张失败不中断
                 failed += 1

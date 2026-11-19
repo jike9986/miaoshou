@@ -5,12 +5,19 @@
 // 加 referrerPolicy="no-referrer" 后不再发送 Referer，图片可正常加载；
 // 同时统一 lazy/eager、object-cover、hover 缩放与失败占位，避免各页面各写一套。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ImageOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface RemoteImageProps {
   src: string | null | undefined;
+  /**
+   * 主地址加载失败时的回退地址（只回退一次，回退也失败才显示占位）。
+   *
+   * 典型用法：详情页先用 900px 中等图（省 2/3 流量），
+   * 服务器上万一没有派生图就自动退回原图，不会裂图。
+   */
+  fallbackSrc?: string | null;
   alt?: string;
   className?: string;
   /** 首屏前 N 张用 eager，其余 lazy（LCP 优化） */
@@ -24,6 +31,7 @@ export interface RemoteImageProps {
 
 export function RemoteImage({
   src,
+  fallbackSrc = null,
   alt = "",
   className,
   eager = false,
@@ -33,8 +41,18 @@ export function RemoteImage({
 }: RemoteImageProps) {
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [usingFallback, setUsingFallback] = useState(false);
 
-  if (!src) {
+  // 换了图（或用上回退）要重置状态：否则上一张的 loaded/failed 会带到下一张
+  useEffect(() => {
+    setFailed(false);
+    setLoaded(false);
+    setUsingFallback(false);
+  }, [src]);
+
+  const effectiveSrc = usingFallback && fallbackSrc ? fallbackSrc : src;
+
+  if (!effectiveSrc) {
     return (
       <div
         className={cn(
@@ -56,14 +74,22 @@ export function RemoteImage({
         </div>
       ) : (
         <img
-          src={src}
+          src={effectiveSrc}
           alt={alt}
           loading={eager ? "eager" : "lazy"}
           decoding="async"
           draggable={draggable}
           referrerPolicy="no-referrer"
           onLoad={() => setLoaded(true)}
-          onError={() => setFailed(true)}
+          onError={() => {
+            // 先用中等图；它不存在就无声退回原图，不要直接给用户看裂图
+            if (fallbackSrc && !usingFallback) {
+              setUsingFallback(true);
+              setLoaded(false);
+              return;
+            }
+            setFailed(true);
+          }}
           className={cn(
             "size-full object-cover transition-transform duration-image ease-out",
             zoomOnHover && "group-hover:scale-[1.02] will-change-transform",

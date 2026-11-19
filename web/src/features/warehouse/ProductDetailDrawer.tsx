@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { CalendarClock, PencilLine, Save, ScanSearch, Sparkles, Tag, Trash2 } from "lucide-react";
-import { cn, formatCount, formatDate, formatPrice } from "@/lib/utils";
+import { cn, formatCount, formatDate, formatPrice, midImageUrl } from "@/lib/utils";
 import { apiErrorMessage } from "@/lib/api";
 import { isConflictBusy, revisionConflictOf, type RevisionConflict } from "@/lib/conflict";
 import type { ImageAnalyzeItem } from "@/lib/queries";
@@ -541,7 +541,12 @@ export function ProductDetailDrawer({
         <div className="flex flex-col gap-5">
           <div className="flex items-start gap-4">
             <div className="size-[120px] shrink-0 overflow-hidden rounded-md border border-border bg-canvas-inset">
-              <RemoteImage src={product.image} />
+              {/* 120px 的框不需要原图：先用 900px 中等图，缺失时回退原图 */}
+              <RemoteImage
+                src={midImageUrl(product.image) || product.image}
+                fallbackSrc={product.image}
+                eager
+              />
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">

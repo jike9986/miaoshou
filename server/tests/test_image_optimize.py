@@ -169,6 +169,59 @@ def test_broken_image_returns_original():
     assert image_upload.make_thumbnail(raw) is None
 
 
+def test_mid_respects_max_side():
+    """详情页中等图最长边不超过 900，且明显小于原图。"""
+    from PIL import Image
+
+    raw = _png_bytes(size=(1600, 1200))
+    mid = image_upload.make_mid_image(raw)
+    assert mid is not None
+    with Image.open(io.BytesIO(mid)) as image:
+        assert max(image.size) == image_upload.MID_MAX_SIDE, image.size
+        assert image.size[0] > image.size[1], "横图应该保持横"
+    assert len(mid) < len(raw) / 3, "中等图应显著小于原图"
+
+
+def test_mid_does_not_upscale_small_image():
+    """本来就比 900 小的图不放大：放大只会变糊还更大。"""
+    from PIL import Image
+
+    raw = _png_bytes(size=(600, 600))
+    mid = image_upload.make_mid_image(raw)
+    assert mid is not None
+    with Image.open(io.BytesIO(mid)) as image:
+        assert max(image.size) == 600, image.size
+
+
+def test_mid_flattens_transparency():
+    """中等图同样要白底，不能黑底。"""
+    from PIL import Image
+
+    image = _rgba_photo_with_transparent_corner()
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    mid = image_upload.make_mid_image(buffer.getvalue())
+    assert mid is not None
+    with Image.open(io.BytesIO(mid)) as result:
+        corner = result.getpixel((2, 2))
+        assert all(channel > 240 for channel in corner[:3]), corner
+
+
+def test_mid_url_of_product_path():
+    """成品区地址 → mid 子目录地址。"""
+    base = "https://aohuang888.com/tk-product-automation/products/"
+    assert image_upload.mid_url_of(base + "abc123.jpg") == base + "mid/abc123.jpg"
+    assert image_upload.mid_url_of(base + "abc123.png") == base + "mid/abc123.jpg"
+
+
+def test_mid_url_of_rejects_non_product():
+    """临时区/外链没有中等图，返回空串让前端回退。"""
+    assert image_upload.mid_url_of(
+        "https://aohuang888.com/tk-product-automation/auto-temp/x.jpg") == ""
+    assert image_upload.mid_url_of("https://cbu01.alicdn.com/x.jpg") == ""
+    assert image_upload.mid_url_of("") == ""
+
+
 def test_thumb_url_of_product_path():
     """成品区地址 → thumbs 子目录地址。"""
     base = "https://aohuang888.com/tk-product-automation/products/"

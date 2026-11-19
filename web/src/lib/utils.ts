@@ -213,3 +213,35 @@ export function truncate(value: string | null | undefined, max = 40): string {
   if (!value) return EMPTY_PLACEHOLDER;
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
+
+/* ------------------------------------------------------------------ *
+ * 图片地址：成品区原图 → 服务器上现成的派生图
+ * ------------------------------------------------------------------ */
+
+/**
+ * 成品区原图 → 900px 中等图地址；不是成品区就返回空串。
+ *
+ * 为什么需要：负责人 2026-11-19 明确「我都是给国内用户用的」，而服务器在香港，
+ * 跨境带宽是瓶颈。详情页平均要加载 15 张原图（平均 216 KB）＝ 3.3 MB 一件。
+ * 中等图体积约 1/3，900px 看清商品足够；大图查看器仍然用原图。
+ *
+ * 与后端 image_upload.mid_url_of() 是同一套规则：
+ *   https://.../products/abc.jpg  →  https://.../products/mid/abc.jpg
+ *   https://.../products/mid/abc.jpg（已经是中等图）→  原样返回
+ *   外链 / 临时区 →  ""
+ *
+ * 取到空串时调用方必须回退原图（RemoteImage 的 fallbackSrc 兜最后一道）。
+ */
+export function midImageUrl(url: string | null | undefined): string {
+  const text = (url ?? "").trim();
+  if (!text) return "";
+  const marker = "/products/";
+  const index = text.indexOf(marker);
+  if (index < 0) return "";
+  const rest = text.slice(index + marker.length);
+  // 中间还有斜杠 = 已经是 thumbs/ 或 mid/ 下的派生图，别再套一层
+  if (!rest || rest.includes("/")) return "";
+  const dot = rest.lastIndexOf(".");
+  const stem = dot > 0 ? rest.slice(0, dot) : rest;
+  return `${text.slice(0, index + marker.length)}mid/${stem}.jpg`;
+}

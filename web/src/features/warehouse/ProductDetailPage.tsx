@@ -33,7 +33,7 @@ import { CategoryPicker, type PickerNode } from "@/features/warehouse/CategoryPi
 import { useBatchCategory, useCategoryTree, useProductDetail, usePatchProduct, usePatchProductImages, useTranslateProductColors, useReviewProductQuality } from "@/lib/queries";
 import { apiErrorMessage } from "@/lib/api";
 import { useOperatorIdentity } from "@/lib/operator";
-import { formatCount, formatDate, formatPrice } from "@/lib/utils";
+import { formatCount, formatDate, formatPrice, midImageUrl } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
 /**
@@ -548,7 +548,14 @@ export function ProductDetailPage() {
                       )}
                       title={`第 ${index + 1} 张`}
                     >
-                      <RemoteImage src={url} className="size-full object-cover" />
+                      {/* 画廊只需要 132px 的视觉尺寸，用 900px 中等图就够：
+                          原图平均 216 KB，中等图约 1/3，详情页平均 15 张。
+                          服务器上万一没有中等图，fallbackSrc 会退回原图。 */}
+                      <RemoteImage
+                        src={midImageUrl(url) || url}
+                        fallbackSrc={url}
+                        className="size-full object-cover"
+                      />
                       {index === 0 && (
                         <span className="absolute left-1 top-1 rounded-xs bg-brand-600/90 px-1 py-0.5 text-[10px] font-medium text-white">
                           主图
@@ -706,7 +713,11 @@ export function ProductDetailPage() {
                                 disabled={!value.imageUrl}
                               >
                                 {value.imageUrl ? (
-                                  <RemoteImage src={value.imageUrl} className="size-full object-cover" />
+                                  <RemoteImage
+                                    src={midImageUrl(value.imageUrl) || value.imageUrl}
+                                    fallbackSrc={value.imageUrl}
+                                    className="size-full object-cover"
+                                  />
                                 ) : null}
                               </button>
                               <span className="line-clamp-2 text-center text-2xs leading-4 text-fg">

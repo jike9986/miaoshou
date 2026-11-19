@@ -430,6 +430,13 @@ PRODUCT_JPEG_QUALITY = 92      # 原图转码质量，视觉无损
 THUMB_MAX_SIDE = 200           # 缩略图最长边（列表卡片 200×200）
 THUMB_JPEG_QUALITY = 82        # 缩略图质量
 THUMB_SUBDIR = "thumbs"
+# 详情页中等尺寸图。负责人 2026-11-19 明确「我都是给国内用户用的」：
+# 服务器在香港，跨境带宽是瓶颈，而详情页平均要加载 15 张原图（平均 216 KB）
+# ＝ 3.3 MB 一件。900px 够看清商品，体积只有原图的 1/3 左右。
+# 大图查看器仍然用原图，这里只服务详情页的画廊和抽屉主图。
+MID_MAX_SIDE = 900
+MID_JPEG_QUALITY = 80
+MID_SUBDIR = "mid"
 
 
 def _flatten_alpha(image: Any) -> Any:
@@ -509,6 +516,46 @@ def make_thumbnail(raw: bytes) -> bytes | None:
         return None
 
 
+def make_mid_image(raw: bytes) -> bytes | None:
+    """生成最长边 MID_MAX_SIDE 的 JPEG 中等图；失败返回 None。"""
+    if not raw:
+        return None
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            converted = _flatten_alpha(image)
+            # 本来就比 900 小的图不放大：放大只会变糊还更大
+            if max(converted.size) > MID_MAX_SIDE:
+                converted.thumbnail((MID_MAX_SIDE, MID_MAX_SIDE), Image.LANCZOS)
+            return _encode_jpeg(converted, MID_JPEG_QUALITY)
+    except Exception as exc:  # noqa: BLE001 - 中等图失败不影响原图
+        logger.warning("生成中等图失败：%s", str(exc)[:120])
+        return None
+
+
+def mid_url_of(url: str) -> str:
+    """成品区图片地址 → 对应的中等图地址；非成品区返回空串。
+
+    https://.../products/abc.jpg → https://.../products/mid/abc.jpg
+    前端取不到就回退原图（RemoteImage 的 fallbackSrc）。
+    """
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    _dir, product_base, _l, _b = _zone_paths("product")
+    if not text.startswith(product_base):
+        return ""
+    name = text[len(product_base):]
+    if not name or "/" in name:
+        return ""
+    stem = name.rsplit(".", 1)[0]
+    return f"{product_base}{MID_SUBDIR}/{stem}.jpg"
+
+
 def thumb_url_of(url: str) -> str:
     """成品区图片地址 → 对应缩略图地址；非成品区返回空串。
 
@@ -578,18 +625,22 @@ def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
         except OSError:
             return url          # 写不进去就保留临时地址，至少图还在
 
-        # 缩略图：列表页用，失败不影响主流程
-        thumb = make_thumbnail(optimized)
-        if thumb:
+        # 派生图：缩略图（列表页）+ 中等图（详情页）。
+        # 两个都是「有就用、没有前端回退原图」，失败不影响入库主流程。
+        for subdir, maker in ((THUMB_SUBDIR, make_thumbnail),
+                              (MID_SUBDIR, make_mid_image)):
+            derived = maker(optimized)
+            if not derived:
+                continue
             try:
-                thumb_dir = _Path(local_product) / THUMB_SUBDIR
-                thumb_dir.mkdir(parents=True, exist_ok=True)
-                thumb_path = thumb_dir / f"{stem}.jpg"
-                if not thumb_path.exists() or thumb_path.read_bytes() != thumb:
-                    thumb_path.write_bytes(thumb)
-                    os.chmod(thumb_path, 0o644)
+                target_dir = _Path(local_product) / subdir
+                target_dir.mkdir(parents=True, exist_ok=True)
+                derived_path = target_dir / f"{stem}.jpg"
+                if not derived_path.exists() or derived_path.read_bytes() != derived:
+                    derived_path.write_bytes(derived)
+                    os.chmod(derived_path, 0o644)
             except OSError:
-                logger.warning("缩略图写入失败（不影响原图）：%s", stem)
+                logger.warning("派生图写入失败（不影响原图）：%s/%s", subdir, stem)
 
         # 临时区的原文件可以删了：成品区已有同一份内容
         # 删不掉就留着，14 天清理会自动收
@@ -626,20 +677,24 @@ def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
                     if staged != local:
                         staged.write_bytes(optimized)
                     new_url = upload_image(staged, timeout=timeout, zone="product")
-                    # 缩略图：upload_image 只会传到分区根目录，这里单独放子目录
-                    thumb = make_thumbnail(optimized)
-                    if thumb:
-                        try:
-                            thumb_dir = f"{product_remote}/{THUMB_SUBDIR}"
-                            try:
-                                sftp.stat(thumb_dir)
-                            except OSError:
-                                sftp.mkdir(thumb_dir)
-                            import io as _io
+                    # 派生图：upload_image 只会传到分区根目录，这里单独放子目录
+                    import io as _io
 
-                            sftp.putfo(_io.BytesIO(thumb), f"{thumb_dir}/{stem}.jpg")
-                        except Exception as exc:  # noqa: BLE001 - 缩略图失败不影响原图
-                            logger.warning("缩略图 SFTP 上传失败：%s", str(exc)[:120])
+                    for subdir, maker in ((THUMB_SUBDIR, make_thumbnail),
+                                          (MID_SUBDIR, make_mid_image)):
+                        derived = maker(optimized)
+                        if not derived:
+                            continue
+                        try:
+                            target_dir = f"{product_remote}/{subdir}"
+                            try:
+                                sftp.stat(target_dir)
+                            except OSError:
+                                sftp.mkdir(target_dir)
+                            sftp.putfo(_io.BytesIO(derived), f"{target_dir}/{stem}.jpg")
+                        except Exception as exc:  # noqa: BLE001 - 派生图失败不影响原图
+                            logger.warning("派生图 SFTP 上传失败 %s：%s", subdir,
+                                           str(exc)[:120])
                     return new_url
             finally:
                 sftp.close()
