@@ -5,8 +5,6 @@
 """
 import io
 
-import pytest
-
 from services import image_upload
 
 

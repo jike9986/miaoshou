@@ -5,8 +5,8 @@
   - 认领到采集箱不套定价模板（模板在妙手那边套）；
   - 只允许妙手成本下限的兜底微调。
 """
-from decimal import Decimal
 import time
+from decimal import Decimal
 
 
 def test_currency_for_site_covers_all_five_sites():
