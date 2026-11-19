@@ -328,7 +328,12 @@ export function ProcessSettings({
                 disabled={disabled || !settings.imagesEnabled}
               />
             </Field>
-            <Field label="SKU 图数量" htmlFor="sku-image-count" className="w-[74px] shrink-0">
+            {/* 「SKU 图数量」实际上是**颜色数量上限**（负责人 2026-11-19 确认）：
+                只有颜色值会挂 SKU 图，尺码值的 imgUrl 恒为空，
+                所以保留前 N 张 SKU 图 == 保留前 N 个颜色。
+                设 9 就只留 9 个颜色，其余颜色连同其 SKU 组合一起丢弃。
+                字段名沿用 skuImageCount 是为了兼容已保存的旧设置。 */}
+            <Field label="颜色数量" htmlFor="sku-image-count" className="w-[74px] shrink-0">
               <NumberInput
                 id="sku-image-count"
                 value={settings.skuImageCount}
@@ -337,7 +342,7 @@ export function ProcessSettings({
                 max={9}
                 step={1}
                 decimals={0}
-                suffix="张"
+                suffix="个"
                 disabled={disabled || !settings.imagesEnabled}
               />
             </Field>

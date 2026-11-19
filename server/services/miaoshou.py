@@ -25,11 +25,17 @@ import httpx
 
 from core.config import get_settings
 from core.constants import (
+    BREAKER_COOLDOWN_SECONDS,
+    BREAKER_FAIL_THRESHOLD,
+    GATEWAY_COOLDOWN_MAX_SECONDS,
+    GATEWAY_COOLDOWN_SECONDS,
+    GATEWAY_FAIL_THRESHOLD,
+    GATEWAY_RETRIES,
+    GATEWAY_RETRY_BACKOFF,
+    GATEWAY_RETRY_BACKOFF_MAX_SECONDS,
     MIAOSHOU_COLLECT_PAGE_SIZE,
     MIAOSHOU_SHOP_PAGE_SIZE,
     PUBLISH_MAX_ITEMS,
-    GATEWAY_RETRIES,
-    GATEWAY_RETRY_BACKOFF,
     UPSTREAM_PACE_MAX_SECONDS,
     UPSTREAM_PACE_MIN_SECONDS,
     UPSTREAM_PACE_SECONDS,
@@ -130,8 +136,18 @@ def pacer_for(key: str) -> Pacer:
 # 这里按账号记连续的网络类失败：连续 FAIL_THRESHOLD 次后进入 OPEN 状态，
 # 在 COOLDOWN 秒内直接快速失败（毫秒级），冷却结束放一个探针请求过去试通。
 # 只对「连不上/超时」这类传输错误计数；业务错误（凭据错、参数错）不计。
-BREAKER_FAIL_THRESHOLD = 3
-BREAKER_COOLDOWN_SECONDS = 60.0
+#
+# 阈值与冷却时长统一放在 core/constants.py：GATEWAY_* 那组是网关抖动的，
+# 这里两个是传输层的。两套计数互不干扰 —— 传输层管「连不上」，
+# 网关那套管「连上了但妙手内部超时」。
+#
+# 网关抖动为什么不跟传输失败共用一个计数（2026-11-19 实测）：
+#   那次妙手网关抖了约 3 分钟，响应是 200 + result=fail。旧代码拿到响应就
+#   record_success() 把计数清零，熔断器全程没动作，每件商品各自重试 3 次
+#   （累计等 7.2s）后失败，50 件全废。传输层熔断管不到这一层。
+# 现在单独记：连续 GATEWAY_FAIL_THRESHOLD 次 → 熔断 GATEWAY_COOLDOWN_SECONDS 秒，
+# 冷却时长按连开次数指数退避（30 → 60 → 120 → 240 → 上限 300）。
+# 抖动期的请求毫秒级快速失败，由 carrier_service 的件级重试队列排尾重跑。
 
 
 class UpstreamBreaker:
@@ -141,10 +157,23 @@ class UpstreamBreaker:
         self._lock = threading.Lock()
         self._failures = 0
         self._open_until = 0.0
+        # 网关级抖动单独计数：它跟传输失败是两回事，混在一起会让
+        # 「网络通、妙手内部超时」这种情况永远触发不了熔断。
+        self._gateway_failures = 0
+        self._gateway_open_until = 0.0
+        # 连续开了几次（每次冷却结束成功一次才算恢复，用来做指数退避）
+        self._gateway_streak = 0
 
     def allow(self) -> bool:
         """是否允许真正发起请求。OPEN 期间返回 False。"""
         with self._lock:
+            if self._gateway_open_until > 0:
+                if time.monotonic() < self._gateway_open_until:
+                    return False
+                # 网关冷却结束：放一个探针，保留阈值-1 的计数。
+                # 探针再失败立刻重新跳闸，不会放一堆请求同时涌进去。
+                self._gateway_open_until = 0.0
+                self._gateway_failures = GATEWAY_FAIL_THRESHOLD - 1
             if self._open_until <= 0:
                 return True
             if time.monotonic() >= self._open_until:
@@ -154,10 +183,24 @@ class UpstreamBreaker:
                 return True
             return False
 
+    def record_transport_success(self) -> None:
+        """只清「连不上」的计数：拿到 HTTP 响应就说明链路是通的。
+
+        跟 record_success() 分开是必须的 —— 只有它会在响应检查之前调用，
+        否则「HTTP 200 但 result=fail」会被误当成连通性恢复。
+        """
+        with self._lock:
+            self._failures = 0
+            self._open_until = 0.0
+
     def record_success(self) -> None:
         with self._lock:
             self._failures = 0
             self._open_until = 0.0
+            # 只有真成功才把网关抖动的连开计数清掉 —— 探测性放过不能算恢复。
+            self._gateway_failures = 0
+            self._gateway_open_until = 0.0
+            self._gateway_streak = 0
 
     def record_transport_failure(self) -> bool:
         """记一次传输失败；返回是否刚跳闸。"""
@@ -168,17 +211,52 @@ class UpstreamBreaker:
                 return True
             return False
 
+    def record_gateway_failure(self) -> bool:
+        """记一次网关级抖动（200 + result=fail）；返回是否刚跳闸。
+
+        冷却时长按连开次数指数退避：30 → 60 → 120 → 240 → 上限 300 秒。
+        妙手那次抖了约 3 分钟，前两档冷却就能覆盖掉大半，不必让客户端
+        每件商品都去撞一次再自己等 7.2 秒。
+        """
+        with self._lock:
+            self._gateway_failures += 1
+            if (self._gateway_failures < GATEWAY_FAIL_THRESHOLD
+                    or self._gateway_open_until > 0):
+                return False
+            cooldown = min(GATEWAY_COOLDOWN_MAX_SECONDS,
+                           GATEWAY_COOLDOWN_SECONDS * (2 ** self._gateway_streak))
+            self._gateway_streak = min(self._gateway_streak + 1, 4)
+            self._gateway_open_until = time.monotonic() + cooldown
+            return True
+
+    def gateway_open_for(self) -> int:
+        """网关熔断还要等多少秒（0 = 没开）。"""
+        with self._lock:
+            if self._gateway_open_until <= 0:
+                return 0
+            return max(0, int(round(self._gateway_open_until - time.monotonic())))
+
+    def in_gateway_cooldown(self) -> bool:
+        with self._lock:
+            return self._gateway_open_until > 0
+
     def retry_after(self) -> int:
         """还要等多少秒才解禁（供错误文案用）。"""
         with self._lock:
-            if self._open_until <= 0:
+            candidates = [value for value in (self._open_until,
+                                              self._gateway_open_until)
+                          if value > 0]
+            if not candidates:
                 return 0
-            return max(0, int(round(self._open_until - time.monotonic())))
+            return max(0, int(round(max(candidates) - time.monotonic())))
 
     def reset(self) -> None:
         with self._lock:
             self._failures = 0
             self._open_until = 0.0
+            self._gateway_failures = 0
+            self._gateway_open_until = 0.0
+            self._gateway_streak = 0
 
 
 _BREAKERS: dict[str, UpstreamBreaker] = {}
@@ -266,12 +344,17 @@ class MiaoshouClient:
 
     # --- 传输 ---------------------------------------------------------------
     def _post_once(self, path: str, body: Mapping[str, Any] | None) -> dict[str, Any]:
-        # 熔断打开时直接快速失败，不要再去等满 request_timeout
+        # 熔断打开时直接快速失败，不要再去等满 request_timeout。
+        # 网关抖动也走这条路：抖了就先停手，由调用方稍后重跑，
+        # 而不是让每件商品各自白等一轮退避（2026-11-19 实测 50 件全废的成因）。
         if not self._breaker.allow():
             wait = self._breaker.retry_after()
+            gateway = self._breaker.in_gateway_cooldown()
             raise MiaoshouError(
-                f"妙手连续连不上，已暂停请求（约 {wait} 秒后自动重试）",
-                code="upstream_unreachable", kind="unreachable")
+                f"妙手{'网关抖动' if gateway else '连续连不上'}，已暂停请求"
+                f"（约 {wait} 秒后自动重试）",
+                code="upstream_gateway_pause" if gateway else "upstream_unreachable",
+                kind="unreachable")
         payload = {k: v for k, v in (body or {}).items() if v is not None}
         body_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         timestamp = int(time.time())
@@ -299,8 +382,13 @@ class MiaoshouClient:
             raise MiaoshouError(f"请求妙手接口失败：{_name}", kind=_kind) from None
 
         raw = response.content
-        # 拿到响应就说明网络通了，清掉传输失败计数（业务错误不算连通性问题）
-        self._breaker.record_success()
+        # 拿到响应只说明「网络通了」，不等于「妙手处理成功」。
+        #
+        # 旧代码在这里就 record_success()，于是 HTTP 200 + result=fail
+        # （下游服务响应超时）会把网关失败计数一起清零 —— 熔断器永远不动作，
+        # 每件商品各自白等 7.2 秒退避后失败。2026-11-19 实测 50 件全废就是这个。
+        # 现在只有真正走到最后 return 才算成功。
+        self._breaker.record_transport_success()
         if response.status_code == 401:
             raise MiaoshouError("妙手拒绝了凭据（AppKey / AppSecret 不正确或已停用）",
                                 code="invalid_app_key", status=401, kind="error")
@@ -316,6 +404,8 @@ class MiaoshouClient:
             # A gateway/server error may arrive after an upstream write has
             # already taken effect, so callers must verify before continuing.
             kind = "unknown" if response.status_code >= 500 else "error"
+            if _is_transient_gateway(message) or response.status_code >= 500:
+                self._breaker.record_gateway_failure()
             raise MiaoshouError(f"妙手接口失败：{message}", code=code,
                                 status=response.status_code, kind=kind)
         if not raw:
@@ -333,21 +423,34 @@ class MiaoshouClient:
             if _is_rate_limit(code, message):
                 kind = "rate_limit"
             elif _is_transient_gateway(message):
+                # 妙手自己的下游在超时/繁忙：计入网关抖动计数，
+                # 连撞几次就把整个账号的请求停一段时间，别每件都去撞。
                 kind = "gateway"
+                self._breaker.record_gateway_failure()
             else:
                 kind = "error"
             raise MiaoshouError(f"妙手接口失败 [{code}]：{message}", code=code,
                                 payload=data, kind=kind)
+        # 走到这里才是真成功：清传输失败 + 清网关抖动计数
+        self._breaker.record_success()
         return data
 
     def post(self, path: str, body: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """带上游重试的调用：限流退避 5 轮，网关瞬时失败短退避 3 轮。
+        """带上游重试的调用：限流退避、网关瞬时失败退避。
 
         读写都走这里。网关失败重试是安全的 —— 它发生在妙手自己的下游处理里，
         不是我们的写请求丢了响应（那种会被标成 kind=unknown，由调用方核对，
         不会在这里自动重放）。
+
+        **网关重试窗口（2026-11-19 修）**：
+          原来写的是 `attempt < GATEWAY_RETRIES`（=3），累计只争取到
+          1.2 + 2.4 + 3.6 = 7.2 秒。实测那次妙手网关抖了约 3 分钟，
+          7.2 秒远不够，于是每件商品都在自己重试耗尽后失败。
+          现在退避改成指数（1.5 → 3 → 6 → 12 → 24），最长覆盖约 46 秒；
+          更长的抖动由熔断器负责（连续失败就停手，交给件级重试队列稍后重跑）。
         """
         last: MiaoshouError | None = None
+        gateway_attempt = 0
         for attempt in range(UPSTREAM_RATE_LIMIT_RETRIES):
             try:
                 data = self._post_once(path, body)
@@ -366,9 +469,13 @@ class MiaoshouClient:
                     last = exc
                     time.sleep(UPSTREAM_RATE_LIMIT_BACKOFF * (attempt + 1))
                     continue
-                if exc.kind == "gateway" and attempt < GATEWAY_RETRIES:
+                if exc.kind == "gateway" and gateway_attempt < GATEWAY_RETRIES:
+                    # 指数退避：1.5 → 3 → 6 → 12 → 24 秒，累计约 46 秒。
+                    # 妙手网关的短线抖动基本都在这之内恢复。
+                    gateway_attempt += 1
                     last = exc
-                    time.sleep(GATEWAY_RETRY_BACKOFF * (attempt + 1))
+                    time.sleep(min(GATEWAY_RETRY_BACKOFF * (2 ** (gateway_attempt - 1)),
+                                   GATEWAY_RETRY_BACKOFF_MAX_SECONDS))
                     continue
                 raise
         assert last is not None

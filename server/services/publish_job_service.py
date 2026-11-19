@@ -164,7 +164,25 @@ def create(db: Session, body: dict[str, Any], account_id: int,
         raise errors.validation("请选择要发布的店铺", field="targets")
 
     operator = operator_service.get(db, operator_id) if operator_id is not None else None
-    del operator  # 只用于后续权限校验路径，这里保持与 claim_job_service 一致的签名
+    # 受限分组闸门：学员不能发布「自营海外仓 / 海外仓定制款 / 精品」三组的货。
+    #
+    # 负责人 2026-11-19：「这三个分组里面的鞋不能随便给用户上都是精品…
+    # 学员账号都看不到这三个分组也上不了这三个分组的鞋子」。
+    # 这三组走合作厂家、拿货价标高，学员发出去等于亏本铺货。
+    #
+    # 必须在 service 层拦：前端把分组藏起来只是体验，
+    # 直接构造 warehouseId 调 API 才是真实越权路径。
+    from services import group_access
+
+    if not group_access.may_access_restricted(operator):
+        from models.product import Product as _Product
+
+        rows = (db.query(_Product.group_id)
+                .filter(_Product.id.in_([int(v) for v in ids]),
+                        _Product.group_id.isnot(None))
+                .distinct().all())
+        group_access.guard_products(db, operator, [row[0] for row in rows],
+                                    action="发布")
     keys: list[str] = []
     for target in normalized:
         for warehouse_id in ids:

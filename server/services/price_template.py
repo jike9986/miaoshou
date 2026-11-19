@@ -259,14 +259,41 @@ def cross_border_freight_myr(weight_kg: Any, template: Mapping[str, Any]) -> Dec
 
 def resolve_rate_with_source(product: Mapping[str, Any] | None,
                              override: Any = None,
-                             *, allow_live: bool = True) -> tuple[Decimal, str]:
-    """返回每 1 MYR 对应的 CNY 数值，连同来源一起返回。
+                             *, allow_live: bool = True,
+                             site: Any = None,
+                             template: Mapping[str, Any] | None = None,
+                             ) -> tuple[Decimal, str]:
+    """按**目标站点币种**返回「1 CNY 等于多少本币」，连同来源一起返回。
+
+    返回值的含义：`rate` 是「1 CNY → 目标币种」的乘数。
+      马来 1 CNY ≈ 1.64 MYR      → 35 CNY × 1.64 = 57.4 MYR
+      菲律宾 1 CNY ≈ 9.54 PHP    → 35 CNY × 9.54 = 333.97 PHP
+      泰国 1 CNY ≈ 5.07 THB
+      越南 1 CNY ≈ 3861 VND
+      新加坡 1 CNY ≈ 0.193 SGD
 
     顺序：手填 override > 有效缓存或实时接口 > 内置兜底。
+
+    **2026-11-19 修（P0，必须看清）**：
+      原来这里调 `exchange_rate.cached_rate()` / `live_rate()` 时**不传币种**，
+      而这两个函数的签名是 `currency: str = DEFAULT_CURRENCY`，
+      `DEFAULT_CURRENCY = "MYR"`。于是：
+        · 马来店恰好正确（MYR 就是默认值）
+        · 菲律宾/泰国/越南/新加坡**全部拿 MYR 汇率算本币报价**
+      实测菲律宾 35CNY/0.6kg：错算 379.30 PHP，正确值 796.47 PHP
+      （妙手官方试算 796.54 PHP）——错了 2.1 倍，发出去就是亏本卖。
+      现在按模板站点取币种，五个站点各自用自己的汇率。
+
+    `site` 和 `template` 二选一即可：给了 template 就从中读 site
+    （以及 template.freightTable.currency 作为二次兜底）。
     product 参数为兼容调用方保留；商品售价含利润，不能用来反推汇率。
     来源文案会原样显示给用户——「这个价是按什么汇率算的」必须能追溯，
     否则报价对不对只能靠猜。
     """
+    from services import exchange_rate
+
+    currency = _resolve_currency(site=site, template=template)
+
     if override not in (None, ""):
         rate = _decimal(override, "汇率")
         if rate <= 0:
@@ -274,22 +301,39 @@ def resolve_rate_with_source(product: Mapping[str, Any] | None,
         return rate, "手动填写"
 
     if allow_live:
-        from services import exchange_rate
-
-        cached, source = exchange_rate.cached_rate()
+        cached, source = exchange_rate.cached_rate(currency=currency)
         if cached is not None:
-            return cached, f"缓存汇率（{source}）"
-        live, source = exchange_rate.live_rate()
+            return cached, f"缓存汇率（{source}）· {currency}"
+        live, source = exchange_rate.live_rate(currency=currency)
         if live is not None:
-            return live, f"实时汇率（{source}）"
-        return FALLBACK_EXCHANGE_RATE, f"内置汇率（网络不可用，{FALLBACK_EXCHANGE_RATE}）"
+            return live, f"实时汇率（{source}）· {currency}"
+        fallback = exchange_rate.fallback_rate(currency)
+        return fallback, f"内置汇率（网络不可用，{fallback} · {currency}）"
 
-    return FALLBACK_EXCHANGE_RATE, f"内置汇率（{FALLBACK_EXCHANGE_RATE}）"
+    fallback = exchange_rate.fallback_rate(currency)
+    return fallback, f"内置汇率（{fallback} · {currency}）"
 
 
-def resolve_rate(product: Mapping[str, Any] | None, override: Any = None) -> Decimal:
+def _resolve_currency(*, site: Any = None,
+                      template: Mapping[str, Any] | None = None) -> str:
+    """定出该用哪个币种：模板 freightTable.currency > 站点映射 > MYR。"""
+    from services import exchange_rate
+
+    if isinstance(template, Mapping):
+        declared = str((template.get("freightTable") or {}).get("currency") or "").strip()
+        if declared:
+            return declared.upper()
+        if site is None:
+            site = template.get("site")
+    return exchange_rate.currency_for_site(site)
+
+
+def resolve_rate(product: Mapping[str, Any] | None, override: Any = None,
+                 *, site: Any = None,
+                 template: Mapping[str, Any] | None = None) -> Decimal:
     """只要汇率本身（保留老签名，内部走完整链路）。"""
-    return resolve_rate_with_source(product, override)[0]
+    return resolve_rate_with_source(product, override, site=site,
+                                    template=template)[0]
 
 
 # 这些是「售价的百分比」，缺一项就少算一块成本，报价偏低。
@@ -529,10 +573,11 @@ def preview_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
     差别只在汇率来源。
     """
     normalized = normalize_template(template)
+    # 币种必须跟着模板站点走（2026-11-19 修）：菲律宾报价不能用 MYR 汇率。
     if rate in (None, ""):
-        rate_d, rate_source = resolve_rate_with_source(None, None)
+        rate_d, rate_source = resolve_rate_with_source(None, None, template=template)
     else:
-        rate_d, rate_source = resolve_rate_with_source(None, rate)
+        rate_d, rate_source = resolve_rate_with_source(None, rate, template=template)
     result = display_price(purchase_cny, weight_kg, normalized, rate=rate_d)
     # display_price 收到的是归一化后的模板（None 已折成 0），「没填」的信号
     # 只能在原始输入上取，所以这里重算一次并覆盖。
@@ -556,7 +601,9 @@ def apply_template(item: Mapping[str, Any], template: Mapping[str, Any], *,
     if not isinstance(sku_map, dict) or not sku_map:
         raise PriceTemplateError("商品没有 SKU，不能套用定价模板")
 
-    rate_d, rate_source = resolve_rate_with_source(result, rate)
+    # 币种跟着模板站点走（2026-11-19 修）：发菲律宾就用 PHP 汇率，
+    # 不能拿马来的 MYR 汇率去算比索报价。
+    rate_d, rate_source = resolve_rate_with_source(result, rate, template=template)
     by_spu = template.get("weightSource", "spu") != "sku"
     samples: list[dict[str, Any]] = []
     changed = 0

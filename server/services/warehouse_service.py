@@ -691,6 +691,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                   claimed: bool | None = None, sort: str = "savedDesc",
                   operator_id: int | None = None,
                   claim_account_id: Any = None,
+                  operator: Any = None,
                   ) -> dict[str, Any]:
     if page < 1:
         raise errors.validation("页码必须不小于 1", field="page", value=page)
@@ -715,6 +716,13 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                                  reviewed_revision.is_(None),
                                  reviewed_revision != Product.revision))
     member_view = _is_member(db, operator_id)
+    # 受限分组判权限要用完整操作员（角色决定能不能看精品组）。
+    # 老调用方只传 operator_id，这里按需补查一次，避免改所有调用点。
+    viewer = operator
+    if viewer is None and operator_id not in (None, ""):
+        from models.operator import Operator as _Operator
+
+        viewer = db.get(_Operator, int(operator_id))
     account_claim_keys = _claim_account_keys(db, operator_id, claim_account_id)
     account_claim_expr = _claim_expression(account_claim_keys)
     owned_accounts = (([int(claim_account_id)] if claim_account_id not in (None, "") else
@@ -736,6 +744,20 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         if not text.isdigit():
             raise errors.validation("accountId 须为数字", field="accountId")
     query = _scope_member_products(db, query, operator_id)
+    # 受限分组（自营海外仓 / 海外仓定制款 / 精品）只对老师和管理员可见。
+    #
+    # 负责人 2026-11-19：「学员账号都看不到这三个分组也上不了这三个分组的鞋子」。
+    # 这三组的成品走合作厂家、不走采购，拿货价是标高的，学员按它发出去
+    # 看起来就是卖一件亏一件（实测这三组 18 件 100% 售价 < 拿货价）。
+    #
+    # 过滤放在 SQL 层而不是查出来再筛：分页总数、分组计数（facets）
+    # 都要跟着一起变，只筛列表会导致「显示 20 件、总数 38 件」这种对不上的状态。
+    from services import group_access
+
+    visible = group_access.visible_group_ids(db, viewer)
+    if visible:
+        query = query.filter(or_(Product.group_id.is_(None),
+                                 Product.group_id.notin_(visible)))
     if category_id not in (None, ""):
         cid_value = str(category_id)
         if cid_value.isdigit():
@@ -3160,33 +3182,101 @@ def apply_image_limits(payload, *, main_limit=0, detail_limit=0, sku_limit=0):
         payload["notes"] = pre_save_check.detail_images_only(detail)
 
     # 颜色 / SKU 图（同一维度：一个颜色一张 SKU 图）
+    #
+    # 2026-11-19 修：原来用 `attrId == "100000"` 认颜色属性，但生产库里
+    # 一半商品的 attrId 是 `None` 或空串（不同来源的商品数据不一样）：
+    #   product 426  Warna  attrId=100000  ✅ 能匹配
+    #   product 29   颜色   attrId=None    ❌ 被跳过 → 颜色数完全没限制
+    #   product 467  Warna  attrId=100000 / 尺码 attrId=''
+    # 于是「SKU 图数量=4」对那些商品毫无作用，颜色该有几个还是几个。
+    #
+    # 现在改成三级判定，任一命中就算颜色维度：
+    #   ① attrId == "100000"（妙手约定的颜色 attrId）
+    #   ② 属性名是颜色（Warna / 颜色 / Color / Colour）
+    #   ③ 该属性的值里带 SKU 图（imgUrl）—— 只有颜色值才会挂图，
+    #      尺码值的 imgUrl 永远是空的，这是最可靠的判据
+    # 三条都不中才当成非颜色维度跳过。
     if sku_limit and sku_limit > 0:
         for prop in (payload.get("skuPropertyList") or []):
             if not isinstance(prop, dict):
                 continue
-            if str(prop.get("attrId") or "") != "100000":
+            if not _is_color_property(prop):
                 continue
             values = [v for v in (prop.get("attrValueList") or [])
                       if isinstance(v, dict)]
             if len(values) <= sku_limit:
                 break
             kept = values[:sku_limit]
-            kept_ids = {str(v.get("attrValueId") or "") for v in kept}
-            all_ids = {str(v.get("attrValueId") or "") for v in values}
             report["colors"] = {"before": len(values), "after": len(kept)}
             prop["attrValueList"] = kept
             sku_map = payload.get("skuMap")
             if isinstance(sku_map, dict):
+                # skuMap 的 key 格式是 `;颜色值;尺码值;`（**属性值文本**，不是
+                # attrValueId）。2026-11-19 实测 product 48：
+                #     attrValueId='2d64a58af5'  attrValue='350 Black and Gray'
+                #     skuMap key = ';350 Black and Gray;35;'
+                # 原来这里拿 attrValueId 去比对 key，永远匹配不上，
+                # 于是颜色值被删了、SKU 全留着 —— 留下的是没有属性定义的
+                # 孤儿 SKU，发布时必然报错。这是颜色截断的第二个 bug。
+                #
+                # 现在同时用两种标识比对，任一命中即删，兼容不同来源的数据：
+                #   ① 属性值文本（skuMap 的实际格式）
+                #   ② attrValueId（少数来源确实用 ID 做 key）
+                dropped_text = {str(v.get("attrValue") or "").strip()
+                                for v in values[sku_limit:]}
+                dropped_ids = {str(v.get("attrValueId") or "").strip()
+                               for v in values[sku_limit:]}
+                dropped_text.discard("")
+                dropped_ids.discard("")
                 dropped = 0
                 for key in list(sku_map.keys()):
-                    parts = [x for x in str(key).split(";") if x]
-                    removed = [p for p in parts if p in all_ids and p not in kept_ids]
-                    if removed:
+                    parts = [x.strip() for x in str(key).split(";") if x.strip()]
+                    if any(p in dropped_text or p in dropped_ids for p in parts):
                         sku_map.pop(key, None)
                         dropped += 1
-                report["sku"] = {"dropped": dropped}
+                report["sku"] = {"dropped": dropped,
+                                 "before": len(sku_map) + dropped,
+                                 "after": len(sku_map)}
             break
     return report
+
+
+# 颜色属性的通用名（含马来/印尼/越南/泰国等站点常见写法）
+_COLOR_ATTR_NAMES = ("warna", "颜色", "颜色分类", "color", "colour", "màu",
+                     "màu sắc", "สี", "mau", "cor")
+_COLOR_ATTR_ID = "100000"
+
+
+def _is_color_property(prop: Mapping[str, Any]) -> bool:
+    """这个 SKU 属性是不是「颜色」维度。
+
+    为什么不能只看 attrId（2026-11-19 实测）：生产库里各来源的
+    attrId 不统一，有的是妙手约定的 100000，有的是 None 或空串。
+    只看 attrId 会让一半商品的颜色上限失效。
+    """
+    if str(prop.get("attrId") or "").strip() == _COLOR_ATTR_ID:
+        return True
+
+    name = str(prop.get("attrNameCn") or prop.get("attrName") or "").strip().lower()
+    if name:
+        # 完全相等或包含关系都算（"Warna" / "颜色分类" / "Color Name"）
+        for candidate in _COLOR_ATTR_NAMES:
+            if name == candidate or candidate in name:
+                return True
+
+    # 最可靠：值上挂了图就是颜色维度。尺码值的 imgUrl 恒为空串。
+    for value in (prop.get("attrValueList") or []):
+        if not isinstance(value, Mapping):
+            continue
+        if _is_image_url(value.get("imgUrl")):
+            return True
+        supplementary = value.get("supplementarySkuImageUrls")
+        if isinstance(supplementary, str) and _is_image_url(supplementary):
+            return True
+        if isinstance(supplementary, list) and any(
+                _is_image_url(u) for u in supplementary):
+            return True
+    return False
 
 def clean_detail_images(payload: dict[str, Any], *,
                        limit: int = DETAIL_IMAGE_HARD_LIMIT,

@@ -259,6 +259,11 @@ class ProcessRequest(CamelModel):
     processImages: bool = False
     # 各类图片分别限制前 N 张；新字段默认 0，旧客户端仍只处理主图。
     mainImageCount: int = Field(default=5, ge=0, le=9)
+    # 「SKU 图数量」实际是**颜色数量上限**（负责人 2026-11-19 确认）：
+    # 只有颜色值会挂 SKU 图，尺码值的 imgUrl 恒为空串，
+    # 所以「保留前 N 张 SKU 图」等价于「保留前 N 个颜色」。
+    # 字段名保留 skuImageCount 是为了兼容已存的旧设置与旧客户端，
+    # 界面上已改名为「颜色数量」。
     skuImageCount: int = Field(default=0, ge=0, le=9)
     detailImageCount: int = Field(default=0, ge=0, le=9)
     # 两道人工复核闸门的确认开关（老版 prepare_shoe 抛错停下等人看）。

@@ -149,16 +149,67 @@ MIAOSHOU_COLLECT_PAGE_SIZE = 20
 #
 # 最终取值 1.05s：这是自适应收敛后的实际稳定值，也是固定值测试里最快的档位
 # （5 件 22.6s，折合 4.5s/件）。仍然保留 penalize/reward，妙手收紧时能自动抬升。
-UPSTREAM_PACE_SECONDS = 1.05
-# 自适应退避的上下限：撞限流逐步抬到 1.5s，连续成功再慢慢降回 1.05s。
+#
+# 2026-11-19 复测（负责人要求再压一档）：
+#   上面那张表里 1.00s(26.7s) / 0.95s(27.9s) / 0.90s(26.8s) 与 1.05s(27.3s)
+#   在 5 件样本下差异在噪声内（±1.5s，样本只有 5 件）。
+#   但真实批量（50 件）的节流代价是线性的：每件 4 个上游请求，
+#   1.05 → 0.90 每件省 0.6s，50 件省 30s；100 件省 60s。
+#
+#   风险边界很清楚：妙手的 accountApiQpsRateLimit 是**每账号**的。
+#   撞上会走 rate_limit 分支 —— penalize() 把间隔自动抬回 1.5s，
+#   同时退避重试，不会丢数据。所以调低是「有机会更快，最坏退回原速」。
+#
+#   取 0.90：留 0.15s 余量到 1.05 这个历史稳定值。不再往下压到 0.80 ——
+#   那张表里 0.80 的 25.7s 是 5 件样本，样本量不足以下结论，
+#   而 50 件批量的限流风险是实打实的。
+UPSTREAM_PACE_SECONDS = 0.90
+# 自适应退避的上下限：撞限流逐步抬到 1.5s，连续成功再慢慢降回 0.90s。
 UPSTREAM_PACE_MAX_SECONDS = 1.5
-UPSTREAM_PACE_MIN_SECONDS = 1.05
+UPSTREAM_PACE_MIN_SECONDS = 0.90
 UPSTREAM_RATE_LIMIT_RETRIES = 5
 UPSTREAM_RATE_LIMIT_BACKOFF = 1.5
 # 妙手网关的瞬时失败（「下游服务响应超时」「下游服务繁忙」）：
 # HTTP 200 + result=fail，隔一两秒重试就好，不该判成商品数据问题。
-GATEWAY_RETRIES = 3
-GATEWAY_RETRY_BACKOFF = 1.2
+#
+# 2026-11-19 修：原来 GATEWAY_RETRIES=3 + 线性退避 1.2s，
+# 累计只争取到 7.2 秒，而那次妙手网关抖了约 3 分钟 —— 重试窗口远短于故障时长。
+# 现在改成 5 次 + 指数退避（1.5/3/6/12/24，累计约 46 秒），
+# 更长的抖动交给下方「网关熔断 + 件级重试队列」处理。
+GATEWAY_RETRIES = 5
+GATEWAY_RETRY_BACKOFF = 1.5
+GATEWAY_RETRY_BACKOFF_MAX_SECONDS = 24.0
+
+# 传输层熔断：连不上 / 超时。
+# 上游不可达时 httpx 每次都要等满 request_timeout（30s），用户点一下「采集箱」
+# 就得干等十几秒才看到错误。连续 FAIL_THRESHOLD 次传输失败后进入 OPEN，
+# COOLDOWN 秒内直接毫秒级快速失败，冷却结束放一个探针试通。
+# 只对「连不上/超时」计数；业务错误（凭据错、参数错）不计。
+BREAKER_FAIL_THRESHOLD = 3
+BREAKER_COOLDOWN_SECONDS = 60.0
+
+# 网关级抖动熔断（HTTP 200 + result=fail）。
+#
+# 为什么必须单独一套：传输层熔断只认 httpx 异常，而「下游服务响应超时」
+# 是规规矩矩的 HTTP 200，旧代码拿到响应就 record_success() 把计数清零，
+# 熔断器全程没动作。2026-11-19 那次抖 3 分钟，每件商品各自白等 7.2 秒，
+# 50 件一次性全废。
+#
+# 现在：连续 3 次网关失败 → 整个账号的请求停 30 秒（指数退避到 300 秒上限）。
+# 抖动期的请求毫秒级快速失败，由 carrier_service 的件级重试队列
+# 排到本批队尾重跑，不再让每件都完整走一遍退避。
+GATEWAY_FAIL_THRESHOLD = 3
+GATEWAY_COOLDOWN_SECONDS = 30.0
+GATEWAY_COOLDOWN_MAX_SECONDS = 300.0
+
+# 件级重试队列：单件载体创建/写入失败时排到本批队尾重试，不拖垮整批。
+#
+# 为什么要它（负责人 2026-11-19 明确）：「哪个失败了就把这个成品放到这一批
+# 从最后重试，因为成品仓库里面肯定都是没问题的」。
+# 旧行为是 collect_carriers 里任何一件抛错就 raise，50 件全废。
+CARRIER_ITEM_RETRY_ROUNDS = 3
+# 每轮之间整批停一下再跑：给妙手网关恢复的时间，也让熔断冷却先走完。
+CARRIER_ITEM_RETRY_PAUSE_SECONDS = 20.0
 
 # 系统
 HEALTH_INTERVAL_MS = 200          # 前端/Electron 探活轮询间隔

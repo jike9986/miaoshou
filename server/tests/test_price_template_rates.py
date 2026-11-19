@@ -19,17 +19,18 @@ def isolated_rate_cache():
 @pytest.mark.parametrize("price", ["61", "80", "63217.19", "invalid"])
 def test_product_selling_price_is_never_an_exchange_rate(monkeypatch, price):
     monkeypatch.setattr(
-        exchange_rate, "live_rate", lambda: (Decimal("1.65"), "test-provider"))
+        exchange_rate, "live_rate",
+        lambda **_kw: (Decimal("1.65"), "test-provider"))
     product = {"skuMap": {"a": {"originPrice": "100", "price": price}}}
 
     rate, source = price_template.resolve_rate_with_source(product)
 
     assert rate == Decimal("1.65")
-    assert source == "实时汇率（test-provider）"
+    assert source == "实时汇率（test-provider）· MYR"
 
 
 def test_manual_rate_does_not_read_cache_or_network(monkeypatch):
-    def unexpected_call():
+    def unexpected_call(**_kw):
         pytest.fail("a manual exchange rate must not read another rate source")
 
     monkeypatch.setattr(exchange_rate, "cached_rate", unexpected_call)
@@ -41,33 +42,34 @@ def test_manual_rate_does_not_read_cache_or_network(monkeypatch):
 
 def test_valid_cache_is_used_and_labelled_without_network(monkeypatch):
     monkeypatch.setattr(exchange_rate.time, "time", lambda: 10000)
-    exchange_rate._cache.update({
+    exchange_rate._bucket("MYR").update({
         "rate": Decimal("1.65"), "at": 9990, "source": "cached-provider"})
 
-    def unexpected_call():
+    def unexpected_call(**_kw):
         pytest.fail("valid cached rates must not trigger a network request")
 
     monkeypatch.setattr(exchange_rate, "live_rate", unexpected_call)
 
     assert price_template.resolve_rate_with_source(None) == (
-        Decimal("1.65"), "缓存汇率（cached-provider）")
+        Decimal("1.65"), "缓存汇率（cached-provider）· MYR")
 
 
 def test_expired_cache_is_replaced_with_live_rate(monkeypatch):
     monkeypatch.setattr(exchange_rate.time, "time", lambda: 10000)
-    exchange_rate._cache.update({
+    exchange_rate._bucket("MYR").update({
         "rate": Decimal("1.8"), "at": 0, "source": "expired-provider"})
     monkeypatch.setattr(
-        exchange_rate, "live_rate", lambda: (Decimal("1.65"), "test-provider"))
+        exchange_rate, "live_rate",
+        lambda **_kw: (Decimal("1.65"), "test-provider"))
 
     assert exchange_rate.cached_rate() == (None, "")
     assert price_template.resolve_rate_with_source(None) == (
-        Decimal("1.65"), "实时汇率（test-provider）")
+        Decimal("1.65"), "实时汇率（test-provider）· MYR")
 
 
 def test_expired_cache_with_network_failure_uses_explicit_fallback(monkeypatch):
     monkeypatch.setattr(exchange_rate.time, "time", lambda: 10000)
-    exchange_rate._cache.update({
+    exchange_rate._bucket("MYR").update({
         "rate": Decimal("1.8"), "at": 0, "source": "expired-provider"})
 
     def offline(*_args, **_kwargs):
@@ -78,8 +80,11 @@ def test_expired_cache_with_network_failure_uses_explicit_fallback(monkeypatch):
 
     rate, source = price_template.resolve_rate_with_source(product)
 
-    assert rate == price_template.FALLBACK_EXCHANGE_RATE
-    assert source == f"内置汇率（网络不可用，{rate}）"
+    # 2026-11-19：兜底汇率改成按币种取（原来写死 1.6393 MYR，
+    # 菲律宾/泰国/越南/新加坡网络不通时会拿马来汇率算本币报价）。
+    fallback = exchange_rate.fallback_rate(exchange_rate.DEFAULT_CURRENCY)
+    assert rate == fallback
+    assert source == f"内置汇率（网络不可用，{fallback} · MYR）"
 
 
 def test_live_rate_inverts_myr_per_cny_and_reuses_valid_cache(monkeypatch):
@@ -136,7 +141,7 @@ def test_reset_cache_retries_after_failed_rate_lookup(monkeypatch):
 
 
 def test_disabling_live_rates_uses_builtin_fallback_without_sources(monkeypatch):
-    def unexpected_call():
+    def unexpected_call(**_kw):
         pytest.fail("allow_live=False must not read cache or network")
 
     monkeypatch.setattr(exchange_rate, "cached_rate", unexpected_call)
@@ -146,13 +151,15 @@ def test_disabling_live_rates_uses_builtin_fallback_without_sources(monkeypatch)
         {"skuMap": {"a": {"originPrice": "100", "price": "61"}}},
         allow_live=False)
 
-    assert rate == price_template.FALLBACK_EXCHANGE_RATE
-    assert source == f"内置汇率（{rate}）"
+    fallback = exchange_rate.fallback_rate(exchange_rate.DEFAULT_CURRENCY)
+    assert rate == fallback
+    assert source == f"内置汇率（{fallback} · MYR）"
 
 
 def test_reapplying_template_keeps_prices_and_purchase_cost_stable(monkeypatch):
     monkeypatch.setattr(
-        exchange_rate, "live_rate", lambda: (Decimal("1.65"), "test-provider"))
+        exchange_rate, "live_rate",
+        lambda **_kw: (Decimal("1.65"), "test-provider"))
     product = {
         "weight": "0.1",
         "skuMap": {

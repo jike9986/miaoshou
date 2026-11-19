@@ -583,6 +583,33 @@ def _assert_member_schedule_mode(operator: Operator | None,
         raise errors.forbidden("学员定时任务不能使用认领模式，请关闭 claimOnly")
 
 
+def _guard_restricted_groups(db: Session, operator: Operator | None,
+                             product_ids: Any, *, action: str) -> None:
+    """受限分组（自营海外仓 / 海外仓定制款 / 精品）只允许老师和管理员排进任务。
+
+    负责人 2026-11-19：「新建定时任务里面也不能选择这些鞋」。
+    这三组的成品走合作厂家、拿货价标高，学员按它排任务等于长期亏本铺货。
+    """
+    from models.product import Product
+    from services import group_access
+
+    if group_access.may_access_restricted(operator):
+        return
+    ids: list[int] = []
+    for value in (product_ids or []):
+        try:
+            ids.append(int(str(value).strip()))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return
+    rows = (db.query(Product.group_id)
+            .filter(Product.id.in_(ids), Product.group_id.isnot(None))
+            .distinct().all())
+    group_access.guard_products(db, operator, [row[0] for row in rows],
+                                action=action)
+
+
 def _assert_schedule_owner(row: Schedule, operator: Operator | None) -> None:
     """Keep tasks private within a shared Miaoshou account."""
     if _is_global_operator(operator):
@@ -726,6 +753,10 @@ def create(db: Session, payload: Mapping[str, Any],
     _assert_member_schedule_mode(operator, fields["claim_only"])
     if not fields["selected_product_ids"]:
         raise errors.validation("请至少选择一件要发布的仓库商品", field="selectedProductIds")
+    # 受限分组闸门（负责人 2026-11-19：「新建定时任务里面也不能选择这些鞋」）。
+    # 这三组（自营海外仓 / 海外仓定制款 / 精品）走合作厂家，只给老师和管理员。
+    _guard_restricted_groups(db, operator, fields["selected_product_ids"],
+                             action="排进定时任务")
     eligible = pick_products(
         db, account_id=fields["account_id"], count=len(fields["selected_product_ids"]),
         claim_only=fields["claim_only"], operator_id=operator.id if operator else None,
@@ -764,6 +795,11 @@ def update(db: Session, task_id: str, payload: Mapping[str, Any],
     _assert_operator_account_access(db, fields["account_id"], operator)
     _assert_member_schedule_mode(operator, fields["claim_only"])
     _verify_template(db, fields["template_name"])
+    # 受限分组闸门：改定时任务时把新选中的商品再验一次，
+    # 否则「先建空任务、再 PATCH 塞受限商品」就绕过去了。
+    if payload.get("selectedProductIds"):
+        _guard_restricted_groups(db, operator, fields["selected_product_ids"],
+                                 action="排进定时任务")
     _verify_shop(db, fields["account_id"], fields["shop_id"])
     for target in (fields.get("targets") or []):
         if str(target.get("shopId") or "") != str(fields["shop_id"]):

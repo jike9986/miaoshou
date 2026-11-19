@@ -25,6 +25,11 @@ from urllib.parse import urlsplit
 from sqlalchemy.orm import Session
 
 from core import errors
+from core.constants import (
+    CARRIER_ITEM_RETRY_PAUSE_SECONDS,
+    CARRIER_ITEM_RETRY_ROUNDS,
+    GATEWAY_COOLDOWN_MAX_SECONDS,
+)
 from services import setting_service
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
@@ -561,6 +566,46 @@ def _collect_box_snapshot(client: MiaoshouClient, *,
     return found
 
 
+def _is_retryable_copy_error(exc: MiaoshouError) -> bool:
+    """这次复制失败能不能靠「排到队尾再试一次」解决。
+
+    判据来自 2026-11-19 线上实测：妙手网关抖了约 3 分钟，所有失败都是
+    「下游服务响应超时」（HTTP 200 + result=fail）。这类问题跟商品数据
+    无关，成品仓库里的货是好的，等网关恢复重跑必然成功。
+
+    retryable：
+      · gateway    —— 下游服务响应超时/繁忙
+      · rate_limit —— 撞 QPS 限流（Pacer 会自己抬间隔）
+      · timeout / unknown / unreachable —— 传输层抖动或熔断暂停
+        （注意：unknown 意味着写请求可能已经到达妙手，所以调用方重试时
+          必须靠 before_ids 快照去重，不能盲目当「没做过」）
+    其余（业务错误：参数错、凭据错、商品不存在）重试也不会好，直接抛。
+    """
+    if exc.kind in {"gateway", "rate_limit", "timeout", "unknown", "unreachable"}:
+        return True
+    # HTTP 5xx 也是上游侧问题，值得重试
+    return exc.status is not None and exc.status >= 500
+
+
+def _retry_pause_seconds(client: MiaoshouClient) -> float:
+    """件级重试前的停顿时长：跟着熔断器走，别在熔断期间做无用重试。
+
+    妙手抖的时候熔断器会开 30~300 秒，这里如果只等 20 秒就冲进去，
+    等于白撞一次探针。取「熔断剩余时间 + 少量余量」和基准值中的较大者。
+    """
+    breaker = getattr(client, "_breaker", None)
+    remaining = 0
+    if breaker is not None and hasattr(breaker, "gateway_open_for"):
+        try:
+            remaining = int(breaker.gateway_open_for())
+        except Exception:  # noqa: BLE001 - 熔断器只是加速器，读不到就用默认停顿
+            remaining = 0
+    if remaining <= 0:
+        return CARRIER_ITEM_RETRY_PAUSE_SECONDS
+    return min(float(remaining) + 2.0,
+               GATEWAY_COOLDOWN_MAX_SECONDS + CARRIER_ITEM_RETRY_PAUSE_SECONDS)
+
+
 def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                      progress: Callable[[dict[str, Any]], None] | None = None,
                      on_carrier: Callable[[int], None] | None = None,
@@ -638,41 +683,84 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
         # 五秒」的来源。新建草稿一定排在列表最前面，取一页 200 条就够。
         before_ids = _collect_box_snapshot(client, page_size=200)
         new_ids: list[int] = []
-        for _ in range(copies):
-            try:
-                claimed = client.claim_common_to_platform([(common_id, "tiktok", 1)])
-            except MiaoshouError as exc:
-                raise CarrierError("复制结果未确认，请先检查采集箱，勿重复操作",
-                                   available=len(details) + len(new_ids),
-                                   required=count) from exc
-            returned_ids = list(dict.fromkeys(claimed_detail_ids(claimed)))
-            if len(returned_ids) != 1 and before_ids is not None:
-                known_ids = before_ids | set(new_ids)
-                for attempt in range(3):
-                    readback = _fresh_box_ids(client, common_id, known_ids)
-                    if readback:
-                        if len(readback) == 1:
-                            returned_ids = readback
-                        break
-                    if attempt < 2:
-                        time.sleep(1)
-            invalid_receipt = len(returned_ids) != 1
-            if (before_ids is not None and returned_ids
-                    and returned_ids[0] in before_ids):
-                invalid_receipt = True
-            if invalid_receipt:
-                raise CarrierError("复制回执数量不完整，请先检查采集箱，勿重复操作",
-                                   commonId=common_id, requested=copies,
-                                   returned=len(returned_ids),
-                                   available=len(details) + len(new_ids), required=count)
-            detail_id = returned_ids[0]
-            if detail_id in new_ids or detail_id in details:
-                raise CarrierError("复制接口返回了重复商品 ID，请先检查采集箱，勿重复操作",
-                                   commonId=common_id, available=len(details) + len(new_ids),
-                                   required=count)
-            new_ids.append(detail_id)
-            if on_carrier:
-                on_carrier(detail_id)
+        # 件级重试队列（负责人 2026-11-19 明确）：
+        #   「哪个失败了就把这个成品放到这一批从最后重试，因为成品仓库里面
+        #    肯定都是没问题的」。
+        #
+        # 旧行为：循环里任何一次 claim_common_to_platform 抛错就 raise
+        # CarrierError，整批 50 件一起作废 —— 明明只是妙手网关抖了一下。
+        # 现在：这一件失败就排到队尾重跑，跑完剩下的再回头补。
+        pending_copies = copies
+        item_round = 0
+        while pending_copies > 0 and item_round <= CARRIER_ITEM_RETRY_ROUNDS:
+            deferred = 0
+            for _ in range(pending_copies):
+                try:
+                    claimed = client.claim_common_to_platform([(common_id, "tiktok", 1)])
+                except MiaoshouError as exc:
+                    # 先判断这是「妙手自己抖了」还是「真的不让做」。
+                    # 抖动（网关超时/繁忙/熔断暂停）→ 排到队尾重试；
+                    # 限流也一样排尾（Pacer 已自动抬间隔）；
+                    # 其余（凭据错、参数错）才真的抛出去。
+                    if _is_retryable_copy_error(exc):
+                        deferred += 1
+                        if progress:
+                            progress({"stage": "copy_deferred",
+                                      "commonId": common_id,
+                                      "reason": str(exc)[:120],
+                                      "deferred": deferred})
+                        continue
+                    raise CarrierError("复制结果未确认，请先检查采集箱，勿重复操作",
+                                       available=len(details) + len(new_ids),
+                                       required=count) from exc
+                returned_ids = list(dict.fromkeys(claimed_detail_ids(claimed)))
+                if len(returned_ids) != 1 and before_ids is not None:
+                    known_ids = before_ids | set(new_ids)
+                    for attempt in range(3):
+                        readback = _fresh_box_ids(client, common_id, known_ids)
+                        if readback:
+                            if len(readback) == 1:
+                                returned_ids = readback
+                            break
+                        if attempt < 2:
+                            time.sleep(1)
+                invalid_receipt = len(returned_ids) != 1
+                if (before_ids is not None and returned_ids
+                        and returned_ids[0] in before_ids):
+                    invalid_receipt = True
+                if invalid_receipt:
+                    # 回执残缺同样先排尾重试：上游可能已经把草稿建出来了，
+                    # 直接判死会让这次复制白做，还得人工去核对采集箱。
+                    deferred += 1
+                    if progress:
+                        progress({"stage": "copy_deferred", "commonId": common_id,
+                                  "reason": "复制回执不完整", "deferred": deferred})
+                    continue
+                detail_id = returned_ids[0]
+                if detail_id in new_ids or detail_id in details:
+                    raise CarrierError("复制接口返回了重复商品 ID，请先检查采集箱，勿重复操作",
+                                       commonId=common_id, available=len(details) + len(new_ids),
+                                       required=count)
+                new_ids.append(detail_id)
+                if on_carrier:
+                    on_carrier(detail_id)
+            if deferred == 0:
+                pending_copies = 0
+                break
+            # 还有没建成的：整批先停一下让妙手缓过来（也等熔断冷却走完），
+            # 再把这几件排到队尾重跑。轮数上限见 CARRIER_ITEM_RETRY_ROUNDS。
+            item_round += 1
+            if item_round > CARRIER_ITEM_RETRY_ROUNDS:
+                raise CarrierError(
+                    f"还有 {deferred} 件载体没能建成（已重试 "
+                    f"{CARRIER_ITEM_RETRY_ROUNDS} 轮），请稍后重试这 {deferred} 件",
+                    commonId=common_id, deferred=deferred,
+                    available=len(details) + len(new_ids), required=count)
+            if progress:
+                progress({"stage": "copy_retry_round", "commonId": common_id,
+                          "round": item_round, "deferred": deferred})
+            time.sleep(_retry_pause_seconds(client))
+            pending_copies = deferred
         if url:
             mark(db, url, ok=True)
         before = len(details)
@@ -1657,6 +1745,16 @@ def _carrier_snapshot(client: MiaoshouClient, detail_id: int, shop_id: int,
         raise shop_error from None
 
 
+def strict_readback_batching_disabled() -> bool:
+    """批量预绑定开关：默认开启，设 0 可回退到「每件单独绑」。
+
+    留这个逃生口是因为批量绑定失败时的降级路径要能被测试覆盖 ——
+    真出问题时不用改代码，设环境变量即可回到旧行为。
+    """
+    import os
+    return os.getenv("AOHUANG_BATCH_BIND_CARRIERS", "1").strip() == "0"
+
+
 def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
                   payloads: Iterable[Mapping[str, Any]], *, shop_id: int,
                   progress: Callable[[dict[str, Any]], None] | None = None,
@@ -1686,6 +1784,22 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
     failures: list[str] = []
     failure_details: list[dict[str, Any]] = []
     price_adjustments: list[dict[str, Any]] = []
+    # 预绑定店铺：整批一次调用，而不是每件一次（2026-11-19 提速）。
+    #
+    # claim_to_shop 接口本来就收列表（detailIds + shopIds），旧代码却每件调一次，
+    # 平白多花 N 次往返 × Pacer 间隔（0.90s）。50 件就是白等约 45 秒。
+    # 整批绑一次，绑不到的（个别载体失败）交给下面逐件读取时的判定。
+    bound_batch = False
+    if carrier_list and not strict_readback_batching_disabled():
+        try:
+            client.claim_to_shop(list(carrier_list), [int(shop_id)])
+            bound_batch = True
+            logger.info("整批 %s 个载体已一次绑定预发布店铺 %s",
+                        len(carrier_list), shop_id)
+        except (MiaoshouError, AttributeError) as exc:
+            # 批量绑失败不判死：下面每件还会按需单独绑一次（幂等），
+            # 真正的成败由 _carrier_snapshot 读到 ossMd5 决定。
+            logger.info("整批绑定预发布店铺失败（改逐件绑定）：%s", str(exc)[:120])
     for index, (detail_id, payload) in enumerate(
             zip(carrier_list, payload_list, strict=True)):
         if progress:
@@ -1705,7 +1819,11 @@ def fill_carriers(client: MiaoshouClient, carriers: Iterable[int],
             # 修法：写入前显式 claim_to_shop 把载体绑到本次的目标店铺。
             # 已绑定的载体再绑一次是幂等的（妙手返回 data=null，不报错），
             # 所以不用先读状态判断，省掉一次往返。
-            _ensure_carrier_bound_to_shop(client, detail_id, shop_id, site)
+            #
+            # 上面已经整批绑过一次（bound_batch=True）时这里就跳过 ——
+            # 那是 2026-11-19 的提速改动：每件一次 claim_to_shop 是纯浪费。
+            if not bound_batch:
+                _ensure_carrier_bound_to_shop(client, detail_id, shop_id, site)
             snapshot, block, oss_md5 = _carrier_snapshot(
                 client, detail_id, shop_id, site)
             if not oss_md5:

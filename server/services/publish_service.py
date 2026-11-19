@@ -85,18 +85,27 @@ def _is_claim_only_log(db: Session, row: PublishLog) -> bool:
     return False
 
 
-def _in_flight_blocker(db: Session, *, account: Account,
-                       keys: list[str], operator_id: int | None) -> None:
-    """本地台账里还有 processing 的同一件商品就拒绝。
+def _find_in_flight(db: Session, *, account: Account,
+                    keys: list[str], operator_id: int | None,
+                    ) -> dict[str, dict[str, Any]]:
+    """查出哪些商品在本地台账里还有 processing 的发布记录。
+
+    返回 `{warehouseKey: {detailId, shopId, requestedAt, lastRequestedAt}}`。
 
     锁只管得住同一进程；进程重启、或者有人另起一个实例时锁是空的，
     台账里的 processing 行是唯一还留着的证据。
     processing 只代表结果未确认。超时、断网或进程退出都不能证明平台没有
     受理，因此即使记录很旧，也必须先核对回执，不能自动重新提交。
+
+    **为什么要逐件返回而不是直接抛（2026-11-19 修）**：
+      原来这里一命中就 raise，于是一个人先发过 2 件、或上一次任务中断留下
+      2 条 processing 记录，就会让新任务的**整批 50 件**全部失败 ——
+      明明只有 2 件结果未知，另外 48 件完全没发过。
+      现在交给调用方只把命中的那几件剔出去，其余照常发。
     """
     wanted = set(keys)
     if not wanted:
-        return
+        return {}
     owner_filter = (PublishLog.operator_id.is_(None) if operator_id is None
                     else PublishLog.operator_id == operator_id)
     rows = (db.query(PublishLog)
@@ -104,6 +113,7 @@ def _in_flight_blocker(db: Session, *, account: Account,
                     owner_filter,
                     PublishLog.status == "processing")
             .all())
+    found: dict[str, dict[str, Any]] = {}
     for row in rows:
         key = str(row.warehouse_key or "") or product_key(row.detail_id, row.shop_id)
         if key not in wanted and row.product_id is not None:
@@ -116,11 +126,29 @@ def _in_flight_blocker(db: Session, *, account: Account,
             continue
         if _is_claim_only_log(db, row):
             continue
-        raise errors.busy(
-            "这件商品的发布结果尚未确认，请先刷新发布记录核对",
-            warehouseKey=key, detailId=row.detail_id, shopId=row.shop_id,
-            status=row.status, requestedAt=row.requested_at,
-            lastRequestedAt=row.last_requested_at)
+        found[key] = {"detailId": row.detail_id, "shopId": row.shop_id,
+                      "requestedAt": row.requested_at,
+                      "lastRequestedAt": row.last_requested_at}
+    return found
+
+
+def _in_flight_blocker(db: Session, *, account: Account,
+                       keys: list[str], operator_id: int | None) -> None:
+    """还有 processing 的商品就拒绝 —— 内部核对类调用用这个。
+
+    **发布主路径不再用它**（改成 `_find_in_flight` + 逐件剔除），
+    否则一件结果未知会拖垮整批。保留给只需要「能不能做」判断的场景。
+    """
+    found = _find_in_flight(db, account=account, keys=keys,
+                            operator_id=operator_id)
+    if not found:
+        return
+    key, row = next(iter(found.items()))
+    raise errors.busy(
+        "这件商品的发布结果尚未确认，请先刷新发布记录核对",
+        warehouseKey=key, detailId=row["detailId"], shopId=row["shopId"],
+        status="processing", requestedAt=row["requestedAt"],
+        lastRequestedAt=row["lastRequestedAt"])
 
 
 def _already_published_blocker(db: Session, *, account: Account,
@@ -1230,8 +1258,42 @@ def publish(db: Session, payload: Mapping[str, Any], *,
         db, scoped_publish_keys, blocking=False,
         busy_message="这件正在发布中，请等上一轮结束")
     try:
-        _in_flight_blocker(db, account=account, keys=publish_keys,
-                           operator_id=log_operator_id)
+        # 在途台账只挡住「结果还没确认的那几件」，不拖垮整批。
+        #
+        # 2026-11-19 修：原来一条 processing 记录会让整批 50 件全失败。
+        # 实测场景是「先发过 2 件验证、再发 50 件」，那 2 件的 processing
+        # 把另外 48 件一起废掉 —— 而那 48 件根本没发过。
+        in_flight = _find_in_flight(db, account=account, keys=publish_keys,
+                                    operator_id=log_operator_id)
+        if in_flight:
+            # key 形如 `<detailId>:<shopId>`，按 entry 的 warehouseId 反查回来
+            blocked_products: set[str] = set()
+            for entry in entries:
+                key = product_key(entry["detailId"], target_shop_id)
+                if key in in_flight:
+                    warehouse_id = str(entry.get("warehouseId") or "")
+                    if warehouse_id:
+                        blocked_products.add(warehouse_id)
+                    failures.append({
+                        "stage": "in_flight",
+                        "certain": False,
+                        "warehouseId": entry.get("warehouseId"),
+                        "detailId": in_flight[key]["detailId"],
+                        "reason": "这件商品的发布结果尚未确认，请先在发布记录里刷新回执核对",
+                    })
+            kept = [entry for entry in entries
+                    if str(entry.get("warehouseId") or "") not in blocked_products]
+            if blocked_products:
+                logger.info("发布剔除在途未确认的商品 %s（其余 %s 件继续）",
+                            sorted(blocked_products), len(kept))
+                entries = kept
+            if not entries:
+                # 全部都在途：这才是真该拦的情况，但仍给出结构化原因
+                first = next(iter(in_flight.values()))
+                raise errors.busy(
+                    "这一批商品的发布结果都尚未确认，请先刷新发布记录核对",
+                    detailId=first["detailId"], shopId=first["shopId"],
+                    status="processing", count=len(in_flight))
         if not claim_only:
             pass  # 不再阻止重复发布到同一店铺
         if claim_only:

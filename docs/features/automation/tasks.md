@@ -52,3 +52,5 @@
 | BUG-012 | 重试时报"正在处理中" | 重启后 `recover_interrupted_runs_on_startup` 重置 items 为 failed 但未清 `automation_images.queued`，`_resume_stuck_image_jobs` 重新拉起图片线程持锁，重试被挡 | v0.1.26 |
 | BUG-013 | 重试时报"图片仍在处理" | 进程被杀后 `automation_images.queued=True` 残留，线程已死但 guard 仍触发；获取到锁后直接重置状态而非 busy | v0.1.26 |
 | BUG-014 | 颜色属性为材质词（"网面"/"布面"）导致整件失败 | `clean_color_strict` 识别不出任何颜色词时整件抛错；改为回退到原样保留，让后续流程继续 | v0.1.26 |
+| BUG-015 | 颜色上限对一半商品无效 | `apply_image_limits` 写死 `attrId == "100000"` 认颜色维度，生产库一半商品该字段是 `None`/空串，颜色截断被静默跳过 | v0.1.28 |
+| BUG-016 | 颜色删了但 SKU 全留着（孤儿 SKU） | 用 `attrValueId` 比对 `skuMap` 的 key，但真实 key 是 `;颜色值文本;尺码值文本;`，永远匹配不上 | v0.1.28 |

@@ -73,7 +73,20 @@ def _validate_member_items(db: Session, warehouse_ids: list[str],
     if not account_service.has_account_access(db, account_id, operator.id):
         raise errors.AppError(errors.FORBIDDEN,
                               "无权访问该妙手账号", status=403)
+    from services import group_access
     from services.warehouse_service import active_query
+
+    # 受限分组：学员不能把「自营海外仓 / 海外仓定制款 / 精品」的货导入采集箱。
+    # 负责人 2026-11-19 明确这三组只给老师和管理员。
+    # 放在账号校验之后、逐件校验之前 —— 分组拦截是更粗的边界，
+    # 先拦掉能省一轮查询，报错信息也更直接。
+    restricted_rows = (db.query(Product.group_id)
+                       .filter(Product.id.in_([int(v) for v in warehouse_ids
+                                               if str(v).isdigit()]),
+                               Product.group_id.isnot(None))
+                       .distinct().all())
+    group_access.guard_products(db, operator, [row[0] for row in restricted_rows],
+                                action="导入采集箱")
 
     # Keep each query below SQLite's bind-parameter limit; large claim jobs may
     # contain thousands of items, while execution rechecks only 100 at a time.

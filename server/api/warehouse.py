@@ -124,7 +124,8 @@ def list_warehouse(
         db, page=page, page_size=pageSize, category_id=categoryId, cid=cid,
         group_id=groupId, group=group, q=q, account_id=accountId, status=status,
         quality_status=qualityStatus, claimed=claimed_flag, sort=sort,
-        operator_id=operator.id, claim_account_id=claimAccountId)
+        operator_id=operator.id, claim_account_id=claimAccountId,
+        operator=operator)
 
 
 @router.post("/reconcile-claims", summary="按妙手采集箱核对当前学员认领状态")
