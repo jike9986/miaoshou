@@ -1169,6 +1169,8 @@ export interface BatchResultRow {
   message: string;
   attempt: number;
   at: number;
+  /** 发布任务才有：这条结果属于哪个店铺（detailId 里也带着，这里方便直接取） */
+  shopId?: string;
 }
 
 /** batch.errors 里的一条（后端只保留最近 50 条） */
@@ -1191,17 +1193,38 @@ export interface BatchSettings {
   save?: boolean;
   processImages?: boolean;
   mainImageCount?: number;
+  /**
+   * 批次种类。`warehouse_claim` = 认领到采集箱，`publish_job` = 发布到店铺。
+   * 两种任务共用同一张批次表和同一个面板，前端靠这个字段决定说哪套话。
+   */
+  kind?: "warehouse_claim" | "publish_job" | string;
+  /** 发布任务的目标店铺（每店带自己站点的模板名） */
+  targets?: Array<{ shopId: string; template: string }>;
+  /** 发布任务的仓库商品 id 清单 */
+  warehouseIds?: string[];
+  /**
+   * 重试时只跑这些「店铺 × 商品」，跑完即清。
+   * 有它说明这一轮是单店重试，不是整批首发。
+   */
+  runPlan?: Array<{ shopId: string; template: string; warehouseIds: string[] }>;
   /** 认领任务当前组的准备与校验进度；最终成功数以 Batch.results 为准。 */
   progress?: {
     stage: string;
-    offset: number;
-    total: number;
-    groupSize: number;
+    offset?: number;
+    total?: number;
+    groupSize?: number;
     processed?: number;
     verified?: number;
     saved?: number;
     failed?: number;
     warehouseId?: string;
+    /** 发布任务：当前发到第几个店铺 / 共几个店铺 */
+    shopIndex?: number;
+    shopTotal?: number;
+    /** 发布任务：本轮真正要发的件数（重试时是子集） */
+    attempted?: number;
+    /** 发布任务：本轮已成功 / 已失败的件数 */
+    succeeded?: number;
   };
 }
 
@@ -1283,6 +1306,22 @@ export interface BatchControlResponse {
 export interface BatchRetryResponse {
   batch: Batch;
   retried: number;
+  message: string;
+}
+
+/**
+ * POST /publish-jobs/{id}/retry —— 只重跑失败的店铺 / 失败的商品。
+ *
+ * 发布不可撤销，所以后端按 BatchItem 的逐件状态挑 failed / pending 重跑，
+ * 已经发成功的一件都不碰。`shops` 是这次会重试的店铺 id。
+ */
+export interface PublishJobRetryResponse {
+  batch: Batch;
+  items: BatchItem[];
+  /** 这次要重试的件数（店铺 × 商品） */
+  retried: number;
+  /** 这次要重试的店铺 id */
+  shops: string[];
   message: string;
 }
 

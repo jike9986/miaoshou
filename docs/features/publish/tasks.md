@@ -63,15 +63,37 @@
       顺带修掉 `publish_service._repricing` 里写死 `currency: "MYR"` 的 bug ——
       发菲律宾店会显示成马币，用户按错的钱数做判断。
 
+## 已完成（v0.1.27，2026-11-19）
+
+- [x] **P2 单店重试**：`POST /publish-jobs/{id}/retry` + 明细页「重试失败店铺」按钮。
+      `publish_job_service.retry()` 从 `BatchItem` 逐件真状态里挑 `failed`/`pending`，
+      按店铺归集成 `settings.runPlan`，批次改回 pending 后投递 `run()`。
+      已成功的一件都不碰（发布不可撤销，整批重发会多建商品）。
+      `run()` 改成读 `_run_plan(settings)`：有 runPlan 只跑它，否则跑完整叉乘；
+      老批次缺 `targets`/`warehouseIds` 时从 `detail_id` 的 `<shopId>:<warehouseId>` 还原。
+- [x] **顺带修掉「按店铺粗判成败」**：原来 `ok_count > 0` 就把该店铺所有件记成成功，
+      5 件里成功 4 件时第 5 件被误标「已提交」，用户点重试也补不回来。
+      现在逐件读 `result["records"]["items"][].warehouseId/status`。
+- [x] **顺带修掉 results 重复**：重试成功后同一件在 `results` 里会留两条
+      （failed + ok），成功/失败计数翻倍。改成按 `detailId` 原地覆盖（`_merge_result`）。
+- [x] **顺带修掉批次状态**：重试修好失败店之后批次要变 `done`，不能停在 failed。
+- [x] **连点重试不投两次**：`hold_for_session("publish-job-retry:<account>:<batch>")`。
+- [x] **前端进度口径分开**：发布任务按 `progress.attempted` 算进度（重试用子集），
+      认领任务仍按组推进；发布任务的 `ok` 显示「已提交」而不是「已导入采集箱」。
+- [x] 测试：`server/tests/test_publish_job_retry.py`（8 条全绿）。
+- [x] 顺手修掉 `test_role_permissions.py` 里 3 条基线失败：`/publish-jobs` 三个路由
+      与 `DELETE /claim-jobs/{id}` 加进 `DYNAMIC_WRITE_ROUTES`（这些路由挂的是
+      `publish_claimed`，处理函数里按 account 归属 + 操作员隔离，和 `/claim-jobs` 同性质）。
+
 ## 待完成
 
 - [ ] **P1 定时任务每账号只能一个店铺**：`ScheduleCreate` 只有一个 `shopId`，
       要支持「一个定时任务发多个店铺」得改数据模型（一条任务拆多条 schedule），
       属独立需求，本次未做。
+      > 2026-11-19 更新：已通过 `schedules.targets` 列实现（迁移 `20261119_0001`），本条已完成。
 - [ ] **P2 多账号共用同一个模板**：扇出时若某站点没勾模板会传 null，
       部分商品按原价上架，需要在结果区明确提示。
-- [ ] **P2 发布任务实时推送**：现在靠批次页 3 秒轮询，量小时够用。
-- [ ] **P2 单店重试**：某个店铺失败后只能整批重发，缺「只重发这一个店铺」。
+- [ ] **P2 发布任务实时推送**：现在靠批次页 3 秒轮询，量小时够用，不建议做。
 
 ## 相关 Bug 记录
 
@@ -82,3 +104,6 @@
 | BUG-P06 | 认领到采集箱价格莫名变高 | 沿用入仓时套模板算出的售价 | v0.1.25 |
 | BUG-P07 | 菲律宾店铺价格只有正确值一半 | 用马来模板（MYR 费率）算 PHP 价 | v0.1.25 |
 | BUG-P08 | 五国定价与妙手官方试算差 15%~36% | 运费表单一 + 缺字段 + 3 处公式基数错 | v0.1.25 |
+| BUG-P09 | 5 店发 10 件、1 店失败只能整批重发 | 缺单店重试接口，重发会把成功的店再发一遍 | v0.1.27 |
+| BUG-P10 | 部分成功时未成功的那件被记成「已提交」 | `run()` 按 `ok_count > 0` 判整店成败 | v0.1.27 |
+| BUG-P11 | 重试后进度条显示「已处理 10/3」、成败计数翻倍 | `results` 用 append 而非覆盖；分母用 `detailIds.length` | v0.1.27 |

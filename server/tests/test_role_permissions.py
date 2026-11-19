@@ -912,6 +912,14 @@ DYNAMIC_WRITE_ROUTES = {
     # to the requesting member's own publish rows in the handler.
     ("POST", "/api/v1/publish/logs/refresh"),
     ("POST", "/api/v1/claim-jobs"),
+    # 发布任务（一次发多店）与认领任务同属「学员自己发自己的货」：
+    # 路由挂 publish_claimed，处理函数里按 account 归属 + 操作员隔离。
+    ("POST", "/api/v1/publish-jobs"),
+    ("POST", "/api/v1/publish-jobs/{batch_id}/retry"),
+    ("DELETE", "/api/v1/publish-jobs/{batch_id}"),
+    # 删除任务记录按 kind 分发到 publish_job_service / claim_job_service，
+    # 两者都在处理函数里校验 account 归属与操作员隔离。
+    ("DELETE", "/api/v1/claim-jobs/{batch_id}"),
     # 登录是唯一公开的写入路由，认证失败统一返回 401。
     ("POST", "/api/v1/auth/login"),
     # 邮箱验证码登录与登录同属公开认证入口，不得继承当前个人会话门禁。

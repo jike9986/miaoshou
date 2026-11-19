@@ -192,6 +192,72 @@ POST /publish-jobs  → publish_job_service.create()  只落库，几十毫秒�
 
 ---
 
+## 单店重试（2026-11-19）
+
+### 为什么要有
+
+5 个店发 10 件，1 个店失败时，原来的唯一出路是**整批重发** ——
+而发布不可撤销，整批重发会把已经发成功的 4 个店再发一遍，
+等于凭空多建 40 件商品。负责人 2026-11-19 明确要求只重发失败的部分。
+
+### 接口
+
+```
+POST /publish-jobs/{batch_id}/retry?accountId=<id>   → 202
+{
+  "batch": {...},              # 已改回 pending
+  "items": [...],              # 明细（被重试的件已回到 pending）
+  "retried": 3,                # 这次要重跑的件数（店铺 × 商品）
+  "shops": ["222"],            # 这次要重跑的店铺
+  "message": "将重试 1 个店铺的 3 件商品"
+}
+```
+
+`publish_job_service.retry()` 只做三件事，都不碰上游：
+
+1. 从 `BatchItem` 的**逐件真状态**里挑 `failed` / `pending`（`results` 只是给人看的快照）；
+2. 把这些键按店铺归集成 `settings.runPlan = [{shopId, template, warehouseIds}]`；
+3. 批次改回 `pending`、`finished_at=None`、`current_index=0`，然后由路由投递 `run()`。
+
+### run() 怎么知道跑哪一份清单
+
+`_run_plan(settings)` 决定：
+
+| 条件 | 跑什么 |
+|---|---|
+| `settings.runPlan` 非空 | 只跑它（重试） |
+| 否则 | `settings.targets × settings.warehouseIds` 完整叉乘（首发） |
+| 老批次缺 `targets`/`warehouseIds` | 从 `BatchItem.detail_id` 的 `<shopId>:<warehouseId>` 还原 |
+
+老批次兜底是必须的：少一个店铺等于用户点了重试却少发一个店，比直接报错更糟。
+
+### 关键取舍
+
+- **`ok` 与 `running` 的件一律不碰**。`running` 说明后台线程还在写，
+  抢过来重发就是重复发布。
+- **结果按 detailId 原地覆盖**（`_merge_result`），不是 append。
+  append 会让同一件在 `results` 里出现两条（一条 failed、一条 ok），
+  进度里的成功/失败计数直接翻倍，界面上还会留一条假的失败记录。
+- **逐件成败来自台账，不按店铺粗判**。原来 `ok_count > 0` 就把该店铺所有件记成成功，
+  5 件里成功 4 件时第 5 件被误标成已提交 —— 用户点重试也补不回来（那一件其实从没发出去）。
+  现在读 `result["records"]["items"][].warehouseId/status`，逐件对。
+- **整批成败按整批判**：重试修好失败店之后批次要变 `done`，不能停在 failed。
+- **连点两次重试不会投两次**：`hold_for_session("publish-job-retry:<account>:<batch>")`
+  非阻塞锁，锁活到路由 commit（函数级锁在这里保护不了任何东西，理由同 `core/locks.py`）。
+
+### 前端
+
+`ClaimJobsPanel`（批次标签页）：
+
+- 任务已结束且 `results` 里有 `failed` 时才出「重试失败店铺」按钮；
+- 在跑的不给按钮（后端也回 409），全部成功的不给按钮（后端回 400）；
+- 明细里发布任务的 `ok` 显示「已提交」而不是「已导入采集箱」（两套口径不能混）；
+- `attempt > 1` 的件显示「（第 N 次）」，一眼能看出这件反复失败；
+- 进度条按 `settings.progress.attempted` 算（重试时是子集），
+  不再用 `detailIds.length`（重试时那个数是全量，会算出「已处理 10/3」）。
+
+---
+
 ## 语言校验已下线（2026-11-18）
 
 **现在的行为**：发布不做语言校验。

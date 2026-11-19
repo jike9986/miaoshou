@@ -47,6 +47,25 @@ def job_detail(batch_id: str, db: DbSession, operator: OperatorDep,
                       for row in batch_service.items_of(db, batch.id)]}
 
 
+@router.post("/{batch_id}/retry", status_code=202)
+def retry_job(batch_id: str, background: BackgroundTasks, db: DbSession,
+              operator: OperatorDep, accountId: str) -> dict[str, Any]:
+    """只重跑失败的店铺 / 失败的商品，已经发成功的一件都不碰。
+
+    为什么不能「整批重发」：发布不可撤销。5 个店发 10 件、1 个店失败时
+    整批重发会把另外 4 个店已经发出去的 40 件再发一遍，等于凭空多建商品。
+    这里按 BatchItem 的逐件状态挑出 failed / pending，只重跑这些。
+    """
+    require_writable(db)
+    account = account_service.require_account(db, accountId)
+    result = publish_job_service.retry(db, batch_id, account.id, operator=operator)
+    db.commit()
+    background.add_task(publish_job_service.run, batch_id)
+    return {**result,
+            "items": [batch_service.serialize_item(row)
+                      for row in batch_service.items_of(db, batch_id)]}
+
+
 @router.delete("/{batch_id}")
 def delete_job(batch_id: str, db: DbSession, operator: OperatorDep,
                accountId: str) -> dict[str, Any]:

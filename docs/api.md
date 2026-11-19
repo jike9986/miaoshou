@@ -135,6 +135,8 @@ grep -hcE "^@(router|alias_router|health_router)\.(get|post|patch|put|delete)" s
 | 类目 | `/categories` | 3 | 3 | §6 |
 | 图片 | `/images` | 8 | 8 | §7 |
 | 发布 | `/publish` | 5 | 5 | §8 |
+| 发布任务 | `/publish-jobs` | 4 | 4 | §8.3 |
+| 认领任务 | `/claim-jobs` | 4 | 4 | §8.4 |
 | 定时 | `/schedules` | 5 | 5 | §9 |
 | 词库 | `/violation-words` + `/words` | 7 | 7 | §10 |
 | 系统 | `/system` | 9 | 9 | §11 |
@@ -189,6 +191,12 @@ grep -hcE "^@(router|alias_router|health_router)\.(get|post|patch|put|delete)" s
 | 图片 | POST `/images/reconcile` | 未成节（`api/images.py:67`） |
 | 发布 | POST `/publish` | §8.1 |
 | 发布 | GET `/publish/logs` | §8.2 |
+| 发布任务 | POST `/publish-jobs` | §8.3.1 |
+| 发布任务 | GET `/publish-jobs` | §8.3.2 |
+| 发布任务 | GET `/publish-jobs/{batch_id}` | §8.3.3 |
+| 发布任务 | POST `/publish-jobs/{batch_id}/retry` | §8.3.4 |
+| 发布任务 | DELETE `/publish-jobs/{batch_id}` | §8.3.5 |
+| 认领任务 | POST/GET `/claim-jobs`、GET/DELETE `/claim-jobs/{batch_id}` | §8.4 |
 | 发布 | POST `/publish/logs/refresh` | 未成节（`api/publish.py`） |
 | 发布 | GET `/publish/settings` | 未成节（`api/publish.py`，读发布总开关） |
 | 发布 | POST `/publish/settings` | 未成节（`api/publish.py`，写发布总开关） |
@@ -1611,6 +1619,141 @@ HTTP 503。当前配额见 `GET /images/limits`（实测 `{"limits":{"minute":60
 | 400 | `VALIDATION_ERROR` | status 非法 |
 | 401 | `AUTH_REQUIRED` | 未连接且库中无记录 |
 | 502 | `UPSTREAM_ERROR` | `refresh=true` 且上游失败（`degraded=true` 时不报错） |
+
+---
+
+## 8.3 发布任务 `/publish-jobs`
+
+发布到店铺的**后台任务**。点发布只落一条批次立刻返回，真正干活在后台线程里按店铺推进。
+
+为什么要有这一层：后端单店要在妙手重建载体（实测 30~60 秒），5 个店铺串行就是几分钟，
+前端 180 秒先超时，用户看到的是「正在提交然后没反应」。任务化之后创建请求只落库（几十毫秒），
+进度由批次页轮询 `/claim-jobs` 显示（两种 kind 共用一张批次表，见 `claim_job_service.VISIBLE_KINDS`）。
+
+权限：`publish_claimed`（与 `/claim-jobs` 同级，处理函数里按 account 归属 + 操作员隔离）。
+
+### 8.3.1 POST /publish-jobs
+
+**请求**
+
+```json
+{
+  "accountId": "1",
+  "items": [{"warehouseId": "1042"}, {"warehouseId": "1043"}],
+  "targets": [
+    {"shopId": "18077152", "template": "马来"},
+    {"shopId": "18077190", "template": "菲律宾"}
+  ],
+  "confirmUnverifiedSpecifications": true,
+  "confirm": true
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+|---|---|---|---|---|
+| accountId | string | 是 | 存在 | 妙手账号 |
+| items | array | 是 | 1–500，不重复 | 每项给 `warehouseId` |
+| targets | array | 是 | 非空 | 每个目标店铺一项；`template` 必须是**该店铺自己站点**的模板 |
+| confirm | boolean | 是 | 字面量 `true` | |
+| confirmUnverifiedSpecifications | boolean | 否 | 默认 `false` | 透传给发布逻辑 |
+
+**响应 201**：`{batch, items}`（与 `GET /claim-jobs/{id}` 同构）。
+
+批次 `settings`：
+
+```json
+{
+  "kind": "publish_job",
+  "targets": [{"shopId": "18077152", "template": "马来"}],
+  "warehouseIds": ["1042", "1043"],
+  "detailKeys": ["18077152:1042", "18077152:1043"],
+  "request": {"confirmUnverifiedSpecifications": true},
+  "progress": {"stage": "publishing", "shopIndex": 1, "shopTotal": 2,
+               "attempted": 2, "succeeded": 2, "failed": 0}
+}
+```
+
+`BatchItem.detail_id` = `<shopId>:<warehouseId>`。带店铺是因为
+`BatchItem` 上有 `(batch_id, detail_id)` 唯一约束，而同一件商品要发到多个店铺。
+
+**错误**
+
+| HTTP | code | 条件 |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | targets 空 / items 空或重复 / 超过 500 件 |
+| 403 | `READ_ONLY_MODE` | 只读模式 |
+| 404 | `NOT_FOUND` | accountId 不存在 |
+| 409 | `CONFLICT_BUSY` | 同一账号同一操作员已有在途发布任务 |
+| 422 | `SHOP_NOT_IN_ACCOUNT` | 目标店铺不属于该账号 |
+
+### 8.3.2 GET /publish-jobs
+
+**Query**：`accountId`（必填）、`limit`（1–200，默认 50）。
+
+**响应 200**：`{items: [Batch], total}`，按 `createdAt` 倒序，只含 `kind=publish_job`。
+
+### 8.3.3 GET /publish-jobs/{batch_id}
+
+**Query**：`accountId`（必填）。**响应 200**：`{batch, items}`。
+
+### 8.3.4 POST /publish-jobs/{batch_id}/retry
+
+**只重跑失败的店铺 / 失败的商品，已成功的一件都不碰。**
+
+为什么不能整批重发：发布不可撤销。5 个店发 10 件、1 个店失败时整批重发，
+会把另外 4 个店已经发出去的 40 件再发一遍，等于凭空多建商品。
+
+**Query**：`accountId`（必填）。
+
+**重试范围**（判据是 `BatchItem` 的逐件真状态，不是 `results` 快照）：
+
+| 明细状态 | 是否重跑 | 理由 |
+|---|---|---|
+| `failed` | 是 | 明确失败 |
+| `pending` | 是 | 上一轮整批异常终止时没轮到的 |
+| `ok` | 否 | 已经发出去了，重发就是多建一件 |
+| `running` | 否 | 后台线程还在写，抢过来就是重复发布 |
+
+**响应 202**
+
+```json
+{
+  "batch": {"id": "pub_01HB7ZQ1KM", "status": "pending", "settings": {"runPlan": [
+    {"shopId": "18077190", "template": "菲律宾", "warehouseIds": ["1042"]}]}},
+  "items": [{"detailId": "18077190:1042", "status": "pending"}],
+  "retried": 1,
+  "shops": ["18077190"],
+  "message": "将重试 1 个店铺的 1 件商品"
+}
+```
+
+**错误**
+
+| HTTP | code | 条件 |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | 没有 failed/pending 的件（全部已成功），或任务没有明细 |
+| 403 | `READ_ONLY_MODE` | 只读模式 |
+| 404 | `NOT_FOUND` | 任务不存在或不属于该账号 |
+| 409 | `CONFLICT_BUSY` | 任务还在 pending/running；或这个任务正在被重试（防连点投两次） |
+
+### 8.3.5 DELETE /publish-jobs/{batch_id}
+
+**Query**：`accountId`（必填）。只删本地台账，妙手侧已发出的商品不受影响。
+在途任务（pending/running）回 409 `CONFLICT_BUSY`。
+
+> 前端实际走的是 `DELETE /claim-jobs/{batch_id}`，由 `claim_job_service` 按 `settings.kind`
+> 分发到 `publish_job_service.delete()`。两条路径等价。
+
+---
+
+## 8.4 认领任务 `/claim-jobs`
+
+与发布任务共用同一张批次表与同一个面板，`kind=warehouse_claim`。
+`POST /claim-jobs`、`GET /claim-jobs`、`GET /claim-jobs/{batch_id}`、
+`DELETE /claim-jobs/{batch_id}`（按 kind 分发，见 §8.3.5）。
+
+认领任务还有 `POST /batch/{id}/retry-failed`（`batch_service.retry_failed`），
+那是**逐件重试**的老机制，只对 `warehouse_claim` 有效；发布任务用 §8.3.4。
 
 ---
 

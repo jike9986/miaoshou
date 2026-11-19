@@ -4,7 +4,11 @@ import { RefreshCw } from "lucide-react";
 import { api, apiErrorMessage } from "@/lib/api";
 import { queryKeys } from "@/lib/queryKeys";
 import { formatDate } from "@/lib/utils";
-import type { BatchDetailResponse, BatchListResponse } from "@/lib/types";
+import type {
+  BatchDetailResponse,
+  BatchListResponse,
+  PublishJobRetryResponse,
+} from "@/lib/types";
 import { Badge, Button, Card, ErrorState, Progress } from "@/components/ui";
 import { useRefreshPublishLogs } from "@/lib/queries";
 import { toast } from "@/components/ui/toast";
@@ -13,6 +17,12 @@ const labels: Record<string, string> = {
   pending: "待开始", running: "进行中", done: "已完成", failed: "失败",
   ok: "已导入采集箱", skipped: "已跳过", stopped: "已停止", paused: "已暂停",
   processing: "等待平台确认",
+};
+
+/** 发布任务的逐件状态用发布口径说人话：ok 不是「已导入采集箱」。 */
+const publishLabels: Record<string, string> = {
+  pending: "待发布", running: "正在发布", ok: "已提交",
+  failed: "发布失败", skipped: "已跳过",
 };
 
 const stageLabels: Record<string, string> = {
@@ -67,6 +77,33 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
     return "店铺 " + detailId.slice(0, separator) + " · 商品 "
       + detailId.slice(separator + 1);
   };
+
+  // 单店重试：只重跑失败的店铺 / 失败的商品，已成功的一件都不碰。
+  //
+  // 为什么不能「整批重发」（负责人 2026-11-19）：发布不可撤销。
+  // 5 个店发 10 件、1 个店失败时整批重发，会把另外 4 个店已经发出去的
+  // 40 件再发一遍，等于凭空多建 40 件商品。
+  const retryJob = useMutation({
+    mutationFn: (batchId: string) =>
+      api.post<PublishJobRetryResponse>(
+        `/publish-jobs/${encodeURIComponent(batchId)}/retry`,
+        {},
+        { query: { accountId }, timeoutMs: 30_000 },
+      ),
+    onSuccess: (data) => {
+      toast.success(data.message || "已提交重试", {
+        description: data.shops.length > 0
+          ? `店铺 ${data.shops.join("、")} 正在后台重发，进度看下方进度条`
+          : undefined,
+        duration: 8000,
+      });
+      void list.refetch();
+      void detail.refetch();
+    },
+    onError: (error: Error) => {
+      toast.error("重试失败", { description: apiErrorMessage(error) });
+    },
+  });
   const detail = useQuery({
     queryKey: queryKeys.claimJobs.detail(operatorId, accountId, expanded ?? "none"),
     queryFn: () => api.get<BatchDetailResponse>(`/claim-jobs/${encodeURIComponent(expanded!)}`, { query: { accountId } }),
@@ -114,10 +151,19 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
         const total = job.detailIds.length;
         const active = job.status === "pending" || job.status === "running";
         const progress = job.settings.progress;
-        const progressDone = active && typeof progress?.processed === "number"
-          ? progress.offset + progress.processed
-          : job.currentIndex;
-        const done = Math.min(total, progressDone);
+        // 发布任务和认领任务是两套口径，混着算会得出「已处理 50/10」这种数字：
+        //   · 认领按「组」推进（offset + processed）；
+        //   · 发布按「店铺 × 商品」推进，currentIndex 是店铺序号，不是件数。
+        const isPublishJob = job.settings.kind === "publish_job";
+        const publishAttempted = isPublishJob
+          ? (progress?.attempted ?? total)
+          : total;
+        const progressDone = isPublishJob
+          ? job.results.length
+          : active && typeof progress?.processed === "number"
+            ? (progress.offset ?? 0) + progress.processed
+            : job.currentIndex;
+        const done = Math.min(publishAttempted, progressDone);
         const completedSuccesses = job.results.filter((row) => row.status === "ok").length;
         const completedFailures = job.results.filter((row) => row.status === "failed").length;
         const isPublishProcessing = job.status === "processing" && job.id.startsWith("pub_");
@@ -127,15 +173,37 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
           : 0;
         const succeeded = completedSuccesses + (active ? progress?.verified ?? 0 : 0);
         const failed = completedFailures + (active ? progress?.failed ?? 0 : 0);
-        const pending = Math.max(0, total - done);
+        const pending = Math.max(0, publishAttempted - done);
         const failureMessage = job.results.find((row) => row.status === "failed")?.message;
+        // 有失败件且任务已结束 → 可以只重试失败的那部分。
+        // 在跑的不给按钮（后端也会 409），全部成功的不给按钮（后端会 400）。
+        const canRetry = !active && completedFailures > 0;
+        const failedShopIds = Array.from(new Set(
+          job.results
+            .filter((row) => row.status === "failed")
+            .map((row) => row.shopId || String(row.detailId).split(":")[0])
+            .filter(Boolean),
+        ));
+        const shopLabel = isPublishJob
+          ? `店铺 ${failedShopIds.length > 0 ? failedShopIds.join("、") : job.shopId}`
+          : `店铺 ${job.shopId}`;
         return (
           <Card key={job.id} className="p-4">
             <div className="flex flex-wrap items-center gap-3 text-sm">
               <Badge variant={job.status === "done" ? "success" : job.status === "failed" ? "danger" : job.status === "processing" ? "warning" : "info"}>{job.status === "failed" && succeeded > 0 ? "部分失败" : labels[job.status] ?? job.status}</Badge>
-              <span>店铺 {job.shopId}</span>
+              <span>{shopLabel}</span>
               <span className="text-fg-muted">{formatDate(job.createdAt)}</span>
               <div className="ml-auto flex items-center gap-1">
+                {/* 单店重试：只重跑失败的店铺 / 失败的商品，已成功的一件都不碰。
+                    整批重发会把已经发成功的店铺再发一遍（发布不可撤销）。 */}
+                {canRetry && isPublishJob && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    loading={retryJob.isPending && retryJob.variables === job.id}
+                    onClick={() => retryJob.mutate(job.id)}
+                  >重试失败店铺</Button>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -161,8 +229,10 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
             </div>
             <Progress
               className="mt-3"
-              label={`已处理 ${done} / ${total} 件`}
-              value={total ? Math.round(done * 100 / total) : 0}
+              label={isPublishJob
+                ? `已处理 ${done} / ${publishAttempted} 件`
+                : `已处理 ${done} / ${total} 件`}
+              value={publishAttempted ? Math.round(done * 100 / publishAttempted) : 0}
               tone={job.status === "failed" ? "danger" : job.status === "done" ? "success" : "brand"}
               showValue
             />
@@ -172,20 +242,32 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
                 : <>成功 <span className="num">{succeeded}</span> 件 · 失败 <span className="num">{failed}</span> 件 · {active ? "待处理" : "未处理"} <span className="num">{pending}</span> 件</>
               }
             </p>
-            {active && progress ? (
+            {active && isPublishJob && (
+              <p className="mt-2 text-sm text-fg-muted" role="status">
+                正在发布第 {Math.max(1, progress?.shopIndex ?? 0)} / {progress?.shopTotal ?? 1} 个店铺
+                {typeof progress?.attempted === "number" && ` · 本轮 ${progress.attempted} 件`}
+                {typeof progress?.succeeded === "number" && ` · 成功 ${progress.succeeded} 件`}
+                {typeof progress?.failed === "number" && progress.failed > 0 && ` · 失败 ${progress.failed} 件`}
+                。每个店铺都要在妙手重建载体，单店约 30~60 秒。
+              </p>
+            )}
+            {active && !isPublishJob && progress ? (
               <p className="mt-2 text-sm text-fg-muted" role="status">
                 {stageLabels[progress.stage] ?? "正在处理当前组"}
-                {progress.groupSize > 0 && `（第 ${progress.offset + 1}–${Math.min(total, progress.offset + progress.groupSize)} 件）`}
+                {(progress.groupSize ?? 0) > 0 && `（第 ${(progress.offset ?? 0) + 1}–${Math.min(total, (progress.offset ?? 0) + (progress.groupSize ?? 0))} 件）`}
                 {typeof progress.processed === "number" && ` · 本组已处理 ${progress.processed}/${progress.groupSize}`}
                 {typeof progress.verified === "number" && ` · 成功 ${progress.verified} 件`}
                 {typeof progress.failed === "number" && ` · 失败 ${progress.failed} 件`}
                 {progress.warehouseId && ` · 当前商品 ${progress.warehouseId}`}
                 。
               </p>
-            ) : active && done === 0 && <p className="mt-2 text-sm text-fg-muted">正在准备并导入商品，进度会在每批完成后更新。</p>}
+            ) : active && done === 0 && !isPublishJob && <p className="mt-2 text-sm text-fg-muted">正在准备并导入商品，进度会在每批完成后更新。</p>}
             {job.status === "failed" && (
               <p className="mt-2 break-words text-sm text-danger-700">
-                {failureMessage || "任务未全部完成，请展开明细查看结果。"} 请先核对采集箱，确认后再处理未成功的商品。
+                {failureMessage || "任务未全部完成，请展开明细查看结果。"}
+                {isPublishJob
+                  ? " 点「重试失败店铺」只重发失败的店铺和商品，已发成功的不会重发。"
+                  : " 请先核对采集箱，确认后再处理未成功的商品。"}
               </p>
             )}
             {expanded === job.id && (
@@ -200,7 +282,14 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
                 {detail.data?.items.map((item) => (
                   <div key={item.id} className="flex flex-wrap gap-x-3 gap-y-1 border-t border-border-subtle py-2">
                     <span className="min-w-0 flex-1 break-all">{renderDetailLabel(item.detailId)}</span>
-                    <span className="shrink-0">{labels[item.status] ?? item.status}</span>
+                    <span className="shrink-0">
+                      {isPublishJob
+                        ? (publishLabels[item.status] ?? item.status)
+                        : (labels[item.status] ?? item.status)}
+                      {item.attempt > 1 && (
+                        <span className="ml-1 text-fg-muted">（第 {item.attempt} 次）</span>
+                      )}
+                    </span>
                     {item.message && <span className="w-full break-words text-fg-muted">{item.message}</span>}
                   </div>
                 ))}
