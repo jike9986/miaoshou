@@ -92,8 +92,11 @@ export function ProductCard({
           这样即使图片是纯白也能看出边界，正文仍是干净的白。 */}
       <div className="relative aspect-square w-full overflow-hidden bg-canvas-inset p-1.5">
         <div className="relative h-full w-full overflow-hidden rounded-md ring-1 ring-black/[0.06] shadow-[0_1px_3px_rgba(15,23,42,0.10)]">
+          {/* 列表卡片只有 200×200，优先用缩略图（约 30 KB）。
+              原图 654 KB，一页 20 件就是 13 MB —— 全部走服务器出口带宽。
+              没有缩略图的老数据自动回退到原图。 */}
           <RemoteImage
-            src={product.image}
+            src={product.imageThumb || product.image}
             eager={index < 8}
             zoomOnHover
             className="[&_svg]:size-8"

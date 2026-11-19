@@ -125,6 +125,10 @@ def serialize(product: Product, *, account_name: str = "",
         "site": product.site or "",
         "images": images,
         "image": images[0] if images else (product.cover or ""),
+        # 列表页专用缩略图（200px）。取不到就空串，前端回退到原图。
+        # 一张卡片只显示 200×200，加载 654 KB 原图纯属浪费带宽
+        # （一页 20 件 = 13 MB，走的是服务器出口）。
+        "imageThumb": _thumb_url_of(images[0]) if images else "",
         "imageCount": len(images),
         "detailImageCount": len(product.detail_images or []),
         "skuCount": int(product.sku_count or 0),
@@ -1792,6 +1796,16 @@ def select_translatable_images(
         "detail": _pick(detail_urls, detail_limit),
         "sku": _pick(sku_urls, sku_limit),
     }
+
+
+def _thumb_url_of(url: Any) -> str:
+    """成品区图片地址 → 缩略图地址；不是成品区的返回空串（前端回退原图）。"""
+    try:
+        from services import image_upload
+
+        return image_upload.thumb_url_of(str(url or ""))
+    except Exception:  # noqa: BLE001 - 缩略图只是优化，取不到不影响列表
+        return ""
 
 
 def attach_image_translation(db: Session, product: Mapping[str, Any], *,

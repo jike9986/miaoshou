@@ -42,19 +42,36 @@
       再兜一道（老客户端 / 定时任务路径）。
 - [x] **算价币种跟站点**：`display_price` 返回的 `currency` 不再写死 MYR。
 
+## 已完成（v0.1.26，2026-11-19）
+
+- [x] **P0 前端语言拦截是死逻辑**：`ff07096` 起后端 `check_language` 就不在调用链上，
+      前端 `PublishDialog.tsx` 却按 `mismatch && !allowMismatch` 拦人，提示「会被后端拒绝
+      422」是假话；`language` / `exchangeRate` 两个 state 也从没进提交体。
+      已删三块 state（`language`、`exchangeRate`、`allowMismatch`）与开关、`mismatch`
+      计算、提交体里的 `allowMismatch`。理由：一个发布任务可能同时发五个国家，
+      单个 `language` 字段从结构上就不成立，站点差异由各店铺自己的定价模板承担。
+      后端 `check_language` 与 `PublishRequest.allowMismatch` 保留，供将来真做站点强校验。
+- [x] **P1 定时发布页 role 门控漂移**：`SchedulesPage.tsx:698` 从
+      `identity?.role !== "member" && accounts.length > 1` 改成 `accounts.length > 1`，
+      与发布弹窗同一判据；顺带删掉不再使用的 `useOperatorIdentity` 导入。
+- [x] **P1 构建缓存被跟踪**：`git rm --cached web/tsconfig.tsbuildinfo`。
+- [x] **P1 根目录 `main.js` 过期副本**：确认无引用（`app/package.json` 的 `main` 指向
+      `dist/main.js`，源头是 `app/src/main.ts`）后 `git rm main.js`。
+- [x] **P1 `.claude/launch.json` 进仓库**：untrack 并写进 `.gitignore`。
+- [x] **P1 发布明细看不到售价**：`publish_job_service.run` 从 `result["repriced"]` 取
+      `priceAfter` 写进 `BatchItem.message`，明细显示「已提交 · 售价 47.56 MYR」。
+      顺带修掉 `publish_service._repricing` 里写死 `currency: "MYR"` 的 bug ——
+      发菲律宾店会显示成马币，用户按错的钱数做判断。
+
 ## 待完成
 
-- [ ] **P0 前端语言拦截已成死逻辑**：`ff07096` 只注释了后端 `check_language`，
-      前端 `PublishDialog.tsx` 仍按 `mismatch && !allowMismatch` 拦，提示「会被后端
-      拒绝 422」已是假话。且 `language` / `exchangeRate` 两个 state 根本没进提交体。
-- [ ] **P1 定时发布页未同步**：`SchedulesPage.tsx` 仍是 role 门控 + 每账号单选一个店铺，
-      没有「多店铺 + 按站点选模板」能力。
-- [ ] **P1 提交里混入构建噪音**：`web/tsconfig.tsbuildinfo` 自 `d4d1df8` 起被跟踪，
-      虽在 `.gitignore` 但已跟踪不受影响，每次构建都产生 diff。需 `git rm --cached`。
-- [ ] **P1 根目录 `main.js` 是过期副本**：与 `app/dist/main.js` 内容不同，真实入口是
-      `app/src/main.ts`。确认无引用后删除。
+- [ ] **P1 定时任务每账号只能一个店铺**：`ScheduleCreate` 只有一个 `shopId`，
+      要支持「一个定时任务发多个店铺」得改数据模型（一条任务拆多条 schedule），
+      属独立需求，本次未做。
 - [ ] **P2 多账号共用同一个模板**：扇出时若某站点没勾模板会传 null，
       部分商品按原价上架，需要在结果区明确提示。
+- [ ] **P2 发布任务实时推送**：现在靠批次页 3 秒轮询，量小时够用。
+- [ ] **P2 单店重试**：某个店铺失败后只能整批重发，缺「只重发这一个店铺」。
 
 ## 相关 Bug 记录
 

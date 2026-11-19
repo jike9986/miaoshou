@@ -977,6 +977,11 @@ def _repricing(payloads: list[dict[str, Any]], entries: list[dict[str, Any]],
     """按模板给每件商品重算售价（用它自己的重量与采购价）。"""
     if template is None:
         return payloads, []
+    # 币种按模板所属站点取，不能写死 MYR —— 同一批可能发 PH/TH/VN/SG，
+    # 明细里显示「47.56 MYR」而实际是比索，用户会按错的钱数做判断。
+    from services import exchange_rate as exchange_rate_module
+
+    currency = exchange_rate_module.currency_for_site(template.get("site"))
     priced: list[dict[str, Any]] = []
     reports: list[dict[str, Any]] = []
     for payload, entry in zip(payloads, entries, strict=True):
@@ -995,7 +1000,7 @@ def _repricing(payloads: list[dict[str, Any]], entries: list[dict[str, Any]],
             "detailId": entry["detailId"],
             "priceBefore": money(before),
             "priceAfter": money(after),
-            "currency": "MYR",
+            "currency": currency,
             "weightKg": _weight_of(new_payload),
             "changed": report.get("changedCount"),
             "skuCount": report.get("skuCount"),

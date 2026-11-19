@@ -142,3 +142,70 @@ if (isTeacher && checkedAccountIds.length > 1) {
 认领到采集箱时 `skuMap.price` 重置为「拿货价 ÷ 目标站点汇率」，不套定价模板。
 真正的定价发生在妙手那边套模板（负责人 2026-11-18 明确）。
 函数：`collect_box_service._reset_claim_prices_to_purchase`。
+
+---
+
+## 发布任务化（publish_job_service，2026-11-18）
+
+### 为什么改
+
+负责人反馈：「这五个店铺同时发布产品，会显示正在提交然后没反应了」。
+
+根因不是卡住，是**前端先超时**：后端一个店铺要在妙手重建载体（实测单店 30~60 秒），
+5 个店铺串行就是几分钟，而 `usePublish` 的 `timeoutMs` 只有 180 秒。前端断了，
+后台还在跑，用户看到按钮一直停在「正在提交…」。
+
+### 任务模型
+
+```
+Batch（settings.kind = "publish_job"）
+  settings.targets      = [{shopId, template}, ...]     每个店铺一个
+  settings.warehouseIds = ["123", "456", ...]            要发的商品
+  settings.request      = {language, exchangeRate, confirmUnverifiedSpecifications, ...}
+  settings.progress     = {stage, shopIndex, shopTotal, succeeded, failed}
+  BatchItem.detail_id   = "<shopId>:<warehouseId>"
+```
+
+**`detail_id` 为什么带店铺**：`BatchItem` 上有 `(batch_id, detail_id)` 唯一约束，
+而同一件商品要发到多个店铺。只用 warehouseId 的话，第二条就被数据库拒了。
+
+### 创建与执行
+
+```
+POST /publish-jobs  → publish_job_service.create()  只落库，几十毫秒返回
+                    ↓ background.add_task(run)
+                    run() 在后台线程按店铺逐个 publish
+                    ↓ 每个店铺完成就写一次 batch.settings.progress
+批次页 3 秒轮询 GET /publish-jobs 显示进度
+```
+
+**单店失败不拖垮整批**：5 个店里 1 个失败，剩下 4 个照常发。比整批中断有用得多。
+
+**并发保护**：同一账号同一操作员不允许两个在途发布任务（`hold_for_session` 非阻塞锁）。
+载体池是共享资源，两个任务同时抢会互相拖慢且难定位。
+
+### 删除接口按 kind 分发
+
+`DELETE /claim-jobs/{batch_id}` 一个入口，`claim_job_service.delete()` 按
+`settings.kind` 分发：`warehouse_claim` 走认领台账，`publish_job` 走发布任务台账。
+在途任务（pending/running）不让删。
+
+---
+
+## 语言校验已下线（2026-11-18）
+
+**现在的行为**：发布不做语言校验。
+
+**为什么**：
+1. 后端 `publish_service.check_language` 自 `ff07096` 起就不在调用链上，函数留着但没人调；
+2. 一个发布任务可能同时发 MY/PH/TH/VN/SG 五个站点，语言各不相同，单个 `language`
+   字段从结构上就不成立；
+3. 前端当时还拿「会被后端拒绝 422 SITE_LANGUAGE_MISMATCH」挡人 —— 而后端根本不校验，
+   等于用一句假话拦用户。
+
+**删除的东西**（`PublishDialog.tsx`）：`exchangeRate` state（界面上从来没有输入框）、
+`language` state、`allowMismatch` state 与开关、`mismatch` 计算、提交体里的
+`allowMismatch`。站点差异由每个店铺各自的定价模板承担（`targets[].template`）。
+
+**保留的东西**：后端 `check_language` / `PublishRequest.allowMismatch` 字段不删，
+留给将来真要做站点语言强校验的路径（定时任务、开放接口），只是发布弹窗不再依赖它。

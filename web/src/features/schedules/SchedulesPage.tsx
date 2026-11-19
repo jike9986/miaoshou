@@ -20,7 +20,6 @@ import {
   LIMITS,
   SCHEDULE_FREQUENCY_OPTIONS
 } from "@/lib/constants";
-import { useOperatorIdentity } from "@/lib/operator";
 import {
   useAuthStatus,
   useCreateSchedule,
@@ -693,9 +692,11 @@ function ScheduleFormDrawer({
   const [runAccountId, setRunAccountId] = useState(accountId);
 
   // 老师多账号模式：同时为多个账号创建同一套定时任务。
-  const identity = useOperatorIdentity();
-  // 只要不是明确的学员且有多账号，就显示多账号选择器
-  const isTeacher = identity?.role !== "member" && accounts.length > 1;
+  // 负责人 2026-11-18：去掉 role 门控，只按「有几个账号」判断。
+  // 原来这里写死 identity?.role !== "member"，与发布弹窗（只看 accounts.length > 1）
+  // 口径不一致 —— 同一个学员账号在仓库页能选多账号，在定时任务里选不了。
+  // 已经第三次出现这种「role 门控漂移」，所以统一成同一个判据。
+  const isTeacher = accounts.length > 1;
   // 多账号模式下勾选的账号 id 列表
   const [checkedAccountIds, setCheckedAccountIds] = useState<string[]>([]);
   // 各账号的店铺列表（首次勾选时懒加载）；null = 加载中，[] = 已加载但无店铺，[...] = 有数据

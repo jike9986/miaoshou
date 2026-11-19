@@ -67,3 +67,6 @@ _client_token.txt
 _build_tmp/
 # tsc 增量构建缓存
 *.tsbuildinfo
+
+# 本机调试配置，不进仓库（.claude/launch.json 是 IDE 启动项）
+.claude/launch.json

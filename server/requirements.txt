@@ -11,3 +11,8 @@ python-multipart==0.0.12
 cryptography>=42.0.0
 # services/image_upload.py 的 SFTP 上传通道（HTTP 通道不需要）
 paramiko>=3.4,<4
+# 图片链路：翻译前降体积（image_service._shrink）、入库转 JPEG + 缩略图
+# （image_upload.optimize_product_image / make_thumbnail）
+# 以前服务器上手动装过但没固化，重装环境就会整条图片优化静默失效
+# （代码里所有 Pillow 调用都 try/except 兜底返回原图，不会报错，只会一直不生效）。
+Pillow>=10.0

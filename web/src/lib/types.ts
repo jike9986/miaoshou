@@ -433,6 +433,8 @@ export interface Product {
   site: string;
   images: string[];
   image: string | null;
+  /** 列表页专用缩略图（200px）。取不到时为空，卡片自动回退到 image。 */
+  imageThumb?: string | null;
   imageCount: number;
   skuCount: number;
   /** 包裹重量 kg（后端从 payload.weight 带出，卡片右下角显示） */

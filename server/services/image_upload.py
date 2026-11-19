@@ -20,6 +20,7 @@ from __future__ import annotations  # noqa: I001
 
 import contextlib
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -28,6 +29,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Any
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger("aohuang.image_upload")
 
 __all__ = ["ImageUploadError", "upload_image", "image_type", "SIZE_CHART_UPLOAD_LIMIT"]
 
@@ -548,24 +551,53 @@ def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
     if not local_product and local_auto:
         local_product = re.sub(r"(/?)auto-temp/?$", r"\1products", local_auto)
 
-    # 本机模式：直接复制文件
+    # 本机模式：直接处理并写入成品区
     if local_auto and local_product:
         from pathlib import Path as _Path  # noqa: I001
-        import shutil
 
         source = _Path(local_auto) / name
-        target = _Path(local_product) / name
         if not source.is_file():
             return url
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists() or target.stat().st_size != source.stat().st_size:
-            try:
-                shutil.copyfile(source, target)
-                os.chmod(target, 0o644)
-            except OSError:
-                return url          # 搬不动就保留临时地址，至少图还在
-        return product_base + name
+        try:
+            raw = source.read_bytes()
+        except OSError:
+            return url
 
+        # 成品图统一转 JPEG + 生成缩略图（负责人 2026-11-18）
+        optimized, new_ext = optimize_product_image(raw)
+        stem = name.rsplit(".", 1)[0]
+        final_name = f"{stem}{new_ext}" if new_ext else name
+        target = _Path(local_product) / final_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # 原图：内容不同才写（重复入库不重复写盘）
+        try:
+            if not target.exists() or target.read_bytes() != optimized:
+                target.write_bytes(optimized)
+                os.chmod(target, 0o644)
+        except OSError:
+            return url          # 写不进去就保留临时地址，至少图还在
+
+        # 缩略图：列表页用，失败不影响主流程
+        thumb = make_thumbnail(optimized)
+        if thumb:
+            try:
+                thumb_dir = _Path(local_product) / THUMB_SUBDIR
+                thumb_dir.mkdir(parents=True, exist_ok=True)
+                thumb_path = thumb_dir / f"{stem}.jpg"
+                if not thumb_path.exists() or thumb_path.read_bytes() != thumb:
+                    thumb_path.write_bytes(thumb)
+                    os.chmod(thumb_path, 0o644)
+            except OSError:
+                logger.warning("缩略图写入失败（不影响原图）：%s", stem)
+
+        # 临时区的原文件可以删了：成品区已有同一份内容
+        # 删不掉就留着，14 天清理会自动收
+        if new_ext or target.exists():
+            with contextlib.suppress(OSError):
+                source.unlink()
+
+        return product_base + final_name
     # 远程模式：用 SFTP 读回来再传到成品区
     try:
         import paramiko
@@ -582,10 +614,33 @@ def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
             try:
                 import tempfile
 
+                product_remote = _zone_paths("product")[0].rstrip("/")
                 with tempfile.TemporaryDirectory() as tmp:
                     local = Path(tmp) / name
                     sftp.get(auto_dir + "/" + name, str(local))
-                    return upload_image(local, timeout=timeout, zone="product")
+                    # 与本地模式保持一致：先转 JPEG 再传，否则新商品在这里绕过优化
+                    raw = local.read_bytes()
+                    optimized, new_ext = optimize_product_image(raw)
+                    stem = name.rsplit(".", 1)[0]
+                    staged = Path(tmp) / (f"{stem}{new_ext}" if new_ext else name)
+                    if staged != local:
+                        staged.write_bytes(optimized)
+                    new_url = upload_image(staged, timeout=timeout, zone="product")
+                    # 缩略图：upload_image 只会传到分区根目录，这里单独放子目录
+                    thumb = make_thumbnail(optimized)
+                    if thumb:
+                        try:
+                            thumb_dir = f"{product_remote}/{THUMB_SUBDIR}"
+                            try:
+                                sftp.stat(thumb_dir)
+                            except OSError:
+                                sftp.mkdir(thumb_dir)
+                            import io as _io
+
+                            sftp.putfo(_io.BytesIO(thumb), f"{thumb_dir}/{stem}.jpg")
+                        except Exception as exc:  # noqa: BLE001 - 缩略图失败不影响原图
+                            logger.warning("缩略图 SFTP 上传失败：%s", str(exc)[:120])
+                    return new_url
             finally:
                 sftp.close()
         finally:

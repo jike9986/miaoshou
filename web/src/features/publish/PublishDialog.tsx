@@ -8,7 +8,7 @@ import { AlertTriangle, PackageCheck, RefreshCw, Send } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { apiErrorMessage, api } from "@/lib/api";
-import { isLanguageMismatch, toPublishItems } from "@/lib/constants";
+import { toPublishItems } from "@/lib/constants";
 import {
   useAuthStatus,
   usePublish,
@@ -27,7 +27,6 @@ import {
   Select,
   Separator,
   SkeletonRows,
-  Switch,
   toast,
 } from "@/components/ui";
 
@@ -194,27 +193,20 @@ export function PublishDialog({
   const hasValidTemplate = useTemplateSites.length > 0
     && useTemplateSites.every((site) => Boolean(templateNameBySite[site]));
 
-  // 汇率覆盖：留空由后端使用有效缓存或实时汇率。
-  const [exchangeRate, setExchangeRate] = useState<string>("");
-  const [language, setLanguage] = useState<string>("");
-  // 负责人 2026-11-18：去掉「只认领进采集箱，不上架」开关，发布就是发布。
-  // 认领走仓库页的「认领到采集箱」按钮，两条路不该混在一个弹窗里。
+  // 负责人 2026-11-18：删掉「汇率覆盖」「语言」「接受语言不匹配」三块死逻辑。
+  //   · 汇率：界面上从来没有输入框，state 恒为空串，等于没传；
+  //   · 语言：一个发布任务可能同时发 MY/PH/TH/VN/SG 五个站点，语言各不相同，
+  //     单个 language 字段从结构上就不成立；后端 publish_service 也不再校验
+  //     （check_language 已不调用），前端拦人等于拿一句假话挡用户；
+  //   · allowMismatch：后端的 check_language 不跑，这个开关就没有下游。
+  // 站点差异由每个店铺各自的定价模板承担，见 targets[].template。
   const effectiveClaimOnly = false;
-  const [allowMismatch, setAllowMismatch] = useState(false);
   // 负责人 2026-11-05：发布不再需要二次确认勾选，默认视为已确认。
   const [confirmed, setConfirmed] = useState(true);
   const [error, setError] = useState<string | null>(null);
   /** 发布结果：非 null 时弹窗切到「结果区」，repriced / warning 常驻可回看 */
   const [result, setResult] = useState<PublishResponse | null>(null);
 
-
-  // 汇率校验与后端一致：0 < rate <= 1000；留空合法
-  const rateInvalid = (() => {
-    const raw = exchangeRate.trim();
-    if (!raw) return false;
-    const parsed = Number(raw);
-    return !Number.isFinite(parsed) || parsed <= 0 || parsed > 1000;
-  })();
 
   // 老师多账号：勾选账号时懒加载店铺。null = 加载中
   const fetchShopsForAccount = async (accId: string): Promise<void> => {
@@ -252,12 +244,9 @@ export function PublishDialog({
     if (!open) return;
     setError(null);
     setConfirmed(true);
-    setAllowMismatch(false);
     // 默认用该账号当前的定价模板（老版 refreshScheduleTemplates 的 result.current）。
     // 不填的话每次发布都得手动选一次，选漏了就是按原价上架。
 
-    setExchangeRate("");
-    setLanguage("");
     setShopId(defaultShopId);
     setResult(null);
     // 老师多账号：打开时默认全选，重置状态，让 useEffect 按需加载
@@ -270,22 +259,12 @@ export function PublishDialog({
     }
   }, [open, defaultShopId, auth?.accountId, templatesQuery.data?.selected]);
 
-  // 店铺列表到手后校验默认值 / 语言默认取站点首语言
+  // 店铺列表到手后校验默认值
   useEffect(() => {
     if (!open || shops.length === 0) return;
     const target = shops.find((shop) => shop.shopId === shopId) ?? shops[0];
     if (target && target.shopId !== shopId) setShopId(target.shopId);
-    if (target && !language) {
-      const siteLanguages = shopsQuery.data?.siteLanguages?.[target.site] ?? target.languages;
-      setLanguage(siteLanguages?.[0] ?? "");
-    }
-  }, [open, shops, shopId, language, shopsQuery.data?.siteLanguages]);
-
-  const targetShop = shops.find((shop) => shop.shopId === shopId) ?? null;
-  const mismatch =
-    Boolean(targetShop && language) &&
-    Boolean(targetShop) &&
-    isLanguageMismatch(targetShop?.site ?? "", language, shopsQuery.data?.siteLanguages);
+  }, [open, shops, shopId]);
 
 
   /** 回源刷新平台回执（结果区与 toast 共用） */
@@ -316,10 +295,6 @@ export function PublishDialog({
     }
     if (!confirmed) {
       setError("请勾选发布确认");
-      return;
-    }
-    if (mismatch && !allowMismatch) {
-      setError("所选语言与目标站点不匹配，请更换语言或勾选「接受语言不匹配」");
       return;
     }
 
@@ -391,7 +366,6 @@ export function PublishDialog({
               accountId: job.accountId,
               items,
               targets: job.targets,
-              allowMismatch,
               confirmUnverifiedSpecifications: true,
               confirm: true,
             },
@@ -468,7 +442,7 @@ export function PublishDialog({
               icon={<Send />}
               loading={publish.isPending || multiPublishing}
               loadingText="正在提交…"
-              disabled={!confirmed || rateInvalid
+              disabled={!confirmed
                 || (requiresTemplate && !hasValidTemplate)
                 || (isTeacher && accounts.length > 1 ? checkedAccountIds.length === 0 : !shopId)}
               onClick={() => { void submit(); }}
@@ -736,22 +710,6 @@ export function PublishDialog({
               )}
             </Field>
           </div>
-
-          {mismatch && (
-            <div className="flex items-start gap-2 rounded-md border border-warning-600/20 bg-warning-50 px-3 py-2.5 text-[13px] leading-5 text-warning-700">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0" strokeWidth={2} />
-              <div className="min-w-0 flex-1">
-                <p>所选语言与目标站点不匹配，默认会被后端拒绝（422 SITE_LANGUAGE_MISMATCH）。</p>
-                <div className="mt-1.5">
-                  <Switch
-                    checked={allowMismatch}
-                    onChange={setAllowMismatch}
-                    label="接受语言不匹配（明确风险）"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
 
           <Separator />
 

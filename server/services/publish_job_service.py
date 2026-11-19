@@ -197,11 +197,21 @@ def run(batch_id: str) -> None:
             })
             ok_count = 0
             fail_message = ""
+            price_by_warehouse: dict[str, str] = {}
             try:
                 result = publish_service.publish(
                     db, body, _log_operator_id=batch.operator_id)
                 db.commit()
                 ok_count = len(result.get("published") or [])
+                # 负责人 2026-11-18：明细里要能直接看到发出去多少钱，
+                # 不然每件都得进妙手后台一个个核对。
+                for row in result.get("repriced") or []:
+                    key = str(row.get("warehouseId") or "")
+                    after = row.get("priceAfter")
+                    if key and after:
+                        currency = str(row.get("currency") or "").strip()
+                        price_by_warehouse[key] = (
+                            f"{after} {currency}".strip())
                 failures = result.get("failures") or []
                 if failures and ok_count == 0:
                     fail_message = str(failures[0].get("reason") or "发布失败")[:300]
@@ -214,15 +224,19 @@ def run(batch_id: str) -> None:
             db.expire_all()
             batch = batch_service.get(db, batch_id)
             rows = list(batch.results or [])
-            for key in keys:
+            for key, warehouse_id in zip(keys, warehouse_ids, strict=False):
                 item = (db.query(BatchItem)
                         .filter(BatchItem.batch_id == batch_id,
                                 BatchItem.detail_id == key).first())
                 if item is None:
                     continue
                 item.status = "ok" if ok_count > 0 else "failed"
-                item.message = ("已提交，等待平台回执" if ok_count > 0
-                                else (fail_message or "发布失败"))
+                if ok_count > 0:
+                    price = price_by_warehouse.get(str(warehouse_id))
+                    item.message = (f"已提交 · 售价 {price}" if price
+                                    else "已提交，等待平台回执")
+                else:
+                    item.message = fail_message or "发布失败"
                 rows.append({"detailId": item.detail_id, "status": item.status,
                              "message": item.message, "shopId": shop_id,
                              "at": now_ts()})
