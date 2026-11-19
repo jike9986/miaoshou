@@ -102,6 +102,8 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
             "accountId": str(existing.account_id) if existing.account_id else "",
             "shopId": existing.shop_id,
             "template": existing.template_name,
+            "targets": [dict(item) for item in (existing.targets or [])
+                        if isinstance(item, Mapping)],
             "frequency": existing.frequency,
             "days": list(existing.days or []),
             "dayOfMonth": list(existing.day_of_month or []),
@@ -137,13 +139,42 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
     if account is None:
         raise errors.not_found(f"账号 {account_id} 不存在", accountId=account_id)
 
-    shop_id = str(pick("shopId") or "").strip()
+    # --- 目标店铺：一个任务可以发多个店铺（负责人 2026-11-19）---------------
+    #
+    # targets 为空 = 老任务，只用 shopId + template 这一对。
+    # targets 非空 = 多店铺，第一个店铺同时写回 shop_id / template_name，
+    # 这样列表、日志、回执这些只认老字段的地方不用改。
+    targets_raw = pick("targets")
+    targets: list[dict[str, str]] = []
+    if isinstance(targets_raw, (list, tuple)):
+        seen_shop_ids: set[str] = set()
+        for item in targets_raw:
+            if not isinstance(item, Mapping):
+                continue
+            target_shop = str(item.get("shopId") or "").strip()
+            if not target_shop or not target_shop.isdigit():
+                raise errors.validation("目标店铺无效", field="targets",
+                                        value=target_shop)
+            if target_shop in seen_shop_ids:
+                continue
+            seen_shop_ids.add(target_shop)
+            targets.append({"shopId": target_shop,
+                            "template": str(item.get("template") or "").strip()})
+
+    shop_id = (targets[0]["shopId"] if targets
+               else str(pick("shopId") or "").strip())
     if not shop_id:
         raise errors.validation("请选择定时发布到哪个店铺", field="shopId")
     if not shop_id.isdigit():
         raise errors.validation("shopId 必须是数字", field="shopId", value=shop_id)
 
     template = str(pick("template", "templateName") or "").strip()
+    if targets:
+        # 每个店铺用它自己站点的模板；某个店铺没填就回落到全局模板
+        for target in targets:
+            if not target["template"]:
+                target["template"] = template
+        template = targets[0]["template"] or template
     if not template and not partial:
         raise errors.validation("请选择用哪套定价模板", field="template")
     # 局部更新（PATCH）没带 template 时沿用原值；原值也为空就不校验，
@@ -248,6 +279,7 @@ def normalize(db: Session, raw: Mapping[str, Any], *, partial: bool = False,
         "account_id": account.id,
         "shop_id": shop_id,
         "template_name": template,
+        "targets": targets or None,
         "frequency": frequency,
         "days": days,
         "day_of_month": day_of_month,
@@ -361,6 +393,8 @@ def serialize(row: Schedule, *, account_name: str = "", shop_name: str = "") -> 
         "shopId": row.shop_id,
         "shopName": shop_name,
         "template": row.template_name,
+        # 一次发多个店铺时的完整目标列表；空数组表示老任务（只看 shopId）
+        "targets": targets_of(row),
         "frequency": row.frequency,
         "days": list(row.days or []),
         "dayOfMonth": list(row.day_of_month or []),
@@ -383,6 +417,29 @@ def serialize(row: Schedule, *, account_name: str = "", shop_name: str = "") -> 
         # 此刻正在执行（内存态，不落库）：界面据此显示「执行中」并自动刷新。
         "running": task_running(row.id),
     }
+
+
+def targets_of(row: Schedule) -> list[dict[str, str]]:
+    """任务实际要发的店铺列表：多店铺读 targets，老任务回落到 shop_id。
+
+    永远返回至少一项（除非任务连 shop_id 都是空的，那种是脏数据）。
+    """
+    stored = row.targets if isinstance(row.targets, list) else []
+    items: list[dict[str, str]] = []
+    for entry in stored:
+        if not isinstance(entry, Mapping):
+            continue
+        shop = str(entry.get("shopId") or "").strip()
+        if not shop:
+            continue
+        items.append({"shopId": shop,
+                      "template": str(entry.get("template") or "").strip()})
+    if items:
+        return items
+    if str(row.shop_id or "").strip():
+        return [{"shopId": str(row.shop_id),
+                 "template": str(row.template_name or "").strip()}]
+    return []
 
 
 def _shop_name_of(db: Session, account: Account | None, shop_id: str) -> str:
@@ -678,6 +735,9 @@ def create(db: Session, payload: Mapping[str, Any],
                                 field="selectedProductIds")
     _verify_template(db, fields["template_name"], required=True)
     _verify_shop(db, fields["account_id"], fields["shop_id"])
+    for target in (fields.get("targets") or []):
+        if str(target.get("shopId") or "") != str(fields["shop_id"]):
+            _verify_shop(db, fields["account_id"], target["shopId"])
     row = Schedule(id=f"task-{uuid.uuid4().hex[:12]}", created_at=now_ts(),
                    updated_at=now_ts(),
                    last_run_date="", attempt_date="", attempts=0,
@@ -705,6 +765,9 @@ def update(db: Session, task_id: str, payload: Mapping[str, Any],
     _assert_member_schedule_mode(operator, fields["claim_only"])
     _verify_template(db, fields["template_name"])
     _verify_shop(db, fields["account_id"], fields["shop_id"])
+    for target in (fields.get("targets") or []):
+        if str(target.get("shopId") or "") != str(fields["shop_id"]):
+            _verify_shop(db, fields["account_id"], target["shopId"])
     for key, value in fields.items():
         setattr(row, key, value)
     if payload.get("enabled") is True or "selectedProductIds" in payload:
@@ -1269,13 +1332,15 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
         # 先把店铺核一遍：店铺在妙手里被删/换绑后，shopId 会失效，
         # 不校验就会在批次中途失败（前几件已发出、后几件全错），
         # 而且报的是通用 SHOP_NOT_IN_ACCOUNT，没有可操作信息。
-        if task.shop_id:
+        pending_targets = targets_of(task)
+        if pending_targets:
             from models.account import Account
 
-            account = (db.query(Account)
-                       .filter(Account.id == task.account_id).one_or_none())
-            if account is not None:
-                account_service.require_shop(db, account, task.shop_id)
+            account_row = (db.query(Account)
+                           .filter(Account.id == task.account_id).one_or_none())
+            if account_row is not None:
+                for target in pending_targets:
+                    account_service.require_shop(db, account_row, target["shopId"])
         if task.owner_operator_id is not None:
             owner = operator_service.get(db, task.owner_operator_id)
             member_owner = (
@@ -1338,21 +1403,63 @@ def _execute_locked(db: Session, task: Schedule, *, raise_on_error: bool = False
                     published=0, account_has_products=account_has,
                     warehouse_empty=warehouse_empty)
             return _store(db, task, empty_summary, moment=moment)
-        # publish_service.publish 的入参是请求体形状，不是散装参数
-        outcome = publish_service.publish(db, {
-            "confirm": True,
-            "accountId": task.account_id,
-            "shopId": task.shop_id,
-            "template": task.template_name or None,
-            "claimOnly": bool(task.claim_only),
-            "items": [{"warehouseId": str(item["id"])} for item in items],
-            "batchId": batch_id,
-            "scheduleId": str(task.id),
-        }, operator_id=task.owner_operator_id,
-            _log_operator_id=task.owner_operator_id)
-        summary = _publish_summary(
-            outcome, task=task, requested=requested, selected=selected,
-            batch_id=batch_id, with_results=with_results)
+        # publish_service.publish 的入参是请求体形状，不是散装参数。
+        #
+        # 多店铺（负责人 2026-11-19）：同一批商品依次发到 targets 里的每个店铺。
+        # **共用一个 batchId** 是刻意的 —— 回执核对（_apply_receipt）按 batchId
+        # 匹配发布记录，每家店换一个新 id 的话，上一轮没回来的回执就匹配不上，
+        # 任务会被当成「已提交」卡在 pending 里。
+        shop_targets = targets_of(task)
+        if not shop_targets:
+            raise errors.validation("定时任务没有目标店铺，请重新编辑后再启用")
+        items_payload = [{"warehouseId": str(item["id"])} for item in items]
+        shop_count = len(shop_targets)
+        merged: dict[str, Any] = {"published": 0, "submitted": 0,
+                                  "failures": 0, "results": [],
+                                  "publishStatuses": {}}
+        shop_outcomes: list[dict[str, Any]] = []
+        for target in shop_targets:
+            outcome = publish_service.publish(db, {
+                "confirm": True,
+                "accountId": task.account_id,
+                "shopId": target["shopId"],
+                "template": target["template"] or task.template_name or None,
+                "claimOnly": bool(task.claim_only),
+                "items": items_payload,
+                "batchId": batch_id,
+                "scheduleId": str(task.id),
+            }, operator_id=task.owner_operator_id,
+                _log_operator_id=task.owner_operator_id)
+            part = _publish_summary(
+                outcome, task=task, requested=requested, selected=selected,
+                batch_id=batch_id, with_results=with_results)
+            merged["published"] += int(part.get("published") or 0)
+            merged["submitted"] += int(part.get("submitted") or 0)
+            merged["failures"] += int(part.get("submissionFailures") or 0)
+            merged["results"].extend(part.get("results") or [])
+            statuses = part.get("publishStatuses")
+            if isinstance(statuses, Mapping):
+                merged["publishStatuses"].update(statuses)
+            shop_outcomes.append({
+                "shopId": target["shopId"],
+                "status": part.get("status"),
+                "published": part.get("published"),
+                "submitted": part.get("submitted"),
+                "reason": part.get("reason") or "",
+            })
+        summary = summarize(
+            task_id=str(task.id), requested=requested * shop_count,
+            selected=selected * shop_count,
+            published=merged["published"], submitted=merged["submitted"],
+            failures=merged["failures"], results=merged["results"])
+        if not task.claim_only:
+            summary.update({
+                "batchId": batch_id,
+                "submissionFailures": merged["failures"],
+                "publishStatuses": merged["publishStatuses"],
+            })
+        if shop_count > 1:
+            summary["shops"] = shop_outcomes
         if task.selected_product_ids:
             summary["scheduledRunIndex"] = int(task.completed_runs or 0)
         return _store(db, task, summary, moment=moment)

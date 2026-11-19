@@ -45,9 +45,11 @@ THUMB_SUBDIR = "thumbs"
 THUMB_MAX_SIDE = 200
 THUMB_JPEG_QUALITY = 82
 PRODUCT_JPEG_QUALITY = 92
-# products 下所有可能存图片地址的列（cover 是 text，其余是 json）
-JSON_COLUMNS = ("images", "detail_images", "sku_properties", "payload", "collected")
-TEXT_COLUMNS = ("cover",)
+# 不要写死列名清单。
+# 2026-11-19 实测踩过：当时写死了 6 列，漏掉 products.automation_images，
+# 结果 31 个在用商品的自动化结果页图片全挂（229 处地址指向已删除的 .png）。
+# 改成按 information_schema 动态发现，加新字段不会再把引用落在外面。
+# 补漏工具见 scripts/fix_converted_image_refs.py。
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 URL_RE = re.compile(r"products/([A-Za-z0-9][A-Za-z0-9._-]*)")
 
@@ -130,15 +132,39 @@ def db_connect():
     return psycopg.connect(dsn, autocommit=False)
 
 
+def image_columns(conn) -> list[tuple[str, str]]:
+    """products 表里所有可能存图片地址的列：[(列名, data_type)]。
+
+    动态发现，避免「加了一列新字段，转换时忘了同步引用」这类漏改。
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            select column_name, data_type from information_schema.columns
+            where table_schema = 'public' and table_name = 'products'
+              and data_type in ('text', 'character varying', 'character',
+                                'json', 'jsonb')
+            order by column_name
+        """)
+        return [(row[0], row[1]) for row in cur.fetchall()]
+
+
+def _text_expr(column: str, dtype: str) -> str:
+    """把列转成 text 用的表达式；JSON 列要显式 cast。"""
+    if dtype in ("json", "jsonb"):
+        return f'"{column}"::text'
+    return f'"{column}"'
+
+
 def referenced_names(conn) -> tuple[set[str], dict[str, int]]:
     """扫出数据库里所有 products/<文件名> 引用。
 
     返回 (被引用的文件名集合, 文件名 → 引用它的行数)。
     """
-    columns = ", ".join([*TEXT_COLUMNS, *[f"{c}::text" for c in JSON_COLUMNS]])
+    columns = image_columns(conn)
+    exprs = ", ".join(_text_expr(name, dtype) for name, dtype in columns)
     counts: dict[str, int] = {}
     with conn.cursor() as cur:
-        cur.execute(f"select {columns} from products")
+        cur.execute(f"select {exprs} from products")
         for row in cur:
             seen: set[str] = set()
             for value in row:
@@ -155,16 +181,19 @@ def rewrite_references(conn, old_name: str, new_name: str) -> int:
     """把数据库里 products/<old> 改成 products/<new>，返回受影响行数。"""
     pattern = f"products/{old_name}"
     replacement = f"products/{new_name}"
-    sets = [f"{col} = replace({col}, %s, %s)" for col in TEXT_COLUMNS]
-    sets += [f"{col} = replace({col}::text, %s, %s)::json" for col in JSON_COLUMNS]
+    columns = image_columns(conn)
+    sets: list[str] = []
     params: list[str] = []
-    for _ in [*TEXT_COLUMNS, *JSON_COLUMNS]:
+    for name, dtype in columns:
+        expr = _text_expr(name, dtype)
+        if dtype in ("json", "jsonb"):
+            sets.append(f'"{name}" = replace({expr}, %s, %s)::json')
+        else:
+            sets.append(f'"{name}" = replace({expr}, %s, %s)')
         params.extend([pattern, replacement])
-    where = " or ".join(
-        [f"{col} like %s" for col in TEXT_COLUMNS]
-        + [f"{col}::text like %s" for col in JSON_COLUMNS])
-    params.extend([f"%{pattern}%"] * len(TEXT_COLUMNS))
-    params.extend([f"%{pattern}%" for _ in JSON_COLUMNS])
+    where = " or ".join(f"{_text_expr(name, dtype)} like %s"
+                        for name, dtype in columns)
+    params.extend([f"%{pattern}%"] * len(columns))
 
     with conn.cursor() as cur:
         cur.execute(f"update products set {', '.join(sets)} where {where}", params)
@@ -173,13 +202,12 @@ def rewrite_references(conn, old_name: str, new_name: str) -> int:
 
 def leftover_references(conn, name: str) -> int:
     pattern = f"%products/{name}%"
-    where = " or ".join(
-        [f"{col} like %s" for col in TEXT_COLUMNS]
-        + [f"{col}::text like %s" for col in JSON_COLUMNS])
+    columns = image_columns(conn)
+    where = " or ".join(f"{_text_expr(column, dtype)} like %s"
+                       for column, dtype in columns)
     with conn.cursor() as cur:
-        cur.execute(
-            f"select count(*) from products where {where}",
-            [pattern] * (len(TEXT_COLUMNS) + len(JSON_COLUMNS)))
+        cur.execute(f"select count(*) from products where {where}",
+                    [pattern] * len(columns))
         return int(cur.fetchone()[0])
 
 

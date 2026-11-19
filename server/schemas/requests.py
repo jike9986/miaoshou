@@ -149,6 +149,13 @@ class CommonBoxPushRequest(CamelModel):
     accountId: str | None = None
 
 
+class ScheduleTarget(CamelModel):
+    """定时任务的一个目标店铺。每个店铺用它自己站点的模板。"""
+
+    shopId: str
+    template: str = ""
+
+
 class ScheduleCreate(CamelModel):
     name: str | None = Field(default=None, max_length=120)
     enabled: bool = True
@@ -168,6 +175,9 @@ class ScheduleCreate(CamelModel):
     selectedProductIds: list[str] = Field(default_factory=list)
     plannedRuns: int | None = Field(default=None, ge=1, le=180)
     claimOnly: bool = False
+    # 一次发多个店铺：[{"shopId": "123", "template": "马来模板"}, ...]
+    # 不传 = 老行为，只用 shopId + template 那一对。
+    targets: list[ScheduleTarget] = Field(default_factory=list)
 
 
 class SchedulePatch(CamelModel):
@@ -186,6 +196,7 @@ class SchedulePatch(CamelModel):
     selectedProductIds: list[str] | None = None
     plannedRuns: int | None = Field(default=None, ge=1, le=180)
     claimOnly: bool | None = None
+    targets: list[ScheduleTarget] | None = None
 
 
 class WordRequest(CamelModel):

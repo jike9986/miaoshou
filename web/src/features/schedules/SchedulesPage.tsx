@@ -3,7 +3,7 @@
 // 新建/编辑：名称、频率（daily/weekly/monthly/range）、时间、星期几、起止日期、每次数量、店铺、模板。
 // 删除确认 + 立即执行（演练）。
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   CalendarClock,
@@ -368,6 +368,11 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
                       </td>
                       <td className="px-3 py-2.5">
                         <p className="truncate text-[13px] text-fg">{task.shopName || task.shopId}</p>
+                        {(task.targets?.length ?? 0) > 1 && (
+                          <p className="text-2xs text-fg-muted">
+                            共 {task.targets?.length} 个店铺
+                          </p>
+                        )}
                       </td>
                       <td className="px-3 py-2.5">
                         <p className="flex items-center gap-1.5 text-[13px] text-fg">
@@ -495,6 +500,14 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
             }
             if (payload.startDate !== editing.startDate) patch.startDate = payload.startDate;
             if (payload.endDate !== editing.endDate) patch.endDate = payload.endDate;
+            // 多店铺：和老任务比一下店铺集合/模板有没有变，变了才提交 targets。
+            // 老任务（targets 为空）比较时按「只有一个 shopId」折算，避免一保存就变成多店铺。
+            const editingTargets = (editing.targets && editing.targets.length > 0)
+              ? editing.targets
+              : [{ shopId: editing.shopId, template: editing.template }];
+            if (JSON.stringify(payload.targets ?? []) !== JSON.stringify(editingTargets)) {
+              patch.targets = payload.targets ?? [];
+            }
 
             if (Object.keys(patch).length === 0) {
               toast.info("没有修改需要保存");
@@ -635,7 +648,11 @@ interface ScheduleFormDrawerProps {
   /** 已连接的账号，用来给任务选「用哪个账号跑」（老版 schedule-account） */
   accounts: Array<{ id: string; name: string }>;
   shops: Array<{ shopId: string; name: string; site: string; siteName: string }>;
-  templates: Array<{ name: string; invalid?: boolean }>;
+  templates: Array<{
+    name: string;
+    invalid?: boolean;
+    template?: Record<string, unknown>;
+  }>;
   /** 账号 → 当前模板名；新建任务时用它当默认值 */
   selectedTemplates?: Record<string, string>;
   submitting: boolean;
@@ -645,6 +662,8 @@ interface ScheduleFormDrawerProps {
     accountId: string;
     shopId: string;
     template: string;
+    /** 一次发多个店铺时带上完整列表；[{shopId, template}] */
+    targets?: Array<{ shopId: string; template: string }>;
     frequency: ScheduleFrequency;
     days: number[];
     dayOfMonth: number[];
@@ -701,8 +720,46 @@ function ScheduleFormDrawer({
   const [checkedAccountIds, setCheckedAccountIds] = useState<string[]>([]);
   // 各账号的店铺列表（首次勾选时懒加载）；null = 加载中，[] = 已加载但无店铺，[...] = 有数据
   const [shopsByAccount, setShopsByAccount] = useState<Record<string, Shop[] | null>>({});
-  // 各账号手动选的店铺；未选时默认取该账号第一个店铺
-  const [selectedShopByAccount, setSelectedShopByAccount] = useState<Record<string, string>>({});
+  // 各账号勾选的店铺（可多个）；未勾时默认取该账号第一个店铺。
+  // 负责人 2026-11-19：定时任务也要能一次发多个店铺，和发布弹窗对齐。
+  const [selectedShopIdsByAccount, setSelectedShopIdsByAccount] =
+    useState<Record<string, string[]>>({});
+  // 站点 → 该站点的模板名（一个站点一套，取第一个）。
+  // 多店铺时每个店铺用它自己站点的模板：马来模板套到菲律宾店必算错价。
+  const templateNameBySite = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const item of templates) {
+      if (item.invalid) continue;
+      const site = String(
+        (item.template as { site?: unknown } | undefined)?.site ?? ""
+      ).trim().toUpperCase();
+      if (site && !map[site]) map[site] = item.name;
+    }
+    return map;
+  }, [templates]);
+  /** 某个店铺该用哪套模板：按它自己的站点找，找不到回落到全局选的模板。 */
+  const templateForShop = useCallback(
+    (shop: { site?: string } | undefined): string => {
+      const site = String(shop?.site ?? "").trim().toUpperCase();
+      return (site && templateNameBySite[site]) || template;
+    },
+    [templateNameBySite, template]
+  );
+  /** 某个账号本次要发的店铺列表（没勾就回落第一个）。 */
+  const targetsForAccount = useCallback(
+    (accId: string): Array<{ shopId: string; template: string }> => {
+      const accShops = shopsByAccount[accId] ?? [];
+      const picked = selectedShopIdsByAccount[accId] ?? [];
+      const chosen = picked.length > 0
+        ? accShops.filter((shop) => picked.includes(shop.shopId))
+        : accShops.slice(0, 1);
+      return chosen.map((shop) => ({
+        shopId: shop.shopId,
+        template: templateForShop(shop),
+      }));
+    },
+    [shopsByAccount, selectedShopIdsByAccount, templateForShop]
+  );
 
   // 切了账号就要换店铺列表：店铺属于账号，拿错账号的店铺建任务会 422
   const switched = Boolean(runAccountId) && runAccountId !== accountId;
@@ -789,6 +846,15 @@ function ScheduleFormDrawer({
       });
       setEnabled(task.enabled);
       setShopId(task.shopId);
+      // 老任务没有 targets：用 shopId 那一个回填，界面显示为「勾了这一个店铺」
+      const taskTargets = task.targets && task.targets.length > 0
+        ? task.targets
+        : [{ shopId: task.shopId, template: task.template }];
+      setSelectedShopIdsByAccount({
+        [task.accountId ?? accountId]: taskTargets
+          .map((item) => String(item.shopId || ""))
+          .filter(Boolean),
+      });
       setTemplate(task.template);
       setRunAccountId(task.accountId || accountId);
       setSelectedProductIds(task.selectedProductIds ?? []);
@@ -814,7 +880,7 @@ function ScheduleFormDrawer({
       setCheckedAccountIds([]);
     }
     setShopsByAccount({});
-    setSelectedShopByAccount({});
+    setSelectedShopIdsByAccount({});
     // 模板默认值单独一个 effect（见下），因为它依赖异步回来的 selectedTemplates
   }, [open, task, accountId, shops]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -925,13 +991,22 @@ function ScheduleFormDrawer({
       claimOnly: false,
     };
 
-    // 老师多账号模式：同时为多个账号创建任务（每个账号一条）
+    // 老师多账号模式：同时为多个账号创建任务（每个账号一条）。
+    // 每个账号里勾了多个店铺时，任务带 targets 一次发多店。
     if (isTeacher && !task && checkedAccountIds.length > 1) {
-      const payloads = checkedAccountIds.map((accId) => {
-        const accShops = shopsByAccount[accId] ?? [];
-        const accShopId = selectedShopByAccount[accId] ?? accShops[0]?.shopId ?? shopId;
-        return { ...basePayload, accountId: accId, shopId: accShopId };
-      }).filter((p) => Boolean(p.shopId)); // 跳过没有店铺的账号
+      const payloads = checkedAccountIds
+        .map((accId) => {
+          const targets = targetsForAccount(accId);
+          if (targets.length === 0) return null;
+          return {
+            ...basePayload,
+            accountId: accId,
+            shopId: targets[0].shopId,
+            template: targets[0].template || template,
+            targets,
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null);
       if (payloads.length === 0) {
         setErrors({ shopId: "所选账号均无可用店铺" });
         return;
@@ -940,8 +1015,16 @@ function ScheduleFormDrawer({
       return;
     }
 
-    // 单账号模式（原有逻辑）
-    onSubmit([{ ...basePayload, accountId: runAccountId || accountId }]);
+    // 单账号模式：当前账号勾了几个店铺就发几个
+    const singles = targetsForAccount(runAccountId || accountId);
+    const targets = singles.length > 0 ? singles : [{ shopId, template }];
+    onSubmit([{
+      ...basePayload,
+      accountId: runAccountId || accountId,
+      shopId: targets[0].shopId,
+      template: targets[0].template || template,
+      targets,
+    }]);
   };
 
   const toggleNumber = (list: number[], value: number): number[] =>
@@ -1007,7 +1090,7 @@ function ScheduleFormDrawer({
                   // null = 加载中（已触发请求），undefined = 还没触发，[] = 加载完无店铺
                   const accShopsLoading = accShopsRaw === null || (checked && accShopsRaw === undefined);
                   const accShops = accShopsRaw ?? [];
-                  const accShopId = selectedShopByAccount[account.id] ?? accShops[0]?.shopId ?? "";
+                  const accShopIds = selectedShopIdsByAccount[account.id] ?? [];
                   return (
                     <div key={account.id} className="rounded-md border border-border-subtle bg-canvas-inset/40 p-2">
                       <label className="flex cursor-pointer items-center gap-2 text-sm">
@@ -1023,18 +1106,41 @@ function ScheduleFormDrawer({
                         <p className="mt-0.5 text-xs text-fg-muted">加载店铺中…</p>
                       )}
                       {checked && !accShopsLoading && accShops.length > 1 && (
-                        <div className="mt-1">
-                          <Select
-                            value={accShopId}
-                            onChange={(val) =>
-                              setSelectedShopByAccount((prev) => ({ ...prev, [account.id]: val }))
-                            }
-                            options={accShops.map((shop) => ({
-                              value: shop.shopId,
-                              label: `${shop.name} · ${shop.siteName || shop.site}`,
-                            }))}
-                            placeholder="选择店铺"
-                          />
+                        <div className="mt-2 space-y-1">
+                          {accShops.map((shop) => (
+                            <label
+                              key={shop.shopId}
+                              className="flex cursor-pointer items-center gap-2 text-xs"
+                            >
+                              <input
+                                type="checkbox"
+                                className="h-3 w-3 cursor-pointer rounded border-border accent-brand-500"
+                                checked={accShopIds.includes(shop.shopId)}
+                                onChange={(e) => {
+                                  setSelectedShopIdsByAccount((prev) => {
+                                    const list = prev[account.id] ?? [];
+                                    return {
+                                      ...prev,
+                                      [account.id]: e.target.checked
+                                        ? [...list, shop.shopId]
+                                        : list.filter((id) => id !== shop.shopId),
+                                    };
+                                  });
+                                }}
+                              />
+                              {/* 必须带站点：同一账号下常有同名的不同国家店铺，
+                                  只显示店名根本分不清该勾哪个。 */}
+                              <span className="truncate text-fg-secondary">
+                                {shop.name}
+                                <span className="ml-1 text-fg-muted">
+                                  · {shop.siteName || shop.site}
+                                </span>
+                              </span>
+                            </label>
+                          ))}
+                          <p className="text-[11px] text-fg-muted">
+                            不勾则默认发到第一个店铺
+                          </p>
                         </div>
                       )}
                       {checked && !accShopsLoading && accShops.length === 1 && (
@@ -1062,17 +1168,61 @@ function ScheduleFormDrawer({
             )
           )}
 
-          <Field label="目标店铺" required error={errors.shopId ?? null}>
-            <Select
-              value={shopId}
-              onChange={setShopId}
-              options={shopOptions.map((shop) => ({
-                value: shop.shopId,
-                label: `${shop.name} · ${shop.siteName || shop.site}`,
-              }))}
-              placeholder={shopOptions.length === 0 ? "该账号下没有店铺" : "选择店铺"}
-              disabled={shopOptions.length === 0}
-            />
+          <Field
+            label="目标店铺"
+            required
+            error={errors.shopId ?? null}
+            hint={shopOptions.length > 1 ? "可勾多个店铺，各自套自己站点的模板" : undefined}
+          >
+            {shopOptions.length > 1 ? (
+              <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border-subtle p-2">
+                {shopOptions.map((shop) => {
+                  const picked = (selectedShopIdsByAccount[runAccountId || accountId] ?? []);
+                  const checked = picked.includes(shop.shopId);
+                  return (
+                    <label
+                      key={shop.shopId}
+                      className="flex cursor-pointer items-center gap-2 text-xs"
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 cursor-pointer rounded border-border accent-brand-500"
+                        checked={checked}
+                        onChange={(e) => {
+                          setSelectedShopIdsByAccount((prev) => {
+                            const key = runAccountId || accountId;
+                            const list = prev[key] ?? [];
+                            return {
+                              ...prev,
+                              [key]: e.target.checked
+                                ? [...list, shop.shopId]
+                                : list.filter((id) => id !== shop.shopId),
+                            };
+                          });
+                        }}
+                      />
+                      <span className="truncate text-fg-secondary">
+                        {shop.name}
+                        <span className="ml-1 text-fg-muted">
+                          · {shop.siteName || shop.site}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <Select
+                value={shopId}
+                onChange={setShopId}
+                options={shopOptions.map((shop) => ({
+                  value: shop.shopId,
+                  label: `${shop.name} · ${shop.siteName || shop.site}`,
+                }))}
+                placeholder={shopOptions.length === 0 ? "该账号下没有店铺" : "选择店铺"}
+                disabled={shopOptions.length === 0}
+              />
+            )}
           </Field>
 
           <Field label="定价模板" hint={templates.length === 0 ? "还没有保存定价模板" : undefined}>

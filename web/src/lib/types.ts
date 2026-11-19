@@ -1002,6 +1002,11 @@ export interface Schedule {
   shopId: string;
   shopName: string;
   template: string;
+  /**
+   * 一次发多个店铺时的完整目标列表（每个店铺带自己站点的模板）。
+   * 老任务返回空数组，界面上按「只有 shopId 那一个店铺」处理。
+   */
+  targets?: Array<{ shopId: string; template: string }>;
   frequency: ScheduleFrequency | string;
   days: number[];
   dayOfMonth: number[];

@@ -28,6 +28,13 @@ class Schedule(Base):
     owner_operator_id: Mapped[int | None] = mapped_column(Integer)
     shop_id: Mapped[str] = mapped_column(String(32), default="")
     template_name: Mapped[str] = mapped_column(String(64), default="")
+    # 一次任务发多个店铺：[{"shopId": "...", "template": "..."}, ...]
+    #
+    # 负责人 2026-11-19：发布弹窗早就能一次发多店，定时任务却只能一个店铺。
+    # 为什么不改成一任务拆多条 schedule：拆开之后「改一次频率要改 N 条」、
+    # 「删任务要删 N 条」、「算不算跑过」全都要按组重算，比这里多一个字段复杂得多。
+    # 空值 = 老任务，执行时回落到 shop_id + template_name 这一对。
+    targets: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
     # daily / weekly / monthly / range
     frequency: Mapped[str] = mapped_column(String(16), default="daily")
     # weekly：1–7（周一为 1）
