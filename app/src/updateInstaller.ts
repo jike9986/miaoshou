@@ -26,6 +26,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { app, BrowserWindow, net } from "electron";
 import {
   ALLOWED_HOSTS,
+  DOWNLOAD_USER_AGENT,
   planSegments,
   rangeHeader,
   segmentLength,
@@ -98,6 +99,9 @@ async function fetchSegment(
       redirect: "follow",
     });
     request.setHeader("Range", rangeHeader(segment));
+    // 显式声明 UA：Cloudflare 的 Browser Integrity Check 会拦脚本类 UA
+    // （实测 Python-urllib 被 403/error 1010）。不依赖 Electron 默认值。
+    request.setHeader("User-Agent", DOWNLOAD_USER_AGENT);
     request.on("response", (response) => {
       // 206 = 支持分段；200 = 服务端忽略了 Range，整份返回 → 不能用
       if (response.statusCode !== 206) {
@@ -211,6 +215,7 @@ async function downloadSingleStream(
     const hash = createHash("sha256");
     await new Promise<void>((resolve, reject) => {
       const request = net.request({ url, redirect: "follow" });
+      request.setHeader("User-Agent", DOWNLOAD_USER_AGENT);
       request.on("response", (response) => {
         if (response.statusCode !== 200) {
           reject(new Error(`下载失败（HTTP ${response.statusCode}）`));

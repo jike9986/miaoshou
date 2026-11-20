@@ -429,3 +429,74 @@ interval=0.35  总 6.07s   客户端睡 0.58s   上游 5.49s   6/6 成功
 **更平滑的做法**：`version.json` 继续用主域，主域 nginx 对下载路径做
 `return 302 https://aohuang888.xyz$request_uri` —— 老客户端不用升级也能
 吃到 CDN 速度，不需要等所有人升级。
+
+---
+
+## Cloudflare 接入后的三条硬规则（2026-11-20 实测）
+
+### 1. 443 必须有 acme 验证路径
+
+nginx 的 443 server 块里必须显式写：
+
+```nginx
+location /.well-known/acme-challenge/ {
+    root /var/www/letsencrypt;
+    default_type text/plain;
+    try_files $uri =404;
+}
+```
+
+原来只有 80 端口有，443 没有 —— 于是 `https://域名/.well-known/...`
+落到 `location /` 反代到后端 → 404。以前没暴露是因为续期走 HTTP，
+但切 Cloudflare 后 CF 默认回源 443，验证请求就走 HTTPS 了。
+
+**不修的后果：60 天后证书续期失败，HTTPS 打不开，全部客户端失联。**
+
+### 2. Cloudflare 的 Browser Integrity Check 会拦脚本类 UA
+
+实测：
+
+```
+Python-urllib/3.13   → 403  error code: 1010
+Electron/31.7.7      → 206
+curl/8.x             → 206
+浏览器 UA / 空 UA     → 206
+```
+
+所以**下载请求必须显式声明浏览器形态 UA**，不能依赖 Electron 默认值。
+默认值现在能过是运气 —— Cloudflare 的托管规则会变，哪天把 `Electron/`
+加进去，全量用户自动更新集体失效，而症状只是「下载失败」。
+
+见 `app/src/updateDownload.ts` 的 `DOWNLOAD_USER_AGENT`。
+
+### 3. `version.json` 靠源站 `no-store` 就够，不需要建 Cache Rule
+
+实测接入 CF 后：
+
+```
+安装包       cf-cache-status: HIT        （源站给了 immutable，CF 自动缓存）
+version.json cf-cache-status: DYNAMIC    （源站给了 no-store，CF 自动不缓存）
+```
+
+**Cloudflare 默认遵循源站 `Cache-Control`。** 文档里写的那些 Cache Rule
+是保险，实测发现不必需。但有一条**必须建**：
+
+```
+URI Path starts with /.well-known/acme-challenge/ → Bypass cache
+```
+
+因为 acme 文件每次内容都不同且必须实时，不能靠源站头解决。
+漏了这条，60 天后证书续期会静默失败。
+
+### 验证「用户能不能收到更新」的方法
+
+不是看配置，是实测：
+
+```bash
+# 1. 改 /var/www/miaoshou-downloads/version.json 的任意字段
+# 2. 等 3 秒
+# 3. curl https://<CDN域名>/miaoshou-downloads/version.json
+# 4. 必须立刻看到新内容
+```
+
+2026-11-20 实测通过（改 notes → 3 秒后 CDN 立刻返回新值）。

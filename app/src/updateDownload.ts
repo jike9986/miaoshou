@@ -21,6 +21,33 @@ export const DOWNLOAD_CONCURRENCY = 6;
 /** 单片最小 4MB，避免 74MB 切成十几片后请求开销变大。 */
 export const MIN_SEGMENT_BYTES = 4 * 1024 * 1024;
 
+/**
+ * 下载请求要带的 User-Agent。
+ *
+ * ## 为什么必须显式设置（2026-11-20 实测）
+ *
+ * 接入 Cloudflare 后，用默认 UA 请求会拿到 **403 error code 1010**
+ * （Browser Integrity Check，专门拦非浏览器 UA）：
+ *
+ *     Python-urllib/3.13   → 403  error code: 1010
+ *     Electron/31.7.7      → 206  ✅
+ *     curl/8.x             → 206  ✅
+ *     浏览器 UA             → 206  ✅
+ *     空 UA                → 206  ✅
+ *
+ * 也就是说 Cloudflare 只拦「已知的脚本类 UA」。Electron 默认 UA 目前能过，
+ * 但那是**依赖对方规则恰好没拦**，不是我们能控制的 —— Cloudflare 的托管
+ * 规则会变，哪天把 `Electron/` 加进去，全量用户的自动更新就集体失效，
+ * 而且症状只是「下载失败」，很难联想到是 CDN 的 UA 规则。
+ *
+ * 所以主动声明一个浏览器形态的 UA（带自己产品标识便于对方统计），
+ * 让请求看起来就是正常客户端，不依赖默认值。
+ */
+export const DOWNLOAD_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+  + "(KHTML, like Gecko) AohuangShangpin/Update Chrome/126.0.0.0 "
+  + "Safari/537.36";
+
 export interface Segment {
   /** 闭区间起点（含） */
   start: number;
