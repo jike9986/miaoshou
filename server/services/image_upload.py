@@ -604,6 +604,20 @@ def promote_to_product_zone(url: str, *, timeout: int = 30) -> str:
 
         source = _Path(local_auto) / name
         if not source.is_file():
+            # 临时区源文件已经不在（上一轮搬运搬走了原文件、或已被 14 天清理），
+            # 但成品区可能已经有同一份内容 —— 那种情况只需把地址改过来。
+            #
+            # 2026-11-19 实测：成品仓 95 件商品的图都是这个状态。
+            # 入库时文件搬成功了（promote_to_product_zone 里 source.unlink()
+            # 删掉了临时区原件），但 payload 里的 URL 没跟着换
+            # —— 因为 promote_payload_images 遍历 SKU 图时用的是
+            # `item.get("imgUrl")`，而那个函数返回的字典里没有这个 key，
+            # 循环体从来没执行过。文件在 products、地址还指着 auto-temp。
+            stem_guess = name.rsplit(".", 1)[0]
+            for candidate in (name, f"{stem_guess}.jpg", f"{stem_guess}.png",
+                              f"{stem_guess}.webp"):
+                if (_Path(local_product) / candidate).is_file():
+                    return product_base + candidate
             return url
         try:
             raw = source.read_bytes()
@@ -781,14 +795,63 @@ def promote_payload_images(payload: dict[str, Any]) -> dict[str, Any]:
             new_notes = new_notes.replace(old, _swap(old))
         payload["notes"] = new_notes
 
-    for item in warehouse_service.sku_image_sources(payload):
-        for field in ("imgUrl", "imageUrl", "image"):
-            if item.get(field):
-                item[field] = _swap(str(item[field]))
+    # SKU 图：按 `sku_image_sources` 给出的地址做映射替换。
+    #
+    # **2026-11-19 修**：这里原来写的是
+    #     for item in sku_image_sources(payload):
+    #         for field in ("imgUrl", "imageUrl", "image"):
+    #             if item.get(field): item[field] = _swap(...)
+    # —— `sku_image_sources` 返回的是 {path, kind, url, propertyIndex, ...}，
+    # 里面**没有** imgUrl/imageUrl/image 这些 key，`item.get(field)` 恒为 None，
+    # 循环体从来没执行过。SKU 图一张都没搬过。
+    # 后果：95/180 件成品仓商品的 SKU 图 URL 停在 auto-temp 临时区，
+    # 而那个目录 14 天自动清理 —— 到点商品图全部变挂图。
+    try:
+        sku_sources = warehouse_service.sku_image_sources(payload)
+    except Exception:  # noqa: BLE001 - 枚举失败不该阻断入库
+        sku_sources = []
+    if sku_sources:
+        replacements = {}
+        for source in sku_sources:
+            old = str(source.get("url") or "")
+            if not old:
+                continue
+            new = _swap(old)
+            if new and new != old:
+                replacements[old] = new
+                report["moved"] += 1
+        if replacements:
+            try:
+                payload["skuPropertyList"] = warehouse_service.rewrite_sku_image_urls(
+                    payload.get("skuPropertyList"), replacements)
+            except Exception as exc:  # noqa: BLE001
+                report["failed"] += 1
+                logger.warning("SKU 图地址替换失败：%s", exc)
 
     chart = payload.get("sizeChart")
     if isinstance(chart, str) and chart:
         payload["sizeChart"] = _swap(chart)
+
+    # colorMap：颜色名 → {imgUrl, imgUrls[]}（或直接是 URL 字符串）。
+    #   {"红色": {"imgUrl": "…", "imgUrls": ["…"]}, "蓝色": "…"}
+    # 这个字段原来完全没被搬运覆盖 —— 实测 #511 搬走 24 处后还剩 8 处全在这里，
+    # 14 天后临时区清理，这些颜色图就全挂。
+    color_map = payload.get("colorMap")
+    if isinstance(color_map, dict):
+        for color_name, entry in list(color_map.items()):
+            if isinstance(entry, str):
+                color_map[color_name] = _swap(entry)
+            elif isinstance(entry, dict):
+                for field in ("imgUrl", "imageUrl"):
+                    value = entry.get(field)
+                    if isinstance(value, str) and value:
+                        entry[field] = _swap(value)
+                multi = entry.get("imgUrls")
+                if isinstance(multi, list):
+                    entry["imgUrls"] = [
+                        _swap(url) if isinstance(url, str) else url for url in multi]
+                elif isinstance(multi, str) and multi:
+                    entry["imgUrls"] = _swap(multi)
     return report
 
 

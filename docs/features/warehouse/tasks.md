@@ -55,6 +55,21 @@
       新增 `services/group_access.py`。生产验证：学员可见 175 件、老师 194 件。
 - [x] **一次性清理颜色超限的商品**：48 / 54 / 59 / 67 四件（颜色 10/12/29/24）
       裁到 9 个颜色，SKU 同步减少。全库复扫无超限、无孤儿 SKU。
+- [x] **入库搬运 SKU 图完全失效，商品图停在临时区会 14 天后消失（BUG-017/018/019）**：
+      成品仓 180 件商品里 **95 件**的图片 URL 指向 `auto-temp`（14 天自动清理），
+      共 2121 处引用。三个叠加 bug：
+      - BUG-017 `promote_payload_images` 遍历 `sku_image_sources()` 写的是
+        `item.get("imgUrl")`，但那函数返回 `{path, kind, url, ...}` 没有这个 key，
+        **循环体从未执行**，SKU 图一张没搬过。
+      - BUG-018 `sku_image_sources` / `rewrite_sku_image_urls` 只认 `imgUrl`
+        和 `supplementarySkuImageUrls`。妙手新数据用 `imageUrl` + `imgUrls[]`，
+        这两个字段既不枚举也不替换。
+      - BUG-019 `promote_payload_images` 完全没覆盖 `colorMap`（颜色图）。
+      另外 `promote_to_product_zone` 遇到「临时区源文件已删、成品区有同名」时
+      直接返回原地址，导致存量数据永远改不过来。
+      修复后新增 `scripts/promote_warehouse_images.py` 处理存量：
+      **生产已迁移 2121 处，180 件商品全部归零，0 处失效引用**。
+      详见 [image-zone-promotion-2026-11-19.md](image-zone-promotion-2026-11-19.md)。
 
 ## 待完成
 

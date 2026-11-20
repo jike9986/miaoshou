@@ -1935,15 +1935,38 @@ def sku_image_sources(item: Any) -> list[dict[str, Any]]:
             if not isinstance(value, Mapping):
                 continue
             base_path = f"skuPropertyList[{property_index}].attrValueList[{value_index}]"
-            image_url = value.get("imgUrl")
-            if _is_image_url(image_url):
-                sources.append({
-                    "path": f"{base_path}.imgUrl",
-                    "kind": "imgUrl",
-                    "url": str(image_url).strip(),
-                    "propertyIndex": property_index,
-                    "valueIndex": value_index,
-                })
+            # 三个图片字段都要枚举（2026-11-19 修）：
+            #   imgUrl        —— 妙手老字段，主 SKU 图
+            #   imageUrl      —— 妙手新字段，同一个图换了个名字
+            #   imgUrls[]     —— 新字段的列表形态，一色多图
+            # 只枚举 imgUrl 的后果实测：180 件成品仓商品里 95 件的图片
+            # URL 永远停在 auto-temp 临时区（367 处 imgUrl 搬走了，
+            # 但 339 处 imageUrl + 339 处 imgUrls[] 没搬），
+            # 而 auto-temp 是 14 天自动清理的目录。
+            for field in ("imgUrl", "imageUrl"):
+                image_url = value.get(field)
+                if _is_image_url(image_url):
+                    sources.append({
+                        "path": f"{base_path}.{field}",
+                        "kind": field,
+                        "url": str(image_url).strip(),
+                        "propertyIndex": property_index,
+                        "valueIndex": value_index,
+                    })
+            multi = value.get("imgUrls")
+            if isinstance(multi, str):
+                multi = [multi]
+            if isinstance(multi, list):
+                for image_index, url in enumerate(multi):
+                    if _is_image_url(url):
+                        sources.append({
+                            "path": f"{base_path}.imgUrls[{image_index}]",
+                            "kind": "imgUrls",
+                            "url": str(url).strip(),
+                            "propertyIndex": property_index,
+                            "valueIndex": value_index,
+                            "imageIndex": image_index,
+                        })
             supplementary = value.get("supplementarySkuImageUrls")
             if isinstance(supplementary, str):
                 supplementary = [supplementary]
@@ -1965,10 +1988,15 @@ def sku_image_sources(item: Any) -> list[dict[str, Any]]:
 def rewrite_sku_image_urls(properties: Any, replacements: Mapping[str, str]) -> Any:
     """按 URL 映射替换 SKU 图片地址（老版 `_rewrite_sku_image_urls`）。
 
-    只动 `imgUrl` 与 `supplementarySkuImageUrls`，`attrValueId` / `attrValue`
+    只动图片字段，`attrValueId` / `attrValue`
     这些翻译结果与平台主键必须原样保留——SKU ID 变了，平台侧就是另一件商品。
     deepcopy 后再改：入参是商品 payload 的一份引用，就地改会污染调用方
     手里「翻译前」的快照（预保存比对、回读校验都靠它）。
+
+    **2026-11-19 修**：原来只处理 `imgUrl` + `supplementarySkuImageUrls`。
+    但妙手新数据用的是 `imageUrl` 和 `imgUrls[]`（一色多图），
+    这两个字段不替换的话，SKU 图地址永远停在 auto-temp 临时区，
+    14 天后被清理就全变挂图。现在四个字段一起处理。
     """
     result = deepcopy(properties)
     if not isinstance(result, list):
@@ -1985,6 +2013,19 @@ def rewrite_sku_image_urls(properties: Any, replacements: Mapping[str, str]) -> 
             image_url = value.get("imgUrl")
             if isinstance(image_url, str):
                 value["imgUrl"] = replacements.get(image_url, image_url)
+            # imageUrl：妙手新字段名，与 imgUrl 是同一个图
+            image_url2 = value.get("imageUrl")
+            if isinstance(image_url2, str):
+                value["imageUrl"] = replacements.get(image_url2, image_url2)
+            # imgUrls：一色多图的列表形态
+            multi = value.get("imgUrls")
+            if isinstance(multi, list):
+                value["imgUrls"] = [
+                    replacements.get(url, url) if isinstance(url, str) else url
+                    for url in multi
+                ]
+            elif isinstance(multi, str):
+                value["imgUrls"] = replacements.get(multi, multi)
             supplementary = value.get("supplementarySkuImageUrls")
             if isinstance(supplementary, str):
                 value["supplementarySkuImageUrls"] = replacements.get(supplementary, supplementary)
