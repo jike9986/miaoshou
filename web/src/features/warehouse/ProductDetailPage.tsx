@@ -31,6 +31,7 @@ import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { RemoteImage } from "@/features/shared/RemoteImage";
 import { CategoryPicker, type PickerNode } from "@/features/warehouse/CategoryPicker";
 import { useBatchCategory, useCategoryTree, useProductDetail, usePatchProduct, usePatchProductImages, useTranslateProductColors, useReviewProductQuality } from "@/lib/queries";
+import { SourceLinkCard } from "./SourceLinkCard";
 import { apiErrorMessage } from "@/lib/api";
 import { useOperatorIdentity } from "@/lib/operator";
 import { formatCount, formatDate, formatPrice, midImageUrl } from "@/lib/utils";
@@ -895,6 +896,12 @@ export function ProductDetailPage() {
               </>
             )}
           </Card>
+
+          {/* ⑨ 1688 货源链接（负责人 2026-11-20）
+              —— 这是采购员出单后真正要照着买的那个链接。
+              载体生成时用的链接来自池子轮换，跟商品真实货源无关，
+              所以这里必须能看到、能改对。老师与管理员可改，学员只读。 */}
+          <SourceLinkCard product={product} />
         </div>
       </PageContent>
 

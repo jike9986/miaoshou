@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 # --- 价格试算（price-preview）所需的导入与请求模型（必须在路由之前定义） ---
 from collections.abc import Mapping
@@ -14,7 +15,8 @@ from sqlalchemy.orm import Session
 from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from api.helpers import parse_bool
 from core import errors
-from core.utils import money, to_decimal
+from core.utils import money, now_ts, to_decimal
+from models.product import Product
 from schemas.common import CamelModel
 from schemas.requests import (
     BatchCategoryRequest,
@@ -33,6 +35,7 @@ from services import (
     setting_service,
     warehouse_service,
 )
+from services.warehouse_service import bump_revision, revision_guard
 
 PRICE_PREVIEW_MAX_ITEMS = 200
 
@@ -269,6 +272,116 @@ def source_item_ids(db: DbSession, operator: OperatorDep,
             accountId = str(account.id) if account is not None else "0"
     ids = warehouse_service.all_source_item_ids(db, account_id=accountId)
     return {"ids": ids, "total": len(ids)}
+
+
+# --- 货源链接：批量扫 / 单件校验 / 手工补录（负责人 2026-11-20）-------------
+# 为什么需要这一组接口：载体生成时用的 1688 链接来自池子轮换，跟商品真实货源
+# 无关；店铺出单后采购员照着错误链接买货。要修就必须先能看见/改对链接。
+#
+# 三个接口都要排在 /{ident} 前面，否则会被当成商品标识匹配。
+@router.get("/source-links", summary="批量检查货源链接状态")
+def source_links(db: DbSession, operator: OperatorDep,
+                 status: str | None = None,
+                 live: int = 0,
+                 limit: int = 500) -> dict[str, Any]:
+    """扫出所有成品仓商品的货源链接状态。
+
+    `live=1` 时逐件调妙手反查确认（有 0.9s 节流，500 件约 8 分钟，
+    只适合小批量核对）；默认只做本地格式检查（零请求）。
+
+    学员看不到货源链接 —— 那是采购侧信息，与 `group_access` 的口径一致：
+    受限分组的商品学员连商品本身都看不到。
+    """
+    from services import source_link as source_link_service
+
+    if operator_service.role_of(operator) == operator_service.ROLE_MEMBER:
+        raise errors.AppError(errors.FORBIDDEN_ORIGIN,
+                              "学员无权查看货源链接", status=403)
+
+    wanted = str(status or "").strip()
+    capped = max(1, min(int(limit or 500), 2000))
+    client = None
+    if live:
+        try:
+            account = account_service.current_account(db)
+            if account is not None:
+                client = account_service.account_client(account)
+        except Exception:  # noqa: BLE001 - 拿不到账号就降级成本地检查
+            client = None
+
+    rows: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    try:
+        query = warehouse_service.active_query(db).filter(
+            Product.status == "ready").order_by(Product.id.asc())
+        for product in query.limit(capped).all():
+            checked = source_link_service.check_payload_source(
+                product.payload, client=client if live else None)
+            decision = str(checked.get("status") or "")
+            counts[decision] = counts.get(decision, 0) + 1
+            if wanted and decision != wanted:
+                continue
+            rows.append({
+                "productId": product.id,
+                "detailId": product.detail_id,
+                "title": product.title,
+                "groupId": product.group_id,
+                "status": decision,
+                "url": checked.get("url") or "",
+                "offerId": checked.get("offerId") or "",
+                "offerTitle": checked.get("title") or "",
+                "error": checked.get("error") or "",
+            })
+    finally:
+        if client is not None:
+            client.close()
+    return {"rows": rows, "total": len(rows), "counts": counts, "live": bool(live)}
+
+
+@router.post("/{ident}/source-link", summary="设置商品的 1688 货源链接",
+             dependencies=[require_permission("process")])
+def set_source_link(ident: str, payload: dict[str, Any], db: DbSession,
+                    operator: OperatorDep) -> dict[str, Any]:
+    """手工设置/修改货源链接（老师与管理员可改）。
+
+    负责人 2026-11-20：「老师可以修改」。存量 532 件商品按实测全部没有
+    货源字段，妙手接口也不返回 —— 只能靠人工补录。补录后载体生成
+    就会用这条正确链接。
+    """
+    from services import source_link as source_link_service
+
+    if operator_service.role_of(operator) == operator_service.ROLE_MEMBER:
+        raise errors.AppError(errors.FORBIDDEN_ORIGIN,
+                              "学员无权修改货源链接", status=403)
+    require_writable(db)
+
+    raw = str((payload or {}).get("url") or "").strip()
+    if not raw:
+        raise errors.validation("货源链接不能为空", field="url")
+    normalized = source_link_service.normalize_source_url(raw)
+    if not normalized:
+        raise errors.validation("认不出这是 1688 货源链接", field="url", value=raw)
+    offer = source_link_service.extract_offer_id(normalized)
+
+    product = warehouse_service.resolve_product(db, ident)
+
+    revision_guard(db, product, None, action="修改货源链接")
+    stored = dict(product.payload) if isinstance(product.payload, dict) else {}
+    stored["sourceUrl"] = normalized
+    if offer:
+        stored["sourceItemId"] = offer
+    stored["sourceCapturedAt"] = time.time()
+    stored["sourceManual"] = True
+    product.payload = stored
+    product.updated_at = now_ts()
+    bump_revision(product)
+    # CLAUDE.md 规则 4：改商品后同步 draft_verified_revision，
+    # 否则该商品会从自动化结果页消失。
+    if product.automation_result and product.draft_verified_revision is not None:
+        product.draft_verified_revision = int(product.revision or 0)
+    db.commit()
+    return {"ok": True, "productId": product.id, "url": normalized,
+            "offerId": offer}
 
 
 @router.api_route("/price-preview", methods=["GET", "PUT", "PATCH", "DELETE"],

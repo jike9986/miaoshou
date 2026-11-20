@@ -36,6 +36,14 @@ contextBridge.exposeInMainWorld("desktop", {
     discard: () => ipcRenderer.invoke("update:discard"),
     runInstallerNow: (installerPath: string) =>
       ipcRenderer.invoke("update:run-installer-now", installerPath),
+    /**
+     * 自动静默更新（负责人 2026-11-20）：
+     * 下好之后不打断当前任务，等用户关软件时静默覆盖安装 + 自动重启，
+     * 桌面快捷方式继续指向最新版本。
+     */
+    setAutoApply: (enabled: boolean) =>
+      ipcRenderer.invoke("update:set-auto-apply", enabled),
+    autoApplyStatus: () => ipcRenderer.invoke("update:auto-apply-status"),
     /** 订阅下载进度；返回取消订阅函数 */
     onProgress: (handler: (progress: {
       received: number;

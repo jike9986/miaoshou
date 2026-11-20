@@ -101,4 +101,14 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameter
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--no-sandbox"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; 启动项（负责人 2026-11-20：「自动重启软件，用户桌面端的快捷方式启动
+; 也是在最新版本的」）。
+;
+; `skipifsilent` 原本表示「静默安装就别启动了，交给调用方重启」。
+; 现在改成**静默安装也启动**（去掉 skipifsilent），原因：
+;   · 客户端 `/S` 静默安装完会自己 spawn 新版本，但那是**异步**的 ——
+;     setup 进程返回时 exe 可能还没落完盘，spawn 会失败;
+;   · Inno 的 [Run] 是在**setup 自己收尾时**启动，时机最准，不会撞文件占用;
+;   · 两处都启动会导致开两个窗口 —— 所以客户端那边改成
+;     「先等 setup 完成，再检测如果没起来才补启动」（见 updateInstaller.ts）。
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--no-sandbox"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall

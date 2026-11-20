@@ -560,7 +560,12 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
                           .one_or_none())
                 if stored is not None and isinstance(stored.payload, dict) and stored.payload:
                     info = {**info, **stored.payload}
-                carriers = carrier_service.collect_carriers(db, client, count=1)
+                carriers = carrier_service.collect_carriers(
+                    db, client, count=1,
+                    # 载体用这件商品自己的 1688 货源（2026-11-20 修）：
+                    # info 上面已合并仓库 payload，货源链接就在里面。
+                    # 拿不到就走池子轮换，不阻断。
+                    preferred_urls=_source_link.source_urls_of([info]))
                 filled = carrier_service.fill_carriers(
                     client, carriers, [info], shop_id=int(target_shop_id),
                     verify_readback=False)

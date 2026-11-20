@@ -31,6 +31,7 @@ from core.constants import (
     GATEWAY_COOLDOWN_MAX_SECONDS,
 )
 from services import setting_service
+from services import source_link
 from services.miaoshou import MiaoshouClient, MiaoshouError
 
 logger = logging.getLogger("aohuang.carrier")
@@ -607,12 +608,29 @@ def _retry_pause_seconds(client: MiaoshouClient) -> float:
 
 
 def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
-                     progress: Callable[[dict[str, Any]], None] | None = None,
+                     progress: Callable[dict[str, Any], None] | None = None,
                      on_carrier: Callable[[int], None] | None = None,
-                     max_rounds: int = 8) -> list[int]:
-    """优先复制公共采集箱已有商品，返回上游明确确认的新草稿 ID。"""
+                     max_rounds: int = 8,
+                     preferred_urls: Iterable[str] | None = None,
+                     ) -> list[int]:
+    """建载体，返回上游明确确认的新草稿 ID。
+
+    `preferred_urls`（2026-11-20 加，负责人指出采购链接错配）：
+    每件成品自带的 1688 货源链接，按顺序优先使用。载体天生就带对链接，
+    用成品覆盖之后采购链接依然一致 —— 店铺出单不会买错货。
+
+    为什么不能只靠链接池轮换：`take_link()` 只按「失败少的优先、最久没用的」
+    挑，完全不知道这件商品原本对应哪个 1688 链接。实测 532 件商品里
+    0 件存货源字段，载体链接必然错配。
+
+    用完 preferred 再回退到池子：同一条链接连续采集可能被上游限流，
+    池子轮换是必要的退路，只是不再是**首选**。
+    """
     if count < 1:
         raise CarrierError("需要至少 1 个载体", required=0)
+    # 优先队列：先用手上这批商品自带的货源链接，再回退池子轮换。
+    preferred = [str(url).strip() for url in (preferred_urls or [])
+                 if str(url or "").strip()]
     details: list[int] = []
     common_id = None
     try:
@@ -630,11 +648,25 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
         raise CarrierError("读取当前账号的公共采集箱失败，请稍后重试") from exc
     url = ""
     failures = 0
+    preferred_index = 0
     while len(details) < count and failures < max_rounds:
-        link = take_link(db) if common_id is None else None
+        # 先消耗 preferred（商品自己带的货源），用完了才轮到池子。
+        if common_id is None and preferred_index < len(preferred):
+            url = preferred[preferred_index]
+            preferred_index += 1
+            link = {"url": url}
+            wanted_source = url          # 这条载体该对齐的货源链接
+        else:
+            link = take_link(db) if common_id is None else None
+            wanted_source = ""
         if common_id is None and link is None:
             raise CarrierError("公共采集箱没有可用商品，且没有可采集的货源链接",
                                available=len(details), required=count)
+        # 复用公共箱已有商品时，也要把它的货源对齐到当前这件商品 ——
+        # 否则「复用」等于沿用上一条不相干商品的链接。
+        if common_id is not None and not wanted_source and preferred_index < len(preferred):
+            wanted_source = preferred[preferred_index]
+            preferred_index += 1
         if link:
             url = str(link.get("url") or "")
             offer = offer_id(url)
@@ -673,6 +705,35 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                 continue
 
         copies = min(count - len(details), 100)
+
+        # === 关键一步：在公共箱把货源链接改对，再复制（2026-11-20）===
+        #
+        # 为什么必须在这里做、而不是「用正确链接重新采集」：
+        #   负责人明确「一个妙手账号每天只能采集 10 个产品」，
+        #   靠 fetch_item 换链接根本不够用（一批 50 件就废了）。
+        #   公共箱的 edit 接口能直接改 sourceList，**不消耗采集配额**。
+        #
+        # 实测：公共箱能改（写入后回读一致）；店铺采集箱改不了
+        # （save_shop 传 sourceList 返回 success 但回读是 null）。
+        # 所以必须「先在公共箱改对，再复制/认领到店铺」。
+        if wanted_source and common_id:
+            override = source_link.override_common_box_source(
+                client, common_id, wanted_source)
+            if progress:
+                progress({"stage": "source_override",
+                          "commonId": common_id,
+                          "url": wanted_source,
+                          "changed": override.get("changed"),
+                          "error": override.get("error") or ""})
+            if override.get("ok"):
+                logger.info("载体货源链接已对齐 commonId=%s url=%s",
+                            common_id, wanted_source)
+            else:
+                # 改不上不阻断复制：至少标题/图/价/SKU 是对的，
+                # 链接留给界面提示人工确认。
+                logger.warning("载体货源链接覆盖失败 commonId=%s url=%s：%s",
+                               common_id, wanted_source, override.get("error"))
+
         if progress:
             progress({"stage": "claim", "commonId": common_id, "copies": copies})
         # 快照：整轮复制**只取一次**，而且只取最近一页。
@@ -2023,8 +2084,13 @@ def collect_and_fill_carriers(db: Session, client: MiaoshouClient, *,
 
     def create() -> None:
         try:
+            # 每件成品自带的 1688 货源链接（2026-11-20 修）：
+            # 载体必须用这个商品自己的货源，否则出单后采购员买错货。
+            # 拿不到就走池子轮换（老行为），不阻断。
+            _preferred = source_link.source_urls_of(payload_list)
             collect_carriers(db, client, count=len(payload_list),
-                             progress=report, on_carrier=publish_carrier)
+                             progress=report, on_carrier=publish_carrier,
+                             preferred_urls=_preferred)
         except Exception as exc:  # surfaced after any already-created carriers are covered
             producer_errors.append(exc)
         finally:

@@ -200,3 +200,219 @@ def collect_carriers(db, client, *, count, preferred_url=None, ...):
 3. 层 3（存量补录）—— 需确认走「手工填」还是先试「店铺商品反查」
 
 等你确认从哪一层开始。
+---
+
+# 第二部分：修复方案（已实施，2026-11-20）
+
+负责人补充了两个决定性约束，推翻了「重新采集」这条路：
+
+1. **载体是「生成一个然后一直复制」**，不是每次重新采集；
+2. **一个妙手账号每天只能采集 10 个产品** —— 一条 50 件的批次重新采集就直接废了。
+
+所以方向确定为 **「覆盖链接」而不是「重新采集」**。
+
+---
+
+## 一、实测三条路径的结论
+
+我把妙手所有相关接口都试了一遍：
+
+| 接口 | 能否改货源链接 | 实测证据 |
+|---|---|---|
+| **公共采集箱** `edit_common_collect_box_detail` | ✅ **能** | 写入 `826406158136` 后回读一致 |
+| 店铺采集箱 `save_shop_collect_item_info` | ❌ 不能 | 返回 `success` 但回读是 `null`（静默忽略） |
+| `get_shop_collect_item_info` | — | 返回里根本没有 `sourceList` 字段 |
+
+公共箱详情返回的结构里，`sourceList` 就藏在 **`editCommonCollectBoxDetail`**（编辑用结构体）里：
+
+```json
+"editCommonCollectBoxDetail": {
+  "commonCollectBoxDetailId": 4148378072,
+  "sourceList": [{
+    "remark": null, "source": "1688", "sourceSite": "",
+    "sourceItemId": "717267894593",
+    "sourceItemUrl": "http://detail.1688.com/offer/717267894593.html"
+  }],
+  "sourceMataInfo": {"source": "1688", "oriItemNum": "717267894593", "price": "22.0"},
+  ...
+}
+```
+
+**关键点：这条路径不消耗每天 10 个采集配额** —— 它走的是 edit，不是 `fetch_item`。
+
+### 踩过的两个坑
+
+**坑 1：`commonCollectBoxDetailId` 必须放顶层**
+
+```
+放进 editCommonCollectBoxDetail 里 → 「commonCollectBoxDetailId 不能为空」
+放顶层                             → 通过
+```
+
+**坑 2：`stock` 必须夹到 99999 以内**
+
+```
+「editCommonCollectBoxDetail.stock 不能大于 99999」
+```
+
+而株洲鞋类的原始库存动辄 **623927** —— 直接整份回写必被拒。所以 `override_common_box_source()`
+里先夹住 stock 再写。
+
+---
+
+## 二、实现的代码
+
+### 2.1 `services/source_link.py`（新增）
+
+货源链接的全部逻辑集中在这里，单一出处：
+
+| 函数 | 作用 |
+|---|---|
+| `extract_offer_id()` | 从裸 id / 桌面链接 / 移动端链接 / 分享链接里抠 offer id |
+| `normalize_source_url()` | 统一归一到 `https://detail.1688.com/offer/<id>.html` |
+| `capture_from_box_row()` | 从采集箱行里抽货源（`source` 大小写不统一也认） |
+| `attach_source()` | 写进 payload，**只补缺不覆盖**（用户手改的更可信） |
+| `override_common_box_source()` | **覆盖公共箱的 sourceList**（夹 stock + 回读校验） |
+| `check_payload_source()` | 有效性检查（本地格式 / 妙手反查两级） |
+
+### 2.2 载体重建改造（`carrier_service.py`）
+
+`collect_carriers()` 新增 `preferred_urls` 参数：
+
+```python
+# 先消耗商品自带的货源，用完了才轮到池子轮换
+if common_id is None and preferred_index < len(preferred):
+    url = preferred[preferred_index]
+    wanted_source = url          # 这条载体该对齐的货源
+```
+
+在**复制之前**插入覆盖步骤：
+
+```python
+if wanted_source and common_id:
+    override = source_link.override_common_box_source(client, common_id, wanted_source)
+    # 改不上不阻断复制：至少标题/图/价/SKU 是对的，
+    # 链接留给界面提示人工确认
+```
+
+顺序很重要：**先在公共箱改对，再复制到店铺** —— 反过来无效（店铺接口改不了）。
+
+`collect_and_fill_carriers()` 从 payload 里取货源传下去：
+
+```python
+_preferred = source_link.source_urls_of(payload_list)
+```
+
+### 2.3 入仓时保存货源（`warehouse_service.py`）
+
+在 `save_from_collect_box` 的 `shop_detail` 之后抓一次（那时还可能抓到），
+写进 `product.payload`。原来只把链接收进**池子**，没存到**商品身上** —— 这就是错配的根源。
+
+### 2.4 API（`api/warehouse.py`）
+
+| 端点 | 作用 |
+|---|---|
+| `GET /warehouse/source-links` | 批量扫状态（`live=1` 逐件反查，默认只做本地检查） |
+| `POST /warehouse/{ident}/source-link` | 手工设置/修改链接（老师与管理员） |
+
+学员 403 —— 货源链接是采购侧信息，与受限分组同口径。
+
+### 2.5 前端（`SourceLinkCard.tsx`）
+
+成品详情页最下面的 ⑧ 卡片：
+
+- 显示链接 / offer id / 货源标题
+- **老师与管理员可改**（学员只读）
+- 「检查有效性」按钮
+- 状态徽章：已记录 / 已确认存在 / 未记录货源 / 链接格式不对 / 无法确认
+
+---
+
+## 三、有效性检查：为什么不能用 HTTP 判死活
+
+负责人要求的「读取这些链接是否还有效」，我实测踩了个坑：
+
+**从服务器侧请求 1688 商品页，存在与不存在返回的是完全相同的字节。**
+
+```
+offer 717267894593（真实存在）: HTTP 200, len 2739
+offer 999999999999（乱造）    : HTTP 200, len 2739
+```
+
+两者都是 `_____tmd_____` 反爬跳转壳页（阿里的滑块验证）。
+移动端 `m.1688.com` 同理（2039 字节壳页）。
+**所以 HTTP 完全无法区分死活 —— 拿它当判据会全部误判成「有效」。**
+
+而且妙手开放平台自己就写着警告（负责人截图里那条）：
+
+> **高危：不存在的链接也会 success 并采到无关的真实商品。采集前务必自行校验链接有效性。**
+
+也就是说 `fetch_item` 也不能当校验器 —— 它是坏尺子。
+
+### 现在用的方案：妙手公共箱反查
+
+`common_box_list(source_item_keyword=<offerId>)` 能按货源 id 搜索，不消耗采集配额：
+
+| offer id | 搜索结果 |
+|---|---|
+| `717267894593`（真实存在） | 搜到 1 行，标题正确 → `verified` |
+| `999999999999`（乱造） | 0 行 → `unknown` |
+
+**为什么不是 `dead`**：搜不到**不等于**失效，可能只是这个账号没采过它。
+判成 dead 会让老师误删好链接，所以一律报 `unknown`（界面显示「无法确认」）。
+
+---
+
+## 四、生产实测
+
+```
+公共箱商品 cid=4148378072，当前货源 717267894593
+
+=== 同一链接再写一次 ===
+  changed=False          ← 不浪费上游配额
+
+=== 换成 826406158136 ===
+  changed=True，after=http://detail.1688.com/offer/826406158136.html   ← 回读确认
+
+=== 还原 ===
+  changed=True，after=http://detail.1688.com/offer/717267894593.html   ← 完整可逆
+
+结论：覆盖生效且可还原
+```
+
+---
+
+## 五、测试
+
+`tests/test_source_link.py` **36 条全通过**：
+
+| 覆盖点 | 条数 |
+|---|---|
+| offer id 抽取（11 种写法） | 11 |
+| 归一化 | 2 |
+| 采集箱行抓取（含大小写变体、非 1688、缺失） | 4 |
+| `attach_source` 不覆盖手改值 | 2 |
+| 公共箱 sourceList 构造 | 2 |
+| **覆盖：改成功 / 夹 stock / 跳过同值 / 识别静默忽略 / 拒绝坏参数** | 5 |
+| 有效性检查（缺失/格式/本地/反查/查不到判 unknown/上游报错） | 10 |
+
+其中最关键的一条：
+
+```python
+def test_override_detects_silently_ignored_write():
+    """店铺接口会静默忽略 sourceList —— 所以必须回读校验。"""
+    client = FakeBoxClient(ignore_edit=True)
+    result = override_common_box_source(client, 4148378072, VALID)
+    assert result["ok"] is False
+    assert "回读" in result["error"]
+```
+
+---
+
+## 六、还剩什么
+
+- ✅ 新入仓商品会存下货源链接
+- ✅ 载体生成用商品自己的链接（公共箱覆盖，不耗采集配额）
+- ✅ 界面可见可改可校验
+- ⬜ **存量 532 件**：payload 里没有、妙手不返回、采集箱多数已删
+      → 只能靠界面手工补录（老师可改）。补一件生效一件。

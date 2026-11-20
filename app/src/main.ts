@@ -7,11 +7,14 @@ import { spawn, ChildProcess } from "node:child_process";
 import { createSessionVault } from "./sessionVault";
 import {
   broadcastProgress,
+  clearAutoApplyMark,
   discardInstaller,
   downloadInstaller,
   installOnQuit,
+  isAutoApplyMarked,
   isInstallRequested,
   launchInstaller,
+  markAutoApply,
   pendingInstaller,
   pruneStaleInstallers,
   quitAndInstall,
@@ -400,6 +403,20 @@ ipcMain.handle("update:run-installer-now", async (event, installerPath: string) 
   return launchInstaller(pending.path, true);
 });
 
+// --- 自动静默更新（负责人 2026-11-20）------------------------------------
+// 语义：下好之后**不打断当前工作**，等用户关软件时静默覆盖安装 + 自动重启。
+ipcMain.handle("update:set-auto-apply", async (event, enabled: boolean) => {
+  if (!trustedSender(event)) return { ok: false, error: "不可信的调用来源" };
+  if (enabled) await markAutoApply();
+  else await clearAutoApplyMark();
+  return { ok: true, auto: Boolean(enabled) };
+});
+
+ipcMain.handle("update:auto-apply-status", async (event) => {
+  if (!trustedSender(event)) return { ok: false, auto: false };
+  return { ok: true, auto: await isAutoApplyMarked() };
+});
+
 app.whenReady().then(async () => {
   // 启动时清掉历史安装包：软件内更新每次都会把 77MB 的 exe 下到
   // userData\updates\，安装器管不到那里。只在后台跑，失败不影响启动。
@@ -449,10 +466,23 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  // 用户点了「重启并安装」才装；单纯关程序不装 —— 否则下次打开发现版本
-  // 悄悄变了却不知道为什么。安装器是独立进程，本进程退出不会带走它。
-  if (isInstallRequested()) {
+  // 两种情况要装：
+  //   1. 用户点了「重启并安装」→ isInstallRequested()
+  //   2. 后台已下好新版本、且用户开着「自动更新」→ isAutoApplyMarked()
+  //
+  // 第 2 条是负责人 2026-11-20 的要求：「下载好之后静默处理的，
+  // 然后自动重启软件」。这里用「关软件」当触发点 —— 那是自然收尾点，
+  // 打断进行中的发布/认领任务会把载体建到一半留在上游。
+  //
+  // 单纯关程序且没有新版本时仍然什么都不做（老行为不变）。
+  const shouldInstall = isInstallRequested();
+  if (shouldInstall) {
     void installOnQuit();
+  } else {
+    // 异步确认一次自动更新标记；before-quit 不等待它，装不上就下次再说
+    void isAutoApplyMarked().then((auto) => {
+      if (auto) void installOnQuit();
+    });
   }
   server?.kill();
 });

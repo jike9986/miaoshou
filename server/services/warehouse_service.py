@@ -2558,6 +2558,33 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     if not block["ossMd5"]:
         raise errors.unprocessable("商品详情缺少 ossMd5，请先在妙手保存一次草稿")
 
+    # === 抓货源链接（must be here，之后就拿不到了）===
+    # 负责人 2026-11-20：载体的采购链接跟商品真实货源对不上，出单后买错货。
+    # 实测妙手 `get_shop_collect_item_info` 的返回里**没有** sourceUrl /
+    # sourceList（只有 originPrice 价格数字），所以这里把整个 response 和
+    # info 都过一遍 `capture_from_box_row` —— 上游结构不统一，多试几个位置
+    # 总比彻底丢掉好。抓不到就是 {}，不写空字段进 payload。
+    from services import source_link as _source_link
+
+    source_captured: dict[str, Any] = {}
+    for candidate in (response.get("data") if isinstance(response, dict) else None,
+                      response if isinstance(response, dict) else None,
+                      info,
+                      info.get("shopCollectItemInfo") if isinstance(info, dict) else None):
+        if not isinstance(candidate, dict):
+            continue
+        found = _source_link.capture_from_box_row(candidate)
+        if found:
+            source_captured = found
+            break
+    if source_captured:
+        logger.info("入仓抓到货源 detailId=%s url=%s",
+                    detail_id, source_captured.get("sourceUrl"))
+    else:
+        # 抓不到不算错误：妙手多数商品本来就不带。但要留日志，
+        # 否则以后又会出现「532 件全没有货源」却无从追查。
+        logger.info("入仓未抓到货源 detailId=%s（妙手返回里没有 1688 字段）", detail_id)
+
     # 翻译放在**最后**一步（负责人 2026-11-09 定），这里只做占位：
     # 颜色、标题清洗、图片筛选的规则全是按中文写的（中文颜色词表、违规词表、
     # 工厂图判定）。先翻译再清洗等于拿马来语撞中文规则 —— 实测
@@ -3146,11 +3173,35 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 链接池自动更新（负责人 2026-10-30 明确「老版就是自动的」）：
     # 每次入仓都顺手把商品的 1688 货源链接收进池子，跨店认领/发布要用它重建载体。
     # 失败只记日志——补池是副产品，不能因为补不上就让入仓失败。
+    #
+    # **2026-11-20 修（负责人指出载体链接错配）**：
+    # 原来只把链接收进**池子**，没有写进**这件商品自己的 payload**。
+    # 后果：载体生成时从池子轮换取链接，跟商品真实货源无关；
+    # 用成品覆盖载体后，标题/图/价/SKU 全对，但采购链接还是载体自己那条 ——
+    # 店铺出单后采购员照着错误链接买货。
+    # 实测：532 件商品 0 件存货源字段，妙手接口也不返回链接，
+    # 采集箱原件多数已删 —— **入仓这一刻是唯一能拿到链接的时机**。
     try:
         from services import carrier_service as _carrier
-        _added = _carrier.harvest_from_payloads(db, [payload] if isinstance(payload, dict) else [])
+        from services import source_link as _source
+
+        payload_dict = payload if isinstance(payload, dict) else {}
+        _added = _carrier.harvest_from_payloads(db, [payload_dict])
         if _added:
             logger.info("入仓自动补充货源链接 detailId=%s 新增=%s", detail_id, _added)
+
+        # 把货源**存到这件商品上**（这才是载体该用的链接）。
+        # 优先用入仓前抓到的 source_captured，没有再试 payload 里的历史字段。
+        captured = dict(source_captured or {})
+        if not captured:
+            captured = _source.capture_from_payload(payload_dict)
+        if captured and product is not None:
+            stored = deepcopy(product.payload) if isinstance(product.payload, dict) else {}
+            if _source.attach_source(stored, captured):
+                product.payload = stored
+                db.flush()
+                logger.info("入仓已记录货源链接 detailId=%s url=%s",
+                            detail_id, captured.get("sourceUrl"))
     except Exception as exc:  # noqa: BLE001 - 补池失败不影响入仓
         logger.warning("入仓自动补充货源链接失败 detailId=%s：%s", detail_id, exc)
 
