@@ -303,3 +303,98 @@ Caching → Cache Rules → Create rule
 然后 HTTPS 打不开。
 
 **这是整个 .xyz 方案里最容易被遗忘的坑。**
+
+---
+
+## 当前进度（2026-11-20 20:50）
+
+### ✅ 已完成
+
+| 事项 | 状态 |
+|---|---|
+| Cloudflare 添加 `aohuang888.xyz` | ✅ 负责人已做 |
+| CF 加 A 记录 `@ → 38.95.75.47`（橙色代理） | ✅ 负责人已做 |
+| Dynadot 改 NS → `osmar/teresa.ns.cloudflare.com` | ✅ 负责人已保存 |
+| **注册局（RDAP）已记录新 NS** | ✅ 已确认 |
+| **Cloudflare 权威 NS 返回正确 IP** | ✅ `osmar/teresa` 都返回 `38.95.75.47` |
+| nginx `server_name` 加 `.xyz`（两处） | ✅ 已改并 reload |
+| **修好 443 的 acme 验证路径** | ✅ 公网验证 HTTP 200 |
+| 现有证书完好，站点正常 | ✅ 5 域名证书，到 2027-01-29 |
+
+### ⏳ 卡在：公共 DNS 缓存未过期
+
+```
+注册局 RDAP      : osmar/teresa.ns.cloudflare.com   ✅
+Cloudflare 权威  : aohuang888.xyz = 38.95.75.47     ✅
+Google DoH       : ns1/ns2.dyna-ns.net + 185.53.179.149   ← 旧缓存
+```
+
+**这是唯一的阻塞点，只能等。** 旧 NS 的 TTL 是 300 秒，但递归解析器
+（尤其 Google 8.8.8.8）对 NS 记录的实际缓存时间通常远长于 TTL，
+实测常见 1~2 小时，最长见过 24 小时。
+
+### 为什么不能绕过
+
+certbot 扩证书时，Let's Encrypt 从**公共 DNS** 解析 `aohuang888.xyz`：
+
+```
+当前解析结果: 185.53.179.149（Dynadot 停放页）
+→ LE 去停放页找 /.well-known/acme-challenge/xxx
+→ 404
+→ 验证失败：Domain: aohuang888.xyz, Type: unauthorized
+```
+
+无法用 `--dns-01` 绕开（那需要 Dynadot 或 Cloudflare 的 API 权限，
+且要改验证方式）。所以必须等 A 记录在公共 DNS 上变成 `38.95.75.47`。
+
+### DNS 生效后的两条命令
+
+```bash
+# 1. 扩证书（webroot 方式，不影响线上）
+certbot certonly --webroot -w /var/www/letsencrypt \
+  --cert-name aohuang888.com \
+  -d aohuang888.com -d www.aohuang888.com \
+  -d aohuang888.cn -d www.aohuang888.cn \
+  -d paytest.aohuang888.com \
+  -d aohuang888.xyz -d www.aohuang888.xyz \
+  --expand --non-interactive --agree-tos
+
+# 2. reload（不是 restart，不断连接）
+nginx -t && systemctl reload nginx
+```
+
+### 扩证书之后还要做（容易漏）
+
+Cloudflare 的 Cache Rule 里必须有一条：
+
+```
+Rule name: Bypass acme challenge
+When: URI Path starts with /.well-known/acme-challenge/
+Then: Cache eligibility = Bypass cache
+```
+
+**这不是一次性配置，而是长期依赖。** 现有续期方式是 webroot，
+每 60 天都走这个路径，切 NS 后一定经过 Cloudflare。
+删了这条规则 → 60 天后证书续期失败 → HTTPS 打不开。
+
+### 顺便修掉的一个既有隐患
+
+443 的 server 块原来**没有** `/.well-known/acme-challenge/` 的 location，
+只有 80 端口有。所以 `https://域名/.well-known/...` 会落到 `location /`
+反代到后端 → 404。
+
+以前没暴露是因为续期走 HTTP（80 → 有 location → 正常）。
+但切 Cloudflare 后，CF 默认回源到 443，验证请求就走 HTTPS 了 ——
+不修这条，续期必失败。
+
+已加：
+
+```nginx
+location /.well-known/acme-challenge/ {
+    root /var/www/letsencrypt;
+    default_type text/plain;
+    try_files $uri =404;
+}
+```
+
+验证：`https://aohuang888.com/.well-known/acme-challenge/<file>` 返回 200。
