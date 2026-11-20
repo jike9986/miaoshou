@@ -235,3 +235,71 @@ location ^~ /miaoshou-downloads/ {
 1. **`.xyz` 在哪个注册商买的？** 改 NS 要去那个后台。
 2. **要不要我配 nginx + 扩证书？** 要的话我现在就做（约 5 分钟，服务不中断）。
 3. **主域用 302 转发到 CDN，还是等新版本直接切？** 我建议 302（老客户端也能受益）。
+---
+
+## 附录：2026-11-20 实测的源站现状（省一步）
+
+在 NS 还没切换前，我先用 `Host: aohuang888.xyz` 直接打源站测了一遍：
+
+```
+带 Host: aohuang888.xyz  → version.json HTTP 200、安装包 HTTP 200  ✅
+不带 Host（默认）        → HTTP 200                                    ✅
+```
+
+**结论：nginx 不需要改 `server_name` 也能回源。**
+
+原因：`/etc/nginx/sites-enabled/aohuang-ai.conf` 里只有一个启用了 SSL 的
+server 块，它自然成了 443 的默认 server，任何 Host 都会落到它上面。
+
+`server_name` 里加 `.xyz` 只是「规范」，不是「必须」。加不加都能跑。
+
+### 唯一必须做的是扩证书
+
+```
+echo | openssl s_client -connect 127.0.0.1:443 -servername aohuang888.xyz | openssl x509 -noout -subject
+#   subject=CN = aohuang888.com     ← 证书里没有 .xyz
+```
+
+Cloudflare 默认 SSL 模式是 **Full**（不是 Full strict），它会校验源站证书
+是否覆盖请求的域名。现在不覆盖 → 会报 **526 Invalid SSL certificate**。
+
+所以必须扩证书。两条命令，webroot 方式，不影响线上：
+
+```bash
+# 1. 把 .xyz 加进现有证书（--expand 保留原有域名）
+certbot certonly --webroot -w /var/www/letsencrypt \
+  --cert-name aohuang888.com \
+  -d aohuang888.com -d www.aohuang888.com \
+  -d aohuang888.cn -d www.aohuang888.cn \
+  -d paytest.aohuang888.com \
+  -d aohuang888.xyz -d www.aohuang888.xyz \
+  --expand --non-interactive --agree-tos
+
+# 2. reload nginx（不是 restart，不断连接）
+nginx -t && systemctl reload nginx
+```
+
+⚠️ 第 1 步要求 **Cloudflare 已经把 `/.well-known/acme-challenge/` 放行到源站**。
+因为切了 NS 后请求会先到 Cloudflare，需要在 CF 建一条规则：
+
+```
+Caching → Cache Rules → Create rule
+  Rule name: Bypass acme challenge
+  When: URI Path starts with /.well-known/acme-challenge/
+  Then: Cache eligibility = Bypass cache
+```
+
+**这条规则比扩证书本身更容易漏** —— 漏了的话 certbot 会失败，
+而且报错信息是「验证失败」，看不出是 CDN 拦的。
+
+### 另外：续期会一直需要这条规则
+
+现有续期方式是 `authenticator = webroot`（见
+`/etc/letsencrypt/renewal/aohuang888.com.conf`），每 60 天跑一次，
+每次都走 `/.well-known/acme-challenge/`。
+
+切 NS 之后这个路径的请求**一定**会经过 Cloudflare，所以那条 Bypass 规则
+不是一次性配置，而是**长期依赖**。删了它，60 天后证书续期就会失败，
+然后 HTTPS 打不开。
+
+**这是整个 .xyz 方案里最容易被遗忘的坑。**
