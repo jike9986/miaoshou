@@ -479,14 +479,21 @@ version.json cf-cache-status: DYNAMIC    （源站给了 no-store，CF 自动不
 ```
 
 **Cloudflare 默认遵循源站 `Cache-Control`。** 文档里写的那些 Cache Rule
-是保险，实测发现不必需。但有一条**必须建**：
+是保险，实测发现**一条都不需要建**。
+
+包括我一开始以为「必须建」的 acme-challenge 规则 —— 也是错的：
 
 ```
-URI Path starts with /.well-known/acme-challenge/ → Bypass cache
+连续 3 次请求 /.well-known/acme-challenge/probe  →  全是 DYNAMIC（不缓存）
+certbot renew --dry-run  →  6 个域名全部 success
 ```
 
-因为 acme 文件每次内容都不同且必须实时，不能靠源站头解决。
-漏了这条，60 天后证书续期会静默失败。
+nginx 对这个 location 没设 `Cache-Control`，CF 默认就不缓存它。
+`--dry-run` 走真实 HTTP-01 验证，通过即证明 60 天后的自动续期没问题。
+
+**教训：不要在没实测前就把「必须建 XX 规则」写进文档。**
+这一条我写错了，如果照做只是多建一条无害但无用的规则；
+但错误建议会让人以为「不做就会坏」，凭空制造焦虑和排查成本。
 
 ### 验证「用户能不能收到更新」的方法
 

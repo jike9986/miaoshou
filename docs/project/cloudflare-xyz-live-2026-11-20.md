@@ -179,31 +179,42 @@ location ^~ /miaoshou-downloads/ {
 
 ---
 
-## 七、还需要你在 Cloudflare 做的一件事
+## 七、**不需要**在 Cloudflare 做任何操作（原判断有误，已实测纠正）
 
-**只有一件**，而且是为了长期续期：
+我一开始写「必须建一条 acme-challenge Bypass 规则」，**那是错的**。
+实测证明不需要。
+
+### 实测证据一：这个路径默认就不缓存
 
 ```
-Caching → Cache Rules → Create rule
-  Rule name: Bypass acme challenge
-  When: URI Path starts with /.well-known/acme-challenge/
-  Then: Cache eligibility = Bypass cache
+通过 CDN 连续请求 3 次 /.well-known/acme-challenge/probe
+  第 1 次: cf-cache-status: DYNAMIC
+  第 2 次: cf-cache-status: DYNAMIC
+  第 3 次: cf-cache-status: DYNAMIC
 ```
 
-**为什么这条必须建**：现有续期方式是 webroot，每 60 天请求这个路径。
-切 NS 后它一定经过 Cloudflare。如果 CF 缓存了验证响应，certbot 会拿到
-旧的 challenge → 验证失败 → 证书过期 → HTTPS 打不开。
+`DYNAMIC` = Cloudflare 没有缓存、每次都回源。
+因为 nginx 对这个 location 没设 `Cache-Control`，CF 的默认行为就是不缓存。
 
-**为什么不能靠源站的 `no-store` 解决**：acme-challenge 的文件是 certbot
-临时生成的，nginx 的 `location /.well-known/` 没有设 `Cache-Control`
-（也不能设，因为每次内容都不同且必须实时）。所以只能靠 CF 规则放行。
+### 实测证据二：完整续期演练通过
 
-### 验证这条规则是否生效
-
-```bash
-# 建规则后，这个路径应该始终 DYNAMIC/BYPASS，永远不是 HIT
-curl -sI https://aohuang888.xyz/.well-known/acme-challenge/test | grep -i cf-cache-status
 ```
+$ certbot renew --cert-name aohuang888.com --dry-run --non-interactive
+
+Simulating renewal of an existing certificate for aohuang888.com and 5 more domains
+Congratulations, all simulated renewals succeeded:
+  /etc/letsencrypt/live/aohuang888.com/fullchain.pem (success)
+EXIT=0
+```
+
+**6 个域名全部通过，包括经过 Cloudflare 的 `aohuang888.xyz`。**
+
+`--dry-run` 走的是真实 ACME 流程（真实的 HTTP-01 验证），只是不真正签发。
+它通过就说明 60 天后的自动续期会成功。
+
+### 结论
+
+**你在 Cloudflare 什么都不用做。** 所有配置已经完成并验证。
 
 ---
 
