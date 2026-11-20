@@ -59,4 +59,12 @@ contextBridge.exposeInMainWorld("desktop", {
       return () => ipcRenderer.removeListener("update:progress", listener);
     },
   },
+  /**
+   * 剪贴板（负责人 2026-11-20「详情图可以右击图片自动复制」）。
+   * 图片必须走主进程：渲染进程写跨域图片到剪贴板会抛 NotAllowedError。
+   */
+  clipboard: {
+    copyImage: (url: string) => ipcRenderer.invoke("clipboard:copy-image", url),
+    copyText: (text: string) => ipcRenderer.invoke("clipboard:copy-text", text),
+  },
 });

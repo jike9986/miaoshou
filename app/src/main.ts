@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage, screen, shell } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, net, safeStorage, screen, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -415,6 +415,81 @@ ipcMain.handle("update:set-auto-apply", async (event, enabled: boolean) => {
 ipcMain.handle("update:auto-apply-status", async (event) => {
   if (!trustedSender(event)) return { ok: false, auto: false };
   return { ok: true, auto: await isAutoApplyMarked() };
+});
+
+// --- 复制图片/文本到剪贴板（负责人 2026-11-20）----------------------------
+// 需求：「最好是详情图这里可以右击图片自动复制」。
+//
+// 为什么必须在主进程做：
+//   `navigator.clipboard.write([new ClipboardItem(...)])` 对**跨域**图片
+//   （我们的图在 aohuang888.com，页面源可能是 file://）会抛 NotAllowedError。
+//   主进程用 net.request 抓字节 → nativeImage.createFromBuffer → clipboard
+//   直接写系统剪贴板，完全绕过渲染进程的同源策略。
+//
+// 只允许抓 http(s) 且限制大小：这是把「页面能让我们下载任意 URL」的
+// 能力收窄，避免被注入的页面当成任意文件读取器。
+const CLIPBOARD_IMAGE_MAX_BYTES = 32 * 1024 * 1024;
+
+function fetchImageBuffer(url: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      reject(new Error("图片地址不合法"));
+      return;
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      reject(new Error("只允许 http/https 图片地址"));
+      return;
+    }
+    const request = net.request({ url: parsed.href, redirect: "follow" });
+    request.on("response", (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`取图失败（HTTP ${response.statusCode}）`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      response.on("data", (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > CLIPBOARD_IMAGE_MAX_BYTES) {
+          reject(new Error("图片超过 32MB，已放弃"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on("end", () => resolve(Buffer.concat(chunks)));
+      response.on("error", (error: Error) => reject(error));
+    });
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+ipcMain.handle("clipboard:copy-image", async (event, url: string) => {
+  if (!trustedSender(event)) return { ok: false, error: "不可信的调用来源" };
+  try {
+    const buffer = await fetchImageBuffer(String(url || ""));
+    const image = nativeImage.createFromBuffer(buffer);
+    if (image.isEmpty()) {
+      return { ok: false, error: "图片解码失败（可能不是常见格式）" };
+    }
+    clipboard.writeImage(image);
+    return { ok: true, size: image.getSize() };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("clipboard:copy-text", async (event, text: string) => {
+  if (!trustedSender(event)) return { ok: false, error: "不可信的调用来源" };
+  try {
+    clipboard.writeText(String(text ?? ""));
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
 
 app.whenReady().then(async () => {

@@ -31,6 +31,7 @@ import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { RemoteImage } from "@/features/shared/RemoteImage";
 import { CategoryPicker, type PickerNode } from "@/features/warehouse/CategoryPicker";
 import { useBatchCategory, useCategoryTree, useProductDetail, usePatchProduct, usePatchProductImages, useTranslateProductColors, useReviewProductQuality } from "@/lib/queries";
+import { copyImageToClipboard } from "@/lib/clipboard";
 import { SourceLinkCard } from "./SourceLinkCard";
 import { apiErrorMessage } from "@/lib/api";
 import { useOperatorIdentity } from "@/lib/operator";
@@ -543,11 +544,18 @@ export function ProductDetailPage() {
                     <button
                       type="button"
                       onClick={() => setLightbox(index)}
+                      // 右击图片 → 复制图片本身（负责人 2026-11-20）。
+                      // 阻止默认菜单：默认菜单里的「图片另存为」要选路径，
+                      // 运营的实际动作是「贴到别处」，复制位图更直接。
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        void copyImageToClipboard(url);
+                      }}
                       className={cn(
                         "relative aspect-square w-[132px] overflow-hidden rounded-sm border border-border bg-canvas-inset",
                         "transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/40"
                       )}
-                      title={`第 ${index + 1} 张`}
+                      title={`第 ${index + 1} 张（右击复制图片）`}
                     >
                       {/* 画廊只需要 132px 的视觉尺寸，用 900px 中等图就够：
                           原图平均 216 KB，中等图约 1/3，详情页平均 15 张。
@@ -956,6 +964,12 @@ export function ProductDetailPage() {
               src={viewerImages[lightbox]}
               alt={`第 ${lightbox + 1} 张`}
               referrerPolicy="no-referrer"
+              // 大图里右击也直接复制图片（负责人 2026-11-20）
+              onContextMenu={(event) => {
+                event.preventDefault();
+                void copyImageToClipboard(viewerImages[lightbox] ?? "");
+              }}
+              title="右击复制图片"
               className="max-h-[88vh] max-w-[92vw] rounded-md object-contain"
             />
             <p className="mt-2 text-center text-xs text-white/70">

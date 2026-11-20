@@ -221,3 +221,36 @@ Cloudflare 后面即可 —— 这是成本最低、见效最快的一步。
 > 注意：图片站（`/tk-product-automation/`）不能挂 CDN，
 > 因为翻译和采集侧在大陆，走 CDN 反而更慢。详见
 > `docs/features/warehouse/image-zone-promotion-2026-11-19.md`。
+
+---
+
+## 清理 Inno 注册表前必须保留 InstallLocation（2026-11-20 事故）
+
+「应用和功能」里出现两套「奥皇上品」时，清理残留项的**前提是先确认不会破坏
+`UsePreviousAppDir` 的判断依据**。
+
+`installer/setup.iss` 用 `UsePreviousAppDir=yes` 决定升级时装回哪个目录，
+它读的就是 `HKCU\...\Uninstall\{8F3A2C41-7B5E-4D9A-9C1F-2E6B8D4A7F30}_is1`
+里的 `InstallLocation`。
+
+**我把它整个删掉后，下一次安装会装到默认的
+`%LOCALAPPDATA%\Programs\奥皇上品`，而旧目录 `D:\软件\奥皇上品` 还在 ——
+变成两份，且桌面快捷方式指向新目录，用户以为「旧版没清掉」。**
+
+正确做法：
+
+```powershell
+# 1. 先看 InstallLocation 实际值
+Get-ItemProperty "HKCU:\...\Uninstall\{8F3A2C41-...}_is1" | Select InstallLocation
+
+# 2. 如果该键是「已失效的旧版本」（卸载器文件不存在），删掉它
+#    然后**立刻用真实安装目录重建**，而不是留空
+New-Item -Path $key -Force
+New-ItemProperty $key -Name InstallLocation -Value "D:\软件\奥皇上品\"
+New-ItemProperty $key -Name DisplayVersion  -Value "<当前版本>"
+New-ItemProperty $key -Name UninstallString -Value '"D:\软件\奥皇上品\unins000.exe"'
+```
+
+判断依据：`UninstallString` 里那个卸载器文件是否存在。
+存在 = 这套是真的，不要删；不存在 = 空壳，可以删，但删完要重建
+`InstallLocation`，否则下次安装会换目录。
