@@ -254,3 +254,50 @@ New-ItemProperty $key -Name UninstallString -Value '"D:\软件\奥皇上品\unin
 判断依据：`UninstallString` 里那个卸载器文件是否存在。
 存在 = 这套是真的，不要删；不存在 = 空壳，可以删，但删完要重建
 `InstallLocation`，否则下次安装会换目录。
+
+---
+
+## deploy_server.py 的文件清单不含 carrier_service（2026-11-20 实测）
+
+改完 `server/services/carrier_service.py` 跑 `python scripts/deploy_server.py`，
+脚本会打 `Done.` 和 `Service status: active`，**但那个文件没被上传**。
+
+发现方式：改完架构后跑端到端测试，`source_override` 事件只触发 1 次（应 3 次），
+且事件里带 `index=None` —— 那是旧代码才有的字段。查证：
+
+```
+远端 source_override 出现次数: 1     ← 旧代码
+远端 round_targets 次数: 7           ← 手动上传后的新代码特征
+```
+
+**所以：改 `carrier_service.py` 后，必须单独比对 sha256 确认真的上去了。**
+
+```python
+import hashlib, sys; sys.path.insert(0,'.')
+import _dsh_remote as R
+R.put(r"D:\...\miaoshou\server\services\carrier_service.py",
+      "/opt/miaoshou-listing-v2/server/services/carrier_service.py")
+local = hashlib.sha256(open("miaoshou/server/services/carrier_service.py","rb").read()).hexdigest()
+c,o,_ = R.run("sha256sum /opt/miaoshou-listing-v2/server/services/carrier_service.py", 60)
+print("一致:", local == o.split()[0].strip())
+```
+
+> 这条不能靠「脚本打 Done 了就算上了」判断。部署脚本该修 —— 它的
+> `FILES` 清单需要把 `services/*.py` 全量纳入，而不是只列一部分。
+
+---
+
+## 涉及「批量 × 逐件」的逻辑必须先写「每件不同」的测试（2026-11-20 教训）
+
+上一版「载体货源链接覆盖」基于「复制会继承当前链接」的假设就写了代码，
+没有验证「一批 N 件共用一个 `common_id`」这个场景。结果是：
+
+- 循环外改一次链接 → 这一批 N 件**全部指向同一条链接**
+- 负责人的原问题（一批 50 个不同商品，采购分不清哪件对哪条）**一点没解决**
+- 而且更难发现：新入仓商品确实有了链接，只是全批共用一条
+
+正确做法：写一个假 client，它每次复制都**记下当时的链接快照**，
+然后断言「N 件副本的链接各不相同」。见
+`tests/test_carrier_source_per_item.py::test_every_copy_gets_its_own_link`。
+
+这类 bug 只有这种测试能抓出来 —— 单件测试全部会过。

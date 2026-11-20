@@ -655,18 +655,17 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
             url = preferred[preferred_index]
             preferred_index += 1
             link = {"url": url}
-            wanted_source = url          # 这条载体该对齐的货源链接
         else:
             link = take_link(db) if common_id is None else None
-            wanted_source = ""
         if common_id is None and link is None:
             raise CarrierError("公共采集箱没有可用商品，且没有可采集的货源链接",
                                available=len(details), required=count)
-        # 复用公共箱已有商品时，也要把它的货源对齐到当前这件商品 ——
-        # 否则「复用」等于沿用上一条不相干商品的链接。
-        if common_id is not None and not wanted_source and preferred_index < len(preferred):
-            wanted_source = preferred[preferred_index]
-            preferred_index += 1
+        # 注意：这里**不再**预先消耗 preferred 去「对齐载体」。
+        #
+        # 链接的对齐已经挪到「复制循环里逐件做」（见下面 source_cursor）——
+        # 因为一批 N 件的每一份副本都要有自己的链接，在挑载体阶段对一次
+        # 只够第一件用，后面 N-1 件会共用同一条。这里提前消耗反而会把
+        # preferred 的游标推乱，导致后面几件拿不到本该属于它们的链接。
         if link:
             url = str(link.get("url") or "")
             offer = offer_id(url)
@@ -706,33 +705,21 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
 
         copies = min(count - len(details), 100)
 
-        # === 关键一步：在公共箱把货源链接改对，再复制（2026-11-20）===
+        # `common_id` 只决定「用公共箱里的哪一件当载体」。
+        # 一批 N 件的每一份副本，都要在**复制前**把公共箱的链接改成
+        # 它自己对应的那条 —— 因为 `claim_common_to_platform` 是
+        # 「复制当前快照」，复制完再改公共箱，已经复制出去的不会变。
         #
-        # 为什么必须在这里做、而不是「用正确链接重新采集」：
-        #   负责人明确「一个妙手账号每天只能采集 10 个产品」，
-        #   靠 fetch_item 换链接根本不够用（一批 50 件就废了）。
-        #   公共箱的 edit 接口能直接改 sourceList，**不消耗采集配额**。
+        # 更要紧的是：整轮复制都用同一个 `common_id`，如果只在循环外改一次，
+        # 这一批 N 件会**共用同一条货源链接** —— 那正是负责人要修的问题
+        # （「一批 50 个不同商品，采购时就分不清哪件对哪条」）。
         #
-        # 实测：公共箱能改（写入后回读一致）；店铺采集箱改不了
-        # （save_shop 传 sourceList 返回 success 但回读是 null）。
-        # 所以必须「先在公共箱改对，再复制/认领到店铺」。
-        if wanted_source and common_id:
-            override = source_link.override_common_box_source(
-                client, common_id, wanted_source)
-            if progress:
-                progress({"stage": "source_override",
-                          "commonId": common_id,
-                          "url": wanted_source,
-                          "changed": override.get("changed"),
-                          "error": override.get("error") or ""})
-            if override.get("ok"):
-                logger.info("载体货源链接已对齐 commonId=%s url=%s",
-                            common_id, wanted_source)
-            else:
-                # 改不上不阻断复制：至少标题/图/价/SKU 是对的，
-                # 链接留给界面提示人工确认。
-                logger.warning("载体货源链接覆盖失败 commonId=%s url=%s：%s",
-                               common_id, wanted_source, override.get("error"))
+        # 负责人 2026-11-20 明确：「每件商品要有自己的链接」。
+        #
+        # 成本（实测）：read 一次 0.47s，之后链式 edit 各约 0.9s。
+        # 靠 `source_link.override_common_box_source(cache=...)` 复用
+        # ossMd5 与编辑模板，避免每件都重读详情。
+        source_cache: dict[str, Any] = {}
 
         if progress:
             progress({"stage": "claim", "commonId": common_id, "copies": copies})
@@ -753,9 +740,52 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
         # 现在：这一件失败就排到队尾重跑，跑完剩下的再回头补。
         pending_copies = copies
         item_round = 0
+        # 这一批里已经用掉了多少条 preferred 链接。
+        # 注意与 `preferred_index` 分开：那个是在「挑载体」阶段消耗的，
+        # 这里是在「逐件改链接」阶段消耗的，两者不能混。
+        source_cursor = 0
+        # 已分好链接、但复制失败待重试的件。
+        # 每项是那件该用的链接；重试时必须**重新把它自己的链接设回去**。
+        retry_targets: list[str] = []
         while pending_copies > 0 and item_round <= CARRIER_ITEM_RETRY_ROUNDS:
             deferred = 0
-            for _ in range(pending_copies):
+            # 本轮要处理的目标链接：优先补上一轮失败的，再按序分新的。
+            # 用 None 表示「这件不改链接」（preferred 为空时的常态）——
+            # 存量 178 件商品都没货源，发布时必须一次 edit 都不发。
+            round_targets: list[str | None] = list(retry_targets)
+            retry_targets = []
+            fresh_needed = pending_copies - len(round_targets)
+            for _ in range(fresh_needed):
+                if not preferred:
+                    round_targets.append(None)
+                    continue
+                if source_cursor < len(preferred):
+                    round_targets.append(preferred[source_cursor])
+                else:
+                    round_targets.append(preferred[-1])
+                source_cursor += 1
+            for target_index, target in enumerate(round_targets):
+                # === 每件复制前，把公共箱链接改成这一件对应的货源 ===
+                #
+                # 顺序不能反：`claim_common_to_platform` 复制的是**当时的快照**，
+                # 复制完再改公共箱，已经复制出去的副本不会跟着变。
+                if common_id and target:
+                    override = source_link.override_common_box_source(
+                        client, common_id, target, cache=source_cache)
+                    if progress:
+                        progress({"stage": "source_override",
+                                  "commonId": common_id,
+                                  "url": target,
+                                  "index": target_index + 1,
+                                  "total": len(round_targets),
+                                  "changed": override.get("changed"),
+                                  "error": override.get("error") or ""})
+                    if not override.get("ok"):
+                        # 不阻断复制：标题/图/价/SKU 仍然是对的，
+                        # 链接问题留给界面提示人工确认。
+                        logger.warning(
+                            "载体货源链接覆盖失败 commonId=%s url=%s：%s",
+                            common_id, target, override.get("error"))
                 try:
                     claimed = client.claim_common_to_platform([(common_id, "tiktok", 1)])
                 except MiaoshouError as exc:
@@ -765,6 +795,8 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                     # 其余（凭据错、参数错）才真的抛出去。
                     if _is_retryable_copy_error(exc):
                         deferred += 1
+                        # 记住这一件的目标链接，下一轮把这个链接重新设回去
+                        retry_targets.append(target)
                         if progress:
                             progress({"stage": "copy_deferred",
                                       "commonId": common_id,
@@ -793,6 +825,8 @@ def collect_carriers(db: Session, client: MiaoshouClient, *, count: int,
                     # 回执残缺同样先排尾重试：上游可能已经把草稿建出来了，
                     # 直接判死会让这次复制白做，还得人工去核对采集箱。
                     deferred += 1
+                    # 已建出的草稿如果链接是对的，重试时会重新设一次（幂等）
+                    retry_targets.append(target)
                     if progress:
                         progress({"stage": "copy_deferred", "commonId": common_id,
                                   "reason": "复制回执不完整", "deferred": deferred})

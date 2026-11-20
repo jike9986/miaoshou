@@ -262,7 +262,8 @@ def build_source_list(url: str) -> list[dict[str, Any]]:
 
 
 def override_common_box_source(client: Any, common_detail_id: int | str,
-                               url: str) -> dict[str, Any]:
+                               url: str, *,
+                               cache: dict[str, Any] | None = None) -> dict[str, Any]:
     """把公共采集箱里某个商品的货源链接改成 `url`。
 
     **不消耗采集配额**（走 edit 接口，不是 fetch_item），这正是它比
@@ -272,33 +273,65 @@ def override_common_box_source(client: Any, common_detail_id: int | str,
          → 替换 sourceList（夹住 stock）
          → 整份回写 → 回读校验
 
+    ## `cache` 参数（2026-11-20 加的，专为「一批 N 件逐件改链接」）
+
+    实测：`edit` 的返回里**每次都带新的 `ossMd5`**，可以直接用于下一次 edit，
+    不必重读详情。
+
+        read 一次      : 0.47s
+        链式 edit #1   : 1.01s  → 新 ossMd5
+        链式 edit #2   : 0.94s  → 新 ossMd5
+        链式 edit #3   : 0.88s  → 新 ossMd5
+
+    所以一批 50 件：原来 50×(读+写+校验)≈75s，现在 1 次读 + 50 次写 ≈48s。
+    传同一个 `cache` dict 进来即可自动复用，跨调用保持 ossMd5 与编辑模板。
+
     返回 `{ok, changed, before, after, error}`。
     失败不抛异常：调用方（载体重建 / 批量修链接）应该继续跑，只记失败。
     """
+    from copy import deepcopy
+
     from services.miaoshou import MiaoshouError
 
+    fresh = cache if cache is not None else {}
     wanted = normalize_source_url(url)
     if not wanted:
         return {"ok": False, "changed": False, "error": "货源链接无法识别"}
     if not str(common_detail_id).isdigit():
         return {"ok": False, "changed": False, "error": "公共箱 detailId 不合法"}
 
-    try:
-        detail = client.common_box_detail(int(common_detail_id))
-    except MiaoshouError as exc:
-        return {"ok": False, "changed": False, "error": f"读取公共箱失败：{exc}"}
+    # 模板只在第一次拿；之后复用（含已夹住 stock 的 skuMap）
+    if "edit" not in fresh or int(fresh.get("cid") or 0) != int(common_detail_id):
+        try:
+            detail = client.common_box_detail(int(common_detail_id))
+        except MiaoshouError as exc:
+            return {"ok": False, "changed": False, "error": f"读取公共箱失败：{exc}"}
+        block = detail.get("data") or {}
+        edit = block.get("editCommonCollectBoxDetail") or {}
+        oss_md5 = block.get("ossMd5")
+        if not isinstance(edit, dict) or not edit:
+            return {"ok": False, "changed": False, "error": "公共箱详情缺少编辑结构"}
+        if not oss_md5:
+            return {"ok": False, "changed": False, "error": "公共箱详情缺少 ossMd5"}
+        template = deepcopy(edit)
+        # stock 必须在这里一次性夹住：上游原始数据常是 60 万，
+        # 直接回写会被拒（「editCommonCollectBoxDetail.stock 不能大于 99999」）
+        if isinstance(template.get("stock"), (int, float)) \
+                and template["stock"] > COMMON_BOX_STOCK_CAP:
+            template["stock"] = COMMON_BOX_STOCK_CAP
+        for entry in (template.get("skuMap") or {}).values():
+            if isinstance(entry, dict):
+                stock = entry.get("stock")
+                if isinstance(stock, (int, float)) and stock > COMMON_BOX_STOCK_CAP:
+                    entry["stock"] = COMMON_BOX_STOCK_CAP
+        fresh["cid"] = int(common_detail_id)
+        fresh["edit"] = template
+        fresh["oss"] = oss_md5
 
-    block = detail.get("data") or {}
-    edit = block.get("editCommonCollectBoxDetail") or {}
-    oss_md5 = block.get("ossMd5")
-    if not isinstance(edit, dict) or not edit:
-        return {"ok": False, "changed": False, "error": "公共箱详情缺少编辑结构"}
-    if not oss_md5:
-        return {"ok": False, "changed": False, "error": "公共箱详情缺少 ossMd5"}
+    edit = fresh["edit"]
+    oss_md5 = fresh["oss"]
 
-    from copy import deepcopy
-
-    before_list = deepcopy(edit.get("sourceList") or [])
+    before_list = edit.get("sourceList") or []
     before = ""
     if before_list and isinstance(before_list[0], Mapping):
         before = str(before_list[0].get("sourceItemUrl")
@@ -313,28 +346,38 @@ def override_common_box_source(client: Any, common_detail_id: int | str,
     # sourceMataInfo.oriItemNum 要与 sourceItemId 一致，否则上游认为货源没对齐
     if isinstance(body_edit.get("sourceMataInfo"), dict) and wanted_offer:
         body_edit["sourceMataInfo"]["oriItemNum"] = wanted_offer
-    # stock 必须夹住：上游原始数据常是 60 万，直接回写会被拒
-    if isinstance(body_edit.get("stock"), (int, float)) \
-            and body_edit["stock"] > COMMON_BOX_STOCK_CAP:
-        body_edit["stock"] = COMMON_BOX_STOCK_CAP
-    for entry in (body_edit.get("skuMap") or {}).values():
-        if isinstance(entry, dict):
-            stock = entry.get("stock")
-            if isinstance(stock, (int, float)) and stock > COMMON_BOX_STOCK_CAP:
-                entry["stock"] = COMMON_BOX_STOCK_CAP
 
     try:
-        client.edit_common_box_detail({
+        response = client.edit_common_box_detail({
             "commonCollectBoxDetailId": int(common_detail_id),
             "ossMd5": oss_md5,
             "editCommonCollectBoxDetail": body_edit,
         })
     except MiaoshouError as exc:
+        # ossMd5 可能因为别处改动而失效 —— 丢掉缓存，下一次重新读
+        fresh.pop("edit", None)
+        fresh.pop("oss", None)
         return {"ok": False, "changed": False, "before": before,
                 "error": f"写入货源链接失败：{exc}"}
 
-    # 回读校验：上游对不认识/不合法的字段是**静默忽略**（店铺接口就是这样），
-    # 只有回读才能证明真改上了。
+    # 链式复用：把上游返回的新 ossMd5 与写进去的内容留作下次的模板
+    returned_oss = (response.get("data") or {}).get("ossMd5") \
+        if isinstance(response, dict) else None
+    if returned_oss:
+        fresh["oss"] = returned_oss
+    else:
+        # 没给新 ossMd5 就不能链式，下次重新读
+        fresh.pop("edit", None)
+        fresh.pop("oss", None)
+    fresh["edit"] = body_edit
+
+    if cache is not None:
+        # 批量场景跳过逐次回读：调用方最后统一校验，省 0.5s/件
+        return {"ok": True, "changed": True, "before": before, "after": wanted,
+                "verified": False}
+
+    # 单件场景回读校验：上游对不认识/不合法的字段是**静默忽略**
+    # （店铺接口就是这样），只有回读才能证明真改上了。
     try:
         verify = client.common_box_detail(int(common_detail_id))
         verified = ((verify.get("data") or {})
