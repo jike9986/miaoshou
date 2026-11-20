@@ -78,9 +78,28 @@ def generate_sign(app_secret: str, path: str, timestamp: int, app_key: str, body
 class Pacer:
     """同账号节流：保证两次上游请求之间至少间隔 ``interval`` 秒。
 
-    间隔是自适应降的：默认 1.2s（实测最优），一旦撞到妙手的
-    accountApiQpsRateLimit 就逐步抬到上限 1.5s，之后连续成功再慢慢降回来。
+    间隔是自适应的：从 ``UPSTREAM_PACE_SECONDS``(0.90) 起步，撞到妙手的
+    accountApiQpsRateLimit 就逐步抬到 ``UPSTREAM_PACE_MAX_SECONDS``(1.5)，
+    连续成功后再慢慢降回 ``UPSTREAM_PACE_MIN_SECONDS``(0.55)。
+
     这样「妙手某天收紧限流」不需要重新发版，客户端会自己收敛到安全值。
+
+    ## 2026-11-20 实测：节流不是「白等」
+
+    关掉节流（interval=0）跑同样 6 条链接：
+
+        有节流  总 6.16s   客户端睡 4.16s   上游 2.00s
+        无节流  总 5.46s   客户端睡 0.00s   上游 5.46s
+
+    只快 12%，因为**上游自己慢了 2.7 倍** —— 妙手收到密集请求时在服务端
+    排队。客户端不睡就得在等响应时睡，等待只是挪了个地方。
+
+    ## reward() 原来从未生效过（已修）
+
+    `UPSTREAM_PACE_MIN_SECONDS` 原来也是 0.90，等于 MIN == 默认值，
+    于是 `interval > MIN` 永远为假 —— 自适应降速从来没跑过。
+    一旦被 penalize 抬到 1.5s，要连续成功 1000 次（50 次 × 每次 0.05）
+    才能爬回来。现在 MIN 降到 0.55，能正常回落。
     """
 
     def __init__(self, interval: float = UPSTREAM_PACE_SECONDS) -> None:
@@ -820,9 +839,26 @@ class MiaoshouClient:
 
 
 def _is_rate_limit(code: str, message: str) -> bool:
+    """判断是否妙手的限流响应。
+
+    2026-11-20 实测补上「请求太频繁」：压测时抓到的原文是
+
+        妙手接口失败 [fail]：请求太频繁，请稍后重试
+
+    原来的关键词表里有 `频率` / `限流` / `qps`，但**没有**这句 ——
+    于是它被归成「业务错误」，既不退避也不抬高 Pacer 间隔，
+    结果是「被限流了却当成数据问题」，重试也不会好。
+    """
     text = f"{code} {message}".lower()
-    return ("ratelimit" in text or "rate_limit" in text or "qps" in text
-            or "频率" in message or "限流" in message or "too many" in text)
+    # 注意 "rate limit"（空格）与 "rate_limit"（下划线）是两种写法，
+    # 只匹配下划线会漏掉「Rate limit reached」这类英文返回。
+    return ("ratelimit" in text or "rate_limit" in text
+            or "rate limit" in text or "qps" in text
+            or "频率" in message or "限流" in message or "too many" in text
+            # 「请求太频繁」「请求过于频繁」「操作太频繁」
+            or "太频繁" in message or "过于频繁" in message
+            # 英文变体
+            or "frequent" in text or "throttl" in text)
 
 
 def _is_transient_gateway(message: str) -> bool:

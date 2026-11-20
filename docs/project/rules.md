@@ -301,3 +301,72 @@ print("一致:", local == o.split()[0].strip())
 `tests/test_carrier_source_per_item.py::test_every_copy_gets_its_own_link`。
 
 这类 bug 只有这种测试能抓出来 —— 单件测试全部会过。
+
+---
+
+## Pacer 常量改了必须同步改 MIN（2026-11-20 修过的真 bug）
+
+`services/miaoshou.py` 的 `Pacer.reward()` 逻辑是：
+
+```python
+if self._ok_streak >= 50 and self.interval > UPSTREAM_PACE_MIN_SECONDS:
+    self.interval = max(UPSTREAM_PACE_MIN_SECONDS, self.interval - 0.05)
+```
+
+原配置 `UPSTREAM_PACE_MIN_SECONDS = 0.90` 与 `UPSTREAM_PACE_SECONDS = 0.90`
+**相等**，于是 `interval > MIN` 永远为假 —— **自适应降速从未生效过**。
+
+后果：一旦 `penalize()` 因为偶发限流把间隔抬到 1.5s，就要连续成功
+50 次 × 每次降 0.05s = **1000 次请求**才能爬回 0.90 —— 实际等于永久变慢。
+
+**规则：MIN 必须严格小于默认值，否则 reward 形同虚设。**
+现在 `MIN = 0.55`，且 `tests/test_pacer_and_rate_limit.py` 里
+`test_min_is_lower_than_default` + `test_reward_can_actually_lower_interval`
+会盯住这条。
+
+---
+
+## 妙手限流的真实文案是「请求太频繁」（2026-11-20 压测抓到）
+
+`_is_rate_limit` 原来的关键词表是：
+
+```python
+"ratelimit" / "rate_limit" / "qps" / "频率" / "限流" / "too many"
+```
+
+但妙手实际返回的是：
+
+```
+妙手接口失败 [fail]：请求太频繁，请稍后重试
+```
+
+「频」和「繁」一个都不在关键词表里 —— 于是**限流被当成业务错误**：
+不退避、不抬 Pacer 间隔，重试也不会好。
+
+已补：`太频繁` / `过于频繁` / `frequent` / `throttl` / `rate limit`（空格变体）。
+
+同时确认不能误判：`下游服务响应超时`、`下游服务繁忙`、`商品不存在`、
+`stock 不能大于99999` 都不能被判成限流（会让退避策略走错分支）。
+测试见 `test_does_not_misclassify_gateway_errors_as_rate_limit`。
+
+---
+
+## 关于「节流是不是白等」的实测结论（2026-11-20）
+
+负责人问「故意等的 0.9 秒真的需要这么久吗」。实测三组（同载体、同 6 条链接）：
+
+```
+interval=0.90  总 6.16s   客户端睡 4.16s   上游 2.00s   6/6 成功
+interval=0.00  总 5.46s   客户端睡 0.00s   上游 5.46s   6/6 成功
+interval=0.35  总 6.07s   客户端睡 0.58s   上游 5.49s   6/6 成功
+```
+
+**关掉节流只快 12%，因为上游自己慢了 2.7 倍** —— 妙手在服务端排队。
+客户端不睡就得在等响应时睡，所以「故意白等」不成立。
+
+**结论：不要为了提速去动 `UPSTREAM_PACE_SECONDS`。** 真要提速，改变的是
+「减少上游请求次数」（例如这次加的链式复用 ossMd5，一批 50 件少读 49 次详情），
+而不是缩短间隔。
+
+另外单独测过纯 edit 路径：0.20 也能 6/6 成功且略快，但那是单一接口场景；
+混合请求（列表+详情+edit+复制）没有验证过，不动主常量。
