@@ -91,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from db.session import SessionLocal
     from models.product import Product
+    from services.group_access import is_restricted_group_id
     from services.warehouse_service import revision_guard
 
     only_ids: set[int] = set()
@@ -106,12 +107,25 @@ def main(argv: list[str] | None = None) -> int:
         for product in products:
             if only_ids and int(product.id) not in only_ids:
                 continue
+            # 受限分组（自营海外仓 / 海外仓定制款 / 精品）不受颜色上限约束，
+            # 颜色超过 9 是正常的 —— 不能按「上限 9」去裁它们的 colorMap
+            # （负责人 2026-11-19）。这些商品的 colorMap 只清理混进来的尺码条目。
+            restricted = is_restricted_group_id(product.group_id)
             payload = product.payload or {}
             color_map = payload.get("colorMap")
             if not isinstance(color_map, dict) or not color_map:
                 continue
             kept_colors, kept_sizes = _kept_colors(payload)
             if not kept_colors:
+                continue
+            if restricted:
+                # 只挑「明显是尺码」的 key，绝不按颜色数裁
+                extra = [k for k in color_map
+                         if str(k).strip() not in kept_colors
+                         and (str(k).strip() in kept_sizes
+                              or _SIZE_LIKE_RE.match(str(k).strip()))]
+                if extra:
+                    targets.append((product, sorted(extra), kept_colors, kept_sizes))
                 continue
             extra = [k for k in color_map if str(k).strip() not in kept_colors]
             # colorMap 里混进来的尺码条目（历史 product_standard bug 的残留）。

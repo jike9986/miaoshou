@@ -2785,7 +2785,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                 payload,
                 main_limit=int(_limits.get("main") or 0),
                 detail_limit=int(_limits.get("detail") or 0),
-                sku_limit=int(_limits.get("sku") or 0))
+                sku_limit=int(_limits.get("sku") or 0),
+                group_id=group_id)
         except Exception as exc:  # noqa: BLE001 - 截断失败不阻断入库
             logger.warning("按设置截断图片失败 detailId=%s：%s", detail_id, exc)
         # 主图的工厂图/尺码图剔除由 pre_save_gate 的 removeIndexes 负责，
@@ -3185,16 +3186,27 @@ def apply_transformed_payload(db: Session, product: Product,
     db.flush()
 
 
-def apply_image_limits(payload, *, main_limit=0, detail_limit=0, sku_limit=0):
+def apply_image_limits(payload, *, main_limit=0, detail_limit=0, sku_limit=0,
+                      group_id=None):
     """按处理设置真正截断主图 / 详情图 / SKU 图与颜色。
 
     负责人口径（2026-11-11）：界面上的「主图数量 / 详情图数量 / SKU 图数量」
     是**保留几张**，不是「翻译几张」；SKU 图数量 = 颜色数，设 4 就只保留
     4 个颜色（连带删其余 SKU）。0 表示不限制。
+    **颜色上限不套用于受限分组**（负责人 2026-11-19）：
+    自营海外仓 / 海外仓定制款 / 精品这三个组是精品线，颜色多少由厂家定。
+    运营不能因为「颜色数量=9」把它们裁掉 —— 那等于改商品本身。
+    这三个组超过 9 种颜色是正常的，不裁。
+    主图 / 详情图的上限仍然生效：那两个是展示取舍，颜色是商品本体。
     """
-    from services import pre_save_check
+    from services import group_access, pre_save_check
 
     report = {}
+
+    # 受限分组豁免颜色上限。
+    if sku_limit and group_access.is_restricted_group_id(group_id):
+        report["colors"] = {"skipped": "受限分组不限制颜色数量"}
+        sku_limit = 0
 
     # 主图：先去重再截断。
     #

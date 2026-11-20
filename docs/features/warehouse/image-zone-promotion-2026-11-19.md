@@ -241,3 +241,80 @@ product 392：`colorMap` 5 条里 3 条是尺码（`40` / `45` / `Saiz`）。
 - 尺码属性即使值上有图也不算颜色
 - 限色时截断的是颜色维度不是尺码维度
 - 端到端：裁色后再搬运，被删颜色的图不该出现在成品区地址里
+
+---
+
+## 八、受限分组的颜色不受上限约束（2026-11-19 再补）
+
+负责人：「三个分组的那里面的颜色图片不受影响，超过九种都没关系」。
+
+### 为什么这三个组要单独放开
+
+自营海外仓 / 海外仓定制款 / 精品走**合作厂家**，是精品线。
+颜色有多少由厂家定，运营不能因为界面上设了「颜色数量 = 9」就裁掉。
+
+裁颜色不是「少显示几张图」，而是**改了商品本身**：
+
+```
+颜色值被删 → attrValueList 少几条
+          → skuMap 里对应的 SKU 被删
+          → 发布出去 SKU 少一批，买家买不到那几个颜色
+```
+
+普通商品裁色是为了控制铺货成本；精品线的货是厂家直供，裁了就是错货。
+
+### 实现
+
+```python
+def apply_image_limits(payload, *, main_limit=0, detail_limit=0,
+                       sku_limit=0, group_id=None):
+    # 受限分组豁免颜色上限
+    if sku_limit and group_access.is_restricted_group_id(group_id):
+        report["colors"] = {"skipped": "受限分组不限制颜色数量"}
+        sku_limit = 0
+```
+
+要点：
+
+1. **只豁免颜色，不豁免主图/详情图**。主图和详情图是「展示取舍」，
+   裁掉不影响商品本体；颜色是「商品本体」，性质完全不同。
+2. 新增 `group_access.is_restricted_group_id()` —— 不查库的快速判定。
+   图片截断那一步手上只有 payload，没有 Session，用不了
+   `is_restricted_group(db, group_id)`。按 id 兜底集合判断（生产库实测
+   受限组就是 1/2/3），名字匹配仍走原来的 `is_restricted_group`。
+3. `group_id` 从 `save_from_collect_box` 的参数一路传下来，
+   `payload` 里没有这个字段（`groupId` 只在列表序列化时出现）。
+
+### 脚本同步
+
+`trim_extra_colors.py` 和 `trim_color_map.py` 都传入 `product.group_id`：
+
+- `trim_extra_colors.py` 靠 `apply_image_limits` 自己跳过，脚本不重复判断
+- `trim_color_map.py` 显式区分：受限组**只清明显是尺码的 key**，
+  绝不按「颜色数 > 9」去裁
+
+### 生产实测
+
+```
+受限分组 14 件，颜色分布 2~8 个（当前都没超 9，历史没被误裁）
+
+豁免实测 #10 (group=3)：
+  设上限 3 前颜色: 7
+  设上限 3 后颜色: 7
+  报告: {'skipped': '受限分组不限制颜色数量'}
+  结论: 豁免生效
+
+普通组对照 #359 (group=4)：
+  设上限 3 前: 5  后: 3  结论: 正常裁断
+```
+
+### 新增测试
+
+`tests/test_restricted_group_color_exempt.py` 10 条：
+
+- 三个受限组 id（1/2/3）各自保留全部颜色
+- 受限组的主图 / 详情图上限仍然生效
+- 普通分组（None / 空串 / 4 / 10 / 99）照旧裁到上限
+- `is_restricted_group_id` 对 1/2/3/"1"/" 2 " 判真，对 4/10/0/"abc"/"精品" 判假
+- 20 种颜色在受限组里也不裁
+- 清理脚本的尺码正则不会把颜色名误判成尺码

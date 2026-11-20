@@ -103,7 +103,11 @@ def main(argv: list[str] | None = None) -> int:
             before_sku = len(payload.get("skuMap") or {})
             expected = int(product.revision or 0)
             report = apply_image_limits(payload, main_limit=0, detail_limit=0,
-                                        sku_limit=args.limit)
+                                        sku_limit=args.limit,
+                                        # 受限分组（自营海外仓/海外仓定制款/精品）
+                                        # 不套颜色上限 —— 传进去让 apply_image_limits
+                                        # 自己跳过，脚本不重复判断（负责人 2026-11-19）
+                                        group_id=product.group_id)
             after_sku = len(payload.get("skuMap") or {})
             if not report.get("colors"):
                 continue

@@ -66,6 +66,20 @@ def is_restricted_group(db: Session, group_id: Any) -> bool:
     return value in restricted_group_ids(db)
 
 
+def is_restricted_group_id(group_id: Any) -> bool:
+    """不查库的快速判定：只按 id 兜底集合判断。
+
+    给「手上没有 Session」的地方用（例如图片截断，那一步只有 payload）。
+    生产库实测受限组就是 id 1/2/3；名字匹配仍然要靠 `is_restricted_group`。
+    """
+    if group_id in (None, ""):
+        return False
+    try:
+        return int(str(group_id).strip()) in RESTRICTED_GROUP_IDS
+    except (TypeError, ValueError):
+        return False
+
+
 def may_access_restricted(operator: Operator | None) -> bool:
     """当前操作员能不能碰受限分组。
 
