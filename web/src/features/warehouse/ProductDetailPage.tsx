@@ -789,8 +789,8 @@ export function ProductDetailPage() {
               )}
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-4 border-t border-border-subtle pt-3 text-xs">
-              <span className="text-fg-muted">
-                采购价区间：
+              <span className="text-fg-muted" title="SKU 拿货价，未套定价模板；售价在导入/发布时按模板计算">
+                拿货价区间：
                 <span className="num ml-1 font-medium text-fg">
                   {formatPrice(product.purchasePriceMin, {
                     currency: product.purchaseCurrency,

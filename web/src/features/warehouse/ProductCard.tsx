@@ -210,7 +210,13 @@ export function ProductCard({
             所以不能靠 auto margin 靠右。 */}
         <div className="flex min-h-[24px] w-full items-baseline justify-between gap-2">
           {price ? (
-            <span className="num shrink-0 text-h3 font-semibold text-fg">
+            <span className="num flex shrink-0 items-baseline gap-1 text-h3 font-semibold text-fg">
+              {/* 标明这是拿货价（负责人 2026-11-19）：成品仓库显示的就是
+                  SKU 的 originPrice，未套定价模板。不标注的话，
+                  运营会把拿货价当成实际售价 —— 实测 62 件商品拿货价高于
+                  妙手原始售价（其中 44 件非受限组），直接按这个数卖就是亏本。
+                  售价在「导入采集箱 / 发布」时套模板才算出来。 */}
+              <span className="text-2xs font-medium text-fg-muted">拿货</span>
               <span className="mr-0.5 text-xs font-medium text-fg-secondary">{price.symbol}</span>
               {price.amount}
             </span>

@@ -586,7 +586,13 @@ export function ProductDetailDrawer({
 
           <div className="grid grid-cols-2 gap-3 rounded-md border border-border-subtle bg-canvas-inset/50 p-3 sm:grid-cols-4">
             <div>
-              <p className="text-2xs text-fg-muted">采购价</p>
+              {/* 明确写「拿货价」而不是「采购价」（负责人 2026-11-19）：
+                  这里显示的是 SKU 的 originPrice，未套定价模板。
+                  成品仓库的用途是「挑货 → 导入采集箱/发布时套模板算售价」，
+                  不标注清楚会让运营把拿货价当成实际售价。 */}
+              <p className="text-2xs text-fg-muted" title="SKU 拿货价，未套定价模板；售价在导入/发布时按模板计算">
+                拿货价
+              </p>
               <p className="num mt-0.5 text-sm font-semibold text-fg">
                 {formatPrice(product.purchasePriceMin, {
                   currency: product.purchaseCurrency,
