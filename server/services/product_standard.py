@@ -581,14 +581,30 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
         color_map: dict[str, Any] = {}
         size_map: dict[str, Any] = {}
         for prop in props:
-            name = str(prop.get("propName") or "")
+            # 判断尺码不能只看 propName（2026-11-19 实测）：
+            #   propName 是中文「颜色」/「尺码」，但有的来源 propName 为空、
+            #   只有 attrName（Warna / 尺码）；
+            #   还有的来源把尺码的 propName 也写成「颜色」。
+            # 只认 propName == "尺码" 的后果：尺码值（EUR33/32码/…）
+            # 被写进 colorMap，实测 product 472 的 colorMap 20 条里有
+            # 11 条是尺码，商品详情页把尺码当颜色显示。
+            # 现在三个字段一起看，并且用「值里带图」兜底 —— 尺码值不挂图。
+            name = str(prop.get("propName") or prop.get("attrName")
+                       or prop.get("attrNameCn") or "").strip().lower()
+            is_size = name in ("尺码", "尺寸", "尺寸表", "size", "saiz", "ukuran")
+            if not is_size and not name:
+                # 名字认不出来时用值的特征判断：颜色值才挂图
+                values = [v for v in (prop.get("attrValueList") or [])
+                          if isinstance(v, dict)]
+                is_size = bool(values) and not any(
+                    v.get("imgUrl") or v.get("imageUrl") for v in values)
             for av in (prop.get("attrValueList") or []):
                 if not isinstance(av, dict):
                     continue
                 label = str(av.get("attrValue") or "").strip()
                 if not label:
                     continue
-                if name in ("尺码", "尺寸"):
+                if is_size:
                     size_map[label] = {"name": label}
                 else:
                     url = av.get("imageUrl") or (av.get("imgUrls") or [None])[0]

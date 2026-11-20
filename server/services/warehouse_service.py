@@ -3278,6 +3278,31 @@ def apply_image_limits(payload, *, main_limit=0, detail_limit=0, sku_limit=0):
                 report["sku"] = {"dropped": dropped,
                                  "before": len(sku_map) + dropped,
                                  "after": len(sku_map)}
+                # colorMap / sizeMap 也要同步裁掉（2026-11-19 修）。
+                #
+                # 这两张表是 build_product 写进 payload 的展示快照，
+                # 只服务本地详情页，不发给妙手（见 _LOCAL_ONLY_PAYLOAD_FIELDS）。
+                # 但它们里面**挂着图片地址**：裁掉颜色后若不同步裁这两张表，
+                # 被删颜色的图会一直留在 payload 里 → 入库搬运时被搬进成品区
+                # → 成品区堆一堆用不到的图。（负责人 2026-11-19 明确指出：
+                # 「多余的颜色是清理的，这些图片不能同步传到成品区里面」。）
+                #
+                # 实测生产：8 件商品的 colorMap 条目数多于实际颜色数，
+                # product 472 是 20 条对 9 色（多出的 11 条里有尺码，
+                # 那是 product_standard 的另一处 bug，已一并修）。
+                for map_key in ("colorMap", "sizeMap"):
+                    table = payload.get(map_key)
+                    if not isinstance(table, dict) or not table:
+                        continue
+                    removed = 0
+                    for label in list(table.keys()):
+                        probe = str(label).strip()
+                        if probe and (probe in dropped_text or probe in dropped_ids):
+                            table.pop(label, None)
+                            removed += 1
+                    if removed:
+                        report[map_key] = {"dropped": removed,
+                                           "after": len(table)}
             break
     return report
 
@@ -3286,6 +3311,11 @@ def apply_image_limits(payload, *, main_limit=0, detail_limit=0, sku_limit=0):
 _COLOR_ATTR_NAMES = ("warna", "颜色", "颜色分类", "color", "colour", "màu",
                      "màu sắc", "สี", "mau", "cor")
 _COLOR_ATTR_ID = "100000"
+
+# 尺码维度的通用名。出现在这个清单里的属性，即使值上挂了图也不算颜色 ——
+# 历史数据里 product_standard 给尺码值补过图，会让「值里带图」这条兜底误判。
+_SIZE_ATTR_NAMES = ("尺码", "尺寸", "尺寸表", "size", "saiz", "ukuran",
+                    "ขนาด", "kích thước", "kích cỡ", "サイズ")
 
 
 def _is_color_property(prop: Mapping[str, Any]) -> bool:
@@ -3298,8 +3328,18 @@ def _is_color_property(prop: Mapping[str, Any]) -> bool:
     if str(prop.get("attrId") or "").strip() == _COLOR_ATTR_ID:
         return True
 
-    name = str(prop.get("attrNameCn") or prop.get("attrName") or "").strip().lower()
+    name = str(prop.get("attrNameCn") or prop.get("attrName")
+               or prop.get("propName") or "").strip().lower()
     if name:
+        # 名字明确是尺码的，**绝不能**算颜色（2026-11-19 补）。
+        #
+        # 三级判定里「值上挂图」这条兜底会被历史数据骗到：
+        # `product_standard` 早期给尺码值也补过图，于是尺码属性满足了
+        # 「值里有图」→ 被判成颜色 → 颜色上限拿尺码值去截断，
+        # 真正要限的颜色反而没限。
+        # 实测 5 件：472(尺码) / 381(saiz) / 395(saiz) / 248(saiz) / 392(saiz)。
+        if name in _SIZE_ATTR_NAMES:
+            return False
         # 完全相等或包含关系都算（"Warna" / "颜色分类" / "Color Name"）
         for candidate in _COLOR_ATTR_NAMES:
             if name == candidate or candidate in name:
@@ -3310,6 +3350,11 @@ def _is_color_property(prop: Mapping[str, Any]) -> bool:
         if not isinstance(value, Mapping):
             continue
         if _is_image_url(value.get("imgUrl")):
+            return True
+        if _is_image_url(value.get("imageUrl")):
+            return True
+        if isinstance(value.get("imgUrls"), list) and any(
+                _is_image_url(u) for u in value["imgUrls"]):
             return True
         supplementary = value.get("supplementarySkuImageUrls")
         if isinstance(supplementary, str) and _is_image_url(supplementary):

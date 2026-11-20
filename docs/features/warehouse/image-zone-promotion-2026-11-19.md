@@ -167,3 +167,77 @@ if not source.is_file():
 
 如果想让清理更激进（省磁盘），先把保留期从 14 天改短，但**改之前必须确认
 `promote_warehouse_images` 的残留计数为 0**，否则会误删还在被引用的图。
+---
+
+## 七、后续修正：多余颜色的图不该搬进成品区（2026-11-19 补）
+
+负责人指出：「有些成品是处理过最多保留九种颜色，多余的颜色是清理的，
+**这些图片不能同步传到成品区里面**。」
+
+上面第三到五节的修复解决了「图停在临时区」，但**没解决「多余的图被搬走」**。
+
+### BUG-020 裁色不裁 colorMap
+
+`apply_image_limits` 裁 `attrValueList` + `skuMap`，**没裁 `colorMap` / `sizeMap`**。
+
+这两张表是详情页的展示快照，本地字段，不发给妙手 —— 但**每个条目挂着图片地址**。
+不裁它们，被删颜色的条目还留在 payload，入库搬运时一起搬进成品区。
+
+实测：92 件商品共 **362 条**多余条目、**340 张图**被误搬进 `products/`。
+
+**修复**：`apply_image_limits` 在裁 SKU 的同一个循环里同步裁这两张表。
+
+### BUG-021 尺码被写进 colorMap
+
+`product_standard.py` 判断尺码用 `propName in ("尺码", "尺寸")`。
+实际数据里：
+
+```
+propName='颜色'  attrName='Warna'  → 颜色，正确
+propName='尺码'  attrName='尺码'   → 尺码，正确（但有个变体）
+propName=''      attrName='Saiz'   → 尺码，漏判 → 写进 colorMap
+```
+
+实测 product 472：`colorMap` 20 条里 **11 条是尺码**（EUR33/EUR34/32码）。
+product 392：`colorMap` 5 条里 3 条是尺码（`40` / `45` / `Saiz`）。
+
+**修复**：三个字段一起看（`propName` / `attrName` / `attrNameCn`），
+名字认不出来时用「值里是否带图」兜底判断。
+
+### BUG-022 saiz 属性被 `_is_color_property` 判成颜色
+
+`_is_color_property` 有三级判定，第三级是「值上挂了图就是颜色」。
+但历史数据里 `product_standard` **给尺码值也补过图**，于是 `saiz` 属性
+满足了这条兜底 → 被判成颜色 → **颜色上限拿尺码值去截断**。
+
+实测 5 件：472(尺码) / 381(saiz) / 395(saiz) / 248(saiz) / 392(saiz)。
+
+**修复**：新增 `_SIZE_ATTR_NAMES` 清单，名字命中就先直接否决，
+不管值上有没有图。覆盖 尺码/尺寸/size/saiz/ukuran/ขนาด/kích thước/サイズ。
+
+### 存量清理
+
+新增 `scripts/trim_color_map.py`（默认 dry-run）：
+
+- 按 `skuPropertyList` 实际保留的颜色裁掉 `colorMap` 多余条目
+- 用正则识别混进来的尺码 key（`40` / `EUR33` / `L(37-39)` / `Saiz`）
+- **只删 key，不删文件**，并把变成孤儿引用的图列出来供人工决定
+
+生产执行结果：
+
+```
+第一批（BUG-020）：清理 92 件，删 362 条，340 张图变孤儿
+第二批（BUG-022）：清理 4 件，删 21 条，21 张图变孤儿
+最终：颜色超限 0 / colorMap 超限 0 / 多属性误判 0 / auto-temp 引用 0
+```
+
+### 新增测试
+
+`tests/test_color_trim_zone_sync.py` 6 条：
+
+- 裁到 9 色时 `colorMap` 也要只剩 9 条
+- 裁色时 `skuMap` 孤儿 SKU 一起删（原有行为不能被破坏）
+- 尺码值不能进 `colorMap`
+- 尺码属性即使值上有图也不算颜色
+- 限色时截断的是颜色维度不是尺码维度
+- 端到端：裁色后再搬运，被删颜色的图不该出现在成品区地址里

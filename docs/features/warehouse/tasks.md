@@ -70,6 +70,24 @@
       修复后新增 `scripts/promote_warehouse_images.py` 处理存量：
       **生产已迁移 2121 处，180 件商品全部归零，0 处失效引用**。
       详见 [image-zone-promotion-2026-11-19.md](image-zone-promotion-2026-11-19.md)。
+- [x] **多余颜色的图被同步搬进成品区（BUG-020/021）**：负责人 2026-11-19 指出
+      「有些成品处理过只要 9 种颜色，多余的颜色是清理的，这些图片不能同步传到
+      成品区」。
+      - BUG-020 `apply_image_limits` 裁 `attrValueList` + `skuMap`，**不裁
+        `colorMap`/`sizeMap`**。这两张表每条挂着图片地址 → 被删颜色的图留在
+        payload → 入库搬运时一起搬进成品区。实测 92 件商品共 362 条多余条目、
+        340 张图被误搬。
+      - BUG-021 `product_standard` 判断尺码只认 `propName in ("尺码","尺寸")`，
+        实际数据 propName 可能为空或只有 `attrName`（Saiz），于是尺码值
+        （EUR33/32码/L(37-39)）被写进 `colorMap`。实测 product 472 的
+        colorMap 20 条里 11 条是尺码。
+      - 附带：`_is_color_property` 的「值里带图」兜底被历史数据骗到 ——
+        早期给尺码值补过图，导致 saiz 属性被判成颜色，颜色上限拿尺码去截断。
+        实测 5 件中招（472/381/395/248/392）。新增 `_SIZE_ATTR_NAMES`
+        优先否决。
+      修复后新增 `scripts/trim_color_map.py` 处理存量：
+      **清理 96 件、383 条多余条目，361 张图不再被引用**。
+      最终状态：180 件商品 / 颜色超限 0 / colorMap 超限 0 / 多属性误判 0。
 
 ## 待完成
 
