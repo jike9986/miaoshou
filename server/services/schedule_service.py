@@ -1560,13 +1560,25 @@ def refresh_processing_logs(db: Session, account_id: Any) -> int:
 
 
 def release_stale_publish_logs(db: Session, *, max_age_seconds: int = 600) -> int:
-    """释放长时间停在 processing 的发布记录。
+    """把长时间停在 processing 的记录标成 unknown（不假装成功）。
 
     发布是异步的，平台回执要稍后刷新。没人刷新就会永久停在 processing，
     而 `_pending_publish_blocker` 看到 processing 就拒绝再次发布——
     表现就是「定时任务到点不执行」或「手动发布报结果尚未确认」。
     这在实际使用里必然发生（网络断、页面关掉、服务重启），
-    所以每轮扫描前先把过期的放掉，标 unknown（不假装成功）。
+    所以每轮扫描前先把过期的放掉。
+
+    **2026-11-19 修（这是 unknown 堆积的主因之二）**：
+      旧实现一过 600 秒就直接标 unknown，**不再尝试回源确认**。
+      调用方 `run_due` 虽然有「先 refresh_processing_logs 再 release」的顺序，
+      但 refresh 只翻 5 页（100 行），平台回执总量 389 行时，
+      落在深处的记录这一轮必然确认不到，紧接着就被这里判成 unknown ——
+      而它们在平台侧其实是 success。实测 119 条 unknown **全部**是这种情况，
+      商品早就发到店铺了，本地却显示失败。
+
+      现在释放前先对这一批做一次**深度回源**（不设页数上限），
+      确认不到的才标 unknown。多花的代价只在「真的有超时记录」时发生，
+      且确认成功后记录会正常走 success，用户看到的台账才是真的。
     """
     import time as _time
 
@@ -1575,19 +1587,63 @@ def release_stale_publish_logs(db: Session, *, max_age_seconds: int = 600) -> in
     now = _time.time()
     rows = (db.query(PublishLog)
             .filter(PublishLog.status == "processing").all())
-    released = 0
-    for row in rows:
-        stamp = row.last_requested_at or row.requested_at or 0
-        age = now - float(stamp) if stamp else max_age_seconds + 1
-        if age <= max_age_seconds:
+    stale = [row for row in rows
+             if (now - float(row.last_requested_at or row.requested_at or 0)
+                 if (row.last_requested_at or row.requested_at)
+                 else max_age_seconds + 1) > max_age_seconds]
+    if not stale:
+        return 0
+
+    # 释放前最后确认一次：按账号分组做深度回源，能确认的走 success/fail，
+    # 只剩真正拿不到回执的才标 unknown。
+    confirmed = 0
+    by_account: dict[Any, None] = {}
+    for row in stale:
+        by_account[row.account_id] = None
+    for account_id in by_account:
+        if account_id is None:
             continue
-        row.status = "unknown"
-        row.reason = "超时未收到平台回执，已释放以免阻塞后续发布"
+        try:
+            from api.publish import _refresh_processing
+
+            result = _refresh_processing(db, str(account_id), deep=True)
+            confirmed += int(result.get("updated") or 0)
+        except Exception as exc:  # noqa: BLE001 - 回源失败不阻断释放
+            logger.warning("释放前深度回源失败 account=%s：%s", account_id, exc)
+    if confirmed:
+        # 回源后状态已变，重新取一遍还没落定的
+        db.expire_all()
+        rows = (db.query(PublishLog)
+                .filter(PublishLog.status == "processing").all())
+        stale = [row for row in rows
+                 if (now - float(row.last_requested_at or row.requested_at or 0)
+                     if (row.last_requested_at or row.requested_at)
+                     else max_age_seconds + 1) > max_age_seconds]
+
+    released = 0
+    for row in stale:
+        # 认领记录（claim-only）不走发布回执，永远确认不到 —— 它的「成功」
+        # 标志是商品进了采集箱，不是平台发布结果。这类记录不该被标成
+        # unknown（会让人以为发布失败了），标成 claimed 才如实反映状态。
+        #
+        # 实测 2026-11-19：425 条残留 unknown 里 422 条是这种认领记录，
+        # 只有 3 条是真正没回执的发布记录。
+        from services.publish_service import _is_claim_only_log
+
+        if _is_claim_only_log(db, row):
+            row.status = "claimed"
+            row.reason = "认领已完成（认领不走发布回执），自动归档"
+        else:
+            row.status = "unknown"
+            row.reason = "超时未收到平台回执，已释放以免阻塞后续发布"
         row.finished_at = now
         released += 1
     if released:
         db.commit()
-        logger.info("释放 %d 条超时未回执的发布记录", released)
+        logger.info("释放 %d 条超时未回执的发布记录（回源先确认了 %d 条）",
+                    released, confirmed)
+    elif confirmed:
+        db.commit()
     return released
 
 

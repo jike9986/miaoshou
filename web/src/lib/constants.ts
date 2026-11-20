@@ -70,6 +70,12 @@ export const PUBLISH_STATUS_META: Record<
   success: { label: "发布成功", tone: "success" },
   fail: { label: "发布失败", tone: "danger" },
   cancel: { label: "已取消", tone: "neutral" },
+  // 认领记录（claim-only）不走发布回执，归档到独立状态。
+  // 混进 unknown 会让人以为发布失败（2026-11-19 修，详见
+  // docs/features/publish/receipt-confirmation-2026-11-19.md）。
+  claimed: { label: "已认领", tone: "info" },
+  // 真正的「超时没拿到平台回执」。不假装成功，也不谎称失败。
+  unknown: { label: "结果未确认", tone: "neutral" },
 };
 
 /** 仓库商品状态文案（api.md §4.1 status） */

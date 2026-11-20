@@ -92,6 +92,11 @@
       + 前端多选店铺 + `schedule_service.execute()` 按 targets 依次发布。
       2026-11-19 生产实测（账号 9：MY 19956376 + PH 20080061）：
       2 件商品 × 2 店铺 = 4 条记录，4/4 success，submitted=4、failed=0。
+- [x] **P0 发布回执确认不到，台账把成功记成失败** → 已完成（BUG-P12/P13/P14）。
+      `unknown` 记录一度增长到 702 条、每天翻倍（45→65→108→201），
+      实测**平台侧全部是 success**，商品早发出去了。
+      三处修复见下方 Bug 记录，详见
+      [receipt-confirmation-2026-11-19.md](receipt-confirmation-2026-11-19.md)。
 - [ ] **P2 多账号共用同一个模板**：扇出时若某站点没勾模板会传 null，
       部分商品按原价上架，需要在结果区明确提示。
 - [ ] **P2 发布任务实时推送**：现在靠批次页 3 秒轮询，量小时够用，不建议做。
@@ -108,3 +113,7 @@
 | BUG-P09 | 5 店发 10 件、1 店失败只能整批重发 | 缺单店重试接口，重发会把成功的店再发一遍 | v0.1.27 |
 | BUG-P10 | 部分成功时未成功的那件被记成「已提交」 | `run()` 按 `ok_count > 0` 判整店成败 | v0.1.27 |
 | BUG-P11 | 重试后进度条显示「已处理 10/3」、成败计数翻倍 | `results` 用 append 而非覆盖；分母用 `detailIds.length` | v0.1.27 |
+| BUG-P12 | 已发布成功却记成「超时未收到平台回执」，unknown 每天翻倍 | 回源只翻 `REFRESH_MAX_PAGES=5` 页（100 行），平台总量 389 行时 69 条永远翻不到 | v0.1.29 |
+| BUG-P13 | 同上，另外 50 条本可确认却被判死 | `release_stale_publish_logs` 过 600 秒直接标 unknown，**不再回源确认** | v0.1.29 |
+| BUG-P14 | 认领记录混在 unknown 里，看着像发布失败 | 认领不走发布回执（`_is_claim_only_log` 把它们过滤掉），永远确认不到；应为独立状态 `claimed` | v0.1.29 |
+| BUG-P15 | 平台回执 `detailId` 恒为 `None` | 真 ID 在 `collectBoxDetailId`；代码 `item.get("detailId") or item.get("collectBoxDetailId")` 兜住了，但这条兜底分支不能删 | 已有兜底，补测试锁定 |

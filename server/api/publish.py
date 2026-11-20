@@ -30,7 +30,17 @@ router = APIRouter(prefix="/publish", tags=["发布"])
 PUBLISH_RECORDS_PAGE_SIZE = 20
 # 回源一次最多往下翻几页（20 条/页）。待确认明细一旦不在最新 20 条里，
 # 只翻第一页就永远匹配不到回执，本地会永久停在 processing。
-REFRESH_MAX_PAGES = 5
+#
+# **2026-11-19 修（这是 unknown 堆积的主因之一）**：
+#   原来写 5 页 = 最多看 100 行。实测账号 9 的平台回执总量 **389 行**，
+#   119 条被标 unknown 的记录里有 **69 条落在第 6~10 页** ——
+#   当前代码根本翻不到，每轮都查不到，10 分钟后被 release_stale_publish_logs
+#   强制标成 unknown。而这些记录在平台侧**全部是 success**（商品真的发出去了）。
+#
+#   现在提到 40 页 = 800 行，足以覆盖单账号一周的发布量。
+#   代价可控：翻页在「待确认明细都已出现过」时提前 break（见循环内判断），
+#   所以正常情况（待确认很少）仍然只打 1~2 次上游，不是固定打 40 次。
+REFRESH_MAX_PAGES = 40
 
 
 @router.get("/logs", summary="本机发起的发布记录")
@@ -188,8 +198,17 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
                         page_no: int = 1, page_size: int = PUBLISH_RECORDS_PAGE_SIZE,
                         status: str | None = None,
                         operator_id: int | None = None,
-                        max_pages: int | None = None) -> dict[str, Any]:
-    """回源平台，更新 processing 行的状态（best effort，不抛错给调用方）。"""
+                        max_pages: int | None = None,
+                        deep: bool = False) -> dict[str, Any]:
+    """回源平台，更新 processing 行的状态（best effort，不抛错给调用方）。
+
+    `deep=True`：不设页数上限，一直翻到「待确认明细全部出现过」或到达平台末尾。
+    给 `release_stale_publish_logs` 用 —— 那一步马上要把记录判成 unknown，
+    必须先把能确认的都确认掉，否则会把已经成功的发布标成失败。
+
+    普通调用（界面刷新、定时扫描前刷新）仍走 `REFRESH_MAX_PAGES` 上限，
+    避免每次扫描都打满上游接口。
+    """
     account, client = publish_service.account_client_for(db, account_id)
     from services.miaoshou import MiaoshouError
 
@@ -225,7 +244,15 @@ def _refresh_processing(db: DbSession, account_id: str | None = None, *,
     wanted_details = {str(row.detail_id) for row in pending}
     # 没有待确认行就只拉第一页（界面要平台总数），不为了「可能用得上」多打四轮
     # 上游接口 —— 定时扫描每 60s 就会进来一次。
-    pages = max(1, int(max_pages or (REFRESH_MAX_PAGES if wanted_details else 1)))
+    #
+    # deep=True 时给一个远高于实际的硬上限（1000 页 = 20000 行）只是防死循环；
+    # 真正的终止条件仍是下面循环里的「待确认明细全部出现过」和「不足一页」。
+    if max_pages is not None:
+        pages = max(1, int(max_pages))
+    elif deep:
+        pages = 1000
+    else:
+        pages = max(1, int(REFRESH_MAX_PAGES if wanted_details else 1))
     try:
         for offset in range(pages):
             records = client.publish_records(page_no=upstream_page + offset,
