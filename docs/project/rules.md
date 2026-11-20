@@ -370,3 +370,62 @@ interval=0.35  总 6.07s   客户端睡 0.58s   上游 5.49s   6/6 成功
 
 另外单独测过纯 edit 路径：0.20 也能 6/6 成功且略快，但那是单一接口场景；
 混合请求（列表+详情+edit+复制）没有验证过，不动主常量。
+
+---
+
+## 更新下载：分段并发是「CDN 之前」就能拿到的收益（2026-11-20）
+
+负责人反复反馈「下载更新很慢」。实测本机到香港服务器（12MB 样本）：
+
+```
+单连接   65.4s   188 KB/s
+ 4 并发   21.1s   582 KB/s
+ 6 并发   17.9s   685 KB/s   ← 取这个
+ 8 并发   18.8s   653 KB/s   ← 已到平台期
+12 并发   14.1s   869 KB/s
+```
+
+瓶颈是**单条 TCP 连接在 14.9% 重传链路上的拥塞窗口**，不是服务器带宽。
+所以「多开几条连接」比「加带宽/加 CPU」有效得多，而且零成本。
+
+实现：`app/src/updateDownload.ts`（纯逻辑，可单测）+
+`app/src/updateInstaller.ts`（Electron 网络层）。
+
+**三条不能放松的**：
+
+1. 分段失败必须退回单连接（服务端不支持 Range 返回 200 时要能降级）
+2. 每片收满字节数要核对 —— 文件预先 truncate 到总长，少收几个字节会留下
+   **零字节空洞**，sha256 不符但报错会指向「校验失败」，误导排查方向
+3. 白名单必须**精确匹配**。用 `endsWith` / `includes` 会让
+   `aohuang888.xyz.evil.com` 通过，等于白名单形同虚设。
+   测试 `updateDownload.test.mjs` 里专门钉了 5 个仿冒域名。
+
+`app/package.json` 的 `check` 已包含 `pnpm test`，跑 `pnpm check` 会一起验。
+
+---
+
+## aohuang888.xyz 是下载专用域名，不要动主域 NS（2026-11-20）
+
+主域 `aohuang888.com` 同一台 nginx 上跑着：
+
+```
+:3000  newapi.aohuang888.com
+:3106  aohuang-ai（负责人另一个产品）
+:8790  我们自己的服务之一
+:8812  我们自己的服务之一
+:8813  aohuang-listing-v2（本项目）
+       aohuang888.cn / www.aohuang888.cn / paytest.aohuang888.com
+```
+
+**全是负责人在做别的东西，改主域 NS 会同时影响这 5 个业务。**
+所以下载 CDN 用新买的 `aohuang888.xyz`，NS 单独托到 Cloudflare。
+
+**切换顺序不能乱**：
+
+1. 先让 `https://aohuang888.xyz` 能正常下载
+2. 发新版本（客户端白名单才认识 .xyz）
+3. 用户升级后，才能把 `version.json` 的 url 改成 .xyz
+
+**更平滑的做法**：`version.json` 继续用主域，主域 nginx 对下载路径做
+`return 302 https://aohuang888.xyz$request_uri` —— 老客户端不用升级也能
+吃到 CDN 速度，不需要等所有人升级。

@@ -33,7 +33,18 @@ def _package_version() -> str:
 APP_VERSION = _package_version()
 
 UPDATE_MANIFEST_URL = "https://aohuang888.com/miaoshou-downloads/version.json"
-UPDATE_HOST_WHITELIST = {"aohuang888.com", "www.aohuang888.com"}
+# 更新包允许的下载域名（服务端侧，配合 app/src/updateDownload.ts 的客户端白名单）。
+#
+# 2026-11-20：负责人买了 `aohuang888.xyz` 专门做安装包下载 CDN。
+# 主域 `aohuang888.com` 必须保留 —— 同一台 nginx 上还跑着 newapi /
+# aohuang-ai / aohuang888.cn / paytest 多个业务，不能动它的 NS；
+# 而老版本客户端只认主域，清单里若只给 .xyz 地址，那些客户端会拒绝下载。
+UPDATE_HOST_WHITELIST = {
+    "aohuang888.com",
+    "www.aohuang888.com",
+    "aohuang888.xyz",
+    "www.aohuang888.xyz",
+}
 UPDATE_CHANNEL = "stable"
 
 # 站点 → 该站点可接受的文字语言（第一个为默认）

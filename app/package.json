@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "format": "prettier --write src",
     "format:check": "prettier --check src",
-    "check": "pnpm typecheck && pnpm lint"
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "test": "node --test src/*.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9",
