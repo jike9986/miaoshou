@@ -30,6 +30,23 @@ class ClaimRequest(CamelModel):
     markCollected: bool = True
 
 
+class AssignSiteItemsRequest(CamelModel):
+    """批量把未分配店铺（site 模式）的采集箱商品认领到目标店铺。
+
+    负责人要求：「打开这个软件如果有未分配的自动分配，在还没有开始自动化
+    处理就把这些产品全部自动弄好」。
+
+    `targetShopId` 用顶部店铺选择器的值 —— 用户已经表达过「这次针对哪个店」，
+    不再新增设置项。
+    """
+
+    targetShopId: str
+    accountId: str | None = None
+    # 单次最多处理多少件。默认 200 足够覆盖正常采集箱；
+    # 设上限是为了防止异常大的采集箱把启动阶段拖太久。
+    maxItems: int = Field(default=200, ge=1, le=1000)
+
+
 class CategoryTarget(CamelModel):
     """改类目/分组的公共字段。"""
 

@@ -345,6 +345,27 @@ export interface StandardRepairReport {
   error?: string;
 }
 
+/**
+ * 批量认领 site 模式商品的结果。
+ *
+ * 对应 `POST /collect-box/site/assign`。软件启动时会主动调一次，
+ * 把「还没分配到店铺」的采集箱商品一次性分好。
+ */
+export interface AssignSiteItemsResult {
+  /** 成功认领件数 */
+  claimed: number;
+  /** 失败件数 */
+  failed: number;
+  /** 未处理件数（超过 maxItems 上限的部分） */
+  skipped: number;
+  /** 扫描到的 site 商品总数 */
+  total: number;
+  /** 认领到哪个店铺 */
+  targetShopId: string;
+  /** 失败原因（最多前 10 条，够定位问题又不刷屏） */
+  errors: string[];
+}
+
 export interface ProcessCollectResult {
   saved: boolean;
   product: Product & {

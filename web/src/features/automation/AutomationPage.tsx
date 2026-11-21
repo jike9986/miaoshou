@@ -34,6 +34,7 @@ import { useIsNarrow, useMediaQuery } from "@/hooks/useMediaQuery";
 import {
   useAuthStatus,
   useCollectBoxList,
+  useAssignSiteItems,
   useProcessCollectItem,
   usePublish,
   useShops,
@@ -185,6 +186,60 @@ export function AutomationPage() {
   });
 
   const refetchList = listQuery.refetchFresh;
+
+  /* ---------------- 启动时自动分配店铺（2026-11-21）---------------- */
+  //
+  // 负责人要求：「打开这个软件如果有未分配的自动分配，在还没有开始自动化
+  // 处理就把这些产品全部自动弄好」。
+  //
+  // 妙手采集箱有两种商品：已分配到店铺的（正常）和只采集到采集箱、还没
+  // 分配店铺的（site 模式）。后者原来在列表里显示不出来，也没法处理。
+  //
+  // 现在：**软件打开、采集箱第一次加载完成后**，如果发现还有 site 商品，
+  // 就主动调一次批量认领，把它们分到顶部选中的店铺。这样用户看到的采集箱
+  // 永远是「全部可处理」的状态，不用等点了「开始自动化」才逐件认领。
+  //
+  // 三个约束：
+  //   · 每次启动只跑**一次**（assignedRef）—— 用户手动刷新列表不该反复
+  //     触发上游写操作，认领是不可撤销的
+  //   · 只在有 site 商品时才发请求 —— 绝大多数情况下一件都没有，不该平白
+  //     多一个网络请求
+  //   · 失败静默 —— 这是启动期的后台动作，不该弹窗打断用户；
+  //     失败了下次打开还会再试
+  const assignedSiteRef = useRef(false);
+  const assignSiteItems = useAssignSiteItems();
+
+  useEffect(() => {
+    if (assignedSiteRef.current) return;
+    if (!connected || !currentShopId) return;
+    // 等列表真正加载过一轮再判断，否则 items 是空的会误判「没有 site 商品」
+    if (listQuery.isLoading || !listQuery.isFetchedAfterMount) return;
+    if (!listQuery.data) return;
+    if (items.length === 0 && total === 0) return;
+
+    const hasSiteItems = items.some((item) => item.editModel === "site");
+    if (!hasSiteItems) {
+      assignedSiteRef.current = true;
+      return;
+    }
+
+    assignedSiteRef.current = true;
+    assignSiteItems
+      .mutateAsync({ targetShopId: currentShopId, accountId: status?.accountId ?? null })
+      .then((result) => {
+        if (result.claimed > 0) {
+          toast.success(`已自动分配 ${result.claimed} 个商品到店铺`, {
+            description: result.failed
+              ? `另有 ${result.failed} 个分配失败，可稍后重试`
+              : undefined,
+          });
+        }
+      })
+      .catch(() => {
+        // 启动期后台动作，不打断用户；下次打开会再试
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, currentShopId, listQuery.isFetchedAfterMount, listQuery.data, items, total]);
 
   /* ---------------- 处理设置 ---------------- */
   // 惰性初始化：先读存档，读不到才用默认值（老版 persistTaskPreferences 的等价物）

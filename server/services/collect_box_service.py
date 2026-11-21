@@ -103,6 +103,13 @@ def invalidate_account(account: Account) -> int:
 # 又短到不会把正常的「过一会儿再认领一次」挡住（重复认领本来就会被上游拒）。
 CLAIM_RECENT_SECONDS = 300.0
 
+# 批量认领 site 商品时每批带多少件（2026-11-21）。
+#
+# 上游 claim_to_shop 收数组，但单次长度有上限，而且要过我们自己的 Pacer
+# （0.90 秒/次）。取 20：47 件 = 3 批，约 3 秒认领完，用户几乎无感；
+# 再大没有明显收益，反而在一次失败时连累更多件。
+SITE_CLAIM_BATCH = 20
+
 
 def _account_claim_key(account: Account) -> str:
     """Return the stable key used for this account's local claim ledger.
@@ -257,7 +264,12 @@ def listing_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             continue
         model = str(row.get("editModel") or "shop")
-        detail_raw = row.get("collectBoxDetailId") or row.get("detailId")
+        # 不能用 `or`：`0` 是合法 detailId 但是 falsy，`a or b` 会把它跳过、
+        # 继续取下一个键，最后拿到 None 然后整行被丢弃。
+        # 线上 detailId 不会真的是 0，但测试和无害输入会踩到，行为必须正确。
+        detail_raw = row.get("collectBoxDetailId")
+        if detail_raw in (None, ""):
+            detail_raw = row.get("detailId")
 
         if model == "site":
             # site 模式：没有店铺，用 site 作为维度
@@ -564,6 +576,123 @@ def detail(db: Session, account: Account, *, detail_id: str, shop_id: str,
     return summary
 
 
+def claim_site_batch(db: Session, account: Account, *, target_shop_id: str,
+                     detail_ids: list[str] | None = None,
+                     max_items: int = 200) -> dict[str, Any]:
+    """把采集箱里**所有还没分配店铺**的商品批量认领到目标店铺。
+
+    ## 负责人要求（2026-11-21）
+
+    「打开这个软件如果有未分配的自动分配，在还没有开始自动化处理就把这些
+    产品全部自动弄好」
+
+    也就是：软件一打开就先把 site 商品分好店，而不是等到用户点「开始自动化」
+    时才逐件认领。这样用户看到的采集箱永远是「都能直接处理」的状态。
+
+    ## 为什么要分批 + 为什么要限流
+
+    `claim_to_shop(detailIds, shopIds)` 一次收一批，实测账号 8 有 47 条、
+    账号 2 有 6 条。但上游对单次数组长度有上限（载体流程里也是分批调），
+    而且这接口在我们自己的 Pacer 里是要限速的（0.90 秒/次）。
+
+    所以：
+      · 每批 `SITE_CLAIM_BATCH` 件（保守取 20）
+      · 批之间走 Pacer 的节奏，不硬刷上游
+      · 整体给一个 `max_items` 上限，防止某个账号的采集箱异常大时
+        在启动阶段跑太久
+
+    ## 幂等与容错
+
+    · 已经分好店的商品不会出现在 site 列表里，天然跳过
+    · 上游对「已在目标店铺」报错时当成功（`_is_already_claimed`）
+    · 单批失败不整体中断：记下失败件数，继续下一批。
+      启动阶段不能因为一条脏数据就放弃所有商品。
+
+    返回：{"claimed": n, "failed": n, "skipped": n, "total": n, "errors": [...]}
+    """
+    if not str(target_shop_id or "").strip():
+        raise errors.validation("请选择要认领到哪个店铺", field="targetShopId")
+    require_shop(db, account, target_shop_id)
+
+    client = account_client(account)
+    try:
+        # 先扫描出全部 site 商品（不受分页影响：用大 pageSize 一次拿）
+        try:
+            response = client.collect_box_list(
+                status="notPublished", keyword="", page_no=1, page_size=500)
+        except MiaoshouError as exc:
+            raise errors.upstream(
+                f"读取采集箱失败：{exc}", reason="collect_box_scan_failed") from None
+
+        site_items = [row for row in listing_rows(response)
+                      if row.get("editModel") == "site"]
+        if detail_ids is not None:
+            wanted = {str(value).strip() for value in detail_ids}
+            site_items = [row for row in site_items if row["detailId"] in wanted]
+
+        total = len(site_items)
+        if total > max_items:
+            site_items = site_items[:max_items]
+
+        claimed = 0
+        failed = 0
+        error_messages: list[str] = []
+
+        for start in range(0, len(site_items), SITE_CLAIM_BATCH):
+            batch = [int(row["detailId"])
+                     for row in site_items[start:start + SITE_CLAIM_BATCH]]
+            if not batch:
+                continue
+            try:
+                client.claim_to_shop(batch, [int(target_shop_id)])
+                claimed += len(batch)
+            except MiaoshouError as exc:
+                if _is_already_claimed(str(exc)):
+                    # 这批里有些已经在目标店铺里了。逐件重试，
+                    # 好让「部分成功」的批也能记准件数。
+                    for detail_id in batch:
+                        try:
+                            client.claim_to_shop([detail_id], [int(target_shop_id)])
+                            claimed += 1
+                        except MiaoshouError as inner:
+                            if _is_already_claimed(str(inner)):
+                                claimed += 1
+                            else:
+                                failed += 1
+                                error_messages.append(f"{detail_id}: {inner}")
+                else:
+                    failed += len(batch)
+                    error_messages.append(f"批 {start}-{start + len(batch)}: {exc}")
+
+        if claimed:
+            invalidate_account(account)
+        return {
+            "claimed": claimed,
+            "failed": failed,
+            "skipped": max(0, total - claimed - failed),
+            "total": total,
+            "targetShopId": str(target_shop_id),
+            "errors": error_messages[:10],
+        }
+    finally:
+        client.close()
+
+
+def _is_already_claimed(message: str) -> bool:
+    """上游「已经在目标店铺采集箱里」这类报错，语义上是幂等成功。
+
+    中文和英文都要覆盖：妙手的报错是中文（「该商品已在采集箱中」），
+    但上游偶发会透出英文（`already exists`），两种都当成成功，
+    否则批量认领会把「其实已经好了」的件计成失败，用户看到一堆假失败。
+    """
+    text = str(message or "").lower()
+    has_already = ("已" in text or "已经" in text
+                   or "already" in text or "exist" in text)
+    has_target = ("采集箱" in text or "店铺" in text or "存在" in text
+                  or "shop" in text or "collect" in text)
+    return has_already and has_target
+
+
 def claim_site_item(db: Session, account: Account, *, detail_id: str,
                     target_shop_id: str) -> str:
     """把一件 **site 模式**（还没分配店铺）的采集箱商品认领到目标店铺。
@@ -616,7 +745,7 @@ def claim_site_item(db: Session, account: Account, *, detail_id: str,
         except MiaoshouError as exc:
             message = str(exc)
             # 已经在这个店铺里了：不算错误，幂等放过
-            if "已" in message and ("采集箱" in message or "存在" in message):
+            if _is_already_claimed(message):
                 return str(target_shop_id)
             raise errors.upstream(
                 f"认领到店铺失败：{message}", reason="claim_site_failed") from None

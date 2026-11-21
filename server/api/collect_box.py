@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 from api.deps import CredentialsHeader, DbSession, OperatorDep, require_permission, require_writable
 from core import errors
 from core.utils import now_ts, product_key
-from schemas.requests import BatchClaimRequest, ClaimRequest, ProcessRequest
+from schemas.requests import (
+    AssignSiteItemsRequest,
+    BatchClaimRequest,
+    ClaimRequest,
+    ProcessRequest,
+)
 from services import account_service, audit_service, collect_box_service
 
 logger = logging.getLogger("aohuang.api")
@@ -52,6 +57,60 @@ def list_collect_box(
         db, account, page=page, page_size=pageSize, status=status,
         keyword=keyword or "", shop_id=shopId, site=site, sort=sort,
         force_refresh=refresh)
+
+
+@router.post("/site/assign", summary="把采集箱里所有未分配店铺的商品认领到目标店铺",
+             dependencies=[require_permission("process")])
+def assign_site_items(
+    payload: AssignSiteItemsRequest,
+    db: DbSession,
+    operator: OperatorDep,
+    credentials: CredentialsHeader = None,
+    accountId: str | None = None,
+) -> dict[str, Any]:
+    """把 site 模式（还没分配店铺）的商品批量认领到目标店铺。
+
+    ## 负责人要求（2026-11-21）
+
+    「打开这个软件如果有未分配的自动分配，在还没有开始自动化处理就把这些
+    产品全部自动弄好」
+
+    也就是软件启动时先把「没店」的商品一次分好，用户打开采集箱看到的
+    就是全部可处理状态，而不是等点了「开始自动化」才逐件认领。
+
+    ## 为什么不在 GET /collect-box 里做
+
+    列表是**读**接口，会在用户翻页、刷新、切筛选时反复调用。在里面写
+    上游数据（认领是不可撤销的）会让一次普通浏览变成一连串写操作 ——
+    用户翻个页就分了几十件，还没想好要哪家店。
+
+    所以做成独立的 POST：前端在**软件启动（连接成功）后**主动调用一次。
+
+    ## 幂等
+
+    已经分好店的商品不在 site 列表里，天然跳过。重复调用只会返回
+    `total=0`，不会重复打上游。
+    """
+    require_writable(db)
+    account = account_service.resolve_account(db, payload.accountId or accountId, credentials)
+    from services import collect_box_service
+
+    target_shop = str(payload.targetShopId or "").strip()
+    if not target_shop:
+        raise errors.validation("请选择默认店铺", field="targetShopId")
+
+    result = collect_box_service.claim_site_batch(
+        db, account, target_shop_id=target_shop,
+        max_items=int(payload.maxItems or 200))
+    if result["claimed"]:
+        audit_service.record(
+            db, operator=operator, action="warehouse.claim", target_kind="product",
+            target_id=f"site-batch:{target_shop}",
+            account_id=account.id if account else None, shop_id=target_shop,
+            detail={"claimed": result["claimed"], "failed": result["failed"],
+                    "total": result["total"]})
+        db.commit()
+    return result
 
 
 @router.get("/{detail_id}", summary="采集箱单件详情（含 ossMd5 / SKU / 诊断）")

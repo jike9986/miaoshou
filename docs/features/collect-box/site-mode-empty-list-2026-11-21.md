@@ -303,3 +303,133 @@ ruff 的 F821 抓到了。已改为 `source_link.source_urls_of(...)` 并补上�
 
 这个 bug 是我上一轮（per-item source link）引入的，当时测试没覆盖到
 `claim_carrier_batch` 这条路径。
+
+---
+
+## 八、启动时自动分配（0.1.33）
+
+负责人在第七节之后进一步明确：
+
+> 不是我是说打开这个软件如果有未分配的自动分配，在还没有开始自动化处理
+> 就把这些产品全部自动弄好
+
+也就是**软件打开就分好店**，不是等点了「开始自动化」才逐件认领。
+
+### 实现分三层
+
+**① 服务层** `collect_box_service.claim_site_batch(db, account, target_shop_id, max_items=200)`
+
+一次扫描出所有 site 商品，分批（`SITE_CLAIM_BATCH = 20`）调 `claim_to_shop`。
+
+三个设计约束：
+
+| 约束 | 原因 |
+|---|---|
+| 每批 20 件 | 上游单次数组有上限；47 件 = 3 批 ≈ 3 秒，再大没收益 |
+| 单批失败不中断 | 启动阶段不能因为一条脏数据放弃所有商品 |
+| `max_items=200` 上限 | 防止异常大的采集箱把启动拖太久 |
+
+容错：`_is_already_claimed()` 把「已在目标店铺」当幂等成功，
+中英文都覆盖（`已在采集箱` / `already exists in shop`）。
+不这样的话批量认领会把「其实已经好了」的件计成失败，用户看到一堆假失败。
+
+**② API** `POST /collect-box/site/assign`
+
+**为什么不塞进 `GET /collect-box`**：列表是读接口，用户翻页、刷新、切筛选都会反复调。
+在里面写上游数据（认领不可撤销）会让「随便翻个页」变成几十次分配 ——
+用户还没想好要哪家店就分完了。所以做成独立的 POST，前端启动后主动调一次。
+
+**③ 前端** `AutomationPage`
+
+```typescript
+const assignedSiteRef = useRef(false);
+useEffect(() => {
+  if (assignedSiteRef.current) return;              // 每次启动只跑一次
+  if (!connected || !currentShopId) return;         // 没店铺就跳过
+  if (listQuery.isLoading || !listQuery.isFetchedAfterMount) return;
+  const hasSiteItems = items.some((item) => item.editModel === "site");
+  if (!hasSiteItems) { assignedSiteRef.current = true; return; }  // 不打无谓请求
+  assignedSiteRef.current = true;
+  assignSiteItems.mutateAsync({ targetShopId: currentShopId, ... })
+    .then((result) => {
+      if (result.claimed > 0) toast.success(`已自动分配 ${result.claimed} 个商品到店铺`);
+    })
+    .catch(() => {});                               // 启动期后台动作，不打断
+}, [...]);
+```
+
+四个刻意的判断：
+
+- `assignedSiteRef`：**用户手动刷新列表不该反复触发上游写操作**
+- `hasSiteItems` 检查：绝大多数情况一件都没有，不该平白多一个网络请求
+- `isFetchedAfterMount` 检查：等列表真正加载过一轮再判断，
+  否则 `items` 是空的会误判「没有 site 商品」
+- `.catch(() => {})`：启动期后台动作失败不该弹窗，下次打开还会再试
+
+### 线上实测
+
+**幂等验证**（账号 8 的 49 条已全部是 shop 模式）：
+
+```
+采集箱共 49 条，其中 site（未分配）0 条
+没有需要分配的，跳过
+```
+
+代码在扫描阶段直接返回，**一次上游请求都没发**。这是「打开软件不该
+产生多余请求」的实证。
+
+**店铺绑定情况**：
+
+```
+账号 2: 店铺 0 个   → 前端 currentShopId 为空，自动分配整个跳过（正确）
+账号 8: 店铺 2 个   → 19974446(MY) / 20075695(PH)
+```
+
+账号 2 的情况说明一个边界：**没有绑定店铺的账号，site 商品无解**。
+前端靠 `if (!currentShopId) return` 自然跳过，不会报错。
+
+### 一个发现：单件认领会把整批带过去
+
+我为了验证 `claim_site_batch`，先做了两次**单件**认领测试
+（`claim_site_item`），结果回头发现账号 8 的 **49 条全部变成了 shop 模式** ——
+不只是我认领的那 2 件。
+
+说明妙手对同一批 site 商品有「认领一件后整批归入该店铺」的行为。
+这不是 bug，但意味着：**测试认领会在生产数据上产生批量副作用**，
+以后验证这类功能要更谨慎（这次只是把未分配的分好了，无害；
+但如果认领到错误的店，影响面是整批）。
+
+### 测试
+
+`server/tests/test_claim_site_batch.py` **21 条**：
+
+- 全部 site 认领、忽略已分配、无 site 时零上游请求
+- 分批验证：44 件 → `[20, 20, 4]` 三批
+- `max_items` 上限、`detail_ids` 过滤
+- **单批失败不中断**：第一批全失败，后两批照常成功
+- 「已在目标店铺」计为成功
+- 空/空白 targetShopId 拒绝，且**不打上游**
+- `_is_already_claimed` 中英文 7 个用例
+
+### 顺带修掉两个真实 bug（都是测试抓到的）
+
+**① `detailId=0` 被丢弃**
+
+```python
+# 错误（falsy 0 会跳过第一个键，最后拿到 None）
+detail_raw = row.get("collectBoxDetailId") or row.get("detailId")
+
+# 正确
+detail_raw = row.get("collectBoxDetailId")
+if detail_raw in (None, ""):
+    detail_raw = row.get("detailId")
+```
+
+线上 detailId 不会真是 0，但测试和无害输入会踩到。行为必须正确。
+
+**② 局部变量 `errors` 遮蔽模块级 `errors`**
+
+`claim_site_batch` 里我写了 `errors: list[str] = []`，
+而文件顶部 `from core import errors`。函数内先引用 `errors.validation(...)`
+会拿到未赋值的局部变量 → `UnboundLocalError`。ruff 的 F823 抓到了。
+已改名 `error_messages`。

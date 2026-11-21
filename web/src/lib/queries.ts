@@ -69,6 +69,7 @@ import type {
   EmailVerificationResponse,
   StudentCreateRequest,
   StudentCreateResponse,
+  AssignSiteItemsResult,
   ProcessCollectRequest,
   ProcessCollectResult,
   ProductDetailResponse,
@@ -1021,6 +1022,39 @@ export interface ProcessCollectVariables {
  * 这是采集箱商品进入成品仓库的唯一入口；save=false 时后端只预览并回滚。
  * 批量场景请由调用方串行 await，避免后端并发写库。
  */
+/**
+ * 把采集箱里所有还没分配店铺（site 模式）的商品批量认领到目标店铺。
+ *
+ * 负责人要求（2026-11-21）：「打开这个软件如果有未分配的自动分配，在还没有
+ * 开始自动化处理就把这些产品全部自动弄好」。
+ *
+ * 所以软件启动、采集箱加载出来后主动调一次，而不是等用户点「开始自动化」
+ * 才逐件认领。用户打开采集箱看到的就是全部可处理状态。
+ *
+ * 幂等：已分好店的商品不在 site 列表里，重复调用只会返回 total=0。
+ */
+export function useAssignSiteItems(): UseMutationResult<
+  AssignSiteItemsResult,
+  Error,
+  { targetShopId: string; accountId?: string | null; maxItems?: number }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (request) =>
+      api.post<AssignSiteItemsResult, typeof request>(
+        "/collect-box/site/assign",
+        request,
+        // 分批认领，每批过一遍上游节奏；47 件约 3 秒，给 2 分钟余量防抖动
+        { timeoutMs: 120_000 }
+      ),
+    onSuccess: () => {
+      // 认领后 site 商品变成 shop 模式，列表和仓库都要重新拉
+      void client.invalidateQueries({ queryKey: queryKeys.collectBox.all });
+      void client.invalidateQueries({ queryKey: queryKeys.warehouse.all });
+    },
+  });
+}
+
 export function useProcessCollectItem(): UseMutationResult<
   ProcessCollectResult,
   Error,
