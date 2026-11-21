@@ -247,7 +247,23 @@ class PricePreviewRequest(CamelModel):
 class ProcessRequest(CamelModel):
     """处理一件商品（拉详情→定价→入仓）的附加接口。"""
 
-    shopId: str
+    # shopId 改成可空（2026-11-21）：site 模式的商品还没有店铺归属，
+    # 前端会把 shopId 传空、改由 targetShopId 指定「认领到哪家店」。
+    # 两者都空时路由会抛明确的校验错误，而不是 500。
+    shopId: str = ""
+    # site 模式商品的兜底店铺（2026-11-21）。
+    #
+    # 负责人的要求：「自动化处理不能默认给他选择一个店铺吗」。
+    # 妙手采集箱里有两种商品：已分配到店铺的（shopId 有值），和只采集到
+    # 采集箱、还没分配店铺的（site 模式，shopId 为空）。
+    #
+    # 后者原来没法处理 —— shopId 必填但它是空的，用户只能先去妙手界面
+    # 手动分配。现在如果 shopId 留空而这个字段有值，就先把商品
+    # claim_to_shop 到这家店，再正常入库。
+    #
+    # 实测有效（账号 8）：认领后 editModel 从 site 变 shop，
+    # 后续拉详情/定价/入库流程完全不用改。
+    targetShopId: str | None = None
     accountId: str | None = None
     language: str | None = None
     groupId: str | None = None

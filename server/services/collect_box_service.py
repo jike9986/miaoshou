@@ -32,7 +32,7 @@ from core.utils import (
 )
 from models.product import Product
 from models.publish_log import PublishLog
-from services import carrier_service, product_service, warehouse_service
+from services import carrier_service, product_service, source_link, warehouse_service
 from services.account_service import (
     Account,
     account_client,
@@ -564,6 +564,67 @@ def detail(db: Session, account: Account, *, detail_id: str, shop_id: str,
     return summary
 
 
+def claim_site_item(db: Session, account: Account, *, detail_id: str,
+                    target_shop_id: str) -> str:
+    """把一件 **site 模式**（还没分配店铺）的采集箱商品认领到目标店铺。
+
+    ## 为什么要这个函数（2026-11-21）
+
+    负责人要求：「自动化处理不能默认给他选择一个店铺吗，加到文字处理里面」
+
+    背景：妙手采集箱的商品有两种形态（见 `listing_rows` 注释）：
+      · `shop` —— 已分配到店铺
+      · `site` —— 只采集到采集箱、没有店铺归属，`shopId` 是 None
+
+    `process` 接口必须拿到 `shopId` 才能入库，所以 site 模式的商品
+    原来根本没法处理 —— 只能让用户去妙手界面手动分配。
+
+    实测 `claim_to_shop([detailId], [shopId])` 对 site 商品**有效**：
+
+        认领前: editModel=site, shopId=''      key=3549599651:site:TIKTOK
+        claim_to_shop([3549599651], [19974446]) → {'result': 'success'}
+        认领后: editModel=shop, shopId=19974446  key=3549599651:19974446
+
+    所以可以在处理前自动认领一步，让 site 商品也能走自动化。
+
+    ## 和 `claim()` 的区别
+
+    `claim()` 是「把 A 店铺的商品认领到 B 店铺」，要求源 `shop_id` 是数字，
+    还有源/目标店铺校验、本地 claimed_at 账本、跨进程窗口。
+
+    这里是「把**没有店铺**的商品第一次分配出去」，源店铺不存在，
+    所以：
+      · 不做源店铺校验（它本来就没有）
+      · 不写 claimed_at 账本（那是防「同一件被两人抢到同一店」，
+        而这里认领后 editModel 就变成 shop，上游天然幂等）
+      · 但仍要校验目标店铺属于该账号
+
+    返回：认领后的 shopId（字符串）。失败抛 AppError。
+    """
+    if not str(target_shop_id or "").strip():
+        raise errors.validation("请选择要认领到哪个店铺", field="targetShopId")
+    if not str(detail_id or "").strip().isdigit():
+        raise errors.validation("detailId 必须是数字", field="detailId",
+                                value=detail_id)
+
+    # 目标店铺必须属于这个账号 —— 否则上游会失败，但错误信息很难懂
+    require_shop(db, account, target_shop_id)
+    client = account_client(account)
+    try:
+        try:
+            client.claim_to_shop([int(detail_id)], [int(target_shop_id)])
+        except MiaoshouError as exc:
+            message = str(exc)
+            # 已经在这个店铺里了：不算错误，幂等放过
+            if "已" in message and ("采集箱" in message or "存在" in message):
+                return str(target_shop_id)
+            raise errors.upstream(
+                f"认领到店铺失败：{message}", reason="claim_site_failed") from None
+    finally:
+        client.close()
+    return str(target_shop_id)
+
+
 def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
           target_shop_id: str, mark_collected: bool = True) -> dict[str, Any]:
     """认领进目标店铺采集箱。只认领，不发布。
@@ -638,7 +699,7 @@ def claim(db: Session, account: Account, *, detail_id: str, shop_id: str,
                     # 载体用这件商品自己的 1688 货源（2026-11-20 修）：
                     # info 上面已合并仓库 payload，货源链接就在里面。
                     # 拿不到就走池子轮换，不阻断。
-                    preferred_urls=_source_link.source_urls_of([info]))
+                    preferred_urls=source_link.source_urls_of([info]))
                 filled = carrier_service.fill_carriers(
                     client, carriers, [info], shop_id=int(target_shop_id),
                     verify_readback=False)

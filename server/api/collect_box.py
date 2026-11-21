@@ -124,15 +124,43 @@ def process(
     from services.account_service import account_client, map_upstream_error
     from services.miaoshou import MiaoshouError
 
-    key = product_key(detail_id, payload.shopId)
+    # --- site 模式商品：先自动认领到目标店铺（2026-11-21）-----------------
+    #
+    # 负责人要求：「自动化处理不能默认给他选择一个店铺吗，加到文字处理里面」
+    #
+    # 背景：妙手采集箱的商品有两种形态（详见 collect_box_service.listing_rows）：
+    #   shop —— 已分配到店铺，行里有 shopId
+    #   site —— 只采集到采集箱、还没分配店铺，shopId 是 None/空
+    #
+    # 原来的实现里 site 商品根本进不了处理流程：这边 `payload.shopId` 必填，
+    # 用户只能先去妙手界面手动分配到店铺。
+    #
+    # 现在：如果调用方给了 targetShopId（处理设置里选的店），而 shopId 为空，
+    # 就先 claim_to_shop 把它认领过去，拿到真实 shopId 再继续。
+    # 实测有效（账号 8）：
+    #   认领前 editModel=site shopId=''         → claim_to_shop
+    #   认领后 editModel=shop shopId=19974446
+    resolved_shop_id = str(payload.shopId or "").strip()
+    if not resolved_shop_id:
+        target_shop = str(getattr(payload, "targetShopId", "") or "").strip()
+        if not target_shop:
+            raise errors.validation(
+                "这件商品还没分配到店铺。请在处理设置里选择「默认店铺」，"
+                "或先去妙手采集箱把它分配到店铺。",
+                field="shopId")
+        from services import collect_box_service
+        resolved_shop_id = collect_box_service.claim_site_item(
+            db, account, detail_id=detail_id, target_shop_id=target_shop)
+
+    key = product_key(detail_id, resolved_shop_id)
     client = account_client(account)
     try:
         with audit_service.guard(db, operator=operator, action="warehouse.import",
                                  target_kind="product", target_id=key,
                                  account_id=account.id if account else None,
-                                 shop_id=payload.shopId):
+                                 shop_id=resolved_shop_id):
             product = warehouse_service.save_from_collect_box(
-                db, account, client, detail_id=detail_id, shop_id=payload.shopId,
+                db, account, client, detail_id=detail_id, shop_id=resolved_shop_id,
                 language=payload.language or "", group_id=payload.groupId,
                 price_template=payload.template, exchange_rate=payload.exchangeRate,
                 enforce_pre_save=bool(payload.save),

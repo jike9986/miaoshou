@@ -308,6 +308,19 @@ export function ProductPicker({
                       <span className="line-clamp-2 min-h-[32px] text-xs font-medium leading-4 text-fg">
                         {item.title || "（无标题）"}
                       </span>
+                      {/* site 模式：还没分配到店铺（2026-11-21）。
+                          这类商品原来根本不显示（被后端丢弃），现在能列出来，
+                          但要告诉用户「它还没店铺」—— 处理时会自动认领到
+                          顶部选的当前店铺，不提示会让人以为已经分好了。 */}
+                      {item.editModel === "site" && (
+                        <span
+                          className="mt-0.5 block truncate text-[10px] leading-3 text-warning-700"
+                          title="这件商品还没分配到店铺。处理时会自动认领到顶部选中的店铺。"
+                        >
+                          未分配店铺
+                          {item.site ? ` · ${item.site}` : ""}
+                        </span>
+                      )}
                     </div>
                     {stage && stage !== "queued" && (
                       <span

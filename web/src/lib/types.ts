@@ -268,8 +268,20 @@ export interface CollectBoxDetail {
  * 与 server/schemas/requests.py 的 ProcessRequest 一一对应（唯一入仓入口）。
  */
 export interface ProcessCollectRequest {
-  /** 来源店铺（必填） */
+  /** 来源店铺。site 模式商品（还没分配店铺）传空串 */
   shopId: string;
+  /**
+   * site 模式商品的兜底店铺（2026-11-21）。
+   *
+   * 负责人的要求：「自动化处理不能默认给他选择一个店铺吗」。
+   *
+   * 妙手采集箱里的商品分两种：已分配到店铺的（shopId 有值），和只采集到
+   * 采集箱、还没分配店铺的（site 模式，shopId 为空）。后者原来没法处理。
+   *
+   * `shopId` 为空而这里有值时，后端会先 `claim_to_shop` 把商品认领到这家店，
+   * 再正常入库。实测有效：认领后 editModel 从 site 变 shop，后续流程不变。
+   */
+  targetShopId?: string | null;
   accountId?: string | null;
   /** 翻译目标语言，留空则不翻译 */
   language?: string | null;

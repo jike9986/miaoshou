@@ -1,4 +1,4 @@
-﻿// features/automation —— 自动化上品（老版第一个板块，一屏布局重做）
+// features/automation —— 自动化上品（老版第一个板块，一屏布局重做）
 //
 // 版面（对齐老版 0.1.4，一屏内全部可见）：
 //   ┌──────────────────────────────────────┬──────────────┐
@@ -1192,6 +1192,18 @@ export function AutomationPage() {
           detailId: target.detailId,
           request: {
             shopId: target.shopId,
+            // site 模式商品（还没分配到店铺）自动认领到当前店铺（2026-11-21）。
+            //
+            // 负责人的要求：「自动化处理不能默认给他选择一个店铺吗」。
+            // 妙手采集箱里那类商品 shopId 是空的，原来根本处理不了 ——
+            // 用户只能先去妙手界面手动分配店铺。
+            //
+            // 现在把当前店铺（顶部选择器）作为兜底传下去：后端看到 shopId 为空
+            // 且有 targetShopId，就先 claim_to_shop 认领到这家店，再正常入库。
+            // 实测有效：认领后 editModel 从 site 变 shop，后续流程完全不变。
+            //
+            // 只在 shopId 为空时才真的用得上，普通商品传了也无副作用。
+            targetShopId: target.shopId ? null : currentShopId || null,
             accountId: durableRun.accountId,
             language: runSettings.textEnabled ? runSettings.language : null,
             template:

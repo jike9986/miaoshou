@@ -187,3 +187,119 @@ shop 模式的 key 是 `product_key(detail_id, shop_id)`。
 两者不一致，就会出现「页面上有数字、列表却空白」这种极难自查的 bug。
 本次就是 `total=raw_count` 配 `listing_rows` 三重过滤（editModel /
 shopList / int 转换）导致的。
+
+---
+
+## 七、后续：自动化处理自动认领到默认店铺（0.1.32）
+
+上一节说「要发布必须先到妙手界面手动分配店铺」。负责人随即要求：
+
+> 自动化处理不能默认给他选择一个店铺吗，加到文字处理里面
+
+### 实测确认可行
+
+`claim_to_shop([detailId], [shopId])` 对 site 商品有效：
+
+```
+认领前: editModel=site, shopId=''         key=3549599651:site:TIKTOK
+claim_to_shop([3549599651], [19974446])   → {'result': 'success', 'code': 'success'}
+认领后: editModel=shop, shopId=19974446   key=3549599651:19974446
+```
+
+账号 8 绑定的店铺（`shop_list` 实测）：
+
+```
+site=(全部): 2 个
+  shopId=19974446  site=MY
+  shopId=20075695  site=PH
+```
+
+### 实现
+
+**服务端** `collect_box_service.claim_site_item(db, account, detail_id, target_shop_id)`
+
+专门处理「把没有店铺的商品第一次分配出去」：
+
+- 不做源店铺校验（它本来就没有店铺）
+- 不写 `claimed_at` 账本（那是防「同一件被两人抢到同一店」；
+  而这里认领后 `editModel` 变 shop，上游天然幂等）
+- 仍然校验目标店铺属于该账号（否则上游报错很难懂）
+- 上游说「已在采集箱/已存在」时当幂等成功，不冒泡成失败
+
+**路由** `POST /collect-box/{detailId}/process`
+
+```python
+resolved_shop_id = str(payload.shopId or "").strip()
+if not resolved_shop_id:
+    target_shop = str(payload.targetShopId or "").strip()
+    if not target_shop:
+        raise errors.validation(
+            "这件商品还没分配到店铺。请在处理设置里选择「默认店铺」，"
+            "或先去妙手采集箱把它分配到店铺。", field="shopId")
+    resolved_shop_id = collect_box_service.claim_site_item(
+        db, account, detail_id=detail_id, target_shop_id=target_shop)
+```
+
+**Schema** `ProcessRequest`
+
+```python
+shopId: str = ""          # 改可空：site 商品传空
+targetShopId: str | None = None   # 兜底店铺
+```
+
+`shopId` 从 `str` 改成 `str = ""` 是必须的 —— 否则 site 商品连请求都发不出来。
+
+**前端** `AutomationPage` 的 process 调用
+
+```typescript
+shopId: target.shopId,
+targetShopId: target.shopId ? null : currentShopId || null,
+```
+
+`currentShopId` 是顶部店铺选择器的值 —— 用户已经选过「这次操作针对哪个店」，
+直接复用它做兜底，不再新增一个设置项。
+
+**前端** `ProductPicker` 商品卡片
+
+site 商品显示「未分配店铺 · TIKTOK」小字，`title` 提示
+「处理时会自动认领到顶部选中的店铺」。不提示的话用户会以为已经分好了。
+
+### 验证
+
+```
+当前 site 模式商品: 47 条（从 49 减到 47，因为我做了两次真实认领测试）
+ProcessRequest(shopId="", targetShopId="19974446")
+  → shopId=''  targetShopId='19974446'  OK
+
+ProcessRequest(shopId="19974446")   # 旧客户端
+  → shopId='19974446'  targetShopId=None  OK（向后兼容）
+```
+
+端到端认领实测：
+
+```
+claim_site_item(detail_id=3549614232, target=19974446) → '19974446'
+复查: editModel=shop  shopId='19974446'   ✅
+```
+
+### 测试
+
+`server/tests/test_claim_site_item.py` **10 条**：
+
+- 正常认领返回 shopId、调用参数正确（`[detailId], [shopId]`）
+- 校验目标店铺属于账号、client 用完关闭
+- 空/空白 targetShopId 拒绝、非数字 detailId 拒绝
+- **参数不合法时不打上游**（认领是不可撤销动作，不能先斩后奏）
+- 上游说「已在采集箱」当幂等成功
+- 其他上游错误包装成可读的 AppError
+
+### 顺手修掉一个真实 bug
+
+`collect_box_service.py:702` 用了 `_source_link.source_urls_of(...)`，
+但文件里只 `import` 了 `carrier_service, product_service, warehouse_service` ——
+**`source_link` 从没导入过**，跑到这一行会 `NameError`。
+
+ruff 的 F821 抓到了。已改为 `source_link.source_urls_of(...)` 并补上导入。
+
+这个 bug 是我上一轮（per-item source link）引入的，当时测试没覆盖到
+`claim_carrier_batch` 这条路径。
