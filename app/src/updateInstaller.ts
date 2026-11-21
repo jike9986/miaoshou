@@ -27,6 +27,7 @@ import { app, BrowserWindow, net } from "electron";
 import {
   ALLOWED_HOSTS,
   DOWNLOAD_USER_AGENT,
+  isCdnHeaders,
   planSegments,
   rangeHeader,
   segmentLength,
@@ -143,6 +144,62 @@ async function fetchSegment(
       response.on("error", reject);
     });
     request.on("error", reject);
+    request.end();
+  });
+}
+
+/**
+ * 这个下载地址是否经过 Cloudflare（或同类会压制并发连接的 CDN）。
+ *
+ * ## 为什么用响应头判断，而不是测速判断
+ *
+ * 第一版写的是「先测一下并发是否更快」。**实测证明这条路走不通** ——
+ * 这条跨境链路的抖动幅度比信号本身还大。同样固定 8MB 总下载量反复测：
+ *
+ *     1 并发   1513 /  265 KB/s
+ *     4 并发    424 /  368 KB/s
+ *     6 并发   1808 / 2144 KB/s
+ *     8 并发   1882 / 1884 KB/s
+ *
+ * 同一并发数两次测量能差 5 倍。任何基于计时的判断都是在赌运气，
+ * 而赌错的代价是「所有用户下载慢 6 倍」。
+ *
+ * 但「是否经过 CDN」是**确定性信号**，看响应头就知道，与网速无关：
+ *
+ *     server: cloudflare
+ *     cf-cache-status: HIT / MISS / DYNAMIC
+ *     cf-ray: ...
+ *
+ * 所以改成：看到 CDN 标记就单连接，否则分段。
+ *
+ * ## 为什么 CDN 就要单连接
+ *
+ * 两个 74MB 全量实测（同一台机器、同一个文件）：
+ *
+ *     Cloudflare 上 6 并发   995 秒    73 KB/s
+ *     Cloudflare 单连接      156 秒   470 KB/s   ← 快 6 倍
+ *
+ * CDN 对单 IP 的并发连接会排队/限速，多开只互相拖慢。
+ * 而直连源站时结论相反（188 → 685 KB/s，3.6 倍），因为瓶颈是单条
+ * TCP 在高重传（14.9%）链路上的拥塞窗口。
+ *
+ * 两种环境的最优策略是反的，所以按环境切换，不写死。
+ */
+async function isBehindCdn(url: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const request = net.request({ url, method: "GET", redirect: "follow" });
+    // 只要 1 字节，这个请求的唯一用途是读响应头
+    request.setHeader("Range", "bytes=0-0");
+    request.setHeader("User-Agent", DOWNLOAD_USER_AGENT);
+    const finish = (value: boolean): void => resolve(value);
+    request.on("response", (response) => {
+      // 判定规则在 updateDownload.ts 里（纯函数，可单测）
+      const behind = isCdnHeaders(response.headers as Record<string, unknown>);
+      response.on("data", () => {});
+      response.on("end", () => finish(behind));
+      response.on("error", () => finish(false));
+    });
+    request.on("error", () => finish(false));
     request.end();
   });
 }
@@ -300,28 +357,34 @@ export async function downloadInstaller(
   try {
     await fs.rm(partial, { force: true });
 
-    // 分段并发下载（2026-11-20）。
+    // 分段并发下载（2026-11-20）—— **仅在实测有效时才用**。
     //
-    // ## 为什么要分段
+    // ## 为什么要先探测
     //
-    // 负责人反馈「下载更新很慢」。实测这台服务器的跨境链路：
+    // 直连源站时，分段确实是大幅提速的：
     //
-    //   单连接           363 KB/s   （74MB 要 205 秒）
-    //   4 个并发连接     1.7 MB/s   （74MB 约 45 秒）
+    //   直连 aohuang888.com，12MB 样本
+    //     单连接   65.4s   188 KB/s
+    //     6 并发   17.9s   685 KB/s   ← 3.6x
     //
-    // 瓶颈是**单条 TCP 连接在高丢包链路上的窗口限制**（重传率 14.9%），
-    // 不是服务器带宽。多开几条连接各自拥塞，总吞吐能上去 4 倍以上。
-    // 所以在 CDN 到位之前，这个改动能立刻见效；CDN 到位后也能继续受益
-    // （CDN 单连接也有上限）。
+    //   原因：瓶颈是单条 TCP 在 14.9% 重传链路上的拥塞窗口，多开连接有效。
     //
-    // ## 失败就退回单连接
+    // **但走 Cloudflare 之后结论完全反过来了。** 同一台机器、同一个文件：
     //
-    // 分段需要服务端支持 `Range`。如果返回 200 而不是 206（不支持分段），
-    // 或者分片校验不过，就整体退回原来的单连接顺序下载 —— 保证不会因为
-    // 「服务器不配合」而彻底下不了。
+    //   经 CDN aohuang888.xyz，完整 74MB
+    //     单连接   156s   470 KB/s
+    //     6 并发   995s    73 KB/s   ← 慢 6 倍
+    //
+    //   CDN 对单 IP 的并发连接有额外限速/排队，多开只会互相拖慢。
+    //
+    // 所以不能无条件分段 —— 那会让**所有**用户都变慢 6 倍。
+    // 做法：先用两条小 Range 请求探测并发是否有效，有效才分段，
+    // 否则老老实实单连接。
+    //
+    // 探测本身很便宜（各 256KB，约 1 秒），代价远小于选错的后果。
     const segments = total > 0 ? planSegments(total) : [];
     let hashHex = "";
-    if (segments.length > 1) {
+    if (segments.length > 1 && !(await isBehindCdn(safeUrl))) {
       const ranged = await downloadBySegments(safeUrl, partial, segments, total, onProgress);
       if (ranged.ok) {
         hashHex = ranged.sha256;

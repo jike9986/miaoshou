@@ -507,3 +507,114 @@ nginx 对这个 location 没设 `Cache-Control`，CF 默认就不缓存它。
 ```
 
 2026-11-20 实测通过（改 notes → 3 秒后 CDN 立刻返回新值）。
+
+---
+
+## 发布安装包到 CDN：文件名必须带内容 hash（2026-11-20 血泪）
+
+**这是会让所有用户下载失败的那种坑，必须记住。**
+
+nginx 给安装包设了 `Cache-Control: public, max-age=31536000, immutable`，
+Cloudflare 会缓存一年。**同名文件覆盖后 CDN 不知道内容变了。**
+
+实测事故：改完代码重新打包，同名覆盖上传
+`AohuangShangpin-0.1.31-Setup.exe`，然后：
+
+```
+清单声明:  size 74831449, sha256 e99209b6...
+CDN 返回:  size 74832728, sha256 b505e072...   ← 旧文件
+```
+
+用户会下载到旧文件 → sha256 校验失败 → 更新失败，而且报错是
+「安装包校验失败」，看不出是 CDN 缓存问题。
+
+### 正确做法
+
+文件名带内容 hash，新版就是新 URL，CDN 必然重新取：
+
+```
+AohuangShangpin-0.1.31-e99209b6-Setup.exe
+                    ^^^^^^^^ sha256 前 8 位
+```
+
+### 发布后必须做的验证（不能只看 Content-Length）
+
+```python
+import hashlib, urllib.request
+url = manifest["url"]
+h = hashlib.sha256()
+with urllib.request.urlopen(url) as r:
+    while chunk := r.read(262144):
+        h.update(chunk)
+assert h.hexdigest() == manifest["sha256"], "CDN 上的文件和清单不一致"
+```
+
+**下载实际字节算 hash 才算验证过。** 我这次就是靠这步发现不一致的。
+
+---
+
+## Cloudflare 上分段下载是负优化（2026-11-20 实测）
+
+同一份 74MB 安装包，两条路径的最优策略**完全相反**：
+
+```
+直连源站 aohuang888.com
+  单连接 188 KB/s → 6 并发 685 KB/s    分段值得（3.6x）
+  瓶颈是单条 TCP 在 14.9% 重传链路上的拥塞窗口
+
+经 Cloudflare aohuang888.xyz
+  单连接 470 KB/s → 6 并发  73 KB/s    分段让用户慢 6 倍
+  CDN 对单 IP 并发连接排队/限速
+```
+
+所以 `app/src/updateDownload.ts` 的 `isCdnHeaders()` 决定用哪种：
+看到 `server: cloudflare` / `cf-ray` / `cf-cache-status` / `via: cloudfront`
+等任何 CDN 迹象 → 单连接；否则 → 6 路并发。
+
+### 为什么用响应头判断而不是测速
+
+测速在这条链路上**完全不可靠**。固定 8MB 总下载量反复测：
+
+```
+1 并发   1513 /  265 KB/s
+4 并发    424 /  368 KB/s
+6 并发   1808 / 2144 KB/s
+8 并发   1882 / 1884 KB/s
+```
+
+同一并发数两次能差 5 倍。基于计时的判断是赌运气，赌错代价是
+「所有用户慢 6 倍」。响应头是确定性信号。
+
+### 顺带发现的真实 bug
+
+第一版 `isCdnHeaders` 只按小写键取值：
+
+```typescript
+const header = (n) => String(headers[n] ?? "").toLowerCase();
+```
+
+测试传 `{ Server: "cloudflare" }` 就取不到 → CDN 被判成直连 →
+所有用户走 6 并发 → 慢 6 倍。已做显式大小写归一，并钉了回归测试。
+
+---
+
+## 清单里的 url 必须用主域，否则老用户收不到更新（2026-11-20）
+
+已部署的 0.1.30 客户端里，域名白名单**只有** `aohuang888.com`：
+
+```
+asar 里出现的域名: ['aohuang888.com']
+.xyz 是否出现: False
+```
+
+`downloadInstaller` 第一步就是 `validateUpdateUrl`，不在白名单直接返回
+「更新地址不合法」。所以清单给 `.xyz` 会让**所有老用户收不到更新**。
+
+正确做法：清单给主域，主域 nginx 302 到 CDN。
+
+```json
+"url": "https://aohuang888.com/miaoshou-downloads/AohuangShangpin-0.1.31-e99209b6-Setup.exe"
+```
+
+**演进**：等绝大多数用户升到 0.1.31（认识 .xyz）后，再改成直连 .xyz，
+省掉 302 那一跳。判断依据看发布后一段时间的版本分布，不要凭感觉。

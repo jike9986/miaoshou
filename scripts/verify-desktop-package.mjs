@@ -90,6 +90,18 @@ const context = {
       }, { filename: "packaged-sessionVault.js" });
       return module.exports;
     }
+    if (name === "./updateDownload") {
+      // 纯逻辑模块（白名单校验 + 切片规划），不依赖 electron，
+      // 直接用 node 原生 require 跑 asar 里编译好的那份。
+      const module = { exports: {} };
+      vm.runInNewContext(asar.extractFile(archive, "dist/updateDownload.js").toString(), {
+        exports: module.exports,
+        require: nativeRequire,
+        Buffer,
+        URL,
+      }, { filename: "packaged-updateDownload.js" });
+      return module.exports;
+    }
     if (name === "./updateInstaller") {
       // 自更新模块要用 net / createWriteStream / spawn，这些在打包校验里
       // 不该真跑（校验只验「模块能加载、IPC 能注册」，不验下载）。
@@ -110,6 +122,17 @@ const context = {
           if (name2 === "node:fs/promises" || name2 === "node:fs"
               || name2 === "node:crypto" || name2 === "node:path") {
             return nativeRequire(name2);
+          }
+          if (name2 === "./updateDownload") {
+            // updateInstaller 依赖 updateDownload 的白名单与切片规划
+            const sub = { exports: {} };
+            vm.runInNewContext(asar.extractFile(archive, "dist/updateDownload.js").toString(), {
+              exports: sub.exports,
+              require: nativeRequire,
+              Buffer,
+              URL,
+            }, { filename: "packaged-updateDownload.js" });
+            return sub.exports;
           }
           return nativeRequire(name2);
         },

@@ -129,3 +129,48 @@ export function segmentsCoverExactly(segments: Segment[], total: number): boolea
 export function rangeHeader(segment: Segment): string {
   return `bytes=${segment.start}-${segment.end}`;
 }
+
+/**
+ * 响应头是否表明「经过 CDN（会压制并发连接）」。
+ *
+ * ## 为什么这个判断决定要不要分段（实测依据）
+ *
+ * 同一份 74MB 安装包，两条路径的最优策略完全相反：
+ *
+ *     直连源站 aohuang888.com
+ *        单连接 188 KB/s  →  6 并发 685 KB/s   分段值得（3.6x）
+ *        瓶颈是单条 TCP 在 14.9% 重传链路上的拥塞窗口
+ *
+ *     经 Cloudflare aohuang888.xyz
+ *        单连接 470 KB/s  →  6 并发  73 KB/s   分段让用户慢 6 倍
+ *        CDN 对单 IP 并发连接排队/限速，多开只互相拖慢
+ *
+ * 所以必须按环境切换。而这个判断**只看响应头，不看测速** ——
+ * 测速在这条链路上完全不可靠：固定 8MB 反复测，同样 6 并发两次
+ * 得到 1808 和 2144 KB/s，而 4 并发只有 424 KB/s，噪声比信号大。
+ *
+ * ## 保守原则
+ *
+ * 看到**任何** CDN 迹象就当 CDN。判错的代价不对称：
+ *
+ *     漏判 CDN → 走 6 并发 → 用户下载慢 6 倍（十几分钟）
+ *     误判直连 → 走单连接 → 最多少快 3.6 倍（一两分钟）
+ *
+ * 所以宁可保守。
+ */
+export function isCdnHeaders(headers: Record<string, unknown>): boolean {
+  // 键大小写不敏感。不能依赖上游已归一化 —— 测试里传 `Server`
+  // 就取不到值，会让 CDN 被判成直连。
+  const lookup = new Map<string, string>();
+  for (const [key, value] of Object.entries(headers || {})) {
+    const text = Array.isArray(value) ? value.join(",") : String(value ?? "");
+    lookup.set(key.toLowerCase(), text.toLowerCase());
+  }
+  const header = (name: string): string => lookup.get(name) ?? "";
+  return header("server").includes("cloudflare")
+    || header("cf-ray").length > 0
+    || header("cf-cache-status").length > 0
+    || header("via").includes("cloudfront")
+    || header("x-cache").length > 0
+    || header("x-amz-cf-id").length > 0;
+}

@@ -25,6 +25,7 @@ import {
   segmentLength,
   segmentsCoverExactly,
   validateUpdateUrl,
+  isCdnHeaders,
 } from "../src/updateDownload.ts";
 
 
@@ -174,4 +175,53 @@ test("new download domain is whitelisted while main domain stays", () => {
   assert.ok(ALLOWED_HOSTS.includes("aohuang888.xyz"));
   // 不能因为买新域名就把别的顺手加进来
   assert.equal(ALLOWED_HOSTS.length, 2);
+});
+
+// --- CDN 判定（决定要不要分段）----------------------------------------------
+
+test("detects Cloudflare via every marker", () => {
+  // 任何一个标记出现都要判定为 CDN。漏判会让用户走 6 并发、下载慢 6 倍。
+  assert.equal(isCdnHeaders({ server: "cloudflare" }), true);
+  assert.equal(isCdnHeaders({ "cf-ray": "a5d7-NRT" }), true);
+  assert.equal(isCdnHeaders({ "cf-cache-status": "HIT" }), true);
+  assert.equal(isCdnHeaders({ server: "cloudflare", "cf-cache-status": "MISS" }), true);
+});
+
+test("detects other CDNs conservatively", () => {
+  assert.equal(isCdnHeaders({ via: "1.1 cloudfront.net (CloudFront)" }), true);
+  assert.equal(isCdnHeaders({ "x-cache": "Hit from cloudfront" }), true);
+  assert.equal(isCdnHeaders({ "x-amz-cf-id": "abc" }), true);
+});
+
+test("header names are case-insensitive", () => {
+  // 这个 bug 真实存在过：只按小写取值时，传 `Server` 就取不到，
+  // Cloudflare 被判成直连 → 所有用户走 6 并发 → 下载慢 6 倍。
+  assert.equal(isCdnHeaders({ Server: "cloudflare" }), true);
+  assert.equal(isCdnHeaders({ "CF-Ray": "a5d7-NRT" }), true);
+  assert.equal(isCdnHeaders({ "CF-CACHE-STATUS": "HIT" }), true);
+  assert.equal(isCdnHeaders({ VIA: "cloudfront" }), true);
+});
+
+test("header values are case-insensitive", () => {
+  assert.equal(isCdnHeaders({ Server: "CLOUDFLARE" }), true);
+  assert.equal(isCdnHeaders({ Via: "CloudFront" }), true);
+});
+
+test("plain origin server is not treated as CDN", () => {
+  // 直连源站（nginx）要能正确判成「非 CDN」，否则分段这个收益就丢了。
+  assert.equal(isCdnHeaders({ server: "nginx/1.18.0 (Ubuntu)" }), false);
+  assert.equal(isCdnHeaders({}), false);
+  assert.equal(isCdnHeaders({ server: "Apache" }), false);
+  assert.equal(isCdnHeaders({ "content-type": "application/octet-stream" }), false);
+});
+
+test("handles array header values", () => {
+  // 同名多值头在 Node 里是数组
+  assert.equal(isCdnHeaders({ "cf-ray": ["a5d7-NRT", "a5d8-NRT"] }), true);
+  assert.equal(isCdnHeaders({ server: ["nginx"] }), false);
+});
+
+test("handles null and undefined values without throwing", () => {
+  assert.equal(isCdnHeaders({ server: null, "cf-ray": undefined }), false);
+  assert.equal(isCdnHeaders({ "cf-ray": null, server: "cloudflare" }), true);
 });
