@@ -208,7 +208,45 @@ def _row_image(row: Mapping[str, Any]) -> str:
 
 
 def listing_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """collect_box_list → 每行 (key, detailId, shopId, shopName, site, title, image, sourceId)。"""
+    """collect_box_list → 每行 (key, detailId, shopId, shopName, site, ...)。
+
+    ## 两种 editModel（2026-11-21 修）
+
+    妙手采集箱的商品有两种存在形态：
+
+    **shop 模式**（`editModel='shop'`）
+        已经分配到某个店铺，行里有 `collectBoxDetailShopList`。
+        这是原来唯一支持的模式。
+
+    **site 模式**（`editModel='site'`）
+        只采集到采集箱、**还没分配到店铺**，行里没有 shop 列表、
+        `shopId` 也是 None。数据本身是完整的（标题/图/价格/库存/
+        commonCollectBoxDetailId 全都有），只是缺店铺归属。
+
+    ### 原来为什么出 bug
+
+    旧代码 `if row.get("editModel") not in (None, "shop"): continue` 把
+    site 模式整行丢弃。但 `_scan_upstream` 的 total 用的是**原始行数**
+    （raw_count，不受这个过滤影响）。
+
+    结果就是负责人看到的：**「采集箱 / 49」但列表空白**。
+    账号 8 的 49 条全是 site 模式，一条都没显示出来。
+
+    ### 现在怎么处理
+
+    site 模式的商品**照常返回**，用 `site` 作为店铺维度的替代标识：
+
+        key     = f"{detailId}:site:{site}"
+        shopId  = ""（空字符串，前端和下游据此识别「未分配店铺」）
+        shopName= "未分配店铺（{site}）"
+
+    这样用户至少能看到商品、能选中、能删除。真正要发布时再走
+    `claim_to_shop`（`site_detail` 返回的 `claimToShopIds` 提供候选店铺）。
+
+    注意 `site` 在行里通常是 None，需要从 `platform` / `siteCode` 兜底，
+    并且 `site_detail` 只在账号真正绑定了该站点时才成功 ——
+    账号 8 实测 MY/PH 可取、SG/TH/ID/VN 报「当前站点没有绑定的店」。
+    """
     data = (response or {}).get("data") or {}
     rows = data.get("detailList")
     if not isinstance(rows, list):
@@ -218,9 +256,44 @@ def listing_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if row.get("editModel") not in (None, "shop"):
-            continue
+        model = str(row.get("editModel") or "shop")
         detail_raw = row.get("collectBoxDetailId") or row.get("detailId")
+
+        if model == "site":
+            # site 模式：没有店铺，用 site 作为维度
+            try:
+                detail_id = int(detail_raw)
+            except (TypeError, ValueError):
+                continue
+            site = first_text(row.get("site"), row.get("siteCode"),
+                              row.get("platform")).upper()
+            key = f"{detail_id}:site:{site}"
+            if key in seen:
+                continue
+            seen.add(key)
+            products.append({
+                "key": key,
+                "detailId": str(detail_id),
+                # 空字符串显式表示「还没分配到店铺」，前端据此显示提示
+                "shopId": "",
+                "shopName": f"未分配店铺（{site}）" if site else "未分配店铺",
+                "site": site,
+                "title": _row_title(row),
+                "imageUrl": _row_image(row),
+                "sourceId": first_text(row.get("sourceItemId"),
+                                       row.get("sourceId")) or None,
+                "status": "未发布",
+                "editModel": "site",
+            })
+            if len(products) >= COLLECT_BOX_MAX_ITEMS:
+                return products
+            continue
+
+        if model != "shop":
+            # 未知模式：保留原来的保守行为（跳过），避免把不认识的
+            # 结构塞进列表导致下游崩。
+            continue
+
         shops = row.get("collectBoxDetailShopList") or []
         if not isinstance(shops, list):
             continue
@@ -248,7 +321,7 @@ def listing_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "imageUrl": _row_image(row),
                 "sourceId": first_text(row.get("sourceItemId"), row.get("sourceId")) or None,
                 "status": "未发布",
-                "editModel": str(row.get("editModel") or "shop"),
+                "editModel": "shop",
             })
             if len(products) >= COLLECT_BOX_MAX_ITEMS:
                 return products

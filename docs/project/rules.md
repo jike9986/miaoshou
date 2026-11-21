@@ -618,3 +618,60 @@ asar 里出现的域名: ['aohuang888.com']
 
 **演进**：等绝大多数用户升到 0.1.31（认识 .xyz）后，再改成直连 .xyz，
 省掉 302 那一跳。判断依据看发布后一段时间的版本分布，不要凭感觉。
+
+---
+
+## 采集箱：`total` 与 `listing_rows` 的过滤必须对齐（2026-11-21）
+
+`collect_box_service._scan_upstream` 里：
+
+```python
+total = raw_count if count_all else matched
+```
+
+`raw_count` 是**上游原始行数**，而 `matched` 来自 `listing_rows()` 过滤后的行。
+`listing_rows()` 会做三重过滤（`editModel` / `shopList` / int 转换）。
+
+**只要两边口径不一致，就会出现「采集箱 / N」但列表空白** ——
+负责人 2026-11-21 遇到的正是这个：账号 8 有 49 条 site 模式商品，
+全被 `listing_rows` 丢弃，但 total 仍是 49。
+
+改 `listing_rows` 的过滤条件时，必须同时检查 `total` 的算法，
+或者至少在页面上加「显示 X / 共 Y」让错位可见。
+
+### site 模式是什么
+
+妙手采集箱两种 `editModel`：
+
+```
+shop  = 已分配到店铺的草稿箱，有 collectBoxDetailShopList
+site  = 只采集到采集箱、还没分配店铺，shopId 是 None
+```
+
+**site 模式数据是完整的**（标题/图/价格/库存/ID 全有），只是缺店铺归属。
+所以`listing_rows` 必须返回它：
+
+```python
+key    = f"{detailId}:site:{site}"     # 不能用 product_key，会和 shop 冲突
+shopId = ""                            # 空串，不是 None（下游有 str() 用法）
+shopName = f"未分配店铺（{site}）"      # 明确告诉用户为什么发布不了
+```
+
+行里的 `site` 常是 `None`，要按 `site` → `siteCode` → `platform` 兜底。
+
+### site 模式不能直接发布
+
+`site_detail(detailId, site)` 是它的详情接口（对应 `shop_detail`）。
+实测账号 8：
+
+```
+site=MY / PH          OK
+site=SG / TH / ID / VN  「当前站点没有绑定的店」
+site=TIKTOK             「站点【TIKTOK】不支持」
+claimToShopIds          空
+```
+
+`claimToShopIds` 空 = 没有可认领的店铺 = **必须用户去妙手界面手动分配**。
+软件不能自动分配（没得可分配，而且「发到哪个店」是业务决定）。
+
+回归测试：`server/tests/test_collect_box_site_mode.py`（18 条）。
