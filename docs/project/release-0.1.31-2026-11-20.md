@@ -228,3 +228,76 @@ H=$(sha256sum "release/奥皇上品-0.1.31-安装程序.exe" | cut -d' ' -f1)
 # 6. 部署服务端 + 桌面端
 python scripts/deploy_server.py
 ```
+---
+
+## 六、官方下载链接（当前有效）
+
+### 给用户直接下载安装
+
+```
+https://aohuang888.com/miaoshou-downloads/AohuangShangpin-0.1.31-e99209b6-Setup.exe
+```
+
+走主域，会自动 302 到 CDN。这个链接对**所有版本**都有效。
+
+### 纯 CDN 直连（更快，少一跳）
+
+```
+https://aohuang888.xyz/miaoshou-downloads/AohuangShangpin-0.1.31-e99209b6-Setup.exe
+```
+
+### 更新清单（客户端自动读，一般不用手工访问）
+
+```
+https://aohuang888.com/miaoshou-downloads/version.json
+```
+
+### 校验信息
+
+| 项 | 值 |
+|---|---|
+| 版本 | 0.1.31 |
+| 大小 | 74,831,449 字节（71.4 MB） |
+| sha256 | `e99209b6948e12aee679126b0f629a0b16cf4dc26116a79ef24dedfc1201b081` |
+
+Windows 上校验：
+
+```powershell
+Get-FileHash .\AohuangShangpin-0.1.31-e99209b6-Setup.exe -Algorithm SHA256
+```
+
+---
+
+## 七、发布校验脚本（以后每次发版都要跑）
+
+```bash
+python -X utf8 scripts/verify_release.py
+```
+
+它做三件事：
+
+1. 对比两个入口（主域 / CDN）的清单是否一致
+2. 下载清单里 `url` 指向的**完整文件**，算 sha256
+3. 比对 sha256 和 size 是否与清单一致
+
+**退出码 0 才能发布。** 这个脚本是为了防住已经真实发生过的事故：
+CDN 缓存了同名旧文件，`Content-Length` 和 sha256 都指向旧版本，
+但清单已更新 —— 用户下完才校验失败，报错还看不出是缓存问题。
+
+只看 `curl -I` 的 `Content-Length` 是**不够**的，必须下完整文件算 hash。
+
+---
+
+## 八、目录清理（2026-11-20）
+
+`/var/www/miaoshou-downloads` 原来堆了 21 个历史安装包（441 MB），
+其中 0.1.6 到 0.1.28 早已无人使用。已清理为：
+
+```
+AohuangShangpin-0.1.29-Setup.exe          74.8 MB   留作回退
+AohuangShangpin-0.1.31-e99209b6-Setup.exe 74.8 MB   当前版本
+version.json                              607 B
+```
+
+**441 MB → 143 MB。** 留 0.1.29 是因为还有用户可能停在那版，
+万一 0.1.31 出问题可以临时把清单指回去。
