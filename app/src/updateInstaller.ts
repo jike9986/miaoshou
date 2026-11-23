@@ -559,24 +559,38 @@ export async function installOnQuit(): Promise<void> {
   }));
   const { spawn: _spawn } = await import("node:child_process");
   const psExe = powershellPath();
-  // ## 必须用 `cmd /c start` 启动，不能直接 spawn（2026-11-23 第五个坑，决定性实验）
+  // ## 必须经 VBS + wscript 以 SW_HIDE 启动（2026-11-23 第五、六个坑，决定性实验）
   //
-  // 直连 spawn 在 Windows 上**必然静默失败**：实测五种写法只有三种能跑，
-  // 而我们现在用的 `detached:true + stdio:"ignore"` 恰好是最坏的那种 ——
-  // 进程被创建、立刻 exit 0、脚本一行都不执行、日志一个字节不写。
+  // 直连 spawn 在 Windows 上**静默失败**：进程被创建、立刻 exit 0、
+  // 脚本一行都不执行、日志一个字节不写。实测六种写法：
   //
-  //   spawn(ps, [...], {detached:true, stdio:"ignore"})  → 空文件，脚本没跑
-  //   spawn(ps, [...], {detached:true, windowsHide:true}) → 同上
-  //   spawn(ps, [...], {detached:true, stdio:[null,null,null]}) → 同上
-  //   spawn(ps, [...], {shell:true})                     → OK
-  //   spawn(ps, [...], {detached:false}).unref()          → OK（但没真脱离）
-  //   spawn("cmd", ["/c","start","","/b",ps,...])         → OK 且真脱离
+  //   spawn(ps, [...], {detached:true, stdio:"ignore"})           → FAIL 空文件
+  //   spawn(ps, [...], {detached:true, windowsHide:true})         → FAIL 同上
+  //   spawn(ps, [...], {detached:true, stdio:[null,null,null]})   → FAIL 同上
+  //   spawn(ps, [...], {shell:true})                              → 能跑，但会现黑框
+  //   spawn(ps, [...], {detached:false, windowsHide:true})        → 能跑，父进程一退就跟着死
+  //   spawn("cmd", ["/c","start","/b",ps,...], {windowsHide:true}) → 能跑且脱离，**但会闪一个
+  //         Windows Terminal 窗口**（Electron 无控制台，cmd 必然新建一个，/b 挡不住）
   //
-  // 选最后一种：`start /b` 让 PowerShell 成为独立的进程树根，
-  // Electron 退出后不会被连带杀掉，也不需要 shell 参数拼接（无注入风险）。
+  // 真正的解法：把启动命令写进 .vbs，用 `WScript.Shell.Run(cmd, 0, False)` ——
+  // 第二个参数 0 就是 SW_HIDE（创建进程时窗口样式直接是隐藏，不是事后去藏），
+  // 第三个 False 表示不等。wscript.exe 本身是 GUI 子系统程序、无控制台，
+  // 它派生 PowerShell 后立即退出，PowerShell 成为独立进程树根。
+  //
+  // 实测：窗口采样期间无任何新增可见窗口；父进程 400ms 后 exit(0)，
+  // 脚本仍把 `start` 和 4 秒后的 `end` 都写完了（真正脱离）。
+  const vbsPath = path.join(app.getPath("userData"), "run-installer.vbs");
+  // VBS 字符串里只有双引号是特殊字符；PowerShell 命令里不含双引号
+  // （路径都用 psQuote 的单引号包裹），所以无需转义。
+  const command = `${psExe} -WindowStyle Hidden -NonInteractive -EncodedCommand ${encoded}`;
+  await fs.writeFile(
+    vbsPath,
+    `CreateObject("WScript.Shell").Run "${command}", 0, False\r\n`,
+    "ascii",
+  );
   const child = _spawn(
-    process.env.ComSpec || "cmd.exe",
-    ["/c", "start", "", "/b", psExe, "-WindowStyle", "Hidden", "-NonInteractive", "-EncodedCommand", encoded],
+    "wscript.exe",
+    ["//nologo", vbsPath],
     { detached: true, stdio: "ignore", windowsHide: true }
   );
   // ## 必须监听 error（2026-11-23 第三个坑）
@@ -592,7 +606,7 @@ export async function installOnQuit(): Promise<void> {
   child.on("error", (error: Error) => {
     void fs.appendFile(
       logPath,
-      `[${new Date().toISOString()}] spawn failed (${psExe}): ${error.message}\n`,
+      `[${new Date().toISOString()}] spawn failed (wscript.exe ${vbsPath}): ${error.message}\n`,
     ).catch(() => {});
   });
   // ## 必须等它真的跑起来（2026-11-23 第四个坑）

@@ -36,17 +36,20 @@
 
 ## 必须遵守的规则（不可绕过）
 
-### 1. 版本号必须五处同步
+### 1. 版本号必须四处同步
 
-每次发版，必须同时更新以下 5 个文件，版本号保持完全一致：
+每次发版，必须同时更新以下 4 个文件，版本号保持完全一致：
 
 ```
 package.json                   # 根
 web/package.json               # 前端
-app/package.json               # Electron
+app/package.json               # Electron（electron-builder 读这个出安装包名）
 server/core/constants.py       # 后端（APP_VERSION 兜底，优先读根 package.json）
-installer/setup.iss            # MyAppVersion（安装包文件名与控制面板版本）
 ```
+
+> 2026-11-23 改：安装包从 Inno Setup 换成 electron-builder 自带的 NSIS，
+> `installer/setup.iss` 已删除，清单从五处变四处。原因见
+> `docs/project/auto-update-nsis-2026-11-23.md`。
 
 一条命令核实（exit 0 才算过）：
 
@@ -54,8 +57,8 @@ installer/setup.iss            # MyAppVersion（安装包文件名与控制面�
 python -X utf8 scripts/check_version.py
 ```
 
-> 2026-11-18 补：`installer/setup.iss` 之前一直漏在同步清单外，导致 0.1.25 时它停在 0.1.23，
-> `scripts/build.ps1` 第一步「版本与静态检查」直接 throw，整条打包链走不下去。
+> 2026-11-18 补（已随 Inno 一起作废）：`installer/setup.iss` 曾漏在同步清单外，
+> 导致 0.1.25 时它停在 0.1.23、`scripts/build.ps1` 第一步直接 throw。
 
 ### 1.1 打包事实（别把正常设计当 bug）
 
