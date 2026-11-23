@@ -26,6 +26,8 @@ import {
   segmentsCoverExactly,
   validateUpdateUrl,
   isCdnHeaders,
+  NSIS_SILENT_FLAGS,
+  installerArguments,
 } from "../src/updateDownload.ts";
 
 
@@ -224,4 +226,52 @@ test("handles array header values", () => {
 test("handles null and undefined values without throwing", () => {
   assert.equal(isCdnHeaders({ server: null, "cf-ray": undefined }), false);
   assert.equal(isCdnHeaders({ "cf-ray": null, server: "cloudflare" }), true);
+});
+
+
+// --- Inno 安装器参数（2026-11-23 事故回归）----------------------------------
+//
+// 事实：`/S` 才是 NSIS 的静默参数（而 NSIS 是 electron-builder 的标准安装包）。
+// 之前项目用 Inno 打安装包却传 `/S`，Inno 不认 → 弹图形向导 → 用户关掉软件后
+// 什么也没发生。现在安装包与参数统一走 NSIS。
+
+const WIN_DIR = String.raw`D:\软件\奥皇上品`;
+const SPACE_DIR = String.raw`C:\Program Files\Aohuang`;
+
+test("uses the NSIS silent switch", () => {
+  const args = installerArguments(WIN_DIR);
+  assert.ok(args.includes("/S"), "NSIS 静默安装就是 /S");
+  for (const flag of NSIS_SILENT_FLAGS) assert.ok(args.includes(flag), flag);
+});
+
+test("never leaks Inno-only switches into an NSIS installer", () => {
+  const args = installerArguments(WIN_DIR);
+  for (const flag of ["/VERYSILENT", "/SILENT", "/SUPPRESSMSGBOXES", "/NOCANCEL", "/NORESTART"]) {
+    assert.ok(!args.includes(flag), `${flag} 是 Inno 的参数，NSIS 会当成未知开关`);
+    assert.ok(!args.some((a) => a.startsWith(flag)), `${flag}= 不该出现`);
+  }
+});
+
+test("pins the install directory with /D= so shortcut and install dir can never diverge", () => {
+  const args = installerArguments(WIN_DIR);
+  assert.equal(args[args.length - 1], `/D=${WIN_DIR}`,
+    "/D= 必须是最后一个参数（NSIS 把 /D= 之后的整段当作目录）");
+});
+
+test("does not quote the /D= value even when the path has spaces", () => {
+  const args = installerArguments(SPACE_DIR);
+  assert.equal(args[args.length - 1], `/D=${SPACE_DIR}`,
+    "NSIS 的 /D= 取值不允许带引号，带引号会装到错误目录");
+  assert.ok(!args[args.length - 1].includes('"'));
+});
+
+test("strips a trailing slash so the same dir is not compared as a different string", () => {
+  assert.deepEqual(installerArguments(WIN_DIR + "\\"), installerArguments(WIN_DIR));
+  assert.deepEqual(installerArguments(WIN_DIR + "/"), installerArguments(WIN_DIR));
+});
+
+test("omits /D= when the install dir is unknown", () => {
+  for (const dir of [undefined, "", "   "]) {
+    assert.deepEqual(installerArguments(dir), [...NSIS_SILENT_FLAGS], String(dir));
+  }
 });

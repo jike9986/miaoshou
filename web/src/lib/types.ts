@@ -183,6 +183,16 @@ export interface CollectBoxItem {
   title: string;
   imageUrl: string | null;
   sourceId: string | null;
+  /**
+   * 公共采集箱明细 ID（2026-11-21）。
+   *
+   * 货源链接的唯一可靠来源：店铺侧 `shop_detail` 返回的 26 个字段里
+   * 没有任何 1688 信息（实测递归扫描 0 命中），但
+   * `common_box_detail(id)` 的 `sourceList[0].sourceItemUrl` 100% 有真链接。
+   *
+   * 这个 ID 只在采集箱列表行里，所以处理时要带进 process 请求。
+   */
+  commonCollectBoxDetailId?: string | null;
   status: string;
   editModel: EditModel | string;
   inWarehouse: boolean;
@@ -282,6 +292,8 @@ export interface ProcessCollectRequest {
    * 再正常入库。实测有效：认领后 editModel 从 site 变 shop，后续流程不变。
    */
   targetShopId?: string | null;
+  /** 公共采集箱明细 ID —— 货源链接的唯一来源（见 CollectBoxItem 注释） */
+  commonCollectBoxDetailId?: string | null;
   accountId?: string | null;
   /** 翻译目标语言，留空则不翻译 */
   language?: string | null;

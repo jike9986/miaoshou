@@ -5,12 +5,21 @@
 ;
 ; Product name unicode: [char]0x5965+[char]0x7687+[char]0x4E0A+[char]0x54C1
 
-; Restore previous install directory so reinstalls / updates go to same place.
+; 安装目录不要在 customInit 里自己做（2026-11-23 删掉）。
+;
+; electron-builder 的 templates/nsis/multiUser.nsh 里 setInstallModePerUser
+; 已经做了完整的目录决策，顺序是：
+;
+;   1. ReadRegStr $perUserInstallationFolder HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
+;      → 升级时装回上次目录
+;   2. ${StdUtils.GetParameter} $R0 "D" ""
+;      → 命令行 /D= 优先（模板注释原文：allow /D switch to override installation path）
+;
+; 我们原来在 customInit 里又 ReadRegStr 一次并 StrCpy $INSTDIR，
+; 这段代码在模板之后执行，会把命令行传进来的 /D= 覆盖回注册表里的旧目录 ——
+; 于是「客户端想让装到当前运行的目录，安装器偏要装回老地方」，
+; 桌面快捷方式和实际安装位置再次分家，就是那个循环更新的根。
 !macro customInit
-  ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.aohuang.listing" "InstallLocation"
-  ${If} $R0 != ""
-    StrCpy $INSTDIR $R0
-  ${EndIf}
 !macroend
 
 !macro customInstall

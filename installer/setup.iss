@@ -3,7 +3,7 @@
 ; AohuangShangpin），中文名在 ISCC/cmd 下会被按 GBK 误解码。用户看到的中文
 ; 来自快捷方式名与窗口标题，不受影响。
 #define MyAppName "奥皇上品"
-#define MyAppVersion "0.1.33"
+#define MyAppVersion "0.1.42"
 #define MyAppPublisher "AOHUANG"
 #define MyAppExeName "AohuangShangpin.exe"
 
@@ -94,21 +94,28 @@ Type: filesandordirs; Name: "{%LOCALAPPDATA}\aohuang-desktop\electron\updates"
 ; 双击 exe 不带参数起不来，参数只能写在快捷方式里。
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--no-sandbox"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
-; 只为当前用户创建桌面入口。
-Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--no-sandbox"; Tasks: desktopicon
-
-[Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："
+; 桌面入口：**每次安装都重写，不受 Tasks 勾选状态影响**（2026-11-23 修）。
+;
+; 原来这一行带 `Tasks: desktopicon`。Inno 会记住上一次勾了哪些任务
+; （注册表 `Inno Setup: Selected Tasks`），用户第一次取消过桌面图标之后，
+; 后续每次覆盖安装都不会再创建/更新这个 .lnk —— 于是「桌面快捷方式一直
+; 指向老版本」：安装目录都可能换了，快捷方式还是老的。
+;
+; 负责人要求「用户桌面端的快捷方式启动也是在最新版本的」，所以这里
+; 无条件覆盖：装了新版，桌面图标必然指到新的 {app}\AohuangShangpin.exe。
+;
+; `ignoreversion` 没有意义（.lnk 不参与版本比较），关键是**没有 Tasks 条件**。
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--no-sandbox"
 
 [Run]
-; 启动项（负责人 2026-11-20：「自动重启软件，用户桌面端的快捷方式启动
-; 也是在最新版本的」）。
+; 启动项（负责人 2026-11-20 提出，2026-11-23 修好）。
 ;
-; `skipifsilent` 原本表示「静默安装就别启动了，交给调用方重启」。
-; 现在改成**静默安装也启动**（去掉 skipifsilent），原因：
-;   · 客户端 `/S` 静默安装完会自己 spawn 新版本，但那是**异步**的 ——
-;     setup 进程返回时 exe 可能还没落完盘，spawn 会失败;
-;   · Inno 的 [Run] 是在**setup 自己收尾时**启动，时机最准，不会撞文件占用;
-;   · 两处都启动会导致开两个窗口 —— 所以客户端那边改成
-;     「先等 setup 完成，再检测如果没起来才补启动」（见 updateInstaller.ts）。
+; 关键事实（实测）：
+;   · 客户端以前传的是 NSIS 的 `/S`，Inno 不认 → 弹出图形向导，
+;     用户以为在后台升级，其实没人点那个窗口，软件再也没起来。
+;     现在客户端传 `/VERYSILENT`（见 app/src/installerArgs.ts）。
+;   · Inno 的 [Run] 在**静默安装**时也会执行（只要没写 skipifsilent），
+;     而且是在 setup 自己收尾时启动，时机最准，不会撞文件占用。
+;   · 客户端那边的 PowerShell 随后会检查进程：已经在跑就不再开第二个。
+;   · 必须带 --no-sandbox，否则新拉起的窗口在原生层崩掉。
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--no-sandbox"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall

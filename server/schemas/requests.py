@@ -281,6 +281,16 @@ class ProcessRequest(CamelModel):
     # 实测有效（账号 8）：认领后 editModel 从 site 变 shop，
     # 后续拉详情/定价/入库流程完全不用改。
     targetShopId: str | None = None
+    # 公共采集箱明细 ID（2026-11-21）。
+    #
+    # 货源链接的唯一可靠来源。店铺侧 `shop_detail` 返回的 26 个字段里
+    # 没有任何 1688 信息（实测递归扫描 0 命中），而
+    # `common_box_detail(commonCollectBoxDetailId)` 的
+    # `editCommonCollectBoxDetail.sourceList[0].sourceItemUrl`
+    # 100% 有真链接（账号 8 抽样 12/12）。
+    #
+    # 这个 ID 只存在于采集箱**列表行**，前端从列表数据里带过来。
+    commonCollectBoxDetailId: str | None = None
     accountId: str | None = None
     language: str | None = None
     groupId: str | None = None

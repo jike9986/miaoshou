@@ -21,6 +21,40 @@ assert.ok(fs.existsSync(path.join(unpacked, "AohuangShangpin.exe")), "Executable
 assert.ok(!fs.existsSync(path.join(resources, "client-token.json")), "Legacy shared token must not ship");
 assert.ok(!fs.existsSync(path.join(resources, "server")), "Remote client must not ship a local backend");
 
+// 安装器参数回归（2026-11-23 事故）。
+//
+// 事故原样：客户端给 **Inno** 打的安装包传 NSIS 的 `/S` → Inno 不认 → 弹图形向导
+// → 用户关掉软件后什么也没发生，下次点快捷方式还是老版本。
+//
+// 现在安装包改成 electron-builder 自带的 **NSIS**（大厂标准路径），
+// 参数必须是 NSIS 的 `/S`，并且 `/D=` 钉住安装目录。这里扫打包产物把这两条钉死。
+const installerCode = asar.extractFile(archive, "dist/updateDownload.js").toString();
+const installerCaller = asar.extractFile(archive, "dist/updateInstaller.js").toString();
+/** 去掉 `//` / `/*` / `*` 注释行 —— 注释里写历史踩坑不算违规，真代码里才有害。 */
+const codeLines = (text) => text
+  .split("\n")
+  .filter((line) => {
+    const trimmed = line.trim();
+    return !trimmed.startsWith("//") && !trimmed.startsWith("/*") && !trimmed.startsWith("*");
+  })
+  .join("\n");
+assert.ok(codeLines(installerCode).includes('"/S"'),
+  "Packaged client must ask the NSIS installer for a silent install (/S)");
+assert.ok(codeLines(installerCode).includes("/D="),
+  "Packaged client must pin the install directory (/D=), otherwise the installer falls back to %LOCALAPPDATA% and the desktop shortcut keeps launching the old version");
+assert.ok(installerCaller.includes("installerArguments"),
+  "Packaged client must build installer args through installerArguments()");
+assert.ok(!codeLines(installerCode).includes("/VERYSILENT"),
+  "NSIS installers do not accept Inno's /VERYSILENT");
+assert.ok(!codeLines(installerCaller).includes("'/S'"),
+  "installer args must come from updateDownload.installerArguments(), not be hardcoded");
+// 安装包必须在自己被运行之后才允许被删掉：老代码 `await discardInstaller()`
+// 紧跟在不等待的 PowerShell spawn 之后，把 900ms 后才执行的 setup.exe 删了 ——
+// 静默升级永远不生效（这正是「关掉软件什么也没发生」的根因）。
+// 只扫真正的代码行（注释里说明这件事的文字不算）。
+assert.ok(!codeLines(installerCaller).includes("await discardInstaller()"),
+  "installOnQuit must not delete the installer before PowerShell runs it");
+
 const web = path.join(root, "web", "dist");
 let checkedFiles = 0;
 function compareWeb(directory, relative = "") {

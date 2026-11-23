@@ -123,6 +123,8 @@ interface SelectionEntry {
   detailId: string;
   shopId: string;
   title: string;
+  /** 公共采集箱明细 ID —— 货源链接的唯一来源，处理时要带进 process 请求 */
+  commonCollectBoxDetailId?: string | null;
 }
 
 const MAX_RUN_ITEMS = 200;
@@ -385,6 +387,7 @@ export function AutomationPage() {
           detailId: item.detailId,
           shopId: item.shopId,
           title: item.title,
+          commonCollectBoxDetailId: item.commonCollectBoxDetailId ?? null,
         });
       }
       return next;
@@ -554,6 +557,9 @@ export function AutomationPage() {
     persistentItems.current = new Map(saved.items.map((item) => [item.key, item.id]));
     const nextSelection = new Map(saved.items.filter(retainAutomationSelection).map((item) => [item.key, {
       key: item.key, detailId: item.detailId, shopId: item.shopId, title: item.title,
+      // 历史任务记录里没存这个字段，用可选链兜底（恢复老任务时为空）
+      commonCollectBoxDetailId: (item as { commonCollectBoxDetailId?: string | null })
+        .commonCollectBoxDetailId ?? null,
     }]));
     // 恢复历史任务**绝不动用户的选择列表**。
     //
@@ -790,6 +796,7 @@ export function AutomationPage() {
             detailId: item.detailId,
             shopId: item.shopId,
             title: item.title,
+            commonCollectBoxDetailId: item.commonCollectBoxDetailId ?? null,
           });
           remaining -= 1;
         }
@@ -1259,6 +1266,8 @@ export function AutomationPage() {
             //
             // 只在 shopId 为空时才真的用得上，普通商品传了也无副作用。
             targetShopId: target.shopId ? null : currentShopId || null,
+            // 货源链接只能从公共采集箱取，ID 在列表行里，带过去
+            commonCollectBoxDetailId: target.commonCollectBoxDetailId ?? null,
             accountId: durableRun.accountId,
             language: runSettings.textEnabled ? runSettings.language : null,
             template:

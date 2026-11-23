@@ -294,6 +294,9 @@ def listing_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "imageUrl": _row_image(row),
                 "sourceId": first_text(row.get("sourceItemId"),
                                        row.get("sourceId")) or None,
+                # 同上：公共采集箱 ID，货源链接的唯一来源
+                "commonCollectBoxDetailId": first_text(
+                    row.get("commonCollectBoxDetailId")) or None,
                 "status": "未发布",
                 "editModel": "site",
             })
@@ -332,6 +335,12 @@ def listing_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "title": _row_title(row),
                 "imageUrl": _row_image(row),
                 "sourceId": first_text(row.get("sourceItemId"), row.get("sourceId")) or None,
+                # 公共采集箱明细 ID —— 货源链接的唯一可靠来源（2026-11-21）。
+                # 店铺侧完全不带 1688 信息，只有这个 ID 能查到
+                # editCommonCollectBoxDetail.sourceList[0].sourceItemUrl。
+                # 它只存在于列表行里，所以必须从这里一路传到入仓。
+                "commonCollectBoxDetailId": first_text(
+                    row.get("commonCollectBoxDetailId")) or None,
                 "status": "未发布",
                 "editModel": "shop",
             })

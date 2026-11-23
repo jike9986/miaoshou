@@ -25,17 +25,57 @@ logger = logging.getLogger("aohuang.api")
 
 router = APIRouter(prefix="/collect-box", tags=["采集箱"])
 
-# 图片后台线程并发信号量。每件商品的图片线程（OCR→翻译→写回妙手）在启动时
-# acquire，全部工作完成后 release。上限由该批次的 itemConcurrency 决定（最高 5）。
-# 默认 5；每次批次启动时用 _reset_image_semaphore() 更新。
-_image_semaphore: threading.Semaphore = threading.Semaphore(5)
+# 图片后台线程「写回妙手」的并发信号量。
+#
+# ⚠️ 这管的是**翻译完写回**，不是发出去翻译（那是
+# `image_service.UPSTREAM_IMAGE_CONCURRENCY=500` / 每学员 50）。
+# 两件事完全不同，别混。
+#
+# 负责人口径（2026-11-21）：
+#   「老师图片翻译完成写回来是最高 5 个，学员都是默认 1 个」
+#
+# 所以上限**按身份**算，不再由前端传的 itemConcurrency 决定：
+#   · 老师 / 管理员 → 5
+#   · 学员           → 1
+# 前端那次的 itemConcurrency 只作为「本批次想并行几件」的意愿值，
+# 还要受身份上限约束（取两者较小），防止学员传 5 把上游写回打爆。
+_image_semaphores: dict[int, threading.Semaphore] = {}
 _image_semaphore_lock = threading.Lock()
 
-def _reset_image_semaphore(concurrency: int) -> None:
-    """在每个批次开始前调用，把信号量重置为本批次的并行数。"""
-    global _image_semaphore  # noqa: PLW0603
+
+def _writeback_limit(concurrency: int | None, *, privileged: bool) -> int:
+    """本批次写回妙手最多并行几件。
+
+    身份上限优先（老师 5 / 学员 1，负责人定的），批次意愿值只能在
+    上限之内下调，不能超过。
+    """
+    from services import image_service
+
+    cap = (image_service.TEACHER_WRITEBACK_CONCURRENCY if privileged
+           else image_service.MEMBER_WRITEBACK_CONCURRENCY)
+    # 0 或空 = 不指定意愿，直接用身份上限。
+    # 不能写成 `int(concurrency or cap)` —— 传 0 时会退成 1，把老师从 5
+    # 错降到 1（重启恢复路径就是这条，2026-11-21 踩过）。
+    raw = int(concurrency or 0)
+    if raw <= 0:
+        return cap
+    return max(1, min(cap, raw))
+
+
+def _reset_image_semaphore(concurrency: int, *, privileged: bool = False,
+                           key: int | None = None) -> int:
+    """为这一批写回线程设定并发上限，返回实际生效值。"""
+    limit = _writeback_limit(concurrency, privileged=privileged)
     with _image_semaphore_lock:
-        _image_semaphore = threading.Semaphore(max(1, min(5, int(concurrency or 1))))
+        # 学员限 1、老师限 5 —— 直接按身份建对应信号量，不做全局共享，
+        # 否则一个学员把闸门占满，老师那 5 个就排不上了。
+        _image_semaphores[int(key or 0)] = threading.Semaphore(limit)
+    return limit
+
+
+def _image_semaphore_for(key: int | None) -> threading.Semaphore:
+    with _image_semaphore_lock:
+        return _image_semaphores.setdefault(int(key or 0), threading.Semaphore(1))
 
 
 @router.get("", summary="分页查询采集箱（扫描即查询）")
@@ -234,7 +274,12 @@ def process(
                     "main": int(payload.mainImageCount or 0),
                     "sku": int(payload.skuImageCount or 0),
                     "detail": int(payload.detailImageCount or 0),
-                })
+                },
+                # 货源链接只能从**公共采集箱**取（2026-11-21 实测）：
+                # 店铺侧 26 个字段里没有任何 1688 信息，
+                # 而 commonCollectBoxDetailId 只在采集箱列表行里。
+                # 调用方（前端 process 请求）把它带过来。
+                common_detail_id=payload.commonCollectBoxDetailId)
     except MiaoshouError as exc:
         raise map_upstream_error(exc) from None
     finally:
@@ -293,7 +338,13 @@ def process(
     db.commit()
     # 文字+价格+入仓已落库，先把结果返回给前端（几秒），图片翻译后台继续。
     if bg_image_job is not None:
-        _reset_image_semaphore(payload.itemConcurrency)
+        from services import image_service
+
+        _reset_image_semaphore(
+            payload.itemConcurrency,
+            privileged=image_service._operator_is_privileged(
+                getattr(operator, "id", None) or 0),
+            key=getattr(operator, "id", None) or 0)
         _spawn_image_translation(bg_image_job)
     return {"saved": True, "product": product, "images": image_result}
 
@@ -374,6 +425,18 @@ def _resume_stuck_image_jobs() -> list[int]:
                     "main": 9, "sku": 9, "detail": 9,
                 },
             }
+            # 重启恢复也要按提交人的身份建信号量。
+            #
+            # 不建的话 `_image_semaphore_for()` 会落到默认的
+            # `Semaphore(1)` —— 老师重启后突然被降到 1 并发，
+            # 和「老师写回最高 5」的口径不一致（2026-11-21）。
+            from services import image_service
+
+            _reset_image_semaphore(
+                0,  # 0 = 用身份上限，不受批次意愿值限制
+                privileged=image_service._operator_is_privileged(
+                    int(row.operator_id or 0)),
+                key=int(row.operator_id or 0))
             _spawn_image_translation(job)
             resumed.append(row.id)
             logger.info("重启恢复图片线程 product=%s detailId=%s",
@@ -390,8 +453,14 @@ def _spawn_image_translation(job: dict[str, Any]) -> None:
 
 
 def _run_image_translation_guarded(job: dict[str, Any]) -> None:
-    """Acquire the concurrency semaphore then run the actual image translation."""
-    with _image_semaphore:
+    """先拿「写回妙手」的并发许可，再跑真正的图片翻译。
+
+    许可按**提交这件商品的人**分配：老师 5、学员 1（负责人口径）。
+    用 operatorId 作键，而不是一个全局信号量 —— 否则学员会把老师的
+    那 5 个名额占掉。
+    """
+    key = int(job.get("operatorId") or 0)
+    with _image_semaphore_for(key):
         _run_image_translation(job)
 
 

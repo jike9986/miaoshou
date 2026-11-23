@@ -33,11 +33,41 @@ class TestListingRows:
         assert rows[0]["shopId"] == "2001"
         assert rows[0]["title"] == "Test"
 
-    def test_site_mode_filtered_out(self):
-        """editModel='site' 的行被跳过。"""
+    def test_site_mode_is_kept(self):
+        """editModel='site' 的行**照常返回**（2026-11-21 行为变更）。
+
+        ## 为什么改了
+
+        负责人报「这个账号的采集箱显示不出来」（截图：采集箱 / 49，
+        列表空白，提示「当前筛选没有结果」）。
+
+        根因就是这里：账号 8 的 49 条全是 `editModel='site'`（只采集到
+        采集箱、还没分配店铺），旧代码把它们全丢掉 —— 列表空、
+        而 `total` 用的是上游原始计数，于是显示「49」却一件不显示。
+
+        现在 site 行照常返回，用 `site` 作店铺维度替代标识：
+            key     = f"{detailId}:site:{site}"
+            shopId  = ""（空串，前端据此显示「未分配店铺」）
+            shopName= "未分配店铺（{site}）"
+
+        真正该跳过的仍然跳过：`editModel` 既不是 shop 也不是 site 的行。
+        """
         rows = listing_rows(_response([
             _row(1001, 2001, edit_model=None),
             _row(1002, 2002, edit_model="site"),
+        ]))
+        assert len(rows) == 2
+        assert rows[0]["detailId"] == "1001"
+        assert rows[1]["detailId"] == "1002"
+        assert rows[1]["editModel"] == "site"
+        # site 行的 shopId 必须是空串（不是 None）—— 前端靠它判断「未分配」
+        assert rows[1]["shopId"] == ""
+
+    def test_unknown_edit_model_still_filtered(self):
+        """既不是 shop 也不是 site 的 editModel 仍然跳过。"""
+        rows = listing_rows(_response([
+            _row(1001, 2001, edit_model="shop"),
+            _row(1002, 2002, edit_model="weird"),
         ]))
         assert len(rows) == 1
         assert rows[0]["detailId"] == "1001"

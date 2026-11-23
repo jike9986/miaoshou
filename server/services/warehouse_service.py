@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 import zlib
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
@@ -1251,8 +1252,51 @@ def admit_automation_results(db: Session, ids: Iterable[Any], *,
             product.group_id = group.id
             product.group_name = getattr(group, "name", "") or ""
     db.flush()
+    # 加入成品仓库 = 真正进仓，此刻才把图从临时区搬到永久区。
+    #
+    # 负责人 2026-11-21：
+    #   「为什么这些自动化处理好的在自动化结果里面，我还没有从自动化结果里面
+    #     把这些东西加入仓库，你就把图片从临时仓库加入永久仓库了，
+    #     要是其中有哪些我不需要没加入成品仓库呢」
+    #
+    # 原来搬运发生在 `save_from_collect_box`（处理那一刻），所以没点
+    # 「加入成品仓库」的商品，图已经躺在 products 永久区了。若用户最后决定
+    # 不要这几件，永久区就留下了一批没人认领的图。
+    #
+    # 现在：处理阶段图留在 auto-temp（临时区，14 天自动清），
+    # 只有这张调用（用户确认加入仓库）才 promote。删除自动化结果时
+    # 图还留在临时区，会被正常清理，不会污染永久区。
+    promote_moved = 0
+    for product in products:
+        try:
+            # 必须 deepcopy：`dict(...)` 是浅拷贝，嵌套的 skuPropertyList /
+            # attrValueList 里的 dict 还是**同一个对象**。promote 就地改那些
+            # 嵌套 dict 时实际改的是 product.payload 本身，赋值回去时
+            # SQLAlchemy 比较 == 发现内容相同 → 判定无变化 → 不生成 UPDATE，
+            # 图片地址的改动全部丢失（2026-11-21 实测：fixed=250 但库里没变）。
+            payload = (deepcopy(product.payload)
+                       if isinstance(product.payload, dict) else {})
+            if not payload:
+                continue
+            from services import image_upload
+
+            report = image_upload.promote_payload_images(payload)
+            moved = int(report.get("moved") or 0)
+            if moved:
+                product.payload = payload
+                # 主图/封面/详情图 URL 可能变了，同步回包装字段
+                main = payload.get("imgUrls")
+                if isinstance(main, list) and main:
+                    product.images = [str(u) for u in main if u]
+                    product.cover = str(main[0])
+                promote_moved += 1
+                logger.info("加入成品仓库搬运图片 id=%s moved=%s", product.id, moved)
+        except Exception as exc:  # noqa: BLE001 - 搬运失败不阻断入库
+            logger.warning("加入成品仓库搬运图片失败 id=%s：%s",
+                           getattr(product, "id", "?"), exc)
     return {"added": len(products), "ids": [str(product.id) for product in products],
-            "groupId": group.id if group is not None else None}
+            "groupId": group.id if group is not None else None,
+            "promoted": promote_moved}
 
 
 # --- 详情 -----------------------------------------------------------------
@@ -2497,7 +2541,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                           skip_image_review: bool = False,
                           operator_id: int | None = None,
                           automation_result: bool = False,
-                           image_limits: Mapping[str, Any] | None = None
+                           image_limits: Mapping[str, Any] | None = None,
+                           common_detail_id: Any = None
                            ) -> dict[str, Any]:
     """拉详情 → 按模板定价（可选）→ 入库（主图截断 9 张）。
 
@@ -2577,13 +2622,53 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         if found:
             source_captured = found
             break
+
+    # 上面全都没抓到 → 查**公共采集箱**（2026-11-21 实测唯一可靠来源）。
+    #
+    # 店铺侧确实一点货源信息都没有：账号 8 的 49 条 `sourceItemId` 全是 None，
+    # `shop_detail` 的 26 个字段递归扫描 0 命中。但公共采集箱里 100% 有：
+    #
+    #   common_box_detail(commonCollectBoxDetailId)
+    #     → editCommonCollectBoxDetail.sourceList[0].sourceItemUrl
+    #     → http://detail.1688.com/offer/717267894593.html
+    #
+    # 实测覆盖率 12/12、49 条约 54 秒（每条一次上游请求）。
+    # 这是在入仓时逐件跑的，可以接受；列表接口里绝不能这么拉。
+    if not source_captured:
+        # `commonCollectBoxDetailId` **只存在于采集箱列表行里**，
+        # `shop_detail` 返回的 26 个字段里没有它（实测）。
+        # 所以调用方必须把它传进来（`common_detail_id`）；
+        # 下面的 fallback 只是兜底，实际拿不到。
+        common_id = common_detail_id
+        if not common_id:
+            for candidate in (
+                info,
+                info.get("shopCollectItemInfo") if isinstance(info, dict) else None,
+                response.get("data") if isinstance(response, dict) else None,
+            ):
+                if isinstance(candidate, dict) and candidate.get("commonCollectBoxDetailId"):
+                    common_id = candidate["commonCollectBoxDetailId"]
+                    break
+        if common_id:
+            source_captured = _source_link.capture_from_common_box(client, common_id)
+            if source_captured:
+                logger.info("入仓从公共采集箱补到货源 detailId=%s commonId=%s url=%s",
+                            detail_id, common_id, source_captured.get("sourceUrl"))
+            else:
+                logger.info("入仓公共采集箱没有货源 detailId=%s commonId=%s",
+                            detail_id, common_id)
+        else:
+            logger.info("入仓未拿到 commonCollectBoxDetailId detailId=%s"
+                        "（调用方没传，详情里也没有）", detail_id)
+
     if source_captured:
         logger.info("入仓抓到货源 detailId=%s url=%s",
                     detail_id, source_captured.get("sourceUrl"))
     else:
         # 抓不到不算错误：妙手多数商品本来就不带。但要留日志，
         # 否则以后又会出现「532 件全没有货源」却无从追查。
-        logger.info("入仓未抓到货源 detailId=%s（妙手返回里没有 1688 字段）", detail_id)
+        logger.info("入仓未抓到货源 detailId=%s（店铺侧和公共采集箱都没有 1688 字段）",
+                    detail_id)
 
     # 翻译放在**最后**一步（负责人 2026-11-09 定），这里只做占位：
     # 颜色、标题清洗、图片筛选的规则全是按中文写的（中文颜色词表、违规词表、
@@ -3047,22 +3132,38 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         )
         draft_verified = True
 
-    # 入库 = 进成品仓：把图片从临时区搬到成品区。
+    # 入库 = 进「自动化结果」暂存区，**不搬图片**。
     #
-    # 图床分两个区（负责人 2026-11-09 定）：auto-temp 放自动化临时图、14 天清理；
-    # products 放成品仓图、长期保留。这里必须**真的搬文件**，只改数据库标记的话
-    # 临时区整批清理时会把成品商品的图一起删掉，商品全变挂图。
-    # 搬不动就保留临时地址（图还在），不阻断入库。
-    try:
-        from services import image_upload
+    # ## 为什么这里不搬（2026-11-21 修正）
+    #
+    # 负责人：
+    #   「为什么这些自动化处理好的在自动化结果里面，我还没有从自动化结果里面
+    #     把这些东西加入仓库，你就把图片从临时仓库加入永久仓库了，
+    #     要是其中有哪些我不需要没加入成品仓库呢」
+    #
+    # 原来这一步就把图从 auto-temp 搬进 products 永久区。问题：
+    #   · 处理完只是进「自动化结果」暂存区，用户还没决定要不要；
+    #   · 一旦用户点删除（不要了），永久区已经留下一批没人认领的图，
+    #     而且原文件被 unlink 了，连回滚都做不到。
+    #
+    # 现在搬运挪到 `admit_automation_results`（用户确认「加入成品仓库」
+    # 那一刻）。图床两区的分工不变：auto-temp 临时区 14 天清理、
+    # products 成品区长期保留 —— 只是「什么时候搬」改成跟用户的决定对齐。
+    #
+    # 直接入仓的路径（不走自动化结果、手动从采集箱导入）仍然在这里搬，
+    # 因为那种情况没有「暂存待确认」这一步。
+    if not automation_result:
+        try:
+            from services import image_upload
 
-        promote_report = image_upload.promote_payload_images(payload)
-        if promote_report.get("moved"):
-            logger.info("入库搬运图片到成品区 detailId=%s moved=%s failed=%s",
-                        detail_id, promote_report.get("moved"), promote_report.get("failed"))
-    except Exception as exc:  # noqa: BLE001 - 搬运失败不阻断入库
-        logger.warning("图片搬运到成品区失败 detailId=%s：%s", detail_id, exc)
-        promote_report = {"error": str(exc)[:160]}
+            promote_report = image_upload.promote_payload_images(payload)
+            if promote_report.get("moved"):
+                logger.info("入库搬运图片到成品区 detailId=%s moved=%s failed=%s",
+                            detail_id, promote_report.get("moved"),
+                            promote_report.get("failed"))
+        except Exception as exc:  # noqa: BLE001 - 搬运失败不阻断入库
+            logger.warning("图片搬运到成品区失败 detailId=%s：%s", detail_id, exc)
+            promote_report = {"error": str(exc)[:160]}
 
     key = product_key(detail_id, shop_id)
     fields = product_service.build_product(
@@ -4113,8 +4214,45 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
                             _sku["weight"] = _src_val
             except ValueError:
                 pass
-        client.save_shop(detail_id, shop_id, oss_md5, upstream_payload)
+        # 成本下限自动抬价（2026-11-21）。
+        #
+        # 妙手会拒绝低于成本的定价：
+        #   「产品设置的本地展示价 6.29MYR，无法覆盖产品基础成本
+        #     (跨境物流运费+关税+增值税)：6.79MYR，继续上传会导致亏损」
+        #
+        # 载体流程（carrier_service.py:2008）早就有这套处理：从错误消息里
+        # 解析出成本下限，把 SKU 价抬到「下限 + 0.01」再重试。但**处理流程
+        # 一直没有接**，所以同一批商品里便宜的几件每次都被打回来，
+        # 用户只看到一句看不懂的上游报错（2026-11-21 实测：8 件未处理商品中
+        # 至少 1 件就是这个原因）。
+        #
+        # 这里复用同一个函数，最多重试 MAX_COST_FLOOR_RETRIES 轮。
+        # 抬价失败（消息解析不出数字）就按原样抛错，不掩盖真问题。
+        from services import carrier_service
+
+        cost_floor_retries = 0
+        price_adjustments: list[dict[str, Any]] = []
+        while True:
+            try:
+                client.save_shop(detail_id, shop_id, oss_md5, upstream_payload)
+                break
+            except MiaoshouError as exc:
+                adjustment = None
+                if cost_floor_retries < carrier_service.MAX_COST_FLOOR_RETRIES:
+                    adjustment = carrier_service._raise_price_to_reported_floor(
+                        upstream_payload, exc)
+                if adjustment is None:
+                    raise
+                cost_floor_retries += 1
+                price_adjustments.append(adjustment)
+                logger.info("成本下限抬价 detailId=%s %s -> %s（第%d轮）",
+                            detail_id, adjustment.get("oldPrice"),
+                            adjustment.get("newPrice"), cost_floor_retries)
         saved = client.shop_detail(detail_id, shop_id)
+        if price_adjustments:
+            payload["_costFloorAdjustments"] = price_adjustments
+            if isinstance(upstream_payload, dict):
+                upstream_payload["_costFloorAdjustments"] = price_adjustments
     except MiaoshouError as exc:
         from services.account_service import map_upstream_error
 
@@ -4126,6 +4264,14 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
             "妙手已接收保存请求，但无法读回商品详情；已阻止后续发布，请刷新核对",
             status=502,
         )
+
+    # 读回是「保存后立刻拉」，妙手那边偶尔还没落定 —— 拿到的是**保存前**的快照，
+    # 于是价格 / 重量被判成「不一致」，整件被拦下不让发布。
+    #
+    # 2026-11-21 实测：同一批 19 件里 2 件报 `mismatches: ['prices']`，
+    # 原样重试一次就都过了 —— 提交的 payload 本身完全正确
+    # （price=10.46 priceIncludeVat=12.41 originPrice=17，没有任何改写）。
+    #
     # 校验基准必须是**实际提交给妙手的那份**（upstream_payload），
     # 不是规范化之前的 payload：规格值对回草稿原文后，payload 里的
     # 清洗值（白绿色）与读回值（566【白绿色】）必然"不一致"，
@@ -4134,6 +4280,30 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
     mismatches = readback_check.readback_issues(
         upstream_payload, actual, original, coverage, pricing_enabled=pricing_enabled,
     )
+
+    # 退避重试读回。只在不一致时进入，正常路径零开销。
+    # 取「重试后不一致项更少」的那次结果，避免一次抖动掩盖真问题。
+    for attempt in range(2):
+        if not mismatches:
+            break
+        time.sleep(1.5 + attempt * 1.0)
+        try:
+            retried = client.shop_detail(detail_id, shop_id)
+        except MiaoshouError:
+            break
+        retried_info = product_service.detail_block(retried)["info"]
+        if not retried_info:
+            break
+        retried_mismatches = readback_check.readback_issues(
+            upstream_payload, retried_info, original, coverage,
+            pricing_enabled=pricing_enabled,
+        )
+        if len(retried_mismatches) < len(mismatches):
+            logger.info("读回重试生效 detailId=%s 第%d次 %s -> %s",
+                        detail_id, attempt + 1, mismatches, retried_mismatches)
+            actual = retried_info
+            mismatches = retried_mismatches
+
     if mismatches:
         # 明细必须带出去：只报一句「不一致」没法定位（2026-11-11 实测：
         # 同一句话连报多天，没人知道是 weight 还是 prices 还是规格）。

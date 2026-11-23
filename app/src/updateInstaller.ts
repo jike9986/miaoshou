@@ -26,6 +26,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { app, BrowserWindow, net } from "electron";
 import {
   ALLOWED_HOSTS,
+  encodePowerShellCommand,
+  installPowerShellScript,
+  installerArguments,
   DOWNLOAD_USER_AGENT,
   isCdnHeaders,
   planSegments,
@@ -445,16 +448,37 @@ export async function downloadInstaller(
   }
 }
 
+/** 当前安装目录（打包态才有意义；开发态返回空串，不传 /DIR）。 */
+function installDir(): string {
+  return app.isPackaged ? path.dirname(app.getPath("exe")) : "";
+}
+
+/**
+ * PowerShell 的绝对路径。
+ *
+ * 不能只写 `"powershell.exe"` 交给 PATH 解析：Electron 打包后的进程环境
+ * 与用户 shell 不同（PATH 可能被裁剪），解析失败只会 emit 一个
+ * `error` 事件，静默失败（2026-11-23 实测：安装包在、软件退出、
+ * install.log 一行没有）。Windows PowerShell 的位置是固定的。
+ */
+function powershellPath(): string {
+  const root = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+  return path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
 /**
  * 启动安装器。
  *
- * NSIS /S 静默安装，安装完成后自动启动程序（通过 /postinstall 参数触发
- * installer.nsh 里的 customInstallEnd，或直接在安装器退出后由我们 spawn 软件）。
+ * 参数见 `installerArgs.ts`：Inno 要 `/VERYSILENT`，**不是** NSIS 的 `/S`
+ * （2026-11-23 实测：传 `/S` 会弹出图形向导，用户以为在后台升级，
+ * 其实桌面上躺着一个没人点的窗口）。同时用 `/DIR=` 钉住安装目录，
+ * 保证装的就是桌面快捷方式指的那一份。
+ *
  * 这里**不等待**安装器退出：它会关掉本程序，等待会让主进程挂在一个正在被卸载的进程上。
  */
 export function launchInstaller(installerPath: string, silent = true): { ok: boolean; error?: string } {
   try {
-    const args = silent ? ["/S"] : [];
+    const args = silent ? installerArguments(installDir()) : [];
     const child = spawn(installerPath, args, {
       detached: true,
       stdio: "ignore",
@@ -475,20 +499,28 @@ export function launchInstaller(installerPath: string, silent = true): { ok: boo
  * 负责人要求：「下载好之后静默处理的，然后自动重启软件，用户桌面端的
  * 快捷方式启动也是在最新版本的」。
  *
- * 三步必须是**串行**的，任何一步提前都会失败：
+ * ## 三道串行步骤（任何一步提前都会失败）
  *
  *   1. 等本进程真正退出（Inno 要替换 AohuangShangpin.exe，
- *      文件被占用时 Setup 会报「文件正在使用」）
- *   2. 静默安装 `/S` → Inno 的 `UsePreviousAppDir=yes` 会自动装回
- *      上次的目录（例如 D:\软件\奥皇上品），不需要我们传路径
- *   3. 装完重启新版本
+ *      被占用时 Setup 会报「文件正在使用」）
+ *   2. `/VERYSILENT /DIR=<当前安装目录>` 静默覆盖安装
+ *   3. 装完**按快捷方式当前指向**拉起新版本
  *
- * ## 为什么重启要写两次「清理 + 启动」
+ * ## 2026-11-23 修的三个真实故障
  *
- * Inno 的 `/S` 是**异步**的：`Start-Process -Wait` 等的是 setup 进程本身，
- * 而 setup 在替换文件后可能提前返回，此时 exe 还没写完。所以安装后
- * 先等 2 秒再启动，并且**优先用快捷方式的目标路径**（安装器会把快捷方式
- * 指到新目录）—— 这样即使安装目录变了，重启的也是新装的那一份。
+ * **① 参数用错**：原来传 NSIS 的 `/S`，Inno 不认 → 弹图形向导。
+ *    用户关掉软件以为在后台升级，其实桌面上躺着个没人点的窗口。
+ *    见 `installerArgs.ts`。
+ *
+ * **② 安装包在自己被运行前删掉了**：原代码 spawn 完 PowerShell 后立刻
+ *    `await discardInstaller()`，那会删掉 `updates\*.exe` ——
+ *    而 PowerShell 还要 800ms 后才去启动它。文件早没了，
+ *    （`Start-Process` 抛错、静默吞掉），于是「关掉软件什么也没发生」。
+ *    现在**只由 PowerShell 在安装成功后清理**，JS 侧不再碰。
+ *
+ * **③ 重启目标取早了**：原代码安装前就把 `$exe` 定成快捷方式当前目标。
+ *    如果这次安装换了目录，装完启动的还是旧路径。现在安装完重新读一次
+ *    快捷方式（Inno 的 `[Icons]` 每次都会重写它），读不到才退回原值。
  *
  * 编码用 Base64(UTF-16LE)：中文路径（D:\软件\奥皇上品）走 cmd 的 GBK
  * 会变乱码，`-EncodedCommand` 不受控制台代码页影响。
@@ -497,8 +529,9 @@ export async function installOnQuit(): Promise<void> {
   const pending = await pendingInstaller();
   if (!pending) return;
 
-  // 安装完要启动的 exe：优先用快捷方式当前指向的目标（安装器会更新它），
-  // 拿不到再退回当前进程的 exe —— 两者在正常升级里是同一个路径。
+  const dir = installDir();
+
+  // 兜底重启目标：当前进程的 exe。安装完会优先用快捷方式的新目标。
   let restartTarget = app.getPath("exe");
   try {
     const shortcut = path.join(app.getPath("desktop"), "奥皇上品.lnk");
@@ -510,44 +543,93 @@ export async function installOnQuit(): Promise<void> {
   } catch { /* 取不到就用当前 exe */ }
 
   const installerTarget = pending.path;
+  const logPath = path.join(app.getPath("userData"), "install.log");
 
-  // PowerShell 脚本（每一步都单独成行便于排查）：
-  //   等 800ms     → 本进程先退干净，否则 exe 被占用装不上
-  //   /S /NOCANCEL → 静默安装，不弹任何界面
-  //   -Wait        → 等安装进程返回
-  //   等 2s        → 让 setup 落完盘
-  //   启动新版本   → 用户看到的还是「点了更新，软件重开就是新版」
-  const psLines = [
-    "Start-Sleep -Milliseconds 800",
-    "$setup = [System.Text.Encoding]::Unicode.GetString("
-      + "[System.Convert]::FromBase64String('"
-      + Buffer.from(installerTarget, "utf16le").toString("base64") + "'))",
-    "$exe = [System.Text.Encoding]::Unicode.GetString("
-      + "[System.Convert]::FromBase64String('"
-      + Buffer.from(restartTarget, "utf16le").toString("base64") + "'))",
-    "Start-Process -FilePath $setup -ArgumentList '/S','/NOCANCEL' -Wait",
-    // 等新版本落完盘
-    "Start-Sleep -Seconds 3",
-    // Inno 的 [Run] 段在静默安装时也会启动软件（2026-11-20 去掉 skipifsilent），
-    // 所以这里先检查是否已经在跑，避免开两个窗口。
-    "$running = Get-Process -Name 'AohuangShangpin' -ErrorAction SilentlyContinue",
-    "if (-not $running -and (Test-Path $exe)) {"
-      + " Start-Process -FilePath $exe -ArgumentList '--no-sandbox' }",
-    // 清理下载目录里的安装包（安装器管不到 userData\\updates，
-    // 不清理就每更新一次多留一个 77MB 的 exe）
-    "Get-ChildItem -Path (Split-Path $setup) -Include *.exe,*.part -File -EA SilentlyContinue "
-      + "| Where-Object { $_.FullName -ne $setup } | Remove-Item -Force -EA SilentlyContinue",
-    "Remove-Item $setup -Force -EA SilentlyContinue",
-  ];
-  const psCommand = psLines.join("; ");
-  const encoded = Buffer.from(psCommand, "utf16le").toString("base64");
+  // 脚本本体在 updateDownload.ts 的纯函数 `installPowerShellScript()` 里。
+  //
+  // 为什么抽出去：拼 PS 命令是不可见的代码，一个引号错了整条脚本语法报错、
+  // PowerShell 秒退，日志一行都不写 —— 实测就是这个症状（安装包在、
+  // 进程优雅退出、版本没变、install.log 是空的）。抽成纯函数后可以用
+  // 真 PowerShell 直接跑一遍验证，也能进单元测试。
+  const encoded = encodePowerShellCommand(installPowerShellScript({
+    installerPath: installerTarget,
+    restartPath: restartTarget,
+    logPath,
+    appDir: dir,
+  }));
   const { spawn: _spawn } = await import("node:child_process");
-  _spawn(
-    "powershell.exe",
-    ["-WindowStyle", "Hidden", "-NonInteractive", "-EncodedCommand", encoded],
-    { detached: true, stdio: "ignore" }
-  ).unref();
-  await discardInstaller();
+  const psExe = powershellPath();
+  // ## 必须用 `cmd /c start` 启动，不能直接 spawn（2026-11-23 第五个坑，决定性实验）
+  //
+  // 直连 spawn 在 Windows 上**必然静默失败**：实测五种写法只有三种能跑，
+  // 而我们现在用的 `detached:true + stdio:"ignore"` 恰好是最坏的那种 ——
+  // 进程被创建、立刻 exit 0、脚本一行都不执行、日志一个字节不写。
+  //
+  //   spawn(ps, [...], {detached:true, stdio:"ignore"})  → 空文件，脚本没跑
+  //   spawn(ps, [...], {detached:true, windowsHide:true}) → 同上
+  //   spawn(ps, [...], {detached:true, stdio:[null,null,null]}) → 同上
+  //   spawn(ps, [...], {shell:true})                     → OK
+  //   spawn(ps, [...], {detached:false}).unref()          → OK（但没真脱离）
+  //   spawn("cmd", ["/c","start","","/b",ps,...])         → OK 且真脱离
+  //
+  // 选最后一种：`start /b` 让 PowerShell 成为独立的进程树根，
+  // Electron 退出后不会被连带杀掉，也不需要 shell 参数拼接（无注入风险）。
+  const child = _spawn(
+    process.env.ComSpec || "cmd.exe",
+    ["/c", "start", "", "/b", psExe, "-WindowStyle", "Hidden", "-NonInteractive", "-EncodedCommand", encoded],
+    { detached: true, stdio: "ignore", windowsHide: true }
+  );
+  // ## 必须监听 error（2026-11-23 第三个坑）
+  //
+  // 之前写的是 `spawn("powershell.exe", ...)` 然后直接 `.unref()`。
+  // 如果进程起不来（PATH 里没有、或打包环境的 PATH 被裁剪），Node 只会
+  // emit 一个 `error` 事件 —— 没人监听时**完全静默**：不回包、不抛错、
+  // 不写日志。实测表现就是「安装包在、软件优雅退出、什么也没发生、
+  // install.log 一行没有」，比崩溃还难查。
+  //
+  // 现在：① 用绝对路径（%SystemRoot%\System32\WindowsPowerShell\v1.0）；
+  //       ② error 落盘到 install.log，下次一眼能看出是 spawn 失败。
+  child.on("error", (error: Error) => {
+    void fs.appendFile(
+      logPath,
+      `[${new Date().toISOString()}] spawn failed (${psExe}): ${error.message}\n`,
+    ).catch(() => {});
+  });
+  // ## 必须等它真的跑起来（2026-11-23 第四个坑）
+  //
+  // spawn 只是把进程创建请求交给系统，PowerShell 自己冷启动要 300~800ms。
+  // 调用方 `before-quit` 紧接着就 `app.exit(0)`，整个进程树被拆掉时
+  // PowerShell 还没执行到第一行 —— 表现为：日志只有我们的 trace、
+  // `launching:` 一行都没有、安装包原地不动、版本不变。
+  //
+  // 判据用脚本自己写的那行 `launching:`：它落盘就证明 PowerShell 已经
+  // 加载完、脚本已开始执行，之后主进程退出不会影响它（已 detached）。
+  const started = await waitForLaunchMarker(logPath, 15000);
+  if (!started) {
+    await fs.appendFile(
+      logPath,
+      `[${new Date().toISOString()}] powershell did not reach launch marker within 15s (pid=${child.pid ?? "?"})\n`,
+    ).catch(() => {});
+  }
+  child.unref();
+  // 刻意**不**在这里 discardInstaller()：那会删掉 PowerShell 900ms 后要运行的
+  // 安装包（2026-11-23 事故根因）。清理交给上面的 PowerShell，装完再删。
+}
+
+/**
+ * 等 `installPowerShellScript()` 写出 `launching:` 那一行。
+ *
+ * 轮询而不是监听文件：Windows 上 fs.watch 对「文件还不存在 → 被创建」
+ * 的语义不可靠，而这里最多等 15 秒、每 100ms 一次，代价可以忽略。
+ */
+async function waitForLaunchMarker(logPath: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const content = await fs.readFile(logPath, "utf-8").catch(() => "");
+    if (content.includes("launching:")) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
 }
 
 /**

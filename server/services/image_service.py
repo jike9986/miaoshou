@@ -16,6 +16,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import os
 import threading
 import time
 from collections.abc import Iterable, Mapping
@@ -75,30 +76,111 @@ def translation_prompt(language: str = "ms") -> str:
     name = LANGUAGE_PROMPT_NAMES.get(target, "马来语")
     return TRANSLATION_PROMPT_TEMPLATE.format(language=name)
 WINDOWS = {"minute": 60, "hour": 3600, "day": 86400}
-# 图片翻译并发（负责人 2026-11-10 定的口径）。
+# 图片翻译并发（负责人口径，2026-11-21 重新确认）。
 #
-# 上游是中转站，总并发上限 100，分给我们的额度是 **50**。
-# 所以这里要分成两层，不能只有一个数字：
+# 分清两件完全不同的事，别混：
 #
-#   IMAGE_CONCURRENCY      单件商品内部同时提交几张 —— 取 50 的额度，
-#                          一件 27 张的图可以一次性全部发出去，不用分批。
-#   IMAGE_GLOBAL_CONCURRENCY 全服务器同时在跑的提交数上限 —— 50。
-#                          多人同时用时，每人各开线程池，靠这个全局闸门
-#                          把总数压住，不会把中转站打爆。
+#   ┌ 发出去翻译（提交给上游中转站）
+#   │   UPSTREAM_IMAGE_CONCURRENCY         全服务器合计上限 = 500
+#   │   PER_USER_IMAGE_CONCURRENCY         每个学员账号上限 = 50
+#   │   老师的图片翻译**不占**学员那份额度，但同样计入 500 的总额
+#   │
+#   └ 翻译完写回妙手（落库 + save_shop）
+#       TEACHER_WRITEBACK_CONCURRENCY      老师 = 5
+#       MEMBER_WRITEBACK_CONCURRENCY       学员 = 1
 #
-# 实测（2026-11-10）：并发 8/16/32 全部成功；48 出现 1 个 502；
-# 80 总并发时 80/80 成功但队尾要等 329s。给到 50 是额度内的安全上限。
-IMAGE_CONCURRENCY = 50
+# 负责人原话：
+#   「服务器能够同时把图片发到上游翻译的张数上限为 500……每个学员用户
+#     当前限制是 50 个，一个产品处理肯定是没有 50 个上限的，所以可以把
+#     两三四件里面的图片一起上传翻译。但是老师没有限制，老师学员所有
+#     加起来的图片并发为 500，但是老师图片翻译完成写回来是最高 5 个，
+#     学员都是默认 1 个」
+#
+# ## 单件商品不该受 50 限制
+#
+# `IMAGE_CONCURRENCY` 是**单次 translate() 里最多同时发几张**。它只受
+# 「本用户剩余额度」和「全局剩余额度」约束，不写死 50 —— 一件 40 张图的
+# 商品可以一次全发（只要额度和全局闸门允许）。所以这里取一个够大的值，
+# 真正的闸门交给下面两个 Semaphore。
+IMAGE_CONCURRENCY = 200
 
-# 全服务器同时提交的图片数（跨用户共享）。中转站分给我们的额度。
-IMAGE_GLOBAL_CONCURRENCY = 50
-# 全局并发闸门：跨用户共享，保证同时提交给中转站的总数不超过额度。
+# 全服务器合计同时提交给上游翻译的张数上限（负责人 2026-11-21：500）。
+# 上游给自己留了 1000 的余量，我们只占一半。
+UPSTREAM_IMAGE_CONCURRENCY = 500
+
+# 每个学员账号同时提交的上限（负责人：每个学员 50）。
+PER_USER_IMAGE_CONCURRENCY = 50
+
+# 翻译完成写回妙手的并发：老师 5、学员 1（负责人明确）。
+TEACHER_WRITEBACK_CONCURRENCY = 5
+MEMBER_WRITEBACK_CONCURRENCY = 1
+
+# 全局闸门：跨用户共享，保证同时提交给上游的总数不超过 500。
 #
-# 多人同时跑时，每件商品各开一个 ThreadPoolExecutor（各自 IMAGE_CONCURRENCY），
-# 光靠单件并发压不住总数 —— 10 个人同时跑就是 500 并发，中转站直接 502。
-# 这里用一个进程级 Semaphore 把总提交数卡在 IMAGE_GLOBAL_CONCURRENCY。
-# 拿不到许可就等（阻塞在提交线程里），不会丢任务、不会报错。
-_GLOBAL_SUBMIT_SLOTS = threading.BoundedSemaphore(IMAGE_GLOBAL_CONCURRENCY)
+# 多人同时用时，每件商品各开一个 ThreadPoolExecutor，光靠单件并发压不住
+# 总数 —— 全靠这个 Semaphore 把总提交数卡住。拿不到许可就等（阻塞在提交
+# 线程里），不会丢任务、不会报错。
+_GLOBAL_SUBMIT_SLOTS = threading.BoundedSemaphore(UPSTREAM_IMAGE_CONCURRENCY)
+
+# 每个用户各自的闸门（学员 50；老师不限，故不建闸门）。
+#
+# 为什么按用户单独一个 Semaphore 而不是一个总数：负责人要的是「每个学员
+# 50，老师不限制」，那就必须分开计数。用 dict 惰性创建，键是 operator_id。
+_USER_SUBMIT_SLOTS: dict[int, threading.BoundedSemaphore] = {}
+_USER_SUBMIT_LOCK = threading.Lock()
+
+
+def _user_submit_slot(operator_id: int | None) -> threading.BoundedSemaphore | None:
+    """取该用户的上游提交闸门；老师/未知身份返回 None（不限）。"""
+    if operator_id is None:
+        return None
+    if _operator_is_privileged(operator_id):
+        return None
+    with _USER_SUBMIT_LOCK:
+        slot = _USER_SUBMIT_SLOTS.get(operator_id)
+        if slot is None:
+            slot = threading.BoundedSemaphore(PER_USER_IMAGE_CONCURRENCY)
+            _USER_SUBMIT_SLOTS[operator_id] = slot
+        return slot
+
+
+def _operator_is_privileged(operator_id: int) -> bool:
+    """老师 / 管理员不受 50 的限制。
+
+    这里只读一次角色，命中缓存后几乎无开销；查不到身份时按「受限」处理
+    （宁可慢一点，也不能让额度被无主线程吃满）。
+    """
+    cached = _PRIVILEGED_CACHE.get(operator_id)
+    if cached is not None:
+        return cached
+    try:
+        from db.session import SessionLocal
+        from models import Operator
+        from services import operator_service
+
+        db = SessionLocal()
+        try:
+            operator = db.query(Operator).filter(Operator.id == operator_id).one_or_none()
+            privileged = (operator is not None
+                          and operator_service.role_of(operator) in {
+                              operator_service.ROLE_ADMIN,
+                              operator_service.ROLE_TEACHER})
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - 判定失败按受限处理
+        privileged = False
+    _PRIVILEGED_CACHE[operator_id] = privileged
+    return privileged
+
+
+_PRIVILEGED_CACHE: dict[int, bool] = {}
+
+
+def writeback_concurrency(operator_id: int | None) -> int:
+    """翻译完成写回妙手的并发：老师/管理员 5，学员 1。"""
+    if operator_id is not None and _operator_is_privileged(operator_id):
+        return TEACHER_WRITEBACK_CONCURRENCY
+    return MEMBER_WRITEBACK_CONCURRENCY
 
 
 STATUSES = ("queued", "submitted", "ready", "unknown", "failed")
@@ -346,9 +428,63 @@ def _shrink(raw: bytes) -> bytes:
         return raw
 
 
+def _repair_zone_url(url: str) -> str:
+    """图床地址指向的分区里文件已经不在时，换到文件真正的分区。
+
+    ## 为什么需要（2026-11-21 实测）
+
+    入库搬运 `promote_to_product_zone()` 会把文件从 `auto-temp/` 移到
+    `products/`，并 `unlink()` 源文件。但妙手草稿里存的仍是旧地址
+    —— 于是重新处理这件商品时，`_fetch_source()` 拿到的还是
+    `.../auto-temp/xxx.jpg`，那个文件早已不存在 → **HTTP 404**
+    → 后台图片翻译失败 → `draft_verified_revision=None`
+    → 商品死锁在 needs_review，永不进「自动化结果」。
+
+    实测 detailId=3549610513（id=559）：19 个图片地址里 18 个 404，
+    而对应文件 18 个全都在 `products/` 里。这不是网络问题，
+    是「地址和文件分了家」。
+
+    修复策略（只动明确失联的地址，不做任何猜测）：
+      · 地址在 auto-temp、但本地 auto-temp 没这个文件、
+        而 products 有同名文件 → 换到 products
+      · 反过来（地址在 products、文件在 auto-temp）同理
+      · 拿不准就原样返回，让上层的 404 照常报出来，不掩盖真问题
+    """
+    text = str(url or "").strip()
+    if not text.startswith("https://"):
+        return url
+    try:
+        from services import image_upload
+    except Exception:  # noqa: BLE001 - 循环依赖兜底
+        return url
+
+    product_dir, product_base, _pl, _pb = image_upload._zone_paths("product")
+    auto_dir, auto_base, _al, _ab = image_upload._zone_paths("auto")
+    if text.startswith(product_base):
+        name = text[len(product_base):]
+        if not name or "/" in name:
+            return url
+        if os.path.isfile(os.path.join(product_dir, name)):
+            return url
+        if os.path.isfile(os.path.join(auto_dir, name)):
+            return auto_base + name
+        return url
+    if text.startswith(auto_base):
+        name = text[len(auto_base):]
+        if not name or "/" in name:
+            return url
+        if os.path.isfile(os.path.join(auto_dir, name)):
+            return url
+        if os.path.isfile(os.path.join(product_dir, name)):
+            return product_base + name
+        return url
+    return url
+
+
 def _fetch_source(url: str) -> bytes:
     if url.startswith("data:"):
         return _decode_base64(url.split(",", 1)[-1])
+    url = _repair_zone_url(url)
     try:
         with httpx.Client(timeout=httpx.Timeout(60.0, connect=15.0),
                           follow_redirects=True, proxy=system_proxy()) as client:
@@ -937,13 +1073,28 @@ def translate(db: Session, payload: Mapping[str, Any],
     outcomes: dict[int, dict[str, Any] | Exception] = {}
 
     def _submit_guarded(raw, size, *, prompt):
-        """Submit through the global gate: block until a slot is free.
+        """Submit through both gates: per-user first, then global.
 
-        Each user opens its own pool, so per-product concurrency alone cannot
-        cap the cross-user total. Waiting here only blocks this submit thread;
-        no task is lost and nothing errors out.
+        ## 两层闸门（负责人 2026-11-21 口径）
+
+        先拿该用户自己的额度（学员 50），再拿全服务器额度（500）。
+        **必须先拿用户闸门再拿全局闸门**，反过来会死锁：
+          用户 A 占满全局 500 张后等自己的 50 张，
+          用户 B 在等全局 —— A 的 50 张永远等不到全局许可，全员卡死。
+        按「先私后公」的固定顺序不会成环。
+
+        老师没有用户闸门（`_user_submit_slot` 返回 None），
+        只受 500 全局上限约束 —— 负责人原话「但是老师没有限制」。
+
+        Waiting here only blocks this submit thread; no task is lost and
+        nothing errors out.
         """
-        with _GLOBAL_SUBMIT_SLOTS:
+        user_slot = _user_submit_slot(operator_id)
+        if user_slot is None:
+            with _GLOBAL_SUBMIT_SLOTS:
+                return _submit(raw, size, prompt=prompt)
+        # 先私后公，顺序固定（反过来会死锁，见上面的说明）
+        with user_slot, _GLOBAL_SUBMIT_SLOTS:
             return _submit(raw, size, prompt=prompt)
 
     if pending:

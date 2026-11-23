@@ -113,14 +113,24 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
             current = Decimal(str(sku.get("price")))
         except (InvalidOperation, TypeError, ValueError):
             continue
-        if current != old_price:
+        # 不再要求 `current == old_price`（2026-11-21 修）。
+        #
+        # 妙手报的「本地展示价」和它收到的 SKU price**不是同一个数**：
+        # 实测 detailId=3549609998 —— 提交 price=4.31（拿货价 7 CNY 换算），
+        # 妙手报「本地展示价 6.29MYR，基础成本 6.79MYR」。
+        # 原来按 `current != old_price` 跳过，于是没有任何 SKU 被改，
+        # 函数返回 None，调用方按原样抛错 —— 抬价机制对这类商品从未生效。
+        #
+        # 正确做法：把「所有低于下限的 SKU」都抬到下限 + 0.01。
+        # 已经高于下限的不动，避免把贵的商品无故涨价。
+        if current >= new_price:
             continue
         sku["price"] = format(new_price, ".2f")
         include_vat = new_price
         try:
             old_include_vat = Decimal(str(sku.get("priceIncludeVat")))
-            if old_include_vat.is_finite() and old_price > 0:
-                include_vat = (old_include_vat * new_price / old_price).quantize(
+            if old_include_vat.is_finite() and current > 0:
+                include_vat = (old_include_vat * new_price / current).quantize(
                     Decimal("0.01"), rounding=ROUND_HALF_UP)
         except (InvalidOperation, TypeError, ValueError):
             pass

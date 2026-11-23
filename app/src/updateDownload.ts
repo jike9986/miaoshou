@@ -174,3 +174,150 @@ export function isCdnHeaders(headers: Record<string, unknown>): boolean {
     || header("x-cache").length > 0
     || header("x-amz-cf-id").length > 0;
 }
+
+// --- 安装器参数（NSIS，electron-builder 标准安装包）----------------------------
+//
+// 2026-11-23 事故链的最后一环：之前用的是 Inno Setup 打的安装包，
+// 但客户端传的是 NSIS 的参数 `/S` —— Inno 不认，**弹出图形向导**（实测窗口
+// 标题「安装 奥皇上品 0.1.34」），用户关掉软件后桌面上躺着个没人点的窗口，
+// 软件再也没起来。
+//
+// 现在的做法是直接走大厂标准路径：安装包用 **electron-builder 自带的 NSIS**，
+// 更新器就是 electron-updater 那一套契约：
+//
+//     setup.exe /S            静默安装（NSIS 的原生参数，装机即用）
+//     setup.exe /S /D=<dir>    装回原目录（/D= 必须是最后一个参数，且不带引号）
+//
+// 为什么 /D= 要钉住目录：安装器默认装到 `%LOCALAPPDATA%\Programs\奥皇上品`，
+// 而用户桌面快捷方式可能还指着老的 `D:\软件\奥皇上品`。一旦两处目录不同，
+// 就会出现「装的是新版、点快捷方式是老版」的无限更新循环。
+// 把安装目录钉在**当前运行的 exe 所在目录**，装完就是同一个文件被替换。
+
+/** 去掉尾部路径分隔符：`D:\软件\奥皇上品\` 与 `D:\软件\奥皇上品` 视为同一个目录。
+ *
+ * 不用正则字符类：`[\/]` 这种写法在多层转义里极易被吃掉一个反斜杠，
+ * 变成只匹配正斜杠 —— 第一次实现就踩了这个坑，单元测试把带尾反斜杠的
+ * 路径原样传了下去。这里直接判码点：47 = `/`，92 = 反斜杠。
+ */
+function trimTrailingSeparators(value: string): string {
+  let end = value.length;
+  while (end > 0) {
+    const ch = value.charCodeAt(end - 1);
+    if (ch !== 47 && ch !== 92) break;
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+/** NSIS 的静默安装参数（electron-builder 安装包的原生开关）。 */
+export const NSIS_SILENT_FLAGS = ["/S"] as const;
+
+/**
+ * 构造安装器参数（NSIS）。
+ *
+ * `appDir` 为空（开发态、或取不到安装目录）时只传 `/S`，
+ * 让安装器用它自己记录的目录（electron-builder 会写注册表 InstallLocation）。
+ */
+export function installerArguments(appDir?: string): string[] {
+  const args: string[] = [...NSIS_SILENT_FLAGS];
+  const dir = trimTrailingSeparators((appDir ?? "").trim());
+  // /D= 必须排最后：NSIS 把 /D= 之后的内容整体当作目录，带空格也不加引号。
+  if (dir) args.push(`/D=${dir}`);
+  return args;
+}
+
+// --- 退出时静默安装的 PowerShell 脚本（纯函数）-------------------------------
+//
+// 为什么要独立成函数（2026-11-23 第二起事故）：
+//   JS 里用字符串拼 PS 命令，拼错一个引号就整条脚本语法错误。实测症状是
+//   安装包在、(pending.json 在)、进程也优雅退出了，但 `install.log` 一行都没写
+//   —— PowerShell 启动即语法报错秒退，后面的 Start-Process 全没跑。
+//   命令是**看不到也测不到**的代码，所以抽成纯函数，然后用真 PowerShell 跑一遍。
+
+/** 单引号字符串转义（PowerShell 里用两个单引号表示一个）。 */
+function psQuote(value: string): string {
+  return "'" + value.replace(/'/g, "''") + "'";
+}
+
+export interface InstallScriptOptions {
+  /** 下载好的安装包绝对路径 */
+  installerPath: string;
+  /** 兜底的重启目标（当前 exe），通常会被装完后的快捷方式目标覆盖 */
+  restartPath: string;
+  /** 日志文件绝对路径，记录 setup 退出码，便于排查 */
+  logPath: string;
+  /** 安装目录，传给 /DIR= 钉住位置 */
+  appDir?: string;
+  /** 关闭按钮/进程名，默认 AohuangShangpin */
+  processName?: string;
+  /** 桌面快捷方式文件名，默认 奥皇上品.lnk */
+  shortcutName?: string;
+}
+
+/**
+ * 生成安装阶段用的 PowerShell 脚本。
+ *
+ * 硬性事实（都在真机上验证过）：
+ *
+ * 1. **不能带 `/S`** —— 那是 NSIS 的，Inno 会弹图形向导；用 `/VERYSILENT`。
+ * 2. **必须 `/DIR=<当前安装目录>`** —— 否则安装器退回 `%LOCALAPPDATA%\Programs`，
+ *    桌面快捷方式还指老目录，用户点它就是老版本，于是无限循环更新。
+ * 3. **不能 `-Wait`** —— Inno 的 `[Run]` 装完会拉起软件，而 PowerShell 的
+ *    `-Wait` 会连子进程一起等，脚本就永远卡在等待里（实测卡了 314 秒，
+ *    直到把软件杀掉才返回）。改成轮询 `HasExited` + 超时。
+ * 4. **清理必须在安装之后** —— 老代码在 JS 侧 spawn 完立刻删安装包，
+ *    900ms 后要执行的 setup.exe 已经不存在（这是「关掉软件什么都没发生」的根因）。
+ * 5. 装完**重读快捷方式**再启动，安装目录换了也能起对版本。
+ */
+export function installPowerShellScript(options: InstallScriptOptions): string {
+  const {
+    installerPath,
+    restartPath,
+    logPath,
+    appDir,
+    processName = "AohuangShangpin",
+    shortcutName = "奥皇上品.lnk",
+  } = options;
+  const args = installerArguments(appDir).map(psQuote).join(",");
+  const lines = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$setup = ${psQuote(installerPath)}`,
+    `$exe = ${psQuote(restartPath)}`,
+    `$log = ${psQuote(logPath)}`,
+    // 先落盘「我起来了」，再等主进程退出。
+    // 顺序反过来会有致命竞态：主进程 spawn 完就 app.exit(0)，
+    // PowerShell 冷启动要 300~800ms，等它睡醒 900ms 主进程早没了，
+    // 安装包一动不动、日志一行不写。先写日志，主进程就能等到这一行再退。
+    "Add-Content -LiteralPath $log -Value ('[' + (Get-Date -Format s) + '] launching: ' + $setup)",
+    // 等本进程真正退出：安装器要替换正在运行的 exe
+    "Start-Sleep -Milliseconds 900",
+    `$proc = Start-Process -FilePath $setup -PassThru -ArgumentList @(${args})`,
+    // 轮询而不是 -Wait：-Wait 会把 Inno 拉起的软件当成子进程一起等
+    "$deadline = (Get-Date).AddMinutes(10)",
+    "while (-not $proc.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }",
+    "$code = if ($proc.HasExited) { $proc.ExitCode } else { -1 }",
+    "Add-Content -LiteralPath $log -Value ('[' + (Get-Date -Format s) + '] setup exit=' + $code)",
+    // 让安装器把文件落完盘
+    "Start-Sleep -Seconds 2",
+    // 安装器会重写桌面快捷方式，重读一次拿新路径
+    `$lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) ${psQuote(shortcutName)}`,
+    "if (Test-Path -LiteralPath $lnk) { $t = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath; if ($t -and (Test-Path -LiteralPath $t)) { $exe = $t } }",
+    "Add-Content -LiteralPath $log -Value ('[' + (Get-Date -Format s) + '] restart: ' + $exe)",
+    // [Run] 段通常已经把软件拉起来了，先查再启动，避免开两个窗口
+    `$running = Get-Process -Name ${psQuote(processName)}`,
+    "if (-not $running) { for ($i = 0; $i -lt 5; $i++) { if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe -ArgumentList '--no-sandbox'; break }; Start-Sleep -Milliseconds 800 } }",
+    // 清理：装完才删（见上面第 4 条）
+    "Get-ChildItem -Path (Split-Path -LiteralPath $setup) -Include *.exe,*.part -File | Where-Object { $_.FullName -ne $setup } | Remove-Item -Force",
+    "Remove-Item -LiteralPath $setup -Force",
+    "Remove-Item -LiteralPath (Join-Path (Split-Path -LiteralPath $setup) 'pending.json') -Force",
+  ];
+  return lines.join("; ");
+}
+
+/** 把脚本编码成 PowerShell 的 `-EncodedCommand` 参数（UTF-16LE + Base64）。
+ *
+ * 中文路径（`D:\软件\奥皇上品`）走控制台代码页会乱码，编码命令不受影响。
+ */
+export function encodePowerShellCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}

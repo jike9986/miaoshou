@@ -56,7 +56,8 @@ def main():
         _, o, e = c.exec_command(cmd, timeout=t)
         return o.read().decode() + e.read().decode()
 
-    exe_name = f"AohuangShangpin-{version}-Setup.exe"
+    # 文件名带内容 hash：同名覆盖会被 Cloudflare 缓存一年，新文件名必然重新回源。
+    exe_name = f"AohuangShangpin-{version}-{sha[:8]}-Setup.exe"
     remote_exe = f"{REMOTE_DIR}/{exe_name}"
 
     # 上传安装包
@@ -78,7 +79,7 @@ def main():
         "publishedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "channel": "stable",
     }
-    content = json.dumps(manifest, indent=2)
+    content = json.dumps(manifest, indent=2, ensure_ascii=False)
     run(f"cat > {REMOTE_DIR}/version.json << 'ENDJSON'\n{content}\nENDJSON")
     sftp.close()
 

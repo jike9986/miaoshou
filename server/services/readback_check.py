@@ -81,7 +81,29 @@ def extract_detail_image_urls(notes: Any) -> list[str]:
 
 
 def sku_image_refs(item: Any) -> list[dict[str, str]]:
-    """SKU 图片引用：`{path, url}` 列表，按路径排序后比对。"""
+    """SKU 图片引用：`{path, url}` 列表，按路径排序后比对。
+
+    ## `imgUrl` 才是妙手的真实字段名（2026-11-21 实测）
+
+    原来只认 `imageUrl` / `image`，两个都不是妙手用的键。实测一件商品
+    （账号 8，`skuPropertyList` 两组、2 颜色 × 6 尺码）：
+
+        attrValue 的键 = ['attrValue', 'attrValueId', 'imgUrl',
+                          'supplementarySkuImageUrls']
+        imgUrl   有值  = 2 个（每个颜色一个）
+        imageUrl 有值  = 0
+        image   有值   = 0
+        旧实现返回     = 0 个
+
+    也就是说这项「SKU 图没被换掉」的核验**从来没看见过任何 SKU 图**，
+    一直是空列表 == 空列表的假通过。修好字段名后才真正生效。
+
+    同一件商品的 `skuImages` 读回核验因此一直报 failed 却查不出原因 ——
+    因为核验对象本身是空的。
+
+    `supplementarySkuImageUrls`（补充图）不参与核验：它是「一色多图」的
+    附加列表，顺序不稳定，比它会把正常商品误判成被换图。
+    """
     properties = item.get("skuPropertyList") if isinstance(item, Mapping) else item
     refs: list[dict[str, str]] = []
     if not isinstance(properties, list):
@@ -92,7 +114,9 @@ def sku_image_refs(item: Any) -> list[dict[str, str]]:
         for value_index, value in enumerate(prop.get("attrValueList") or []):
             if not isinstance(value, Mapping):
                 continue
-            url = str(value.get("imageUrl") or value.get("image") or "").strip()
+            # imgUrl 优先（真实字段），后两个是历史/兼容写法
+            url = str(value.get("imgUrl") or value.get("imageUrl")
+                      or value.get("image") or "").strip()
             if url:
                 refs.append({
                     "path": f"skuPropertyList[{prop_index}].attrValueList[{value_index}]",
@@ -299,6 +323,28 @@ def _retained_sku_images_unchanged(original: Mapping[str, Any],
     return sku_image_refs(original) == sku_image_refs(actual)
 
 
+def _sku_image_slots_match(original: Mapping[str, Any],
+                           actual: Mapping[str, Any]) -> bool:
+    """两次读回的 SKU 图「位置」一致，不要求 URL 相同。
+
+    ## 为什么不能比 URL（2026-11-21 实测）
+
+    入库会把图从 `auto-temp` 搬到 `products`，`imgUrl` 随之改变。
+    原来 `sku_image_refs(original) == sku_image_refs(actual)` 比的是
+    `{path, url}` 完整列表，搬图后两边 URL 必然不同 —— 于是**每一件
+    经过搬运的商品**都被判成「SKU 图被换了」，卡在读回校验里出不来
+    （实测 detailId=3549609998 反复失败，日志 mismatches=['skuImages']）。
+
+    要保证的其实是：原来有图的位置，读回来仍然有图；图的数量没少。
+    文件名一致性由搬运逻辑本身保证（`promote_to_product_zone` 按 stem 改名）。
+    """
+    before = sku_image_refs(original)
+    after = sku_image_refs(actual)
+    if len(before) != len(after):
+        return False
+    return [item["path"] for item in before] == [item["path"] for item in after]
+
+
 def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
                     original: Mapping[str, Any], coverage: Mapping[str, Any], *,
                     pricing_enabled: bool = False,
@@ -347,15 +393,26 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
         extract_detail_image_urls(actual.get("notes"))
         == extract_detail_image_urls(payload.get("notes")))
 
-    # SKU 图我们不改动（清洗只动颜色文案与规格表顺序），基准用草稿 original：
-    # 颜色被清洗后 attrValueList 下标会移位，拿 payload 比会把「下标变了」
-    # 误报成「图被换了」。
-    comparisons["skuImages"] = _retained_sku_images_unchanged(original, actual)
+    # SKU 图不清洗、不搬动，基准用草稿 original。
+    #
+    # **2026-11-21 修**：改成「只比哪些位置有图」，不比 URL。
+    # 之前 `_retained_sku_images_unchanged` 直接比 `{path,url}` 列表相等，
+    # 而入库时图片会从 auto-temp 搬到 products —— URL 全变，于是每一项都
+    # 被判成「图被换掉了」，商品卡在读回校验里出不来
+    # （实测 detailId=3549609998：skuImages 恒失败，且只影响经过搬运的商品）。
+    #
+    # 真正要保证的是「保留范围内的颜色仍然各自有图、图的数量没少」，
+    # 不是 URL 字符串一致。搬图是本地正常动作，不该算不一致。
+    comparisons["skuImages"] = _sku_image_slots_match(original, actual)
 
     if pricing_enabled:
         # 开定价时销售价必须与处理结果一致，采购价必须原样返回。
         comparisons["prices"] = _prices_match(payload, actual)
         comparisons["originPriceUnchanged"] = pricing_preserves_origin_price(original, actual)
+    elif payload.get("_costFloorAdjustments"):
+        # 本轮触发过成本下限抬价：提交价比草稿原价高，拿 original 比必然不一致。
+        # 基准换成**实际提交的那份**（payload），这才是我们承诺给妙手的东西。
+        comparisons["prices"] = _prices_match(payload, actual)
     else:
         comparisons["prices"] = _prices_unchanged(original, actual)
 

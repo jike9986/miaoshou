@@ -379,6 +379,16 @@ ipcMain.handle("update:download", async (event, manifest: UpdateManifest) => {
     return { ok: false, error: "缺少更新信息" };
   }
   const result = await downloadInstaller(manifest, broadcastProgress);
+  // 下载成功就打上「退出时自动安装」的标记。
+  //
+  // 2026-11-23 补：`update:set-auto-apply` 这个 IPC 在前端**从来没被调用过**
+  // （`grep setAutoApply web/src` 为空），所以 `isAutoApplyMarked()` 永远是
+  // false —— 「下好之后关软件自动静默升级 + 自动重启」这条负责人要求的
+  // 路径实际上从来没有生效过，用户只能手动点「重启并更新」。
+  //
+  // 这里改成下载成功即标记：默认自动装。不立刻装是因为会杀掉正在跑的
+  // 发布/认领任务，所以仍然等「关软件」这个自然收尾点。
+  if (result?.ok) await markAutoApply();
   return result;
 });
 
@@ -540,24 +550,57 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-  // 两种情况要装：
+let quitInstallHandled = false;
+
+app.on("before-quit", (event) => {
+  // 退出时要装新版本的两种情况：
   //   1. 用户点了「重启并安装」→ isInstallRequested()
-  //   2. 后台已下好新版本、且用户开着「自动更新」→ isAutoApplyMarked()
+  //   2. 后台已下好新版本 → isAutoApplyMarked()
   //
   // 第 2 条是负责人 2026-11-20 的要求：「下载好之后静默处理的，
   // 然后自动重启软件」。这里用「关软件」当触发点 —— 那是自然收尾点，
   // 打断进行中的发布/认领任务会把载体建到一半留在上游。
   //
-  // 单纯关程序且没有新版本时仍然什么都不做（老行为不变）。
-  const shouldInstall = isInstallRequested();
-  if (shouldInstall) {
-    void installOnQuit();
-  } else {
-    // 异步确认一次自动更新标记；before-quit 不等待它，装不上就下次再说
-    void isAutoApplyMarked().then((auto) => {
-      if (auto) void installOnQuit();
-    });
-  }
-  server?.kill();
+  // ## 2026-11-23 修：这里必须 preventDefault 等异步结果
+  //
+  // 原来是：
+  //     void isAutoApplyMarked().then((auto) => { if (auto) void installOnQuit(); });
+  // 注释还写着「before-quit 不等待它，装不上就下次再说」。
+  // 实测这就是「关掉软件什么都没发生」的直接原因 —— `isAutoApplyMarked()`
+  // 要先 await 读 `auto-apply.json`，`installOnQuit()` 又要 await 读
+  // `pending.json`，两次异步 IO 之间进程早就退干净了，
+  // PowerShell 根本没被 spawn 出来。
+  //
+  // 现在：先拦住退出，把「读标记 → 起安装器」这两步走完，再真正退出。
+  // 拦的是 `before-quit`（不是 `will-quit`），因为要确保 `app.exit` 之前
+  // PowerShell 已经 detach 出去。
+  if (quitInstallHandled) return;
+  quitInstallHandled = true;
+  event.preventDefault();
+  void (async () => {
+    // 退出安装这条路完全不可见：装没装、为什么没装，界面上什么都看不到。
+    // 每次退出往 install.log 记一行决策，出问题时不用再猜。
+    const traceLog = path.join(app.getPath("userData"), "install.log");
+    const trace = (line: string) => {
+      try {
+        fs.appendFileSync(traceLog, `[${new Date().toISOString()}] ${line}\n`);
+      } catch { /* 日志写不进去不能影响退出 */ }
+    };
+    try {
+      trace(`before-quit: requested=${isInstallRequested()}`);
+      const marked = await isAutoApplyMarked();
+      trace(`auto-apply marked=${marked}`);
+      const shouldInstall = isInstallRequested() || marked;
+      if (shouldInstall) {
+        const pending = await pendingInstaller();
+        trace(`pending=${pending ? `${pending.version} ${pending.path}` : "null"}`);
+        await installOnQuit();
+        trace("installOnQuit returned");
+      }
+    } catch (error) {
+      trace(`quit-install failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    server?.kill();
+    app.exit(0);
+  })();
 });

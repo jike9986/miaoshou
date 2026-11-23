@@ -105,10 +105,26 @@ def to_int(value: Any) -> int | None:
 
 # --- 文本 -----------------------------------------------------------------
 def first_text(*values: Any) -> str:
-    """字段回退链：返回第一个非空字符串（去首尾空格）。"""
+    """字段回退链：返回第一个非空值，转成字符串并去首尾空格。
+
+    ## 为什么也接数字（2026-11-21）
+
+    原来只认 `str`，把整数 ID 一律当空跳过。结果
+    `commonCollectBoxDetailId`（妙手返回的是整数 `4156684809`，
+    不是字符串）在所有采集箱行里都变成 None，导致货源链接整条链路断掉 ——
+    这个 ID 是查 1688 货源的唯一入口。
+
+    `0` 仍然算空（ID 不会是 0，而 0 通常表示「没有」）；
+    布尔值明确排除，否则 `True` 会变成无意义的 "True"。
+    """
     for value in values:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                return value.strip()
+        elif isinstance(value, (int, float)) and value != 0:
+            return str(value).strip()
     return ""
 
 

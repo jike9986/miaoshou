@@ -113,15 +113,28 @@ def capture_from_box_row(row: Mapping[str, Any] | None) -> dict[str, Any]:
     返回 `{}` 表示这行没有货源 —— 调用方**不要**写空字段进 payload，
     免得以后分不清「没抓到」和「抓到了但是空」。
 
-    上游结构（实测）：
+    上游结构（实测 2026-11-21）：
 
         row = {
           "title": "…",
           "sourceList": [
-            {"source": "1688", "sourceItemId": "620123456789",
-             "sourceUrl": "https://detail.1688.com/offer/….html"}
+            {"source": "1688", "sourceItemId": "717267894593",
+             "sourceItemUrl": "http://detail.1688.com/offer/717267894593.html"}
           ],
         }
+
+    ## `sourceItemUrl` 这个字段名是关键
+
+    第一版只认 `sourceItemId` / `sourceUrl` / `url`，结果在真实数据上
+    **永远抓不到链接** —— 妙手用的键是 `sourceItemUrl`。
+    实测公共采集箱 `editCommonCollectBoxDetail.sourceList[0]`：
+
+        sourceItemId  = 717267894593
+        source        = 1688
+        sourceItemUrl = http://detail.1688.com/offer/717267894593.html
+
+    所以这里把 `sourceItemUrl` 放在候选里，并且**优先用它**（它才是 URL，
+    `sourceItemId` 只是数字）。
     """
     if not isinstance(row, Mapping):
         return {}
@@ -131,8 +144,9 @@ def capture_from_box_row(row: Mapping[str, Any] | None) -> dict[str, Any]:
             continue
         if not is_1688_source(source.get("source")):
             continue
-        raw = (source.get("sourceItemId") or source.get("sourceUrl")
-               or source.get("url") or "")
+        # sourceItemUrl 是妙手真实字段名，必须排在前面。
+        raw = (source.get("sourceItemUrl") or source.get("sourceUrl")
+               or source.get("url") or source.get("sourceItemId") or "")
         offer = extract_offer_id(raw)
         url = normalize_source_url(raw)
         if not url:
@@ -198,6 +212,58 @@ def attach_source(payload: dict[str, Any], source: Mapping[str, Any]) -> bool:
         payload[key] = value
         changed = True
     return changed
+
+
+def capture_from_common_box(client: Any, common_detail_id: Any) -> dict[str, Any]:
+    """从**公共采集箱**取一件商品的 1688 货源链接。
+
+    ## 为什么必须走这条（2026-11-21 实测）
+
+    店铺采集箱那侧**完全没有**货源信息：
+
+      · `collect_box_list` 行里的 `sourceItemId`/`sourceId` —— 账号 8 的 49 条全是 None
+      · `shop_detail` 返回 26 个字段，递归扫描 0 命中
+        （`brandId brandName cid detailId editModel imgUrls notes oriTitle
+          packageHeight packageLength packageWidth productAttributes
+          productCertifications productIds shopId site sizeChart sizeChartType
+          skuMap skuPropertyList title weight` …）
+
+    但**公共采集箱**有，而且 100% 覆盖（账号 8 抽样 12/12 全中）：
+
+        common_box_detail(commonCollectBoxDetailId)
+          → editCommonCollectBoxDetail.sourceList[0]
+              sourceItemId  = 717267894593
+              source        = 1688
+              sourceItemUrl = http://detail.1688.com/offer/717267894593.html
+
+    而每条采集箱行里都有 `commonCollectBoxDetailId`，所以链路是通的。
+
+    ## 成本
+
+    每条一次上游请求。实测 12 条 13.2 秒 → 49 条约 54 秒。
+    所以调用方必须**按需**调用（入仓时逐件补），不要在列表接口里批量拉。
+
+    返回 `{}` 表示这件商品查不到货源；不要写空字段进 payload。
+    """
+    if client is None or not common_detail_id:
+        return {}
+    try:
+        response = client.common_box_detail(common_detail_id)
+    except Exception:  # noqa: BLE001
+        # 公共采集箱取不到不该阻断入仓 —— 货源链接是附加信息
+        return {}
+    data = (response or {}).get("data") or {}
+    edit = data.get("editCommonCollectBoxDetail") or {}
+    if not isinstance(edit, Mapping):
+        return {}
+    captured = capture_from_box_row(edit)
+    if captured:
+        # 用公共采集箱里的标题兜底：店铺侧标题可能被机翻过，
+        # 而货源信息里记的应当是原始中文标题。
+        original = str(edit.get("title") or "").strip()
+        if original:
+            captured.setdefault("sourceTitle", original)
+    return captured
 
 
 def source_url_of(payload: Mapping[str, Any] | None) -> str:
