@@ -2025,6 +2025,11 @@ export function useDeleteTemplate(): UseMutationResult<DeleteTemplateResponse, E
  * ------------------------------------------------------------------ */
 
 export interface TemplatePricePreviewBody {
+  /**
+   * 界面上的当前参数快照。传了后端就直接用它算，不看库里的模板 ——
+   * 用户改完费率/切完模板想立刻看结果，不该被迫先保存。
+   */
+  template?: Record<string, unknown> | null;
   /** 产品采购价（CNY） */
   purchaseCny: string | number;
   /** 产品包裹重量（kg） */

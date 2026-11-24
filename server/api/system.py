@@ -580,6 +580,38 @@ def price_preview(payload: PricePreviewRequest, db: DbSession,
     name = str(payload.templateName or "").strip()
     stored = setting_service.price_templates(db, operator_id=_template_scope(db, operator))
     pt_defaults = price_template.DEFAULT_TEMPLATE
+
+    # 界面直接给了一份参数（改完还没保存就想看结果）——就用它算。
+    # 负责人 2026-11-23：「我切换定价模板，下面的数字都不会跟着变」，
+    # 根因是试算只读库里的模板：不保存就永远算旧值，切模板也一样。
+    if isinstance(payload.template, dict) and payload.template:
+        inline = dict(payload.template)
+        inline.setdefault("name", name or "临时试算")
+        try:
+            price_template.normalize_template(inline)
+        except price_template.PriceTemplateError as exc:
+            raise errors.AppError(errors.TEMPLATE_INVALID, f"定价模板不可用：{exc}",
+                                  status=422, details={"field": "template"}) from None
+        try:
+            result = price_template.preview_price(purchase, weight, inline, rate=rate)
+        except price_template.PriceTemplateError as exc:
+            raise errors.unprocessable(str(exc)) from None
+        return {
+            "price": result["price"],
+            "currency": result["currency"],
+            "lines": result["lines"],
+            "linesCny": result["linesCny"],
+            "rate": result["rate"],
+            "rateSource": result["rateSource"],
+            "templateName": str(inline.get("name") or ""),
+            "missingRateFields": result.get("missingRateFields", []),
+            "isEstimate": bool(result.get("isEstimate")),
+            "site": (payload.site or inline.get("site") or "").strip().upper(),
+            "purchasePriceCny": result.get("purchasePriceCny"),
+            "packageWeightKg": result.get("packageWeightKg"),
+            "inline": True,
+        }
+
     if not name:
         # 四级兜底：前端不传模板名也得算得出价，否则「选漏了按原价上架」。
         name = setting_service.selected_template_name(

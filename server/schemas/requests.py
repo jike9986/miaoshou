@@ -259,6 +259,11 @@ class PricePreviewRequest(CamelModel):
     rate: Any = Field(default=None, description="CNY→站点币种汇率；空则走兜底汇率")
     site: str | None = Field(default=None, description="站点代码，仅用于回显")
     accountId: str | None = Field(default=None, description="按哪个账号的选中记录兜底")
+    # 界面上的当前参数快照。传了就用它算 —— 用户改完费率想立刻看结果，
+    # 不该被迫先保存（保存会落库，试算是一次性动作）。
+    template: dict[str, Any] | None = Field(
+        default=None,
+        description="直接给一份模板参数（界面未保存的编辑值），优先于 templateName")
 
 
 class ProcessRequest(CamelModel):

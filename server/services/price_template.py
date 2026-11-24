@@ -390,16 +390,39 @@ def resolve_rate_with_source(product: Mapping[str, Any] | None,
 
 def _resolve_currency(*, site: Any = None,
                       template: Mapping[str, Any] | None = None) -> str:
-    """定出该用哪个币种：模板 freightTable.currency > 站点映射 > MYR。"""
+    """定出该用哪个币种。
+
+    顺序：**站点映射** > 模板 freightTable.currency > MYR。
+
+    为什么站点排第一（2026-11-23 修）：原来 freightTable.currency 优先，
+    而旧模板里那一栏是 `DEFAULT_FREIGHT_TABLE` 抄下来的 MYR —— 于是
+    切到菲律宾模板、站点改成 PH，算出来的还是 MYR 价（实测 35 CNY/0.6kg
+    返回 MYR 而不是 PHP）。站点是用户在界面上明确选的，比模板里的
+    历史遗留字段可信；而且运费表的 currency 本来就该跟着站点走，
+    两处不一致时按站点算，结果至少和「发到哪个店」是一致的。
+    """
     from services import exchange_rate
 
+    declared = ""
     if isinstance(template, Mapping):
-        declared = str((template.get("freightTable") or {}).get("currency") or "").strip()
-        if declared:
-            return declared.upper()
-        if site is None:
-            site = template.get("site")
-    return exchange_rate.currency_for_site(site)
+        declared = str((template.get("freightTable") or {}).get("currency") or "").strip().upper()
+
+    # 1. 调用方显式传的 site（「发到哪个店」是业务决定，最可信）
+    explicit_site = str(site or "").strip().upper()
+    if explicit_site:
+        return exchange_rate.currency_for_site(explicit_site)
+
+    # 2. 模板里显式声明的 freightTable.currency（老契约，且是显式值）
+    if declared:
+        return declared
+
+    # 3. 模板自己的 site
+    if isinstance(template, Mapping):
+        inner = str(template.get("site") or "").strip().upper()
+        if inner:
+            return exchange_rate.currency_for_site(inner)
+
+    return exchange_rate.currency_for_site(None)
 
 
 def resolve_rate(product: Mapping[str, Any] | None, override: Any = None,
@@ -472,11 +495,15 @@ def display_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
         Decimal(str(template.get("orderProcessCny") or 0)) / rate_d)
     purchase_myr = _money(purchase / rate_d)
     # 币种跟着模板站点走，不再写死 MYR（菲律宾 PHP / 泰国 THB / 越南 VND / 新加坡 SGD）
-    currency = str(
-        (template.get("freightTable") or {}).get("currency")
-        or {"MY": "MYR", "PH": "PHP", "TH": "THB", "VN": "VND", "SG": "SGD"}
-        .get(str(template.get("site") or "MY").upper(), "MYR")
-    )
+    # 站点优先于 freightTable.currency：后者在旧模板里一律是 MYR，
+    # 优先它会让「切到菲律宾模板」算出来的价标着 MYR（见 _resolve_currency 注释）。
+    from services import exchange_rate as _exchange_rate
+
+    _site = str(template.get("site") or "").strip().upper()
+    _declared_currency = str(
+        (template.get("freightTable") or {}).get("currency") or "").strip().upper()
+    currency = (_exchange_rate.currency_for_site(_site) if _site
+                else (_declared_currency or _exchange_rate.DEFAULT_CURRENCY))
 
     # 费率缺失时按 0 算会让报价偏低，但不该整单报错——运营的模板常常只填
     # 常用的那几项。这里把「缺了哪几项」记下来，报价标记为估算，
@@ -648,10 +675,17 @@ def preview_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
     """
     normalized = normalize_template(template)
     # 币种必须跟着模板站点走（2026-11-19 修）：菲律宾报价不能用 MYR 汇率。
+    #
+    # 这里把模板自己的 site **显式**当参数传下去（2026-11-23）：否则
+    # `_resolve_currency` 会先看 freightTable.currency（旧模板一律是 MYR），
+    # 五个站点全按 MYR 汇率算，切模板时数字一模一样。
+    template_site = str(template.get("site") or "").strip().upper() or None
     if rate in (None, ""):
-        rate_d, rate_source = resolve_rate_with_source(None, None, template=template)
+        rate_d, rate_source = resolve_rate_with_source(
+            None, None, site=template_site, template=template)
     else:
-        rate_d, rate_source = resolve_rate_with_source(None, rate, template=template)
+        rate_d, rate_source = resolve_rate_with_source(
+            None, rate, site=template_site, template=template)
     result = display_price(purchase_cny, weight_kg, normalized, rate=rate_d)
     # display_price 收到的是归一化后的模板（None 已折成 0），「没填」的信号
     # 只能在原始输入上取，所以这里重算一次并覆盖。

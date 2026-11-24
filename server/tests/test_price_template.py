@@ -9,6 +9,7 @@ from services.price_template import (
     PriceTemplateError,
     cross_border_freight_myr,
     display_price,
+    preview_price,
     normalize_template,
 )
 
@@ -116,3 +117,45 @@ class TestDisplayPrice:
         r1 = display_price("50", "0.6", TEMPLATE, rate="1.6393")
         r2 = display_price("80", "0.6", TEMPLATE, rate="1.6393")
         assert r2["price"] > r1["price"]
+
+
+class TestPreviewFollowsTemplate:
+    """试算必须跟着模板参数走（负责人 2026-11-23）。
+
+    「我切换定价模板，下面的数字都不会跟着变」——两个根因：
+      1. 接口只按模板名读库，界面改完没保存就算旧值
+      2. `_resolve_currency` 让 freightTable.currency 优先于站点，
+         旧模板里那栏一律是 MYR，切到菲律宾模板仍按 MYR 汇率算
+    """
+
+    def test_profit_percent_changes_price(self):
+        """同一份模板只改利润率，价格必须变。"""
+        low = dict(DEFAULT_TEMPLATE); low.update({"name": "低", "site": "MY", "profitPercent": 10})
+        high = dict(DEFAULT_TEMPLATE); high.update({"name": "高", "site": "MY", "profitPercent": 50})
+        a = preview_price("35", "0.6", low)
+        b = preview_price("35", "0.6", high)
+        assert b["price"] > a["price"], "利润率提高，售价必须提高"
+
+    def test_charge_rate_changes_price(self):
+        """改手续费率也要反映到价格上。"""
+        base = dict(DEFAULT_TEMPLATE); base.update({"name": "基准", "site": "MY"})
+        raised = dict(base); raised["paymentChargePercent"] = 10.0
+        a = preview_price("35", "0.6", base)
+        b = preview_price("35", "0.6", raised)
+        assert b["price"] != a["price"], "交易手续费变了，售价必须跟着变"
+
+    def test_each_site_uses_its_own_currency(self):
+        """五个站点各自用本币，价格量级必须不同（不能全按 MYR 算）。"""
+        results = {}
+        for site, expected in (("MY", "MYR"), ("PH", "PHP"),
+                               ("TH", "THB"), ("VN", "VND"), ("SG", "SGD")):
+            template = dict(DEFAULT_TEMPLATE)
+            template.update({"name": site, "site": site})
+            results[site] = preview_price("35", "0.6", template)
+            assert results[site]["currency"] == expected, f"{site} 币种应为 {expected}"
+
+        prices = {site: float(row["price"]) for site, row in results.items()}
+        assert len(set(prices.values())) == len(prices), \
+            f"各站点价格不该相同，实际：{prices}"
+        # 越南盾面值最大，新加坡币最贵 → 数字最小
+        assert prices["VN"] > prices["PH"] > prices["SG"]

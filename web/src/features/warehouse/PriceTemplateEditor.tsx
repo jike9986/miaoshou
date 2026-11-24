@@ -347,6 +347,20 @@ export function PriceTemplateEditor({
     }
   }, [active, picked, templates]);
 
+  // 切模板 / 切站点 / 改费率之后，如果试算区已经有结果，就按新参数重算一遍。
+  // 原来这里什么都不做 —— 用户切了模板，下面的数字一动不动，只能自己再点一次
+  // 「计算」，而且点了也算旧值（接口只认库里的模板）。两处一起修。
+  const previewKey = useMemo(
+    () => JSON.stringify({ form, purchaseCny, weightKg, rate }),
+    [form, purchaseCny, weightKg, rate]
+  );
+  useEffect(() => {
+    // 从来没算过就别自动算：用户还没填采购价，凭空跳出一个价反而困惑
+    if (!active || preview === null) return;
+    calculate(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewKey]);
+
   const set = <K extends keyof TemplateForm>(key: K, value: TemplateForm[K]): void => {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
@@ -390,9 +404,20 @@ export function PriceTemplateEditor({
   };
 
   /** 试算：用表单当前值算 —— 改完参数不用先保存就能看结果。 */
-  const calculate = (): void => {
+  /**
+   * 试算。把**当前表单里的值**整份发给后端（`template` 字段），
+   * 而不是只给一个模板名。
+   *
+   * 为什么必须这样：接口原来只按名字读库里的模板，于是
+   *   · 改完费率点计算 —— 算的还是保存前的旧值
+   *   · 切模板 —— 表单变了、算出来的还是上一套
+   * 负责人 2026-11-23 就是撞上了这个：「我切换定价模板，下面的数字都不会跟着变」。
+   *
+   * `silent=true` 用于切模板/切站点后的自动重算：没填采购价时不该弹错误。
+   */
+  const calculate = (silent = false): void => {
     if (!purchaseCny.trim() || !weightKg.trim()) {
-      setPreviewError("请填写产品采购价和产品包裹重量");
+      if (!silent) setPreviewError("请填写产品采购价和产品包裹重量");
       return;
     }
     setPreviewError(null);
@@ -403,12 +428,15 @@ export function PriceTemplateEditor({
         rate: rate.trim() || null,
         templateName: form.name.trim() || picked || null,
         site: form.site,
+        // 界面上的完整参数快照 —— 后端优先用它算，不看库
+        template: buildTemplate(form),
       },
       {
         onSuccess: (data) => setPreview(data),
         onError: (err) => {
           setPreview(null);
-          setPreviewError(apiErrorMessage(err));
+          // 自动重算失败时不吵：用户可能正处在中间编辑状态
+          if (!silent) setPreviewError(apiErrorMessage(err));
         },
       }
     );
@@ -716,7 +744,7 @@ export function PriceTemplateEditor({
               size="sm"
               className="flex-1"
               loading={pricePreview.isPending}
-              onClick={calculate}
+              onClick={() => calculate()}
             >
               计算
             </Button>
