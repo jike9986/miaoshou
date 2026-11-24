@@ -65,27 +65,30 @@ const SITE_OPTIONS = [
  */
 const PLATFORM_FEE_FIELDS: Array<{
   key: keyof TemplateForm;
+  /** 标签只写名目，单位一律放进输入框（负责人 2026-11-23：「这种
+   *  什么 % cny 这种不能直接放到框里面吗，为什么加到上面的名字里面
+   *  弄得又长还不对称」）。 */
   label: string;
-  hint?: string;
+  unit: string;
 }> = [
-  { key: "platformCommissionPercent", label: "平台佣金率 %" },
-  { key: "paymentChargePercent", label: "交易手续费率 %" },
-  { key: "vatChargePercent", label: "增值税率 %" },
-  { key: "consumptionTaxChargePercent", label: "消费税率 %", hint: "留空为 0" },
-  { key: "localConsumptionTaxChargePercent", label: "本地消费税率 %", hint: "留空为 0" },
-  { key: "tariffChargePercent", label: "关税税率 %", hint: "留空为 0" },
-  { key: "withdrawChargePercent", label: "提现手续费率 %" },
-  { key: "sfpChargePercent", label: "SFP 服务费率 %", hint: "留空为 0" },
-  { key: "affiliateChargePercent", label: "达人佣金费率 %", hint: "留空为 0" },
-  { key: "bcpChargePercent", label: "BCP 活动费率 %" },
-  { key: "activityChargePercent", label: "活动费率 %", hint: "留空为 0" },
-  { key: "freeShippingChargePercent", label: "包邮服务费率 %", hint: "留空为 0" },
-  { key: "eCommerceGrowthChargePercent", label: "电商增长服务费率 %", hint: "留空为 0" },
-  { key: "enterpriseWithholdPercent", label: "企业商家代扣税率 %", hint: "留空为 0" },
-  { key: "lastMileFreightServiceTaxPercent", label: "尾程运费服务税率 %", hint: "留空为 0" },
-  { key: "platformSupportCny", label: "平台支持费 CNY" },
-  { key: "orderProcessCny", label: "订单处理服务费 CNY", hint: "留空为 0" },
-  { key: "otherChargeCny", label: "其它费用 CNY", hint: "留空为 0" },
+  { key: "platformCommissionPercent", label: "平台佣金率", unit: "%" },
+  { key: "paymentChargePercent", label: "交易手续费率", unit: "%" },
+  { key: "vatChargePercent", label: "增值税率", unit: "%" },
+  { key: "consumptionTaxChargePercent", label: "消费税率", unit: "%" },
+  { key: "localConsumptionTaxChargePercent", label: "本地消费税率", unit: "%" },
+  { key: "tariffChargePercent", label: "关税税率", unit: "%" },
+  { key: "withdrawChargePercent", label: "提现手续费率", unit: "%" },
+  { key: "sfpChargePercent", label: "SFP 服务费率", unit: "%" },
+  { key: "affiliateChargePercent", label: "达人佣金费率", unit: "%" },
+  { key: "bcpChargePercent", label: "BCP 活动费率", unit: "%" },
+  { key: "activityChargePercent", label: "活动费率", unit: "%" },
+  { key: "freeShippingChargePercent", label: "包邮服务费率", unit: "%" },
+  { key: "eCommerceGrowthChargePercent", label: "电商增长服务费率", unit: "%" },
+  { key: "enterpriseWithholdPercent", label: "企业商家代扣税率", unit: "%" },
+  { key: "lastMileFreightServiceTaxPercent", label: "尾程运费服务税率", unit: "%" },
+  { key: "platformSupportCny", label: "平台支持费", unit: "CNY" },
+  { key: "orderProcessCny", label: "平台基础设施费", unit: "CNY" },
+  { key: "otherChargeCny", label: "其他费用", unit: "CNY" },
 ];
 
 /** 后端没下发 siteFields 时退回「全部显示」，而不是显示空表。 */
@@ -253,29 +256,37 @@ function formFromTemplate(
 }
 
 /** 费用明细一行的标签（后端 lines 的键）。 */
-const LINE_LABELS: Record<string, string> = {
-  purchase: "产品采购价",
-  firstMile: "头程运费",
-  lastMile: "尾程运费",
-  platformCommission: "平台佣金",
-  paymentCharge: "交易手续费",
-  vatCharge: "增值税",
-  consumptionTax: "消费税",
-  localConsumptionTax: "本地消费税",
-  tariffCharge: "关税",
-  withdrawCharge: "提现手续费",
-  sfpCharge: "SFP 服务费",
-  affiliateCharge: "达人佣金",
-  bcpCharge: "BCP 活动费",
-  activityCharge: "活动费",
-  freeShippingCharge: "包邮服务费",
-  eCommerceGrowthCharge: "电商增长服务费",
-  platformSupport: "平台支持费",
-  lastMileFreightServiceTax: "尾程运费服务税",
-  orderProcess: "订单处理服务费",
-  enterpriseWithhold: "企业商家代扣税",
-  otherCharge: "其他费用",
-};
+/**
+ * 详细费用的显示顺序与中文名。
+ *
+ * 键名必须与后端 `display_price` 返回的 `lines` **完全一致** ——
+ * 之前这里写的是 `purchase`/`vatCharge`/`tariffCharge`，而后端返回的是
+ * `purchasePrice`/`vat`/`tariffChargePercent`，结果右栏把英文键名直接摊在
+ * 界面上，运营看到的是一屏 `purchasePrice` `merchantFreight`。
+ * 顺序照妙手「详细费用」的分组：平台费 → 运费 → 税费 → 固定费 → 采购。
+ */
+const COST_LINE_ORDER: Array<[string, string]> = [
+  ["paymentCharge", "交易手续费"],
+  ["platformCommission", "平台佣金"],
+  ["vat", "增值税"],
+  ["consumptionTaxChargePercent", "消费税"],
+  ["localConsumptionTaxChargePercent", "本地消费税"],
+  ["tariffChargePercent", "关税"],
+  ["bcpCharge", "BCP 活动费"],
+  ["sfpCharge", "SFP 服务费"],
+  ["affiliateCharge", "达人佣金"],
+  ["lastMileTax", "尾程运费服务税"],
+  ["platformSupport", "平台支持费"],
+  ["orderProcess", "平台基础设施费"],
+  ["enterpriseWithhold", "企业商家代扣税"],
+  ["freeShippingChargePercent", "包邮服务费"],
+  ["eCommerceGrowthChargePercent", "电商增长服务费"],
+  ["activityChargePercent", "活动费"],
+  ["otherCharge", "其他费用"],
+  ["withdrawCharge", "提现手续费"],
+  ["merchantFreight", "跨境物流成本"],
+  ["purchasePrice", "产品采购价"],
+];
 
 export interface PriceTemplateEditorProps {
   /** 编辑器是否可见。不可见时不拉模板列表（设置页常驻传 true） */
@@ -445,6 +456,28 @@ export function PriceTemplateEditor({
   );
 
   const lines = preview?.lines ?? {};
+  const fmt = (value: unknown): string =>
+    typeof value === "number" ? value.toFixed(2) : String(value ?? "-");
+
+  /**
+   * 详细费用只列「这个站点的模板里真实填了值」的项。
+   *
+   * 妙手自己也是这么显示的：泰国截图里只有交易手续费 / 平台佣金 / 增值税 /
+   * 关税 / 商家运费 / 提现 / 达人佣金 / 平台基础设施 / 电商增长 / 采购价，
+   * 没有 BCP、SFP、消费税那些 —— 因为那些费率是空的。
+   * 原来把 `lines` 整个对象铺出来，二十多行里一半是 0.00，看着像算错了。
+   */
+  const visibleCostLines = useMemo(() => {
+    if (!preview) return [];
+    const out: Array<{ key: string; label: string }> = [];
+    for (const [key, label] of COST_LINE_ORDER) {
+      const value = lines[key];
+      if (typeof value !== "number") continue;
+      if (value <= 0) continue;   // 0 值项不显示（与妙手一致）
+      out.push({ key, label });
+    }
+    return out;
+  }, [preview, lines]);
   const currency = String(preview?.currency ?? form.currency ?? "");
   const price = preview?.price;
 
@@ -521,7 +554,7 @@ export function PriceTemplateEditor({
             <Field label="站点">
               <Select value={form.site} onChange={pickSite} options={SITE_OPTIONS} />
             </Field>
-            <Field label="币种" hint="随站点自动带出">
+            <Field label="币种">
               <Input
                 value={form.currency}
                 onChange={(value) => set("currency", value === null ? "" : String(value))}
@@ -529,11 +562,10 @@ export function PriceTemplateEditor({
                 maxLength={8}
               />
             </Field>
-            <Field label="汇率" hint="1 CNY = ? 站点币种；留空用兜底汇率">
+            <Field label="汇率">
               <Input
                 value={rate}
                 onChange={(value) => setRate(value === null ? "" : String(value))}
-                placeholder="留空自动获取"
               />
             </Field>
           </div>
@@ -553,13 +585,14 @@ export function PriceTemplateEditor({
                   ]}
                 />
               </Field>
-              <Field label="利润率 %" required>
+              <Field label="利润率" required>
                 <NumberInput
                   value={form.profitPercent}
                   onChange={(value) => set("profitPercent", value === null ? "" : String(value))}
+                  suffix="%"
                 />
               </Field>
-              <Field label="折扣" hint="1~9.99 折；留空不打折">
+              <Field label="折扣">
                 <NumberInput
                   value={form.discount}
                   onChange={(value) => set("discount", value === null ? "" : String(value))}
@@ -583,10 +616,11 @@ export function PriceTemplateEditor({
                   ]}
                 />
               </Field>
-              <Field label="尾程运费" required hint="固定 CNY 金额">
+              <Field label="尾程运费" required>
                 <NumberInput
                   value={form.lastMileFreightCny}
                   onChange={(value) => set("lastMileFreightCny", value === null ? "" : String(value))}
+                  suffix="CNY"
                 />
               </Field>
             </div>
@@ -639,13 +673,13 @@ export function PriceTemplateEditor({
             {/* 两行：每行 6 格（负责人 2026-11-23：「平台费用弄成两行」） */}
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
               {PLATFORM_FEE_FIELDS.filter((item) => visibleFields.has(item.key)).map((item) => (
-                <Field key={item.key} label={item.label} hint={item.hint}>
+                <Field key={item.key} label={item.label}>
                   <NumberInput
                     value={form[item.key]}
                     onChange={(value) =>
                       set(item.key, value === null ? "" : String(value))
                     }
-                    placeholder={item.hint?.includes("留空") ? "留空为 0" : undefined}
+                    suffix={item.unit}
                   />
                 </Field>
               ))}
@@ -709,32 +743,52 @@ export function PriceTemplateEditor({
 
           {preview && (
             <div className="flex flex-col gap-2 text-xs">
-              <div className="flex items-center justify-between rounded border border-border bg-surface px-2 py-1.5">
-                <span className="text-fg-secondary">税前售价</span>
-                <span className="font-semibold text-fg">
-                  {typeof price === "number" ? price.toFixed(2) : String(price ?? "-")}{" "}
-                  {currency}
-                </span>
-              </div>
-              {preview.isEstimate ? (
-                <div className="rounded border border-warning-border bg-warning-soft px-2 py-1.5 text-[11px] text-warning">
-                  这是估算值：{preview.rateSource}
-                  {preview.missingRateFields.length
-                    ? `，缺 ${preview.missingRateFields.join(" / ")}`
-                    : ""}
+              {/* 照妙手的三段式：计算结果 / 详细费用（只列该国真实有的项）。
+                  费率填 0 的项目不显示 —— 妙手也不显示，列出来只是噪音
+                  （负责人 2026-11-23：「详细费用为什么有这么多东西
+                  不能像妙手一样显示吗」）。 */}
+              <div className="rounded border border-border bg-surface px-2 py-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-fg-secondary">本地展示价</span>
+                  <span className="font-semibold text-fg">
+                    {typeof price === "number" ? price.toFixed(2) : String(price ?? "-")}{" "}
+                    {currency}
+                  </span>
                 </div>
-              ) : null}
-              <div className="text-[11px] font-medium text-fg-tertiary">详细费用（CNY）</div>
+              </div>
+
+              <div className="flex flex-col gap-1 rounded border border-border bg-surface px-2 py-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-fg-secondary">税前售价</span>
+                  <span className="tabular-nums text-fg">
+                    {fmt(lines.pretaxPrice)} {currency}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-fg-secondary">利润</span>
+                  <span className="tabular-nums text-fg">
+                    {fmt(lines.profit)} {currency}
+                  </span>
+                </div>
+              </div>
+
+              <div className="text-[11px] font-medium text-fg-tertiary">
+                详细费用（{currency}）
+              </div>
               <div className="flex flex-col gap-1">
-                {Object.entries(lines).map(([key, value]) => (
-                  <div key={key} className="flex items-center justify-between gap-2">
-                    <span className="text-fg-secondary">{LINE_LABELS[key] ?? key}</span>
-                    <span className="tabular-nums text-fg">
-                      {typeof value === "number" ? value.toFixed(2) : String(value)}
-                    </span>
+                {visibleCostLines.map((item) => (
+                  <div key={item.key} className="flex items-center justify-between gap-2">
+                    <span className="text-fg-secondary">{item.label}</span>
+                    <span className="tabular-nums text-fg">{fmt(lines[item.key])}</span>
                   </div>
                 ))}
               </div>
+
+              {preview.isEstimate ? (
+                <div className="rounded border border-warning-border bg-warning-soft px-2 py-1.5 text-[11px] text-warning">
+                  估算值：{preview.rateSource}
+                </div>
+              ) : null}
             </div>
           )}
         </div>

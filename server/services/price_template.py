@@ -607,7 +607,14 @@ def display_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
         # 384.36 × 10/110 = 34.94 ✓
         # 按售价直接乘 10% 得 41.13，高估 18%。
         tariff_rate = extra_pct.get("tariffChargePercent") or Decimal("0")
-        tariff = (pretax * tariff_rate / (Decimal("100") + tariff_rate)
+        # 关税基数是「展示价 - 增值税」，**不扣运费**（2026-11-23 按妙手泰国
+        # 官方试算对齐）。妙手截图 303.21 THB / 30CNY / 0.5kg：
+        #   (303.21 - 19.84) × 10/110 = 25.76 ✓ 与截图完全一致
+        # 原来用 pretax（再减 20.00 运费）算得 23.94，整份报价偏低 2.75 THB。
+        # 本函数上面的注释其实写的就是「税前价 = 展示价 - 增值税」，与代码
+        # 里的 pretax 定义不一致 —— 这次按注释与截图统一。
+        tariff_base = price - vat
+        tariff = (tariff_base * tariff_rate / (Decimal("100") + tariff_rate)
                   if tariff_rate else Decimal("0"))
         # 企业商家代扣税：按售价百分比，与 withdraw 同口径进成本
         withhold = withhold_pct / Decimal("100") * price if withhold_pct else Decimal("0")
@@ -629,9 +636,19 @@ def display_price(purchase_cny: Any, weight_kg: Any, template: Mapping[str, Any]
         # 注意：**不含**尾程服务税和「按售价百分比的附加费」——
         # 这些项本来就不是从售价里扣出来的现金流。
         # 原来把它们也减掉了，提现费被低估（越南差 30 VND，泰国差 0.6 THB）。
+        # 提现基数（2026-11-23 按妙手泰国官方试算逐项对齐）：
+        #   妙手截图 303.21 THB / 30CNY / 0.5kg：
+        #     提现 2.00 = 1% × (税前 237.61 - 交易 12.27 - 基础 1.07
+        #                       - 关税 25.76 - 电商增长 24.35) = 1.99 ✓
+        #   基数必须把「按售价百分比的附加费」(电商增长/活动费/包邮等) 也减掉，
+        #   它们同样是先从售价里扣走的现金流。原来漏减，提现费被高估。
+        extra_on_price = sum(
+            (extra_pct.get(field) or Decimal("0")) / Decimal("100") * price
+            for field in EXTRA_CHARGE_FIELDS
+            if field != "tariffChargePercent")
         withdraw = withdraw_pct / Decimal("100") * (
             pretax - payment - bcp - support_myr - commission - sfp - affiliate
-            - tariff - withhold - order_process_myr)
+            - tariff - withhold - order_process_myr - extra_on_price)
         profit = (profit_pct / Decimal("100") * price if profit_by_sale
                   else profit_pct / Decimal("100") * (purchase_myr + freight))
         lines = {
