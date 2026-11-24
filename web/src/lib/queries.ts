@@ -391,6 +391,8 @@ export interface WarehouseListParams extends PageParams {
   accountId?: string | null;
   status?: ProductStatus | null;
   qualityStatus?: QualityReviewStatus | null;
+  /** 货源筛选：missing＝没有货源链接/已失效，present＝有。仅老师及以上 */
+  sourceStatus?: "missing" | "present" | null;
   claimed?: boolean | null;
   sort?: ProductSort;
 }
@@ -407,6 +409,7 @@ export function warehouseQueryKey(params: WarehouseListParams): readonly unknown
     claimAccountId: params.claimAccountId ?? null,
     status: params.status ?? null,
     qualityStatus: params.qualityStatus ?? null,
+    sourceStatus: params.sourceStatus ?? null,
     claimed: params.claimed ?? null,
     sort: params.sort,
   });
@@ -428,6 +431,7 @@ export function useWarehouseList(params: WarehouseListParams): UseQueryResult<Wa
           claimAccountId: params.claimAccountId,
           status: params.status,
           qualityStatus: params.qualityStatus,
+          sourceStatus: params.sourceStatus,
           claimed: params.claimed,
           sort: params.sort,
         }),

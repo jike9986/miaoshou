@@ -624,6 +624,8 @@ export interface WarehouseQuery {
   accountId?: string | null;
   status?: ProductStatus | null;
   qualityStatus?: QualityReviewStatus | null;
+  /** 货源筛选：missing＝没有货源链接/已失效，present＝有。仅老师及以上 */
+  sourceStatus?: "missing" | "present" | null;
   claimed?: boolean | null;
   sort?: ProductSort;
 }

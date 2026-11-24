@@ -689,6 +689,7 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
                   group: str | None = None, q: str | None = None,
                   account_id: Any = None, status: str | None = None,
                   quality_status: str | None = None,
+                  source_status: str | None = None,
                   claimed: bool | None = None, sort: str = "savedDesc",
                   operator_id: int | None = None,
                   claim_account_id: Any = None,
@@ -704,6 +705,8 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
         raise errors.validation("状态筛选无效", field="status", value=status)
     if quality_status not in (None, "verified", "needs_review"):
         raise errors.validation("规格核验状态无效", field="qualityStatus", value=quality_status)
+    if source_status not in (None, "missing", "present"):
+        raise errors.validation("货源状态无效", field="sourceStatus", value=source_status)
     if q is not None and len(str(q)) > 64:
         raise errors.validation("搜索词不能超过 64 个字符", field="q")
 
@@ -712,6 +715,32 @@ def list_products(db: Session, *, page: int = 1, page_size: int = 24,
     if quality_status == "verified":
         query = query.filter(Product.quality_review.is_not(None),
                              reviewed_revision == Product.revision)
+    if source_status:
+        # 货源链接存在 payload JSON 里（`sourceUrl` / `sourceItemId`）。
+        #
+        # 为什么用 json_extract 而不是取出来在 Python 里筛：这要参与分页，
+        # 内存里筛会让 total 和页数全部错位。SQLite 与 PostgreSQL 都支持
+        # json_extract（PG 上是 -> 的语法糖），一份表达式两边都能跑。
+        #
+        # 负责人 2026-11-23：「在前面全部状态这个筛选里面加上仅老师可见可用的
+        # 一个，就是看哪些产品的货源链接没有或者失效的这种」。
+        # 方言差异：SQLite 用 json_extract(col, "$.k")，PostgreSQL 用
+        # col ->> 'k'（返回 text）。`func.json_extract` 在 PG 上不存在 —
+        # 实测报 `function json_extract(json, character varying) does not exist`，
+        # 所以按 dialect 分两套表达式。
+        if db.bind.dialect.name == "postgresql":
+            _url = func.coalesce(
+                Product.payload.op("->>")("sourceUrl"),
+                Product.payload.op("->>")("sourceItemId"),
+            )
+        else:
+            _url = func.coalesce(
+                func.json_extract(Product.payload, "$.sourceUrl"),
+                func.json_extract(Product.payload, "$.sourceItemId"),
+            )
+        has_source = and_(_url.is_not(None), _url != "")
+        query = query.filter(has_source if source_status == "present"
+                             else ~has_source)
     elif quality_status == "needs_review":
         query = query.filter(or_(Product.quality_review.is_(None),
                                  reviewed_revision.is_(None),

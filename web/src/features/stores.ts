@@ -86,6 +86,8 @@ export interface WarehouseState {
   claimed: boolean | null;
   status: ProductStatus | null;
   qualityStatus: QualityReviewStatus | null;
+  /** 货源筛选：missing＝没有货源链接，present＝有。仅老师/管理员可用 */
+  sourceStatus: "missing" | "present" | null;
   category: WarehouseCategoryFilter;
   /** 选中商品 id（跨页保留） */
   selected: string[];
@@ -98,6 +100,7 @@ export interface WarehouseState {
   setClaimed: (claimed: boolean | null) => void;
   setStatus: (status: ProductStatus | null) => void;
   setQualityStatus: (status: QualityReviewStatus | null) => void;
+  setSourceStatus: (status: "missing" | "present" | null) => void;
   setCategory: (category: WarehouseCategoryFilter) => void;
   toggleSelected: (id: string) => void;
   selectMany: (ids: string[]) => void;
@@ -114,6 +117,7 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
   claimed: null,
   status: null,
   qualityStatus: null,
+  sourceStatus: null,
   category: { kind: "all" },
   selected: [],
 
@@ -127,6 +131,7 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
   setClaimed: (claimed) => set({ claimed, page: 1, selected: [] }),
   setStatus: (status) => set({ status, page: 1, selected: [] }),
   setQualityStatus: (qualityStatus) => set({ qualityStatus, page: 1, selected: [] }),
+  setSourceStatus: (sourceStatus) => set({ sourceStatus, page: 1, selected: [] }),
   setCategory: (category) => set({ category, page: 1, selected: [] }),
   toggleSelected: (id) =>
     set((state) => ({

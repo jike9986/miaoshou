@@ -1,7 +1,7 @@
 // design-system §7.1 页面头（56px，px-6，border-b，bg-canvas/85 backdrop-blur-[2px]，sticky top-0 z-10）
 // 标题 18/26 600；不再渲染面包屑（侧栏已承担导航定位，页头只留页名）；右侧操作区 gap-2，主按钮 md。
 
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 export interface PageHeaderProps {
@@ -55,7 +55,20 @@ export interface PageContentProps {
   /** 是否允许滚动（表格页自管理滚动时传 false） */
   scroll?: boolean;
   padding?: string;
+  /**
+   * 滚动位置记忆的 key。传了就自动「离开时存、回来时恢复」。
+   *
+   * 为什么需要：列表页点进详情是路由跳转，整个页面卸载，回来时滚动容器
+   * 是全新的，位置自然归零。运营翻到第 80 件点进去看一眼，退回来又得从头
+   * 往下滑 —— 用 sessionStorage 存偏移量，回来直接停在原处
+   * （负责人 2026-11-23：「往下滑点进去一个产品的详情，再退出就会自动
+   * 回到最上面」）。
+   */
+  scrollRestoreKey?: string;
 }
+
+/** 恢复滚动位置的全局前缀，避免和别的 key 撞车 */
+const SCROLL_PREFIX = "dsh.scroll.";
 
 export function PageContent({
   children,
@@ -63,13 +76,37 @@ export function PageContent({
   width = "table",
   scroll = true,
   padding = "p-6",
+  scrollRestoreKey,
 }: PageContentProps) {
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+
+  // 挂载时恢复、卸载时保存。只存一次（rAF 里读），避免滚动事件写爆 storage。
+  useLayoutEffect(() => {
+    if (!scrollRestoreKey) return;
+    const node = scrollerRef.current;
+    if (!node) return;
+    const storageKey = SCROLL_PREFIX + scrollRestoreKey;
+    const saved = Number(window.sessionStorage.getItem(storageKey) || 0);
+    if (saved > 0) {
+      // 等布局稳定再设，否则内容还没撑开、scrollTop 会被夹到 0
+      requestAnimationFrame(() => {
+        if (scrollerRef.current) scrollerRef.current.scrollTop = saved;
+      });
+    }
+    return () => {
+      // 卸载时把当前偏移记下来，下次进来恢复
+      window.sessionStorage.setItem(storageKey, String(node.scrollTop));
+    };
+  }, [scrollRestoreKey]);
   // 注意：Tailwind 对 w-[var(--x)] 会误判为颜色类型而不生成 CSS，
   // 这里直接写字面值（与 tokens.css 的 --form-max/--content-max 保持同值）。
   const widthClass =
     width === "form" ? "max-w-[880px]" : width === "table" ? "mx-auto max-w-[1760px]" : "";
   return (
-    <div className={cn("min-h-0 flex-1", scroll && "overflow-y-auto", padding, className)}>
+    <div
+      ref={scrollerRef}
+      className={cn("min-h-0 flex-1", scroll && "overflow-y-auto", padding, className)}
+    >
       <div className={cn("flex flex-col gap-4", widthClass)}>{children}</div>
     </div>
   );

@@ -1128,7 +1128,6 @@ function ScheduleFormDrawer({
               <div className="mb-1 flex items-baseline justify-between gap-1">
                 <div className="flex items-baseline gap-1">
                   <span className="text-sm font-medium text-fg">发布账号</span>
-                  <span className="text-xs text-fg-secondary">（老师模式：每个勾选账号创建一条独立任务）</span>
                 </div>
                 <button
                   type="button"
@@ -1145,7 +1144,7 @@ function ScheduleFormDrawer({
                 </button>
               </div>
               <div className="max-h-56 overflow-y-auto rounded-md border border-border-subtle p-2">
-                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 lg:grid-cols-3">
                 {accounts.map((account) => {
                   const checked = checkedAccountIds.includes(account.id);
                   const accShopsRaw = shopsByAccount[account.id];
@@ -1227,11 +1226,14 @@ function ScheduleFormDrawer({
             )
           )}
 
+          {/* 店铺与模板同一行（负责人 2026-11-23：「左边这个店铺的框可以小一点」、
+              「这个模板肯定要全部显示出来啊」）。店铺 1 份宽、模板 2 份宽，
+              五个模板一行不截断。 */}
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
           <Field
             label="目标店铺"
             required
             error={errors.shopId ?? null}
-            hint={shopOptions.length > 1 ? "可勾多个店铺，各自套自己站点的模板" : undefined}
           >
             {shopOptions.length > 1 ? (
               <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border-subtle p-2">
@@ -1305,7 +1307,9 @@ function ScheduleFormDrawer({
                   : "该国家还没有对应模板"}
               </p>
             ) : (
-              <div className="grid grid-cols-5 gap-2">
+              // 模板名必须完整显示（负责人 2026-11-23：「这个模板肯定要全部
+              // 显示出来啊」）。原来用 truncate 截成「马…」「菲…」，等于没法选。
+              <div className="flex flex-wrap gap-2">
                 {templateOptions.map((item) => {
                   const active = template === item.name;
                   return (
@@ -1320,7 +1324,7 @@ function ScheduleFormDrawer({
                         setTemplate(active ? "" : item.name);
                       }}
                       className={cn(
-                        "flex items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs transition-colors duration-fast",
+                        "flex min-w-[72px] flex-1 basis-[18%] items-center justify-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition-colors duration-fast",
                         item.invalid
                           ? "cursor-not-allowed border-border-subtle text-fg-muted line-through"
                           : active
@@ -1328,14 +1332,15 @@ function ScheduleFormDrawer({
                             : "border-border text-fg-secondary hover:border-border-strong hover:bg-surface-hover"
                       )}
                     >
-                      {active && <Check className="size-3" />}
-                      <span className="truncate">{item.name}</span>
+                      {active && <Check className="size-3 shrink-0" />}
+                      <span className="whitespace-nowrap">{item.name}</span>
                     </button>
                   );
                 })}
               </div>
             )}
           </Field>
+          </div>
         </div>
 
         <Separator />
@@ -1357,7 +1362,9 @@ function ScheduleFormDrawer({
           </Button>
         </Field>
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        {/* 频率 / 执行时间 / 每次数量 同一行（负责人 2026-11-23：
+            「下面的频率时间数量也弄成一行」）。 */}
+        <div className="grid gap-3 sm:grid-cols-3">
           <Field label="频率" required>
             <Select
               value={draft.frequency}
@@ -1375,6 +1382,23 @@ function ScheduleFormDrawer({
               onChange={(next) => patch({ time: next })}
               invalid={Boolean(errors.time)}
               minTime={todayMinTime(draft)}
+            />
+          </Field>
+
+          <Field
+            label="每次数量"
+            required
+            error={errors.perRun ?? null}
+          >
+            <NumberInput
+              value={draft.perRun}
+              min={LIMITS.schedulePerRun.min}
+              max={2000}
+              step={1}
+              decimals={0}
+              suffix="件"
+              invalid={Boolean(errors.perRun)}
+              onChange={(value) => patch({ perRun: value ?? LIMITS.schedulePerRun.min })}
             />
           </Field>
         </div>
@@ -1465,26 +1489,6 @@ function ScheduleFormDrawer({
             </Field>
           </div>
         )}
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field
-            label="每次数量"
-            required
-            error={errors.perRun ?? null}
-          >
-            <NumberInput
-              value={draft.perRun}
-              min={LIMITS.schedulePerRun.min}
-              max={2000}
-              step={1}
-              decimals={0}
-              suffix="件"
-              invalid={Boolean(errors.perRun)}
-              onChange={(value) => patch({ perRun: value ?? LIMITS.schedulePerRun.min })}
-            />
-          </Field>
-
-        </div>
 
 
         {Object.keys(errors).length > 0 && (

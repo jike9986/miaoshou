@@ -170,6 +170,7 @@ export function WarehousePage() {
     claimed: query.claimed,
     status: query.status,
     qualityStatus: isTeacher ? query.qualityStatus : null,
+    sourceStatus: isTeacher ? query.sourceStatus : null,
     sort: query.sort,
     cid: category.kind === "cid" ? category.cid : null,
     categoryId: category.kind === "categoryId" ? category.categoryId : null,
@@ -183,12 +184,14 @@ export function WarehousePage() {
   // 总页数：工具栏里的「第 X / Y 页」与翻页按钮的禁用判断都用它。
   const pageCount = Math.max(1, Math.ceil(total / Math.max(1, query.pageSize)));
   const hasActiveWarehouseFilter = query.claimed !== null || query.status !== null
-    || query.qualityStatus !== null || category.kind !== "all";
+    || query.qualityStatus !== null || query.sourceStatus !== null
+    || category.kind !== "all";
 
   const clearWarehouseFilters = (): void => {
     query.setClaimed(null);
     query.setStatus(null);
     query.setQualityStatus(null);
+    query.setSourceStatus(null);
     query.setCategory({ kind: "all" });
   };
 
@@ -590,7 +593,12 @@ export function WarehousePage() {
         actions={headerActions}
       />
 
-      <PageContent width="table">
+      {/* 列表滚动位置记忆（负责人 2026-11-23：「往下滑点进去一个产品的详情，
+          再退出就会自动回到最上面」）。
+          路由切换会卸载整个页面，回来时滚动容器是新的，位置自然归零。
+          进详情前把偏移存进 sessionStorage，回到列表时恢复 ——
+          用 sessionStorage 而不是内存变量，是因为刷新后也希望停在原处。 */}
+      <PageContent width="table" scrollRestoreKey="warehouse-list">
         <Tabs
           value={tab}
           onChange={(value) => setTab(value as WarehouseTab)}
@@ -727,34 +735,52 @@ export function WarehousePage() {
 
             {/* 工具栏 */}
             <div className="flex flex-wrap items-center gap-2">
+              {/*
+                只留一个状态筛选（负责人 2026-11-23：「规格核验下拉不保留，
+                只保留第一个筛选」）。
+
+                原来有两个下拉：认领状态 + 规格核验状态，并排放着既占地方
+                又让人不知道该看哪个。现在合成一个，把规格核验的两项和
+                货源缺失并进去 —— 它们本来都是「筛出某一批要处理的商品」，
+                同时选两个筛选的交集在实际使用里没人要。
+
+                货源缺失只对老师及以上开放：货源链接是采购侧信息，
+                与 `source-links` 接口、`group_access` 的口径一致。
+              */}
               <Select
                 size="md"
-                aria-label="认领状态"
-                className="w-[132px]"
-                value={query.claimed === null ? "all" : query.claimed ? "claimed" : "unclaimed"}
-                onChange={(value) =>
-                  query.setClaimed(value === "all" ? null : value === "claimed")
+                aria-label="商品状态"
+                className="w-[168px]"
+                value={
+                  query.sourceStatus ? `source_${query.sourceStatus}`
+                    : query.qualityStatus ? `quality_${query.qualityStatus}`
+                      : query.claimed === null ? "all"
+                        : query.claimed ? "claimed" : "unclaimed"
                 }
+                onChange={(value) => {
+                  // 这三个筛选互斥：选一个就把另外两个清掉，否则查询条件会叠加
+                  query.setClaimed(value === "claimed" ? true
+                    : value === "unclaimed" ? false : null);
+                  query.setQualityStatus(
+                    value === "quality_needs_review" ? "needs_review"
+                      : value === "quality_verified" ? "verified" : null);
+                  query.setSourceStatus(
+                    value === "source_missing" ? "missing"
+                      : value === "source_present" ? "present" : null);
+                }}
                 options={[
                   { value: "all", label: "全部状态" },
                   { value: "claimed", label: "已认领" },
                   { value: "unclaimed", label: "未认领" },
+                  ...(isTeacher
+                    ? [
+                        { value: "quality_needs_review", label: "待核验规格" },
+                        { value: "quality_verified", label: "已核验规格" },
+                        { value: "source_missing", label: "货源缺失/失效" },
+                      ]
+                    : []),
                 ]}
               />
-              {isTeacher && (
-                <Select
-                  size="md"
-                  aria-label="规格核验状态"
-                  className="w-[148px]"
-                  value={query.qualityStatus ?? "all"}
-                  onChange={(value) => query.setQualityStatus(value === "all" ? null : value as "verified" | "needs_review")}
-                  options={[
-                    { value: "all", label: "全部规格" },
-                    { value: "needs_review", label: "待核验规格" },
-                    { value: "verified", label: "已核验规格" },
-                  ]}
-                />
-              )}
 
               {!listQuery.isLoading && !listQuery.isError && items.length > 0 && (
                 <span className="num ml-1 flex shrink-0 items-center gap-1.5 text-xs text-fg-muted">

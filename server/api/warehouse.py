@@ -120,13 +120,15 @@ def list_warehouse(
     status: str | None = None,
     claimed: str | None = None,
     qualityStatus: str | None = Query(default=None, pattern="^(verified|needs_review)$"),
+    sourceStatus: str | None = Query(default=None, pattern="^(missing|present)$"),
     sort: str = "savedDesc",
 ) -> dict[str, Any]:
     claimed_flag = None if claimed in (None, "") else parse_bool(claimed, "claimed")
     return warehouse_service.list_products(
         db, page=page, page_size=pageSize, category_id=categoryId, cid=cid,
         group_id=groupId, group=group, q=q, account_id=accountId, status=status,
-        quality_status=qualityStatus, claimed=claimed_flag, sort=sort,
+        quality_status=qualityStatus, source_status=sourceStatus,
+        claimed=claimed_flag, sort=sort,
         operator_id=operator.id, claim_account_id=claimAccountId,
         operator=operator)
 
