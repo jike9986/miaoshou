@@ -79,7 +79,9 @@ function Shell() {
   const [currentShortId, setCurrentShortId] = useState<string | null>(null);
   // 单机模式：不再等「有人登录」才查状态 —— 本机令牌就能查，否则未登录时
   // 侧栏永远显示「妙手未连接」、版本检查也不跑。
-  const { data: status } = useAuthStatus(true);
+  // status 不再用（底部不显示连接状态了），但缓存还是要保持热 ——
+  // 其他页面依赖同一个 queryKey。
+  useAuthStatus(true);
   const versionQuery = useVersion(true, hasRuntimeToken() || Boolean(operatorIdentity?.token));
   const notifiedVersion = useRef<string | null>(null);
   // 角色可能被管理员在别处改过（学员 → 老师），而本地只存了登录那一刻的值。
@@ -115,15 +117,17 @@ function Shell() {
     }
   }, [operatorIdentity?.mustChangePassword, location.pathname, navigate]);
 
-  const connected = status?.connected ?? false;
   // 操作员名：已设置显示名字，未设置标注「本机（未设置）」——
   // 多人共用一台机器时，左下角随时能看到「现在是谁在操作」。
+  //
+  // 2026-11-24 负责人：「软件最下角不要显示妙手已连接，只需要显示图像、
+  // 名字和数字 id，数字 id 可以加个椭圆底，让数字明显一点，数字前面不要
+  // 这个 # 就纯六位数字，老师学员也不要显示」。
+  // 所以 detail 只剩数字 ID（纯 6 位，无 #），角色和连接状态都不再出现。
   const operatorLabel = operatorIdentity
     ? operatorDisplayName()
     : `${operatorDisplayName()}（未设置）`;
-  const roleLabel = operatorIdentity?.role === "teacher" || operatorIdentity?.role === "admin"
-    ? "老师"
-    : operatorIdentity ? "学员" : "未登录";
+  const operatorShortId = currentShortId ?? null;
 
   const logout = (): void => {
     clearOperatorQueryClients();
@@ -148,7 +152,7 @@ function Shell() {
         brand={{ icon: <BrandMark className="size-4" />, name: "奥皇上品" }}
         account={SHOW_ACCOUNT_UI ? {
           name: operatorLabel,
-          detail: `${roleLabel}${currentShortId ? ` #${currentShortId}` : ""} · 妙手${connected ? "已连接" : "未连接"}`,
+          shortId: operatorShortId,
         } : null}
         onAccountClick={SHOW_ACCOUNT_UI ? () => navigate("/settings") : undefined}
         onAccountLogout={SHOW_ACCOUNT_UI ? logout : undefined}

@@ -14,6 +14,7 @@
 import { Fragment, useId, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowLeftRight,
   Ban,
   BadgeCheck,
   CheckCircle2,
@@ -49,7 +50,6 @@ import {
 } from "@/lib/queries";
 import {
   currentOperator,
-  LOCAL_OPERATOR_NAME,
   setOperator,
   useOperatorIdentity,
 } from "@/lib/operator";
@@ -93,72 +93,6 @@ function roleLabel(role?: string): string {
     case "teacher": return "老师";
     default: return "学员";
   }
-}
-
-/* ------------------------------------------------------------------ *
- * 当前身份卡
- * ------------------------------------------------------------------ */
-
-function IdentityCard({
-  onSwitch,
-  onCreated,
-}: {
-  onSwitch: () => void;
-  onCreated: () => void;
-}) {
-  const identity = useOperatorIdentity();
-  const operatorsQuery = useOperators();
-  const me = useMemo(() => {
-    const list = operatorsQuery.data?.operators ?? [];
-    if (!identity) return operatorsQuery.data?.current ?? null;
-    return list.find((item) => item.id === identity.id) ?? operatorsQuery.data?.current ?? null;
-  }, [identity, operatorsQuery.data]);
-
-  const name = identity?.name ?? LOCAL_OPERATOR_NAME;
-  return (
-    <Card padding="normal">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="grid size-10 shrink-0 place-items-center rounded-full bg-brand-100 text-[15px] font-semibold text-brand-800">
-          {Array.from(name)[0] ?? "本"}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="flex flex-wrap items-center gap-2">
-            <span className="text-[15px] font-semibold leading-[22px] text-fg">
-              当前身份：{name}
-            </span>
-            {(me?.role === "teacher" || me?.role === "admin" || me?.admin) && (
-              <Badge variant="brand" size="sm">
-                老师
-              </Badge>
-            )}
-            {!identity && (
-              <Badge variant="neutral" size="sm">
-                未设置
-              </Badge>
-            )}
-            {identity && me && !me.enabled && (
-              <Badge variant="danger" size="sm">
-                已被停用
-              </Badge>
-            )}
-          </p>
-          <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
-            {identity
-              ? "你的改动会记在这个名字下，冲突时后端按版本号拦住覆盖。"
-              : "请先使用软件账号登录。"}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button variant="secondary" size="md" icon={<Users />} onClick={onSwitch}>
-            切换
-          </Button>
-          <Button variant="primary" size="md" icon={<UserPlus />} onClick={onCreated}>
-            新建操作员
-          </Button>
-        </div>
-      </div>
-    </Card>
-  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -648,11 +582,12 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
   const canManage = me?.role === "teacher" || me?.role === "admin" || me?.admin === true;
   const canManageRoles = operatorsQuery.data?.current?.canManageRoles === true;
 
-  const accountEmailPanel = identity && me && !me.builtin
-    ? <AccountEmailPanel key={me.id} operator={me} />
-    : null;
-  const passwordPanel = identity && me && !me.builtin ? (
+  // 2026-11-24 负责人：「设置的登录密码和找回密码邮箱不能合并成一个吗」。
+  // 两件事本来就是「这个账号的登录凭证」，拆两张卡只是多一个边框。
+  // 合并后：密码一行 + 邮箱一行，都在同一张卡里。
+  const accountSecurityPanel = identity && me && !me.builtin ? (
     <Card padding="normal">
+      {passwordOpen && <ChangeSoftwarePasswordDialog onClose={() => setPasswordOpen(false)} />}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <CardTitle>登录密码</CardTitle>
@@ -660,7 +595,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
         </div>
         <Button variant="secondary" icon={<KeyRound />} onClick={() => setPasswordOpen(true)}>修改密码</Button>
       </div>
-      {passwordOpen && <ChangeSoftwarePasswordDialog onClose={() => setPasswordOpen(false)} />}
+      <AccountEmailPanel key={me.id} operator={me} inline />
     </Card>
   ) : null;
 
@@ -683,8 +618,7 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
             你可以自行修改登录密码和绑定邮箱；账号权限如需调整，请联系老师。
           </p>
         </Card>
-        {passwordPanel}
-        {accountEmailPanel}
+        {accountSecurityPanel}
       </div>
     );
   }
@@ -733,12 +667,12 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
 
   return (
     <div className={cn("flex flex-col gap-4", className)}>
-      {passwordPanel}
-      {accountEmailPanel}
+      {accountSecurityPanel}
       {/* 2026-11-23：原来这里包着一层「兼容身份维护」折叠块，里面装的正是
           当前身份卡和操作员列表 —— 内容和上面的学员账号高度重叠，负责人要求
-          合并。现在直接摊开显示，不再多一层折叠，也不再重复解释一遍。 */}
-      <IdentityCard onSwitch={() => setSwitchOpen(true)} onCreated={() => setCreateOpen(true)} />
+          合并。现在直接摊开显示，不再多一层折叠，也不再重复解释一遍。
+          2026-11-24 负责人：「这个当前身份这一栏卡片不要，去掉这个」——
+          IdentityCard 整张去掉：切换/新建操作员在上面操作员列表里都有。 */}
 
       <Card padding="none">
         <div className="flex flex-wrap items-center gap-2 px-4 py-3">
@@ -754,6 +688,17 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
               icon={<Users className={cn(operatorsQuery.isFetching && "animate-pulse")} />}
               onClick={() => void operatorsQuery.refetch()}
             />
+            {/* 「切换身份」原来是 IdentityCard 里的按钮，那张卡整个去掉后
+                挪到这里（负责人 2026-11-24 要去掉当前身份卡片，但换身份的
+                入口不能一起没了） */}
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<ArrowLeftRight />}
+              onClick={() => setSwitchOpen(true)}
+            >
+              切换身份
+            </Button>
             <Button
               variant="secondary"
               size="sm"
@@ -1196,7 +1141,14 @@ function miaoshouBindingStatus(status?: string): { label: string; variant: "succ
   }
 }
 
-function AccountEmailPanel({ operator }: { operator: Operator }) {
+/**
+ * 找回密码邮箱。
+ *
+ * `inline` = 不自己包 Card，塞进「登录密码」那张卡里（负责人 2026-11-24：
+ * 「设置的登录密码和找回密码邮箱不能合并成一个吗」）。两件都是这个账号的
+ * 登录凭证，分开两张卡只是多一圈边框。
+ */
+function AccountEmailPanel({ operator, inline = false }: { operator: Operator; inline?: boolean }) {
   const emailFieldId = useId();
   const codeFieldId = useId();
   const requestCode = useRequestEmailVerificationCode();
@@ -1254,8 +1206,8 @@ function AccountEmailPanel({ operator }: { operator: Operator }) {
     });
   };
 
-  return (
-    <Card padding="normal">
+  const body = (
+    <>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <CardTitle>找回密码邮箱</CardTitle>
@@ -1378,7 +1330,13 @@ function AccountEmailPanel({ operator }: { operator: Operator }) {
           {error && <InlineError>{error}</InlineError>}
         </div>
       )}
-    </Card>
+    </>
+  );
+
+  return inline ? (
+    <div className="mt-4 border-t border-border-subtle pt-4">{body}</div>
+  ) : (
+    <Card padding="normal">{body}</Card>
   );
 }
 

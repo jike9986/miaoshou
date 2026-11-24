@@ -348,16 +348,13 @@ export function WordsPage({ embedded = false }: { embedded?: boolean }) {
       {/* 面板统一用 flex gap-3 竖排（与审计日志 / 操作员等设置面板同口径） */}
       <PageContent width="table">
         <div className="flex flex-col gap-3">
-        {embedded && (
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <span className="text-[14px] font-semibold text-fg">违规词库</span>
-            <div className="flex items-center gap-2">{headerActions}</div>
-          </div>
-        )}
         {/* 与其他设置面板对齐：筛选条放在 Card 里（负责人 2026-11-23：
             「这个违规词库界面怎么感觉和其他界面不一样不统一」）。
             原来搜索行直接挂在页面上，没有卡片边界，看着像另一套设计。 */}
         <Card padding="compact">
+        {/* 2026-11-24 负责人：「这个违规词库的名字去掉，然后上下合并成一行，
+            这个搜索和上面一行的合成一行」—— 嵌入设置页时不再显示面板名，
+            按钮和搜索框并到同一行。 */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="min-w-[220px] flex-1">
             <SearchInput
@@ -394,6 +391,8 @@ export function WordsPage({ embedded = false }: { embedded?: boolean }) {
             disabled={selected.length === 0}
             onClick={() => setDeleteOpen(true)}
           />
+
+          {embedded && headerActions}
         </div>
         </Card>
 

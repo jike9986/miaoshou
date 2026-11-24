@@ -492,6 +492,14 @@ export interface SidebarAccount {
   name: string;
   /** 店铺名 / 站点，11/16 muted */
   detail?: string;
+  /**
+   * 操作员数字 ID（纯 6 位，不带 #）。
+   *
+   * 2026-11-24 负责人：「数字 id 可以加个椭圆底，让数字明显一点，
+   * 数字前面不要这个 # 就纯六位数字，老师学员也不要显示」。
+   * 传这个就不再渲染 detail —— 角色和「妙手已连接」都不许出现在底部。
+   */
+  shortId?: string | null;
   /** 当前操作员名（11px 更弱一行）：多人共用一台机器时，「现在是谁」必须随时可见 */
   operator?: string;
   initial?: string;
@@ -656,7 +664,12 @@ export function Sidebar({
                   <span className="block truncate text-[13px] font-semibold leading-5 text-fg">
                     {account.name}
                   </span>
-                  {account.detail && (
+                  {account.shortId && (
+                    <span className="mt-0.5 inline-block rounded-full bg-canvas-inset px-1.5 py-px text-[10px] font-medium leading-4 text-fg-muted ring-1 ring-border">
+                      {account.shortId}
+                    </span>
+                  )}
+                  {account.detail && !account.shortId && (
                     <span className="block truncate text-[11px] leading-4 text-fg-muted">
                       {account.detail}
                     </span>
@@ -712,10 +725,20 @@ export function Sidebar({
               </span>
               {!collapsed && (
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[12px] font-semibold leading-4 text-fg">
-                    {account.name}
+                  <span className="flex items-center gap-1.5">
+                    <span className="truncate text-[12px] font-semibold leading-4 text-fg">
+                      {account.name}
+                    </span>
+                    {/* 数字 ID：椭圆底让它在名字旁边立得住，纯数字不带 # */}
+                    {account.shortId && (
+                      <span className="shrink-0 rounded-full bg-canvas-inset px-1.5 py-px text-[10px] font-medium leading-4 text-fg-muted ring-1 ring-border">
+                        {account.shortId}
+                      </span>
+                    )}
                   </span>
-                  {account.detail && (
+                  {/* detail 只在没有 shortId 时兜底显示，避免角色/连接状态
+                      又跑回底部（负责人 2026-11-24 明确要求去掉） */}
+                  {account.detail && !account.shortId && (
                     <span className="block truncate text-[11px] leading-[14px] text-fg-muted">
                       {account.detail}
                     </span>

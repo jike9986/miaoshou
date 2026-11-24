@@ -161,11 +161,42 @@ export function SourceLinkCard({ product, onSaved }: SourceLinkCardProps) {
 
   return (
     <Card padding="normal">
+      {/* 2026-11-24 负责人：「这个 1688 货源链接右边不是比较空吗，这个
+          officeid 可以移到右边，下面这个详情一打开就自动显示什么正在核验
+          货源这个有什么用，可以移到上面 1688 货源链接名字的右边」。
+          所以：状态徽章和核验结果都在标题行，offer id 在右侧和链接同一行。 */}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <SectionTitle>⑧ 1688 货源链接</SectionTitle>
           <Badge variant={meta.tone} size="sm">{meta.label}</Badge>
           {isManual && <Badge variant="neutral" size="sm">手工填写</Badge>}
+          {/* 核验状态跟着标题走，不再占详情下方一块 */}
+          {checking && !checked && (
+            <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
+              <RefreshCw className="size-3 animate-spin" />
+              正在核验货源
+            </span>
+          )}
+          {checked && (
+            <span className="inline-flex items-center gap-1 text-xs">
+              {checked.status === "verified" ? (
+                <>
+                  <CheckCircle2 className="size-3.5 shrink-0 text-success-700" strokeWidth={1.75} />
+                  <span className="text-success-700">
+                    妙手采集箱里能找到这条货源
+                    {checked.offerTitle ? `：${checked.offerTitle}` : ""}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <TriangleAlert className="size-3.5 shrink-0 text-warning-700" strokeWidth={1.75} />
+                  <span className="text-fg-secondary">
+                    {checked.error || "无法确认（不代表失效）"}
+                  </span>
+                </>
+              )}
+            </span>
+          )}
         </div>
         <Link2 className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
       </div>
@@ -216,57 +247,35 @@ export function SourceLinkCard({ product, onSaved }: SourceLinkCardProps) {
               editable && "cursor-text transition-colors hover:border-border-strong"
             )}
           >
-            {stored ? (
-              <a
-                href={stored}
-                target="_blank"
-                rel="noreferrer"
-                onClick={(event) => event.stopPropagation()}
-                className="inline-flex items-center gap-1.5 break-all text-[13px] font-medium text-brand-700 underline decoration-brand-700/30 hover:decoration-brand-700"
-              >
-                {stored}
-                <ExternalLink className="size-3.5 shrink-0" strokeWidth={1.75} />
-              </a>
-            ) : null}
-            {!stored && (
-              <p className="text-[13px] text-fg-muted">
-                {editable ? "粘贴 1688 链接或 offer id" : "尚未记录货源链接"}
-              </p>
-            )}
-            {offerId && (
-              <p className="mt-1.5 text-xs text-fg-muted">offer id：{offerId}</p>
-            )}
+            {/* 链接和 offer id 同一行：不换行时链接占左、id 靠右，
+                窄屏才折下来 —— 右边原本空着一大片。 */}
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+              <div className="min-w-0">
+                {stored ? (
+                  <a
+                    href={stored}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(event) => event.stopPropagation()}
+                    className="inline-flex items-center gap-1.5 break-all text-[13px] font-medium text-brand-700 underline decoration-brand-700/30 hover:decoration-brand-700"
+                  >
+                    {stored}
+                    <ExternalLink className="size-3.5 shrink-0" strokeWidth={1.75} />
+                  </a>
+                ) : (
+                  <p className="text-[13px] text-fg-muted">
+                    {editable ? "粘贴 1688 链接或 offer id" : "尚未记录货源链接"}
+                  </p>
+                )}
+              </div>
+              {offerId && (
+                <p className="num shrink-0 text-xs text-fg-muted">offer id：{offerId}</p>
+              )}
+            </div>
             {sourceTitle && (
               <p className="mt-1 text-xs text-fg-secondary">货源标题：{sourceTitle}</p>
             )}
           </div>
-
-          {checking && !checked && (
-            <div className="mt-2 flex items-center gap-1.5 text-xs text-fg-muted">
-              <RefreshCw className="size-3 animate-spin" />
-              正在核验货源
-            </div>
-          )}
-          {checked && (
-            <div className="mt-2 flex items-start gap-1.5 text-xs">
-              {checked.status === "verified" ? (
-                <>
-                  <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-success-700" strokeWidth={1.75} />
-                  <span className="text-success-700">
-                    妙手采集箱里能找到这条货源
-                    {checked.offerTitle ? `：${checked.offerTitle}` : ""}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warning-700" strokeWidth={1.75} />
-                  <span className="text-fg-secondary">
-                    {checked.error || "无法确认（不代表失效）"}
-                  </span>
-                </>
-              )}
-            </div>
-          )}
 
           {error && <div className="mt-2"><InlineError>{error}</InlineError></div>}
 
