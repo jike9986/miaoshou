@@ -820,20 +820,11 @@ function ScheduleFormDrawer({
   const toggleAccount = (accId: string, checked: boolean): void => {
     if (checked) {
       setCheckedAccountIds((prev) => (prev.includes(accId) ? prev : [...prev, accId]));
-      void (async () => {
-        await fetchShopsForAccount(accId);
-        // fetchShopsForAccount 内部已 setState，这里从最新快照取
-        setShopsByAccount((prev) => {
-          const shops = prev[accId] ?? [];
-          if (shops.length > 0) {
-            setSelectedShopIdsByAccount((picked) => ({
-              ...picked,
-              [accId]: shops.map((shop) => shop.shopId),
-            }));
-          }
-          return prev;
-        });
-      })();
+      // 只把店铺列表拉回来，**不替用户勾选任何店铺**。
+      // 负责人 2026-11-24：「创建定时任务不要自动全选店铺」。
+      // 原来这里会把这个账号下所有店铺全勾上，用户以为只发一两个店，
+      // 实际一次发到全部 —— 多发一个店就是多发一批商品，代价很实。
+      void fetchShopsForAccount(accId);
     } else {
       setCheckedAccountIds((prev) => prev.filter((id) => id !== accId));
       setSelectedShopIdsByAccount((prev) => {
@@ -1096,12 +1087,9 @@ function ScheduleFormDrawer({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      // 2026-11-24：原来是 lg（640px）。这个抽屉里塞了发布账号九宫格、
-      // 目标店铺 + 定价模板同一行、发布商品选择，640px 扣掉内边距只剩
-      // 约 590px —— 模板那侧不足 350px，6 个模板按钮排成三行，
-      // 店铺下拉也被压成「C ZYM SH…」。提到 xl（880px）后
-      // 店铺 240px + 模板约 580px，6 个模板一行排得下。
-      size="xl"
+      // 保持 lg（640px）：负责人 2026-11-24 明确「你给这个页面加宽干什么」——
+      // 加宽整张对话框是错的做法，该改的是模板那侧自己占满一行。
+      size="lg"
       title={task ? "编辑定时任务" : "新建定时任务"}
       description=""
       closeOnOverlay={false}
@@ -1234,15 +1222,17 @@ function ScheduleFormDrawer({
             )
           )}
 
-          {/* 店铺与模板同一行（负责人 2026-11-23：「左边这个店铺的框可以小一点」、
-              「这个模板肯定要全部显示出来啊」）。
-              2026-11-24 负责人：「这个定价模板不是弄成一行吗，左边这个店铺都压缩
-              没了」—— 原来用 1fr / 1.6fr 按比例分，模板按钮多（6 个）时
-              店铺那侧被压到只剩一个下拉框的宽度，模板自己也被挤成三行。
-              改成店铺固定 240px、模板吃掉剩下的全部宽度：
-              店铺够显示「C ZYM SHOP · 马来西亚」这种较长的名字，
-              模板那侧一行的可用宽度也够排 6 个。窄屏（<640px）自动堆叠。 */}
-          <div className="grid gap-3 sm:grid-cols-[240px_minmax(0,1fr)]">
+          {/* 店铺和定价模板**同一行**，模板那 5 个按钮也**同一行**。
+              负责人 2026-11-24：「不是说定价模板这五个弄成一行吗，你给这个
+              页面加宽干什么」、「不是我是说店铺和模板在同一行」。
+
+              上一版错在把整张对话框从 640px 加到 880px —— 该改的是这一行的
+              宽度分配，不是页面宽度。现在保持 lg(640px)：
+                内容 592px = 店铺 180px + gap 12 + 模板 400px
+                模板 5 个按钮：(400 - 4×6) / 5 = 75px 每个，一行排得下
+                （最长「马来西亚」+ 勾选图标约 60px，还有余量）。
+              店铺 180px 显示「C ZYM SHOP · 马来」，完整名字悬停可看 title。 */}
+          <div className="grid gap-3 sm:grid-cols-[180px_minmax(0,1fr)]">
           <Field
             label="目标店铺"
             required
@@ -1337,12 +1327,11 @@ function ScheduleFormDrawer({
                         setTemplate(active ? "" : item.name);
                       }}
                       className={cn(
-                        // 模板按钮等宽铺满一行：6 个时每个约 1/6 宽（减去 gap），
-                        // 3 个时 1/3。原来写死 basis-[18%] 是「按 5.5 个算」，
-                        // 6 个模板必然折行 —— 负责人 2026-11-24：
-                        // 「这个定价模板不是弄成一行吗」。min-w 只保证文字不被
-                        // 压掉，不是用来控制列数的。
-                        "flex min-w-[64px] flex-1 basis-[calc(16.666%-6px)] items-center justify-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition-colors duration-fast",
+                        // 模板按钮铺满一行：basis 按 5 个算（gap 8px 扣掉），
+                        // 负责人原话就是「定价模板这五个弄成一行」。
+                        // 模板不足 5 个时 flex-1 会让它们均分整行，不留空档；
+                        // 超过 5 个才折到第二行。
+                        "flex min-w-[72px] flex-1 basis-[calc(20%-7px)] items-center justify-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition-colors duration-fast",
                         item.invalid
                           ? "cursor-not-allowed border-border-subtle text-fg-muted line-through"
                           : active
