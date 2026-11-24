@@ -141,28 +141,94 @@ def _templates_key(operator_id: int | None = None) -> str:
 
 
 def _seed_templates() -> dict[str, Any]:
-    """第一次打开时给这个人的那套初始值。
+    """第一次打开时给这个人的那套初始值，**按国别填好各国真实费率**。
 
     负责人 2026-11-23：「不是模板是每人一套默认的，可以自己去修改自己账号的
-    定价模板，没有共享模板」。所以新人进来看到的是按站点铺好的一套默认模板
-    （马来 / 泰国 / 越南 / 菲律宾 / 新加坡），改了就存他自己那份，
-    谁都不影响谁。
+    定价模板，没有共享模板」。
+
+    2026-11-23 二次修正：原来五国都套用 `DEFAULT_TEMPLATE`（马来那一套），
+    于是泰国模板里增值税率是 10 而不是 7、BCP 活动费 3.24 明明泰国没有、
+    菲律宾却挂着增值税 —— 数字看着像模板但其实全错。这里按妙手「创建定价
+    模板」五张截图的默认值逐国写死：
+
+      马来   交易 3.78  增值税 10  提现 1  BCP 3.24  平台支持 0.81  尾程税 6
+      泰国   交易 3.21  增值税  7  关税 10  提现 1  平台基础设施 0.21  电商增长 8.03
+      越南   交易 6     增值税 10  提现 1  订单处理 0.78  企业代扣 1
+      菲律宾 交易 2.24  提现 1  包邮服务 5.5  订单处理 0.52   （无增值税）
+      新加坡 交易 3.27  消费税  9  提现 1                      （无增值税）
     """
     from services import price_template
     from services.exchange_rate import currency_for_site
 
+    # (站点, 模板名, 利润率, 各字段初值)
+    seeds: tuple[tuple[str, str, float, dict[str, Any]], ...] = (
+        ("MY", "马来", 20.0, {
+            "paymentChargePercent": 3.78,
+            "vatChargePercent": 10.0,
+            "withdrawChargePercent": 1.0,
+            "bcpChargePercent": 3.24,
+            "platformSupportCny": 0.81,
+            "lastMileFreightServiceTaxPercent": 6.0,
+            "lastMileFreightCny": 16.19,
+        }),
+        ("TH", "泰国", 15.0, {
+            "paymentChargePercent": 3.21,
+            "vatChargePercent": 7.0,
+            "tariffChargePercent": 10.0,
+            "withdrawChargePercent": 1.0,
+            "orderProcessCny": 0.21,
+            "eCommerceGrowthChargePercent": 8.03,
+            "lastMileFreightCny": 15.55,
+        }),
+        ("VN", "越南", 15.0, {
+            "paymentChargePercent": 6.0,
+            "vatChargePercent": 10.0,
+            "withdrawChargePercent": 1.0,
+            "orderProcessCny": 0.78,
+            "enterpriseWithholdPercent": 1.0,
+            "lastMileFreightCny": 7.75,
+        }),
+        ("PH", "菲律宾", 15.0, {
+            "paymentChargePercent": 2.24,
+            "withdrawChargePercent": 1.0,
+            "freeShippingChargePercent": 5.5,
+            "orderProcessCny": 0.52,
+            "lastMileFreightCny": 6.27,
+        }),
+        ("SG", "新加坡", 15.0, {
+            "paymentChargePercent": 3.27,
+            "consumptionTaxChargePercent": 9.0,
+            "withdrawChargePercent": 1.0,
+            "lastMileFreightCny": 0.0,
+        }),
+    )
+
     seeded: dict[str, Any] = {}
-    for site, name, profit in (
-        ("MY", "马来", 20.0),
-        ("TH", "泰国", 20.0),
-        ("VN", "越南", 20.0),
-        ("PH", "菲律宾", 20.0),
-        ("SG", "新加坡", 20.0),
-    ):
-        raw = dict(price_template.DEFAULT_TEMPLATE)
-        raw.update({"name": name, "site": site,
-                    "currency": currency_for_site(site),
-                    "profitPercent": profit})
+    for site, name, profit, values in seeds:
+        # 从纯空模板起（不用 DEFAULT_TEMPLATE，那套是马来口径，
+        # 会把 BCP/增值税之类别国没有的项带进去）
+        raw: dict[str, Any] = {
+            "name": name,
+            "site": site,
+            "currency": currency_for_site(site),
+            "profitType": "bySalePriceProfit",
+            "profitPercent": profit,
+            "discount": None,
+            "freightMode": "officialCrossBorder",
+            "weightSource": "spu",
+        }
+        raw.update(values)
+        # 该国模板里没点名的费率项一律留空（None），不要继承马来默认值 ——
+        # 妙手新建模板时那些格子本来就是空的，抄 3.24 会让报价凭空多算一笔。
+        for field in ("platformCommissionPercent", "paymentChargePercent",
+                      "vatChargePercent", "withdrawChargePercent",
+                      "sfpChargePercent", "affiliateChargePercent",
+                      "bcpChargePercent", "lastMileFreightServiceTaxPercent",
+                      "enterpriseWithholdPercent", "platformSupportCny",
+                      "orderProcessCny", "otherChargeCny"):
+            raw.setdefault(field, None)
+        for field in price_template.EXTRA_CHARGE_FIELDS:
+            raw.setdefault(field, None)
         try:
             seeded[name] = price_template.normalize_template(raw)
         except price_template.PriceTemplateError:

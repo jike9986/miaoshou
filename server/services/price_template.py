@@ -134,64 +134,67 @@ EXTRA_CHARGE_FIELDS = (
 # 这里只影响**界面显示哪些字段**；计算逻辑仍然认全部 22 项（模板里存了值就
 # 参与计算），所以老模板不会因为界面收敛而少算钱。
 SITE_CHARGE_FIELDS: dict[str, tuple[str, ...]] = {
-    # 公共项：所有站点都有
+    # 公共项：五国都有
     "_common": (
         "profitPercent",
         "discount",
         "freightMode",
         "lastMileFreightCny",
-        "weightSource",
         "platformCommissionPercent",
         "paymentChargePercent",
         "withdrawChargePercent",
-        "lastMileFreightServiceTaxPercent",
+        # 「其他费用 CNY」五国都有（妙手五张截图底部都在）
         "otherChargeCny",
     ),
+    # 马来（妙手「创建定价模板」截图逐项核对）
+    #   平台佣金率 / 交易手续费率 3.78 / 增值税率 10 / 提现手续费率 1
+    #   SFP 服务费率 / 达人佣金费率 / BCP 活动费率 3.24 / 平台支持费 0.81
+    #   尾程运费服务税率 6
+    #   没有：关税、活动费率
     "MY": (
         "vatChargePercent",
+        "sfpChargePercent",
+        "affiliateChargePercent",
         "bcpChargePercent",
         "platformSupportCny",
-        "sfpChargePercent",
-        "affiliateChargePercent",
-        "activityChargePercent",
+        "lastMileFreightServiceTaxPercent",
     ),
+    # 泰国：平台佣金率 / 交易手续费率 3.21 / 增值税率 7 / 关税税率 10
+    #       提现手续费率 1 / 达人佣金费率 / 平台基础设施费 0.21 / 电商增长服务费率 8.03
+    #   没有：BCP、SFP、活动费率
     "TH": (
         "vatChargePercent",
-        # 泰国的「平台基础设施费」按 CNY 收，落到 orderProcessCny 这一格
+        "tariffChargePercent",
+        "affiliateChargePercent",
         "orderProcessCny",
         "eCommerceGrowthChargePercent",
-        "sfpChargePercent",
-        "affiliateChargePercent",
-        "activityChargePercent",
     ),
+    # 越南：平台佣金率 / 交易手续费率 6 / 增值税率 10 / 提现手续费率 1
+    #       SFP 服务费率 / 达人佣金费率 / 订单处理服务费 0.78 / 企业商家代扣税率 1
+    #   没有：关税、BCP、活动费率
     "VN": (
         "vatChargePercent",
+        "sfpChargePercent",
+        "affiliateChargePercent",
         "orderProcessCny",
         "enterpriseWithholdPercent",
-        "affiliateChargePercent",
-        "activityChargePercent",
     ),
+    # 菲律宾：平台佣金率 / 交易手续费率 2.24 / 提现手续费率 1 / 达人佣金费率
+    #         包邮服务费率 5.5 / 商家成长费率 / 订单处理服务费 0.52
+    #   没有：增值税（该国无 VAT）、关税、SFP、BCP、活动费率
     "PH": (
-        # 菲律宾没有 VAT，收的是包邮服务费 + 商家成长费
+        "affiliateChargePercent",
         "freeShippingChargePercent",
         "eCommerceGrowthChargePercent",
         "orderProcessCny",
-        "affiliateChargePercent",
-        "activityChargePercent",
     ),
+    # 新加坡：平台佣金率 / 交易手续费率 3.27 / 消费税率 9 / 提现手续费率 1
+    #         达人佣金费率 / BCP 活动费率
+    #   没有：增值税（这里是消费税 GST）、关税、SFP、活动费率、平台支持费
     "SG": (
-        # 新加坡的 GST（消费税），字段与别国 VAT 不共用
         "consumptionTaxChargePercent",
-        "orderProcessCny",
         "affiliateChargePercent",
-        "activityChargePercent",
-    ),
-    "ID": (
-        "vatChargePercent",
-        "orderProcessCny",
-        "localConsumptionTaxChargePercent",
-        "affiliateChargePercent",
-        "activityChargePercent",
+        "bcpChargePercent",
     ),
 }
 
@@ -244,9 +247,45 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _site_base_template(site: Any) -> dict[str, Any]:
+    """按站点取「起手值」：该国没有的费率项留 0，而不是抄马来的。
+
+    2026-11-23 修：原来 `normalize_template` 一律从 `DEFAULT_TEMPLATE`
+    （马来口径）起手，于是：
+      · 泰国模板带着 BCP 活动费 3.24（泰国没有这项）
+      · 菲律宾模板带着增值税 10（菲律宾没有 VAT）
+      · 新加坡模板带着增值税而不是消费税
+    结果界面上按站点藏了字段，算价却仍按马来那套费率在算，越藏越不一致。
+    这里按 `SITE_CHARGE_FIELDS` 判断：**该国不显示的费率项一律归 0**，
+    这样「界面没显示」和「计算不参与」是同一件事。
+    """
+    base = dict(DEFAULT_TEMPLATE)
+    key = str(site or "").strip().upper()
+    if not key:
+        return base
+    allowed = set(SITE_CHARGE_FIELDS.get(key, ())) | set(SITE_CHARGE_FIELDS["_common"])
+    # 只清「费率 / 固定费用」类字段；模板元信息（name/site/currency/…）不动
+    money_or_rate = (
+        "platformCommissionPercent", "paymentChargePercent", "vatChargePercent",
+        "withdrawChargePercent", "sfpChargePercent", "affiliateChargePercent",
+        "bcpChargePercent", "lastMileFreightServiceTaxPercent",
+        "enterpriseWithholdPercent", "platformSupportCny", "orderProcessCny",
+        "otherChargeCny",
+        *EXTRA_CHARGE_FIELDS,
+    )
+    for field in money_or_rate:
+        if field not in allowed:
+            base[field] = None
+    return base
+
+
 def normalize_template(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """校验操作者给的模板并补默认值。"""
-    template = dict(DEFAULT_TEMPLATE)
+    # 先定站点，再按站点取起手值 —— 顺序不能反（见 _site_base_template）
+    site_hint = ""
+    if isinstance(raw, Mapping):
+        site_hint = str(raw.get("site") or "").strip().upper()
+    template = _site_base_template(site_hint)
     explicit_table: Mapping[str, Any] | None = None
     if isinstance(raw, Mapping):
         for key, value in raw.items():

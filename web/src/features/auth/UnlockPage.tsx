@@ -359,9 +359,9 @@ export function UnlockPage() {
                     // `new-password` 是能被尊重的写法。
                     autoComplete="new-password"
                     spellCheck={false}
-                    // 这里不能用 sk_ 开头的假密钥当占位符：看着像已经填好的真密钥，
-                    // 用户会以为输入框里有内容、或者直接拿它当真实值去连账号。
-                    placeholder="粘贴妙手后台的 AppSecret"
+                    // 占位符也不留（负责人 2026-11-23：「这个输入框里面怎么还有
+                    // 东西」）—— 任何文字都会让人以为框里已经有内容。
+                    // 标签「AppSecret」自己就说明了要填什么。
                     invalid={Boolean(errors.appSecret)}
                     onChange={(event) => {
                       setAppSecret(event.currentTarget.value);

@@ -508,7 +508,8 @@ export function PriceTemplateEditor({
           <Separator />
 
           {/* ---------- 模板信息 ---------- */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {/* 四个字段一行（负责人 2026-11-23：「这四个弄成一行」） */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="模板名称" required>
               <Input
                 value={form.name}
@@ -540,7 +541,8 @@ export function PriceTemplateEditor({
           {/* ---------- 利润信息 ---------- */}
           <div className="flex flex-col gap-3 rounded-md border border-border p-3">
             <div className="text-xs font-semibold text-fg-secondary">利润信息</div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {/* 三个一行（利润方式 / 利润率 / 折扣） */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <Field label="利润方式">
                 <Select
                   value={form.profitType}
@@ -588,7 +590,10 @@ export function PriceTemplateEditor({
                 />
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {/* 首重/续重四项按负责人要求隐藏（2026-11-23）：
+                跨境物流小包的运费表由官方运价表决定，让运营手填这几个数
+                只会和官方口径不一致。值仍保留在 form 里原样提交。 */}
+            <div className="hidden grid-cols-2 gap-3 sm:grid-cols-4">
               <Field label="首重 g">
                 <NumberInput
                   value={form.firstWeightGrams}
@@ -631,7 +636,8 @@ export function PriceTemplateEditor({
           */}
           <div className="flex flex-col gap-3 rounded-md border border-border p-3">
             <div className="text-xs font-semibold text-fg-secondary">平台费用</div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {/* 两行：每行 6 格（负责人 2026-11-23：「平台费用弄成两行」） */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
               {PLATFORM_FEE_FIELDS.filter((item) => visibleFields.has(item.key)).map((item) => (
                 <Field key={item.key} label={item.label} hint={item.hint}>
                   <NumberInput
