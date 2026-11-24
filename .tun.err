@@ -1,0 +1,16 @@
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 60484)
+Traceback (most recent call last):
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 755, in __init__
+    self.handle()
+  File "D:\缓存文件夹\codex工作台\p006\miaoshou\tools\source_match\tunnel.py", line 37, in handle
+    chan = self.server.transport.open_channel(  # type: ignore[attr-defined]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\site-packages\paramiko\transport.py", line 1088, in open_channel
+    raise SSHException("SSH session not active")
+paramiko.ssh_exception.SSHException: SSH session not active
+----------------------------------------

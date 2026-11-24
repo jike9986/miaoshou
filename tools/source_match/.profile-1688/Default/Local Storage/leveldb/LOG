@@ -1,0 +1,5 @@
+2026/11/24-20:05:17.136 484c Creating DB D:\缓存文件夹\codex工作台\p006\miaoshou\tools\source_match\.profile-1688\Default\Local Storage\leveldb since it was missing.
+2026/11/24-20:05:17.166 484c Reusing MANIFEST D:\缓存文件夹\codex工作台\p006\miaoshou\tools\source_match\.profile-1688\Default\Local Storage\leveldb/MANIFEST-000001
+2026/11/24-20:05:30.796 7e8 Level-0 table #5: started
+2026/11/24-20:05:30.801 7e8 Level-0 table #5: 90749 bytes OK
+2026/11/24-20:05:30.806 7e8 Delete type=0 #3

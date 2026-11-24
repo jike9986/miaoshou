@@ -758,6 +758,58 @@ def _basename(url: str) -> str:
     return tail.split("?", 1)[0]
 
 
+def _ensure_derived(url: str) -> None:
+    """确保成品区某张图有 thumbs/ 和 mid/ 派生图；缺就补生成。
+
+    幂等且静默：已有的跳过，失败只记日志 —— 派生图是性能优化，
+    不能因为它让入库失败。
+    """
+    global _DERIVED_DONE
+    try:
+        text = str(url or "").strip()
+        if not text:
+            return
+        _dir, product_base, local_product, _b = _zone_paths("product")
+        if not text.startswith(product_base):
+            return
+        name = text[len(product_base):]
+        if not name or "/" in name:
+            return
+        stem = name.rsplit(".", 1)[0]
+        if stem in _DERIVED_DONE:
+            return
+        _DERIVED_DONE.add(stem)
+
+        from pathlib import Path as _P
+
+        src = _P(local_product) / name
+        if not src.is_file():
+            return
+        need = []
+        for subdir, maker in ((THUMB_SUBDIR, make_thumbnail),
+                              (MID_SUBDIR, make_mid_image)):
+            if not (_P(local_product) / subdir / f"{stem}.jpg").is_file():
+                need.append((subdir, maker))
+        if not need:
+            return
+        raw = src.read_bytes()
+        for subdir, maker in need:
+            data = maker(raw)
+            if not data:
+                continue
+            target_dir = _P(local_product) / subdir
+            target_dir.mkdir(parents=True, exist_ok=True)
+            path = target_dir / f"{stem}.jpg"
+            path.write_bytes(data)
+            os.chmod(path, 0o644)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("补生成派生图失败（不影响主流程）：%s", str(exc)[:120])
+
+
+# 同一进程内已经确认过派生图存在的 stem 缓存，避免反复 stat 磁盘
+_DERIVED_DONE: set[str] = set()
+
+
 def promote_payload_images(payload: dict[str, Any]) -> dict[str, Any]:
     """把商品 payload 里所有临时区图片搬到成品区（入库时调用）。
 
@@ -776,10 +828,18 @@ def promote_payload_images(payload: dict[str, Any]) -> dict[str, Any]:
         # 下游按原地址做的替换/比对全部失配（2026-11-09 实测：
         # probe_img_wire 的 imageApplied 归零）。
         if not auto_temp_name(url):
+            # 已经在成品区但可能缺派生图 —— 补齐（幂等，有就跳过）。
+            #
+            # 为什么必须在这里做：派生图原来只在 promote_to_product_zone()
+            # 里生成，那只在「首次搬进成品区」时跑一次。先入库、派生图机制
+            # 后来才上线的图就永远没有缩略图（2026-11-24 实测：3060 处图片里
+            # 203 处缺 thumbs/mid，尺码图 221/222 全缺）。
+            _ensure_derived(url)
             return url
         new = promote_to_product_zone(url)
         if new and new != url:
             report["moved"] += 1
+            _ensure_derived(new)
         elif new:
             report["failed"] += 1
         return new or url

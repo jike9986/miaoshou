@@ -34,7 +34,7 @@ import { copyImageToClipboard } from "@/lib/clipboard";
 import { SourceLinkCard } from "./SourceLinkCard";
 import { apiErrorMessage } from "@/lib/api";
 import { useOperatorIdentity } from "@/lib/operator";
-import { formatCount, formatPrice, midImageUrl } from "@/lib/utils";
+import { formatCount, formatPrice, thumbImageUrl } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
 /**
@@ -552,11 +552,12 @@ export function ProductDetailPage() {
                       )}
                       title={`第 ${index + 1} 张（右击复制图片）`}
                     >
-                      {/* 画廊只需要 132px 的视觉尺寸，用 900px 中等图就够：
-                          原图平均 216 KB，中等图约 1/3，详情页平均 15 张。
-                          服务器上万一没有中等图，fallbackSrc 会退回原图。 */}
+                      {/* 格子只有 132px，用 200x200 的 thumbs（平均 8.3 KB）。
+                          之前用 900px 中等图（92 KB）是 11 倍浪费：详情页 17 张
+                          合计 1.5 MB，改后只要 140 KB。
+                          逐级回退：thumbs → 原图（服务器可能还没生成派生图）。 */}
                       <RemoteImage
-                        src={midImageUrl(url) || url}
+                        src={thumbImageUrl(url) || url}
                         fallbackSrc={url}
                         className="size-full object-cover"
                       />
@@ -718,7 +719,7 @@ export function ProductDetailPage() {
                               >
                                 {value.imageUrl ? (
                                   <RemoteImage
-                                    src={midImageUrl(value.imageUrl) || value.imageUrl}
+                                    src={thumbImageUrl(value.imageUrl) || value.imageUrl}
                                     fallbackSrc={value.imageUrl}
                                     className="size-full object-cover"
                                   />
@@ -822,18 +823,21 @@ export function ProductDetailPage() {
               if (!chart) {
                 return <p className="mt-3 text-xs text-fg-muted">未上传尺码图</p>;
               }
+              // 尺码图只是「扫一眼确认有这张表」，不需要占半个屏幕
+              // （负责人 2026-11-24：「根本用不了这么大，直接和详情图差不多
+              // 大小就可以了」）。做成和画廊同尺寸的格子，点开再看大图。
+              const thumb = thumbImageUrl(chart) || chart;
               return (
                 <button
                   type="button"
                   onClick={() => openInViewer(chart)}
-                  className="mt-3 block w-fit max-w-full overflow-hidden rounded-sm border border-border"
+                  className="mt-3 block size-[132px] overflow-hidden rounded-sm border border-border bg-canvas-inset transition-shadow hover:shadow-md"
                   title="点击查看大图"
                 >
-                  <img
-                    src={chart}
-                    alt="尺码图"
-                    referrerPolicy="no-referrer"
-                    className="block max-h-[520px] max-w-full object-contain"
+                  <RemoteImage
+                    src={thumb}
+                    fallbackSrc={chart}
+                    className="size-full object-cover"
                   />
                 </button>
               );

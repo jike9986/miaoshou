@@ -1,0 +1,161 @@
+[
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523451089&sign=abe42f1d157244f80c5ff96a4a82296a&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=jsonp&dataType=jsonp&timeout=20000&jsonpIncPrefix=reqTppId_32517_getOfferList&callback=mtopjsonpreqTppId_32517_getOfferList1&data=%7B%22appId%22%3A32517%2C%22params%22%3A%22%7B%5C%22beginPage%5C%22%3A1%2C%5C%22pageSize%5C%22%3A60%2C%5C%22method%5C%22%3A%5C%22imageSimilarSearchV2%5C%22%2C%5C%22searchScene%5C%22%3A%5C%22pcImageSearch%5C%22%2C%5C%22appName%5C%22%3A%5C%22pctusou%5C%22%2C%5C%22tab%5C%22%3A%5C%22imageSearch%5C%22%2C%5C%22imageAddress%5C%22%3A%5C%22https%253A%252F%252Faohuang888.com%252Ftk-product-automation%252Fproducts%252Fstore-8c84ab1ffd749f700e53d39eec88fee7.jpg%5C%22%7D%22%7D",
+  "method": "GET",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "accept-language": "zh-CN",
+   "sec-ch-ua-mobile": "?0"
+  },
+  "post": null
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523452458&sign=6a183c19079dd6c43f73ed694e3a4934&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=originaljson&timeout=20000&dataType=jsonp",
+  "method": "POST",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "accept-language": "zh-CN",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "sec-ch-ua-mobile": "?0",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "accept": "application/json",
+   "content-type": "application/x-www-form-urlencoded"
+  },
+  "post": "data=%7B%22appId%22%3A39799%2C%22params%22%3A%22%7B%5C%22bizName%5C%22%3A%5C%22input_hotKeyword%5C%22%2C%5C%22verticalProductFlag%5C%22%3A%5C%22pcmarket%5C%22%2C%5C%22method%5C%22%3A%5C%22inputHotKeyword%5C%22%2C%5C%22rescnt%5C%22%3A8%7D%22%7D"
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523452458&sign=0ac389595a61b6867c73995f50b725fb&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=originaljson&timeout=20000&dataType=jsonp",
+  "method": "POST",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "accept-language": "zh-CN",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "sec-ch-ua-mobile": "?0",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "accept": "application/json",
+   "content-type": "application/x-www-form-urlencoded"
+  },
+  "post": "data=%7B%22appId%22%3A39799%2C%22params%22%3A%22%7B%5C%22bizName%5C%22%3A%5C%22home_search%5C%22%2C%5C%22verticalProductFlag%5C%22%3A%5C%22pcmarket%5C%22%2C%5C%22method%5C%22%3A%5C%22shadeHotKeyword%5C%22%2C%5C%22sceneSource%5C%22%3A%5C%22pcmarket%5C%22%2C%5C%22source%5C%22%3A%5C%22pc_shade_hotword%5C%22%2C%5C%22rescnt%5C%22%3A4%7D%22%7D"
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523452458&sign=a8840c97b037d730554b8d19116e2bb8&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=originaljson&timeout=20000&dataType=jsonp",
+  "method": "POST",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "accept-language": "zh-CN",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "sec-ch-ua-mobile": "?0",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "accept": "application/json",
+   "content-type": "application/x-www-form-urlencoded"
+  },
+  "post": "data=%7B%22appId%22%3A31250%2C%22params%22%3A%22%7B%5C%22scene_id%5C%22%3A1%2C%5C%22pageName%5C%22%3A%5C%22findFactory%5C%22%2C%5C%22level1_biz%5C%22%3A%5C%22recommend%5C%22%2C%5C%22level2_biz%5C%22%3A%5C%22homeguess%5C%22%2C%5C%22level3_biz%5C%22%3A%5C%22pc_main%5C%22%7D%22%7D"
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523452458&sign=6cd6a624ed6574846e72487d9a0311d9&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=originaljson&timeout=20000&dataType=jsonp",
+  "method": "POST",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "accept-language": "zh-CN",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "sec-ch-ua-mobile": "?0",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "accept": "application/json",
+   "content-type": "application/x-www-form-urlencoded"
+  },
+  "post": "data=%7B%22appId%22%3A32517%2C%22params%22%3A%22%7B%5C%22appName%5C%22%3A%5C%22nodeSearchWork%5C%22%2C%5C%22searchScene%5C%22%3A%5C%22pcOfferSearch%5C%22%2C%5C%22verticalProductFlag%5C%22%3A%5C%22pcmarket%5C%22%2C%5C%22method%5C%22%3A%5C%22getInitialData%5C%22%2C%5C%22charset%5C%22%3A%5C%22GBK%5C%22%7D%22%7D"
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523452458&sign=6a183c19079dd6c43f73ed694e3a4934&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=originaljson&timeout=20000&dataType=jsonp",
+  "method": "POST",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "accept-language": "zh-CN",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "sec-ch-ua-mobile": "?0",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "accept": "application/json",
+   "content-type": "application/x-www-form-urlencoded"
+  },
+  "post": "data=%7B%22appId%22%3A39799%2C%22params%22%3A%22%7B%5C%22bizName%5C%22%3A%5C%22input_hotKeyword%5C%22%2C%5C%22verticalProductFlag%5C%22%3A%5C%22pcmarket%5C%22%2C%5C%22method%5C%22%3A%5C%22inputHotKeyword%5C%22%2C%5C%22rescnt%5C%22%3A8%7D%22%7D"
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523452458&sign=0ac389595a61b6867c73995f50b725fb&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=originaljson&timeout=20000&dataType=jsonp",
+  "method": "POST",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "accept-language": "zh-CN",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "sec-ch-ua-mobile": "?0",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "accept": "application/json",
+   "content-type": "application/x-www-form-urlencoded"
+  },
+  "post": "data=%7B%22appId%22%3A39799%2C%22params%22%3A%22%7B%5C%22bizName%5C%22%3A%5C%22home_search%5C%22%2C%5C%22verticalProductFlag%5C%22%3A%5C%22pcmarket%5C%22%2C%5C%22method%5C%22%3A%5C%22shadeHotKeyword%5C%22%2C%5C%22sceneSource%5C%22%3A%5C%22pcmarket%5C%22%2C%5C%22source%5C%22%3A%5C%22pc_shade_hotword%5C%22%2C%5C%22rescnt%5C%22%3A4%7D%22%7D"
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523452458&sign=a8840c97b037d730554b8d19116e2bb8&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=originaljson&timeout=20000&dataType=jsonp",
+  "method": "POST",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "accept-language": "zh-CN",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "sec-ch-ua-mobile": "?0",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "accept": "application/json",
+   "content-type": "application/x-www-form-urlencoded"
+  },
+  "post": "data=%7B%22appId%22%3A31250%2C%22params%22%3A%22%7B%5C%22scene_id%5C%22%3A1%2C%5C%22pageName%5C%22%3A%5C%22findFactory%5C%22%2C%5C%22level1_biz%5C%22%3A%5C%22recommend%5C%22%2C%5C%22level2_biz%5C%22%3A%5C%22homeguess%5C%22%2C%5C%22level3_biz%5C%22%3A%5C%22pc_main%5C%22%7D%22%7D"
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.relationrecommend.wirelessrecommend.recommend/2.0/?jsv=2.7.2&appKey=12574478&t=1795523452458&sign=6cd6a624ed6574846e72487d9a0311d9&api=mtop.relationrecommend.wirelessrecommend.recommend&v=2.0&type=originaljson&timeout=20000&dataType=jsonp",
+  "method": "POST",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "accept-language": "zh-CN",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "sec-ch-ua-mobile": "?0",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "accept": "application/json",
+   "content-type": "application/x-www-form-urlencoded"
+  },
+  "post": "data=%7B%22appId%22%3A32517%2C%22params%22%3A%22%7B%5C%22appName%5C%22%3A%5C%22nodeSearchWork%5C%22%2C%5C%22searchScene%5C%22%3A%5C%22pcOfferSearch%5C%22%2C%5C%22verticalProductFlag%5C%22%3A%5C%22pcmarket%5C%22%2C%5C%22method%5C%22%3A%5C%22getInitialData%5C%22%2C%5C%22charset%5C%22%3A%5C%22GBK%5C%22%7D%22%7D"
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.cbu.pc.smart.engine.api.abtest.execute/1.0/?jsv=2.7.2&appKey=12574478&t=1795523452511&sign=8d53006d7baa54445ae9da968ef93116&api=mtop.cbu.pc.smart.engine.api.abtest.execute&v=1.0&type=jsonp&dataType=jsonp&timeout=20000&jsonpIncPrefix=3jcw6c86som&callback=mtopjsonp3jcw6c86som2&data=%7B%22abtestCode%22%3A%2222205%22%2C%22extraParams%22%3A%22%7B%5C%22from%5C%22%3A%5C%22alibar%5C%22%2C%5C%22spmAB%5C%22%3A%5C%22a26352.b28411319%2F2508%5C%22%7D%22%2C%22disableEventTrackingLog%22%3Afalse%7D",
+  "method": "GET",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "accept-language": "zh-CN",
+   "sec-ch-ua-mobile": "?0"
+  },
+  "post": null
+ },
+ {
+  "url": "https://h5api.m.1688.com/h5/mtop.alibaba.cbu.cupid.resource.getresourcedata/1.0/?jsv=2.7.2&appKey=12574478&t=1795523452573&sign=501e401fb8b058fb2a049a13cfdad869&api=mtop.alibaba.cbu.cupid.resource.getResourceData&v=1.0&type=jsonp&dataType=jsonp&timeout=20000&jsonpIncPrefix=y6h3mgjs10b&callback=mtopjsonpy6h3mgjs10b3&data=%7B%22resourceId%22%3A%2274185159%22%2C%22params%22%3A%22%7B%7D%22%7D",
+  "method": "GET",
+  "headers": {
+   "sec-ch-ua-platform": "\"Windows\"",
+   "referer": "https://air.1688.com/",
+   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+   "sec-ch-ua": "\"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"156\", \"HeadlessChrome\";v=\"156\"",
+   "accept-language": "zh-CN",
+   "sec-ch-ua-mobile": "?0"
+  },
+  "post": null
+ }
+]

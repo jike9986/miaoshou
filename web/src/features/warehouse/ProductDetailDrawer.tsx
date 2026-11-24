@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { CalendarClock, PencilLine, Save, ScanSearch, Sparkles, Tag, Trash2 } from "lucide-react";
-import { cn, formatCount, formatDate, formatPrice, midImageUrl } from "@/lib/utils";
+import { cn, formatCount, formatDate, formatPrice, thumbImageUrl } from "@/lib/utils";
 import { apiErrorMessage } from "@/lib/api";
 import { isConflictBusy, revisionConflictOf, type RevisionConflict } from "@/lib/conflict";
 import type { ImageAnalyzeItem } from "@/lib/queries";
@@ -542,7 +542,7 @@ export function ProductDetailDrawer({
             <div className="size-[120px] shrink-0 overflow-hidden rounded-md border border-border bg-canvas-inset">
               {/* 120px 的框不需要原图：先用 900px 中等图，缺失时回退原图 */}
               <RemoteImage
-                src={midImageUrl(product.image) || product.image}
+                src={thumbImageUrl(product.image) || product.image}
                 fallbackSrc={product.image}
                 eager
               />

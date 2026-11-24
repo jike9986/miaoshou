@@ -232,9 +232,39 @@ export function truncate(value: string | null | undefined, max = 40): string {
  *
  * 取到空串时调用方必须回退原图（RemoteImage 的 fallbackSrc 兜最后一道）。
  */
+/**
+ * 缩略图（200x200，平均 8.3 KB）。
+ *
+ * 详情页的画廊格子只有 132px、规格颜色小图 80px，用 900px 中等图（92 KB）
+ * 是 11 倍浪费。改指 thumbs/ 后单张从 92 KB 降到 8.3 KB。
+ *
+ *   与后端 image_upload.thumb_url_of() 同一套规则。
+ */
+export function thumbImageUrl(url: string | null | undefined): string {
+  const text = (url ?? "").trim();
+  if (!text) return "";
+  // 尺码图不在 products/ 下（默认那张是站点根的 size-chart.png），
+  // 但它有专门的 size-chart-thumb.jpg，单独认一下。
+  if (/\/size-chart\.(png|jpe?g)$/i.test(text)) {
+    return text.replace(/\/size-chart\.(png|jpe?g)$/i, "/size-chart-thumb.jpg");
+  }
+  const marker = "/products/";
+  const index = text.indexOf(marker);
+  if (index < 0) return "";
+  const rest = text.slice(index + marker.length);
+  if (!rest || rest.includes("/")) return "";
+  const dot = rest.lastIndexOf(".");
+  const stem = dot > 0 ? rest.slice(0, dot) : rest;
+  return `${text.slice(0, index + marker.length)}thumbs/${stem}.jpg`;
+}
+
 export function midImageUrl(url: string | null | undefined): string {
   const text = (url ?? "").trim();
   if (!text) return "";
+  // 尺码图中等图（放大看用，154 KB 替代 1.19 MB）
+  if (/\/size-chart\.(png|jpe?g)$/i.test(text)) {
+    return text.replace(/\/size-chart\.(png|jpe?g)$/i, "/size-chart.jpg");
+  }
   const marker = "/products/";
   const index = text.indexOf(marker);
   if (index < 0) return "";
