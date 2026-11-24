@@ -117,3 +117,4 @@
 | BUG-P13 | 同上，另外 50 条本可确认却被判死 | `release_stale_publish_logs` 过 600 秒直接标 unknown，**不再回源确认** | v0.1.29 |
 | BUG-P14 | 认领记录混在 unknown 里，看着像发布失败 | 认领不走发布回执（`_is_claim_only_log` 把它们过滤掉），永远确认不到；应为独立状态 `claimed` | v0.1.29 |
 | BUG-P15 | 平台回执 `detailId` 恒为 `None` | 真 ID 在 `collectBoxDetailId`；代码 `item.get("detailId") or item.get("collectBoxDetailId")` 兜住了，但这条兜底分支不能删 | 已有兜底，补测试锁定 |
+| BUG-P16 | 学员新建定时任务必报「部分所选商品不可用于该账号发布」 | 弹窗允许勾「未认领」商品，但 `pick_products` 学员分支只认已存在的 `ProductClaim`；生产库实测全部学员认领数为 0，等于谁都建不出任务 | v0.1.46 |

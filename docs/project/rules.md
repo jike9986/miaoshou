@@ -675,3 +675,29 @@ claimToShopIds          空
 软件不能自动分配（没得可分配，而且「发到哪个店」是业务决定）。
 
 回归测试：`server/tests/test_collect_box_site_mode.py`（18 条）。
+
+## 定时任务的学员认领：自动认领（2026-11-23 负责人确认）
+
+学员（`ROLE_MEMBER`）在「新建定时任务」弹窗里点名勾选的成品商品，创任务时
+**由后端自动补认领记录**，不再要求他先去成品仓库手动认领。
+
+为什么必须这样：
+
+- 弹窗的商品选择器（`ProductPickerDialog`）有 `全部 / 已认领 / 未认领` 三档，
+  「未认领」的商品本来就能勾。
+- 但 `schedule_service.pick_products` 的学员分支只认已成在的 `ProductClaim`，
+  于是「勾了 → 点创建 → 部分所选商品不可用于该账号发布」。
+- 生产库实测：全部学员的认领数是 0，等于**所有学员都建不出定时任务**。
+
+实现要点（`schedule_service._auto_claim_for_member`）：
+
+- 只补「还能认领」的：`automation_result IS FALSE`（已入仓）且 `status != 'archived'`。
+  自动化结果不能认领，`warehouse_service.claim_product` 同样拒绝。
+- 已存在的认领记录直接跳过，**不把 `released` 改回 `claimed`**
+  —— 学员可能主动释放过，不能因为排任务又悄悄改回去。
+- `auto_claim=True` 只在 `create()` 里传；运行期（`_run`）保持默认 False，
+  免得跑任务时顺手把商品占住。
+
+回归测试：`server/tests/test_shared_account_task_isolation.py`
+的 `test_member_schedule_creation_auto_claims_selected_products` 与
+`test_member_schedule_creation_still_rejects_unclaimable_products`。

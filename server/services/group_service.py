@@ -30,10 +30,26 @@ def serialize(row: Group, *, count: int = 0) -> dict[str, Any]:
     }
 
 
-def list_groups(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
+def list_groups(db: Session, *, operator_id: int | None = None,
+                operator: Any = None) -> dict[str, Any]:
+    """分组列表。
+
+    学员不能看到受限分组（自营海外仓 / 海外仓定制款 / 精品）——
+    负责人 2026-11-19 明确「学员账号都看不到这三个分组」。
+    只过滤商品行是不够的：分组筛选栏是按这个接口渲染的，行里 0 件商品
+    但文件夹还在，学员照样看得见这三个分组的存在，等于没藏。
+    """
+    from services import group_access, operator_service
+
     counts = _counts(db, operator_id=operator_id)
     rows = db.query(Group).order_by(Group.sort.asc(), Group.id.asc()).all()
-    items = [serialize(row, count=counts.get(row.id, 0)) for row in rows]
+    if operator is None and operator_id is not None:
+        operator = operator_service.get(db, operator_id)
+    keep = {str(item.get("id")) for item in
+            group_access.filter_group_options(
+                [{"id": str(row.id)} for row in rows], db, operator)}
+    items = [serialize(row, count=counts.get(row.id, 0))
+             for row in rows if str(row.id) in keep]
     return {"groups": items, "items": items, "total": len(items)}
 
 

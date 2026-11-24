@@ -321,3 +321,40 @@ def test_member_list_excludes_restricted_products(restricted_db):
     assert "受限组测试商品" in teacher_sees
     assert "受限组测试商品" not in member_sees
     assert "普通组测试商品" in member_sees
+
+def test_member_group_list_hides_restricted_folders(restricted_db):
+    """学员的分组列表里不该出现受限分组那三个文件夹。
+
+    回归 BUG：`filter_group_options` 早就写好了，但从来没被调用过 ——
+    `group_service.list_groups` 直接 `db.query(Group).all()` 全给。
+    商品行是过滤掉了，可筛选栏按 Group 表渲染，学员照样看到
+    「精品 0 / 自营海外仓 0」三个空壳文件夹，等于告诉他这三个组存在。
+    """
+    from services import group_service
+
+    member_view = group_service.list_groups(
+        restricted_db, operator_id=1, operator=_FakeOperator("member"))
+    teacher_view = group_service.list_groups(
+        restricted_db, operator_id=1, operator=_FakeOperator("teacher"))
+
+    member_names = {row["name"] for row in member_view["groups"]}
+    teacher_names = {row["name"] for row in teacher_view["groups"]}
+
+    assert "精品" not in member_names
+    assert "自营海外仓" not in member_names
+    assert "海外仓定制款" not in member_names
+    # 老师照样能看到
+    assert {"精品", "自营海外仓", "海外仓定制款"} <= teacher_names
+    # 非受限分组对所有身份都在
+    assert any(name.startswith("普通-") for name in member_names)
+
+
+def test_member_warehouse_facets_hide_restricted_group_chips(restricted_db):
+    """成品仓库筛选面板的分组计数同样不能出现受限分组。"""
+    from services import warehouse_service
+
+    member_facets = warehouse_service.facets(restricted_db, operator_id=1)
+    member_chips = {row["name"] for row in member_facets.get("groups") or []}
+    assert "精品" not in member_chips
+    assert "自营海外仓" not in member_chips
+    assert "海外仓定制款" not in member_chips

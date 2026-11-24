@@ -85,13 +85,16 @@ export function useTabTrap(containerRef: React.RefObject<HTMLElement>) {
  * Dialog
  * ------------------------------------------------------------------ */
 
-export type DialogSize = "sm" | "md" | "lg" | "xl";
+export type DialogSize = "sm" | "md" | "lg" | "xl" | "2xl";
 
 const DIALOG_WIDTH: Record<DialogSize, string> = {
   sm: "max-w-[400px]",
   md: "max-w-[480px]",
   lg: "max-w-[640px]",
   xl: "max-w-[880px]",
+  // 定价模板那种「左表单 + 右试算」的左右分栏要更宽：
+  // 880px 塞两栏后每栏都挤，费率项得拆成一行两个还不够。
+  "2xl": "max-w-[1180px]",
 };
 
 export interface DialogProps {

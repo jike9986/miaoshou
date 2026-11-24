@@ -2009,6 +2009,59 @@ export function useDeleteTemplate(): UseMutationResult<DeleteTemplateResponse, E
   });
 }
 
+/* ------------------------------------------------------------------ *
+ * POST /system/price-preview —— 手填采购价 + 重量的定价试算
+ *
+ * 与 `/warehouse/price-preview` 不是一回事：那个是按仓库商品的
+ * warehouseId 批量重算，这个是「还没有商品、只有采购价和重量」时的
+ * 单件试算（老版 /api/price-preview）。定价模板编辑器的右栏用它 ——
+ * 用户改完费率不用先保存、也不需要有商品，就能看到算出来的价。
+ * ------------------------------------------------------------------ */
+
+export interface TemplatePricePreviewBody {
+  /** 产品采购价（CNY） */
+  purchaseCny: string | number;
+  /** 产品包裹重量（kg） */
+  weightKg: string | number;
+  /** 用哪套模板；空则按四级兜底取当前选中 */
+  templateName?: string | null;
+  /** CNY → 站点币种汇率；空则走兜底汇率 */
+  rate?: string | number | null;
+  /** 站点代码，仅用于回显 */
+  site?: string | null;
+  accountId?: string | null;
+}
+
+export interface TemplatePricePreviewResponse {
+  price: number | string;
+  currency: string;
+  /** 费用拆分（CNY） */
+  lines: Record<string, number>;
+  linesCny?: Record<string, number>;
+  rate: number | string | null;
+  rateSource: string;
+  templateName: string | null;
+  /** 模板里没填的费率项；非空表示这个价是估算的 */
+  missingRateFields: string[];
+  isEstimate: boolean;
+  site: string;
+  purchasePriceCny?: string | number;
+  packageWeightKg?: string | number;
+}
+
+/** 试算不改数据，所以不 invalidate 任何查询。 */
+export function useTemplatePricePreview(): UseMutationResult<
+  TemplatePricePreviewResponse,
+  Error,
+  TemplatePricePreviewBody
+> {
+  return useMutation({
+    mutationFn: (body: TemplatePricePreviewBody) =>
+      api.post<TemplatePricePreviewResponse, TemplatePricePreviewBody>(
+        "/system/price-preview", body),
+  });
+}
+
 /* ================================================================== *
  * 工作流默认值（重量增量 / 包裹尺寸 / 尺码图地址）
  *

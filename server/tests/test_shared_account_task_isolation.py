@@ -20,7 +20,8 @@ from models.product_claim import ProductClaim
 from models.publish_log import PublishLog
 from models.schedule import Schedule
 from models.schedule_log import ScheduleLog
-from services import claim_job_service, operator_service, publish_service, schedule_service
+from services import (claim_job_service, operator_service, publish_service,
+                      schedule_service, setting_service)
 
 
 @pytest.fixture
@@ -502,3 +503,108 @@ def test_teacher_empty_schedule_keeps_global_warehouse_diagnostic(
     # Products from the shared account make the global warehouse non-empty, while
     # the selected account itself has no products.
     assert result["reason"] == "仓库里没有属于这个账号的商品，检查任务的账号设置"
+
+
+def test_member_schedule_creation_auto_claims_selected_products(
+        shared_account_operators):
+    """学员在弹窗里点名勾选的商品，建任务时应自动补认领。
+
+    回归：之前学员分支只认已存在的 ProductClaim，界面上「未认领」商品
+    本来就能勾（ProductPickerDialog 有 全部/已认领/未认领），于是勾了→
+    建任务→「部分所选商品不可用于该账号发布」。生产库实测全部学员的
+    认领数都是 0，等于所有学员都建不出定时任务。
+    """
+    db, account, first, second, _teacher = shared_account_operators
+    suffix = uuid.uuid4().hex[:8]
+
+    def add_product(label: str) -> Product:
+        product = Product(
+            warehouse_key=f"auto-claim-{suffix}-{label}:7", account_id=account.id,
+            detail_id=f"auto-claim-{suffix}-{label}", shop_id="7", title=label,
+        )
+        db.add(product)
+        db.flush()
+        return product
+
+    fresh = add_product("fresh")
+    already = add_product("already")
+    # second 已经认领过一件，first 完全没有认领记录
+    db.add(ProductClaim(product_id=already.id, owner_operator_id=first.id))
+    db.commit()
+
+    db.add(PublishLog(account_id=account.id, product_id=fresh.id,
+                      detail_id=fresh.detail_id, warehouse_key=fresh.warehouse_key,
+                      shop_id="7", status="success", operator_id=second.id))
+    db.commit()
+
+    template = f"auto-claim-template-{suffix}"
+    setting_service.save_template(db, {"name": template})
+    db.commit()
+
+    fields = {
+        "accountId": str(account.id),
+        "shopId": "7",
+        "name": f"auto-claim-{suffix}",
+        "template": template,
+        "selectedProductIds": [str(fresh.id), str(already.id)],
+        "plannedRuns": 1,
+        "claimOnly": False,
+        "frequency": "daily",
+        "time": "09:00",
+        "perRun": 2,
+    }
+    row = schedule_service.create(db, fields, first)
+    db.commit()
+
+    claims = {
+        claim.product_id: claim.status
+        for claim in db.query(ProductClaim)
+        .filter(ProductClaim.owner_operator_id == first.id).all()
+    }
+    assert claims.get(fresh.id) == "claimed"
+    assert claims.get(already.id) == "claimed"
+    # 另一名学员的认领账本不受影响
+    other_claims = db.query(ProductClaim).filter(
+        ProductClaim.owner_operator_id == second.id).count()
+    assert other_claims == 0
+    stored = db.query(Schedule).filter(
+        Schedule.id == row["task"]["id"]).one()
+    assert set(stored.selected_product_ids) == {str(fresh.id), str(already.id)}
+
+
+def test_member_schedule_creation_still_rejects_unclaimable_products(
+        shared_account_operators):
+    """自动化结果（未入仓）和已归档商品仍然不能被顺手认领。"""
+    db, account, first, _second, _teacher = shared_account_operators
+    suffix = uuid.uuid4().hex[:8]
+    product = Product(
+        warehouse_key=f"auto-claim-blocked-{suffix}:7", account_id=account.id,
+        detail_id=f"auto-claim-blocked-{suffix}", shop_id="7", title="blocked",
+        automation_result=True,
+    )
+    db.add(product)
+    db.commit()
+
+    template = f"auto-claim-blocked-template-{suffix}"
+    setting_service.save_template(db, {"name": template})
+    db.commit()
+
+    fields = {
+        "accountId": str(account.id),
+        "shopId": "7",
+        "name": f"auto-claim-blocked-{suffix}",
+        "template": template,
+        "selectedProductIds": [str(product.id)],
+        "plannedRuns": 1,
+        "claimOnly": False,
+        "frequency": "daily",
+        "time": "09:00",
+        "perRun": 1,
+    }
+    with pytest.raises(errors.AppError) as rejected:
+        schedule_service.create(db, fields, first)
+    assert rejected.value.status == 400
+    claimed = db.query(ProductClaim).filter(
+        ProductClaim.owner_operator_id == first.id,
+        ProductClaim.product_id == product.id).count()
+    assert claimed == 0

@@ -354,9 +354,14 @@ export function UnlockPage() {
                     id={secretField}
                     type="password"
                     value={appSecret}
-                    autoComplete="off"
+                    // 密码型输入框上 `autoComplete="off"` 会被 Chrome 忽略，
+                    // 浏览器照样把上次存过的密钥填进来，用户看到框里有东西不敢动。
+                    // `new-password` 是能被尊重的写法。
+                    autoComplete="new-password"
                     spellCheck={false}
-                    placeholder="sk_9c1f0e2a7b6d4f8a"
+                    // 这里不能用 sk_ 开头的假密钥当占位符：看着像已经填好的真密钥，
+                    // 用户会以为输入框里有内容、或者直接拿它当真实值去连账号。
+                    placeholder="粘贴妙手后台的 AppSecret"
                     invalid={Boolean(errors.appSecret)}
                     onChange={(event) => {
                       setAppSecret(event.currentTarget.value);

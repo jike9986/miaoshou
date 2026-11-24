@@ -1092,7 +1092,17 @@ def facets(db: Session, *, operator_id: int | None = None) -> dict[str, Any]:
                               "count": uncategorized})
 
     group_list: list[dict[str, Any]] = []
+    # 学员看不到受限分组这些行（负责人 2026-11-19：这三个分组学员根本看不到）。
+    # 商品行已经按 visible_group_ids 过滤掉了，但分组 chip 是按 Group 表渲染的，
+    # 不过滤就会留下「精品 0」这种空壳文件夹 —— 等于告诉学员这三个组存在。
+    from services import group_access, operator_service
+
+    viewer = (operator_service.get(db, operator_id)
+              if operator_id is not None else None)
+    hidden_groups = group_access.visible_group_ids(db, viewer) or set()
     for row in sorted(groups.values(), key=lambda item: (item.sort, item.name)):
+        if int(row.id) in hidden_groups:
+            continue
         group_list.append({
             "id": str(row.id),
             "name": row.name,

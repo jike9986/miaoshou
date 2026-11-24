@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core import errors
@@ -760,7 +761,9 @@ def create(db: Session, payload: Mapping[str, Any],
     eligible = pick_products(
         db, account_id=fields["account_id"], count=len(fields["selected_product_ids"]),
         claim_only=fields["claim_only"], operator_id=operator.id if operator else None,
-        selected_product_ids=fields["selected_product_ids"])
+        selected_product_ids=fields["selected_product_ids"],
+        # 学员在弹窗里点名的商品，创建时就补认领，否则一定命中下面那条报错。
+        auto_claim=True)
     if len(eligible) != len(fields["selected_product_ids"]):
         raise errors.validation("部分所选商品不可用于该账号发布，请刷新商品列表后重选",
                                 field="selectedProductIds")
@@ -859,21 +862,80 @@ def note_result(db: Session, task_id: str, *, success: bool, result: dict[str, A
     return row
 
 
+def _auto_claim_for_member(db: Session, operator_id: int,
+                           product_ids: list[int]) -> None:
+    """学员建定时任务时，把他点名的商品补上认领记录。
+
+    为什么需要（2026-11-23，负责人确认走「自动认领」）：
+    界面上未认领的商品本来就能勾（ProductPickerDialog 有 全部/已认领/未认领
+    三档筛选），但 `pick_products` 的学员分支只认已存在的认领记录，于是
+    「勾了 → 点创建 → 部分所选商品不可用于该账号发布」。
+    生产库实测：全部学员的认领数都是 0，等于所有学员根本建不出定时任务。
+
+    只补「还能认领」的商品：自动化结果（未入仓）不允许认领，
+    已归档的也不该被顺手占住。已存在的记录直接跳过，不做状态变更
+    —— 学员可能主动 release 过，不能因为排任务又悄悄改回去。
+    """
+    from models.product import Product
+    from models.product_claim import ProductClaim
+
+    if not product_ids:
+        return
+    claimable = {
+        row[0] for row in
+        db.query(Product.id)
+        .filter(Product.id.in_(product_ids),
+                Product.deleted_at.is_(None),
+                Product.automation_result.is_(False),
+                Product.status != "archived")
+        .all()
+    }
+    if not claimable:
+        return
+    existing = {
+        row[0] for row in
+        db.query(ProductClaim.product_id)
+        .filter(ProductClaim.owner_operator_id == operator_id,
+                ProductClaim.product_id.in_(claimable))
+        .all()
+    }
+    for product_id in sorted(claimable - existing):
+        try:
+            with db.begin_nested():
+                db.add(ProductClaim(product_id=product_id,
+                                    owner_operator_id=operator_id))
+                db.flush()
+        except IntegrityError:
+            # 并发下另一个请求刚插进去（唯一约束），忽略即可
+            continue
+
+
 def pick_products(db: Session, *, account_id: int | None, count: int,
                   template: str = "", claim_only: bool = False,
                   operator_id: int | None = None,
                   selected_product_ids: list[str] | None = None,
-                  run_index: int = 0
+                  run_index: int = 0,
+                  auto_claim: bool = False
                   ) -> list[dict[str, Any]]:
     """挑出本轮要处理的商品，按 saved_at 倒序，最多 per_run 件。
 
     学员按本人认领和目标账号的发布记录选共享成品，不按成品来源账号或全局
     发布状态过滤。已发布过的不再取；数量不足时少取，不报错。
+
+    `auto_claim`：创建定时任务时用（运行期不用）。
+    学员在界面上点名勾了某几件成品，本身就是「我要发这几件」的明确意图；
+    之前这里只认已存在的认领记录，导致界面上能勾、点创建却报
+    「部分所选商品不可用于该账号发布」——生产库里全部学员的认领数都是 0，
+    等于所有学员根本建不出定时任务。
+    现在创建时先替他把勾中的商品补上认领，再走正常筛选。
     """
     from models.product import Product
     from models.product_claim import ProductClaim
 
     query = db.query(Product).filter(Product.deleted_at.is_(None))
+    # 显式勾选的商品 id（Integer）。在块外先初始化：下面学员分支要用它做
+    # 自动认领，未勾选（自动轮转）时必须存在、为空 list，否则 UnboundLocalError。
+    numeric_ids: list[int] = []
     if selected_product_ids is not None:
         start = max(run_index, 0) * count
         ids = selected_product_ids[start:start + count]
@@ -882,7 +944,6 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
         # Product.id 是 Integer；前端传来的 id 是字符串，
         # 直接 in_(["308"]) 会被 psycopg 绑定成 ::VARCHAR，报
         # 「operator does not exist: integer = character varying」。
-        numeric_ids = []
         for value in ids:
             try:
                 numeric_ids.append(int(str(value).strip()))
@@ -904,6 +965,14 @@ def pick_products(db: Session, *, account_id: int | None, count: int,
         # ProductClaim.product_id 与 Product.id 都是 Integer，直接子查询即可。
         # 之前误加了 cast(..., Text)，反而造成 integer = text 类型不匹配，
         # 报「operator does not exist: integer = text」。
+        #
+        # 创建任务时先补认领（负责人 2026-11-23 确认走「自动认领」）：
+        # 学员在界面上点名勾了这几件，就是要发它们。界面上「未认领」商品
+        # 本来就能勾（ProductPickerDialog 有 全部/已认领/未认领 三档筛选），
+        # 但这里以前只认已存在的认领记录，于是「勾了 → 点创建 → 报不可用」。
+        # 生产库实测所有学员的认领数都是 0，等于全体育员建不出定时任务。
+        if auto_claim and numeric_ids:
+            _auto_claim_for_member(db, operator.id, numeric_ids)
         claimed_ids = (db.query(ProductClaim.product_id)
                        .filter(ProductClaim.owner_operator_id == operator.id,
                                ProductClaim.status == "claimed"))

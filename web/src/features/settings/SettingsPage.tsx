@@ -9,7 +9,7 @@
 //   · 操作员：当前身份 + 名单 + 一次性 token（管理动作都在这里）
 //   · 审计日志：谁在什么时候动了什么（排查用）
 
-import { Info, SlidersHorizontal, ScrollText, ShieldBan, Users } from "lucide-react";
+import { Calculator, Info, SlidersHorizontal, ScrollText, ShieldBan, Users } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { PageContent, PageHeader } from "@/components/layout/PageHeader";
 import { Tabs, tabId, tabPanelId } from "@/components/ui";
@@ -18,20 +18,34 @@ import { useOperators } from "@/lib/queries";
 import { OperatorsPanel } from "@/features/settings/OperatorsPanel";
 import { AuditLogPanel } from "@/features/settings/AuditLogPanel";
 import { PublishSettingsPanel } from "@/features/settings/PublishSettingsPanel";
+import { PricingTemplatePanel } from "@/features/settings/PricingTemplatePanel";
 import { ImageServiceCard } from "@/features/automation/ImageServiceCard";
 import { VersionPanel } from "@/features/settings/VersionPanel";
 import { LocalCachePanel } from "@/features/settings/LocalCachePanel";
 import { WordsPage } from "@/features/words/WordsPage";
 import { SHOW_ACCOUNT_UI } from "@/lib/featureFlags";
 
-export type SettingsTab = "operators" | "processing" | "audit" | "words" | "about";
+export type SettingsTab =
+  | "operators"
+  | "processing"
+  | "pricing"
+  | "audit"
+  | "words"
+  | "about";
 
 export interface SettingsPageProps {
   /** 从标题栏身份按钮跳进来时直接定位到某个 Tab */
   initialTab?: SettingsTab;
 }
 
-const SETTINGS_TABS: SettingsTab[] = ["operators", "processing", "audit", "words", "about"];
+const SETTINGS_TABS: SettingsTab[] = [
+  "operators",
+  "processing",
+  "pricing",
+  "audit",
+  "words",
+  "about",
+];
 
 export function SettingsPage({ initialTab = SHOW_ACCOUNT_UI ? "operators" : "about" }: SettingsPageProps) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -46,7 +60,9 @@ export function SettingsPage({ initialTab = SHOW_ACCOUNT_UI ? "operators" : "abo
     role === "teacher" || role === "admin" || operatorsQuery.data?.current?.admin === true;
   const activeTab = SHOW_ACCOUNT_UI
     ? canManage || tab === "operators" || tab === "about" || tab === "words" ? tab : "operators"
-    : canManage && (tab === "processing" || tab === "audit") ? tab : tab === "words" ? "words" : "about";
+    : canManage && (tab === "processing" || tab === "pricing" || tab === "audit")
+      ? tab
+      : tab === "words" ? "words" : "about";
   const settingsTabs = [
     ...(SHOW_ACCOUNT_UI
       ? [{ value: "operators", label: canManage ? "账号与权限" : "账号", icon: <Users className="size-3.5" /> }]
@@ -54,6 +70,9 @@ export function SettingsPage({ initialTab = SHOW_ACCOUNT_UI ? "operators" : "abo
     ...(canManage
       ? [
           { value: "processing", label: "处理配置", icon: <SlidersHorizontal className="size-3.5" /> },
+          // 定价模板决定所有商品的售价 —— 是全局配置，不是某个人自己的偏好。
+          // 放设置页而不是仓库页：负责人 2026-11-23 明确要求挪到这里。
+          { value: "pricing", label: "定价模板", icon: <Calculator className="size-3.5" /> },
           { value: "audit", label: "审计日志", icon: <ScrollText className="size-3.5" /> },
         ]
       : []),
@@ -94,6 +113,7 @@ export function SettingsPage({ initialTab = SHOW_ACCOUNT_UI ? "operators" : "abo
               <ImageServiceCard />
             </div>
           )}
+          {activeTab === "pricing" && canManage && <PricingTemplatePanel />}
           {activeTab === "audit" && canManage && <AuditLogPanel />}
           {activeTab === "words" && <WordsPage embedded />}
           {activeTab === "about" && (
