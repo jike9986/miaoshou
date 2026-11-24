@@ -405,7 +405,8 @@ def price_preview(payload: PricePreviewRequest, db: DbSession,
     if len(payload.items) > PRICE_PREVIEW_MAX_ITEMS:
         raise errors.validation(f"一次最多试算 {PRICE_PREVIEW_MAX_ITEMS} 件商品",
                                 field="items", value=len(payload.items))
-    template = _preview_template(db, payload.template)
+    template = _preview_template(db, payload.template,
+                                 operator_id=getattr(operator, "id", None))
     rate = payload.exchangeRate
     if rate not in (None, ""):
         try:
@@ -934,13 +935,19 @@ def confirm_save(payload: ConfirmSaveRequest, db: DbSession,
 #   · 不调上游、不看发布开关、不做只读校验（只读模式下也能试算）
 # 定价算法 100% 复用 services.price_template.apply_template()——与
 # publish_service._repricing() 走的是同一个函数，试算结果与真实发布一致。
-def _preview_template(db: Session, name: Any) -> dict[str, Any]:
-    """取模板并校验；错误码与 publish_service._find_template 保持一致。"""
+def _preview_template(db: Session, name: Any, *,
+                      operator_id: int | None = None) -> dict[str, Any]:
+    """取模板并校验；错误码与 publish_service._find_template 保持一致。
+
+    模板每人一套（2026-11-23），必须按操作员取 —— 不给 operator_id 会落到
+    共享键上，那里是空的，于是每个操作员都被告知「模板不存在」。
+    """
     wanted = str(name or "").strip()
     if not wanted:
         raise errors.AppError(errors.TEMPLATE_INVALID, "请先选择定价模板",
                               status=422, details={"field": "template"})
-    raw = setting_service.price_templates(db).get(wanted)
+    raw = setting_service.price_templates(
+        db, operator_id=operator_id).get(wanted)
     if not raw:
         raise errors.AppError(errors.TEMPLATE_INVALID, f"定价模板「{wanted}」不存在",
                               status=422, details={"field": "template"})

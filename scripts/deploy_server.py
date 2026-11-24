@@ -15,6 +15,8 @@ FILES = [
     ("services/schedule_service.py",        "services/schedule_service.py"),
     ("services/setting_service.py",         "services/setting_service.py"),
     ("services/price_template.py",          "services/price_template.py"),
+    ("services/sync_service.py",            "services/sync_service.py"),
+    ("api/sync.py",                         "api/sync.py"),
     ("services/publish_service.py",         "services/publish_service.py"),
     ("services/group_service.py",           "services/group_service.py"),
     ("api/system.py",                       "api/system.py"),

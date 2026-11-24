@@ -70,6 +70,25 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
     },
   });
 
+  /**
+   * 明细里哪些行不该显示（负责人 2026-11-23）。
+   *
+   * 认领/处理任务的逐件记录，在商品还没确定落到哪个店铺时 detailId 只是
+   * 仓库侧的数字 ID（例如 `520`）。这些行展示出来就是「仓库商品 520 · 进行中」
+   * 一长串 —— 既看不出是哪件商品，也没有可操作的信息，只是把列表撑长。
+   * 真正的店铺商品 ID 是「店铺:商品」形式，那种才显示。
+   *
+   * 注意只过滤**展示**：任务进度和统计仍然按全部条目算，
+   * 否则「已处理 4/9」会和明细条数对不上，看着像丢数据。
+   */
+  const isDisplayableItem = (item: { detailId: string | null; status: string }): boolean => {
+    const id = String(item.detailId ?? "").trim();
+    if (!id) return false;
+    // 纯数字 = 还没绑定到店铺的仓库侧 ID
+    if (/^\d+$/.test(id)) return false;
+    return true;
+  };
+
   // 发布任务的 detailId 是「店铺:商品」，展示时拆开，让人看得出发到哪个店。
   const renderDetailLabel = (detailId: string): string => {
     const separator = detailId.indexOf(":");
@@ -279,7 +298,7 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
                     <Button size="sm" variant="ghost" onClick={() => void detail.refetch()}>重试明细</Button>
                   </div>
                 )}
-                {detail.data?.items.map((item) => (
+                {detail.data?.items.filter(isDisplayableItem).map((item) => (
                   <div key={item.id} className="flex flex-wrap gap-x-3 gap-y-1 border-t border-border-subtle py-2">
                     <span className="min-w-0 flex-1 break-all">{renderDetailLabel(item.detailId)}</span>
                     <span className="shrink-0">

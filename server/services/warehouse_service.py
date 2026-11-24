@@ -2691,7 +2691,13 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
 
     template = None
     if price_template:
-        raw = setting_service.price_templates(db).get(str(price_template))
+        # 必须按操作员取模板（2026-11-23）。模板改成每人一套后，读共享键
+        # `pricing.templates` 永远拿不到东西 —— 于是 template 为 None，
+        # 定价整段被跳过，商品按原价（拿货价当本币）提交，被妙手成本校验打回：
+        #   「本地展示价 18.71PHP，无法覆盖产品基础成本 225.50PHP」
+        # 这就是学员认领失败的根因。
+        raw = setting_service.price_templates(
+            db, operator_id=operator_id).get(str(price_template))
         if not raw:
             raise errors.AppError(errors.TEMPLATE_INVALID,
                                   f"定价模板「{price_template}」不存在",

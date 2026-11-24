@@ -287,7 +287,8 @@ def _bootstrap_templates(db: DbSession,
     return {"items": items, "total": len(items),
             "selected": selected,
             "selectedName": setting_service.selected_template_name(
-                db, selected_account_id)}
+                db, selected_account_id,
+                operator_id=_template_scope(db, operator))}
 
 
 def _validate_workflow_defaults(raw: dict[str, Any]) -> dict[str, Any]:

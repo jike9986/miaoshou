@@ -80,6 +80,7 @@ def sync_price_templates(
             return sync_service.sync_price_templates(
                 db, site=payload.site, account_id=account.id,
                 template_name=payload.templateName or "", save=True,
+                operator_id=getattr(operator, "id", None),
             )
         except price_template.PriceTemplateError as exc:
             raise errors.unprocessable(str(exc)) from None

@@ -382,7 +382,8 @@ def harvest_source_links(db: Session, scope: SourceScope) -> dict[str, Any]:
 
 def sync_price_templates(db: Session, *, site: Any = None, account_id: Any = None,
                          template_name: Any = "", save: bool = False,
-                         client: Any = None) -> dict[str, Any]:
+                         client: Any = None,
+                         operator_id: int | None = None) -> dict[str, Any]:
     """从妙手同步定价模板：拉上游 + 站点默认 → 选一套 → 三级合并 → 可选落库。
 
     老版 `service_price.sync`（:70）的等价实现。`save=False` 是刻意的默认值：
@@ -422,14 +423,18 @@ def sync_price_templates(db: Session, *, site: Any = None, account_id: Any = Non
             logger.warning("站点默认费率获取失败：%s", type(exc).__name__)
             defaults = {}
 
+        # 模板每人一套（2026-11-23）：按操作员取，否则读的是空共享键，
+        # 合并结果里那份「已存模板」永远是 None，同步等于没同步。
         stored = None
         if template_name:
-            stored = setting_service.price_templates(db).get(str(template_name))
+            stored = setting_service.price_templates(
+                db, operator_id=operator_id).get(str(template_name))
         if stored is None:
             selected = setting_service.selected_templates(db)
             current = (selected.get("accounts") or {}).get(str(account or ""))
             if current:
-                stored = setting_service.price_templates(db).get(str(current))
+                stored = setting_service.price_templates(
+                    db, operator_id=operator_id).get(str(current))
         merged = price_template_service.merge_from_upstream(
             raw, stored, defaults, template_name=template_name)
     finally:
@@ -456,7 +461,9 @@ def sync_price_templates(db: Session, *, site: Any = None, account_id: Any = Non
         if merged.get(field) in (None, "")
     ]
     if save:
-        setting_service.save_template(db, merged)
+        # 同上：写也必须写进这个操作员自己那份，否则同步下来的模板
+        # 落进空共享键，学员在界面上永远看不到自己刚同步的那套。
+        setting_service.save_template(db, merged, operator_id=operator_id)
         setting_service.select_template(db, merged["name"], str(account or ""))
         # 四级兜底的第三级：把「妙手侧当前是哪一套」也记下来。
         # 不记的话，用户清掉本地选择后第三级永远取不到值，等于只有三级兜底。
