@@ -70,3 +70,39 @@ _build_tmp/
 
 # 本机调试配置，不进仓库（.claude/launch.json 是 IDE 启动项）
 .claude/launch.json
+
+# 1688 图搜相关的浏览器会话（含登录 cookie，绝不入库）
+.1688-profile/
+.1688-p2/
+.p3/
+tools/source_match/.profile-1688/
+tools/source_match/.1688-cookie.txt
+tools/source_match/.img-cache/
+tools/source_match/.thumbs/
+tools/source_match/.candidates.json
+tools/source_match/.verified.json
+tools/source_match/.batch-report.json
+tools/source_match/.result_api.json
+tools/source_match/.air_resp_*.txt
+tools/source_match/.air_resp_index.json
+tools/source_match/.h5api_calls.json
+tools/source_match/.up_resp_*.json
+tools/source_match/.ok_resp_*.json
+tools/source_match/.kw_*.json
+tools/source_match/.kw_page.html
+tools/source_match/.1688_api.json
+tools/source_match/.captcha_dom.txt
+tools/source_match/.captcha_page.png
+tools/source_match/.air_*.png
+tools/source_match/.login_*.png
+tools/source_match/.upload_diag*.png
+tools/source_match/.final_*.png
+tools/source_match/.probe_cookie.png
+tools/source_match/.probe_cookie_up.png
+tools/source_match/.ok_search.png
+tools/source_match/.test_all.png
+tools/source_match/.upload.jpg
+tools/source_match/.resized.jpg
+tools/source_match/.small.png
+tools/source_match/.probe.jpg
+tools/source_match/.diag*.png

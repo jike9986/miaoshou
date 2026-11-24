@@ -1,5 +1,0 @@
-2026/11/24-20:04:17.682 4aac Creating DB D:\缓存文件夹\codex工作台\p006\miaoshou\.p3\Default\Local Storage\leveldb since it was missing.
-2026/11/24-20:04:17.714 4aac Reusing MANIFEST D:\缓存文件夹\codex工作台\p006\miaoshou\.p3\Default\Local Storage\leveldb/MANIFEST-000001
-2026/11/24-20:04:25.726 460c Level-0 table #5: started
-2026/11/24-20:04:25.730 460c Level-0 table #5: 231922 bytes OK
-2026/11/24-20:04:25.734 460c Delete type=0 #3
