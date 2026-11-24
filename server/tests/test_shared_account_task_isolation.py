@@ -538,7 +538,9 @@ def test_member_schedule_creation_auto_claims_selected_products(
     db.commit()
 
     template = f"auto-claim-template-{suffix}"
-    setting_service.save_template(db, {"name": template})
+    # 2026-11-23：模板改成每人一套，没有共享库。建任务用的是 first 自己那份，
+    # 所以模板也要存到 first 名下，否则 _verify_template 查不到（报「不存在」）。
+    setting_service.save_template(db, {"name": template}, operator_id=first.id)
     db.commit()
 
     fields = {
@@ -586,7 +588,8 @@ def test_member_schedule_creation_still_rejects_unclaimable_products(
     db.commit()
 
     template = f"auto-claim-blocked-template-{suffix}"
-    setting_service.save_template(db, {"name": template})
+    # 同上：模板按操作员隔离，建到 first 自己名下
+    setting_service.save_template(db, {"name": template}, operator_id=first.id)
     db.commit()
 
     fields = {
