@@ -24,9 +24,10 @@
  *   3. 一键检查有效性 —— 用妙手公共箱反查（不消耗采集配额）
  */
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, ExternalLink, Link2, RefreshCw, Save, TriangleAlert } from "lucide-react";
-import { Badge, Button, Card, InlineError, Input, toast } from "@/components/ui";
+import { CheckCircle2, ExternalLink, Link2, RefreshCw, TriangleAlert } from "lucide-react";
+import { Badge, Card, InlineError, Input, toast } from "@/components/ui";
 import { api, apiErrorMessage } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { currentOperator } from "@/lib/operator";
 import type { ProductDetailProduct } from "@/lib/types";
 
@@ -54,9 +55,11 @@ interface CheckResult {
 
 interface SourceLinkCardProps {
   product: ProductDetailProduct;
+  /** 保存成功后的回调：让父级重新取详情（替代原来的整页刷新） */
+  onSaved?: () => void;
 }
 
-export function SourceLinkCard({ product }: SourceLinkCardProps) {
+export function SourceLinkCard({ product, onSaved }: SourceLinkCardProps) {
   const payload = product.payload;
   const stored = String(payload?.sourceUrl ?? "").trim();
   const offerId = String(payload?.sourceItemId ?? "").trim();
@@ -90,9 +93,25 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
     setEditing(true);
   }, [stored]);
 
-  const save = useCallback(async () => {
+  /**
+   * 失焦/回车自动保存。
+   *
+   * 三处必须注意：
+   *   1. 值没变就直接退出 —— 点一下输入框也会触发 blur，不判断的话
+   *      每次点击都发一次请求。
+   *   2. **不能 `window.location.reload()`**。原来保存完刷新整页，
+   *      在详情页里等于把用户正在看的东西全丢了，滚动位置、展开的图
+   *      全部复位。现在改成让父级重新取详情。
+   *   3. 失败时退回展示态并把错误显示出来，否则用户以为存好了。
+   */
+  const commit = useCallback(async () => {
     const url = draft.trim();
+    if (url === stored.trim()) {
+      setEditing(false);
+      return;
+    }
     if (!url) {
+      // 清空不是有效操作：货源链接要么填要么别动，别静默删掉已有值
       setError("请填写 1688 货源链接");
       return;
     }
@@ -102,14 +121,14 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
       await api.post(`/warehouse/${encodeURIComponent(String(product.id))}/source-link`, { url });
       toast.success("货源链接已保存");
       setEditing(false);
-      // 刷新详情，让 payload 里的新值生效
-      window.location.reload();
+      // 让父级重新拉详情（不刷新整页，用户的滚动位置和展开状态都保留）
+      onSaved?.();
     } catch (err) {
       setError(apiErrorMessage(err));
     } finally {
       setSaving(false);
     }
-  }, [draft, product.id]);
+  }, [draft, stored, product.id, onSaved]);
 
   const check = useCallback(async () => {
     setChecking(true);
@@ -152,54 +171,67 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
       </div>
 
       {editing ? (
-        <div className="mt-3 space-y-2">
+        /* 点进来就是一个输入框，改完失焦（或按回车）自动保存 ——
+           没有「保存 / 取消」按钮（负责人 2026-11-23：
+           「这个输入框我是说直接点击就可以输入而不是要点前面的链接，
+            而且怎么还有保存的按键」）。
+           值没变就不提交，避免点一下发一次请求。 */
+        <div className="mt-3">
           <Input
             value={draft}
             onChange={(event) => setDraft(event.currentTarget.value)}
-            placeholder="https://detail.1688.com/offer/123456789.html 或直接填 offer id"
+            onBlur={() => void commit()}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void commit();
+                (event.currentTarget as HTMLInputElement).blur();
+              }
+              if (event.key === "Escape") setEditing(false);
+            }}
+            placeholder="粘贴 1688 链接或 offer id"
             autoFocus
+            suffix={saving ? "保存中…" : undefined}
           />
-          {error && <InlineError>{error}</InlineError>}
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>取消</Button>
-            <Button variant="primary" size="sm" icon={<Save />} loading={saving} onClick={() => void save()}>
-              保存
-            </Button>
-          </div>
+          {error && <div className="mt-1"><InlineError>{error}</InlineError></div>}
         </div>
       ) : (
         <>
-          <div className="mt-3 rounded-sm border border-border bg-canvas-inset p-3">
+          <div
+            role={editable ? "button" : undefined}
+            tabIndex={editable ? 0 : undefined}
+            onClick={editable ? startEdit : undefined}
+            onKeyDown={
+              editable
+                ? (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      startEdit();
+                    }
+                  }
+                : undefined
+            }
+            className={cn(
+              "mt-3 rounded-sm border border-border bg-canvas-inset p-3",
+              editable && "cursor-text transition-colors hover:border-border-strong"
+            )}
+          >
             {stored ? (
               <a
                 href={stored}
                 target="_blank"
                 rel="noreferrer"
+                onClick={(event) => event.stopPropagation()}
                 className="inline-flex items-center gap-1.5 break-all text-[13px] font-medium text-brand-700 underline decoration-brand-700/30 hover:decoration-brand-700"
               >
                 {stored}
                 <ExternalLink className="size-3.5 shrink-0" strokeWidth={1.75} />
               </a>
             ) : null}
-            {stored && editable ? (
-              <button
-                type="button"
-                onClick={startEdit}
-                className="ml-2 inline-flex items-center gap-1 text-xs text-fg-muted underline decoration-border hover:text-fg"
-              >
-                <Link2 className="size-3" />
-                修改
-              </button>
-            ) : editable ? (
-              <button
-                type="button"
-                onClick={startEdit}
-                className="text-[13px] text-fg-muted underline decoration-border hover:text-fg"
-              >
-                点击填写货源链接
-              </button>
-            ) : (
-              <p className="text-[13px] text-fg-muted">尚未记录货源链接</p>
+            {!stored && (
+              <p className="text-[13px] text-fg-muted">
+                {editable ? "粘贴 1688 链接或 offer id" : "尚未记录货源链接"}
+              </p>
             )}
             {offerId && (
               <p className="mt-1.5 text-xs text-fg-muted">offer id：{offerId}</p>

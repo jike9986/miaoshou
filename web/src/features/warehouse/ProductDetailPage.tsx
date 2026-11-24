@@ -904,7 +904,7 @@ export function ProductDetailPage() {
               —— 这是采购员出单后真正要照着买的那个链接。
               载体生成时用的链接来自池子轮换，跟商品真实货源无关，
               所以这里必须能看到、能改对。老师与管理员可改，学员只读。 */}
-          <SourceLinkCard product={product} />
+          <SourceLinkCard product={product} onSaved={() => void detail.refetch()} />
         </div>
       </PageContent>
 
