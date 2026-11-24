@@ -106,3 +106,6 @@ tools/source_match/.resized.jpg
 tools/source_match/.small.png
 tools/source_match/.probe.jpg
 tools/source_match/.diag*.png
+.1688_api.json
+.1688_imgsearch*.png
+tools/source_match/.probe_cookie*.png
