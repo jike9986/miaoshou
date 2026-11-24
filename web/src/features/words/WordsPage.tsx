@@ -3,7 +3,6 @@
 
 import { useMemo, useRef, useState } from "react";
 import {
-  ExternalLink,
   Download,
   Plus,
   SearchX,
@@ -12,8 +11,6 @@ import {
 } from "lucide-react";
 import { cn, formatCount } from "@/lib/utils";
 import { api, ApiError, apiErrorMessage } from "@/lib/api";
-import { queryKeys } from "@/lib/queryKeys";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { LIMITS, SITE_LANGUAGES } from "@/lib/constants";
 import { useMutateWords, useViolationWords } from "@/lib/queries";
 import { useWordsStore } from "@/features/stores";
@@ -25,7 +22,6 @@ import {
   BulkActionBar,
   Button,
   Card,
-  Checkbox,
   ConfirmDialog,
   Dialog,
   EmptyState,
@@ -36,7 +32,6 @@ import {
   SearchInput,
   Select,
   SkeletonRows,
-  Switch,
   Textarea,
   toast,
 } from "@/components/ui";
@@ -90,19 +85,6 @@ export function WordsPage({ embedded = false }: { embedded?: boolean }) {
     q,
   });
   const mutate = useMutateWords();
-  const queryClient = useQueryClient();
-  /** 真启停：只翻 enabled 位，不删词（与后端 PATCH /violation-words/enabled 对应）。 */
-  const toggleEnabled = useMutation({
-    mutationFn: (body: { enabled: boolean; words: string[] }) =>
-      api.patch<{ updated: number; enabled: boolean; missing: string[] }>(
-        "/violation-words/enabled",
-        body
-      ),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.violationWords.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.auth.all });
-    },
-  });
 
   const [addOpen, setAddOpen] = useState(false);
   const [singleWord, setSingleWord] = useState("");
@@ -130,8 +112,6 @@ export function WordsPage({ embedded = false }: { embedded?: boolean }) {
 
   const selected = store.selectedWords;
 
-  const pageWords = items.map((item) => item.word);
-  const allSelected = pageWords.length > 0 && pageWords.every((word) => selected.includes(word));
 
   const parsedImportBackup = useMemo(() => {
     const input = importText.trim();
@@ -453,95 +433,39 @@ export function WordsPage({ embedded = false }: { embedded?: boolean }) {
 
         {!listQuery.isLoading && !listQuery.isError && items.length > 0 && (
           <>
-            {/* 全选/清空操作条 */}
-            <div className="flex items-center gap-2">
-              <Checkbox
-                checked={allSelected}
-                indeterminate={!allSelected && selected.length > 0}
-                onChange={() => {
-                  if (allSelected) store.clearWords();
-                  else store.setWords(pageWords);
-                }}
-                aria-label="全选本页"
-                label="全选"
-              />
-              {selected.length > 0 && (
-                <span className="text-xs text-fg-muted">已选 {selected.length} 个</span>
-              )}
-            </div>
-
-            {/* 标签流式布局：一词一个胶囊，多个一行排满。
-                一词一行的表格在几十上百个词时全是空白，翻页翻到手酸。 */}
+            {/* 只显示词本身（负责人 2026-11-23：「前面这个勾选是什么，
+                不是在选择删除之后才会出现吗…后面怎么还有个开关，这些都没有用吧
+                正常不就显示词吗，美观一点」）。
+                勾选框只在进入批量删除模式后才出现；平时就是一行行干净的词。
+                逐个启停的开关也去掉了 —— 违规词库的语义是「这些词不能用」，
+                单个词启停没有实际场景，只会让界面噪音变多。 */}
             <div className="flex flex-wrap gap-2">
               {items.map((item) => {
-                const checked = selected.includes(item.word);
                 return (
                   <span
                     key={item.id}
                     className={cn(
-                      "group inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[13px] transition-colors duration-fast",
-                      checked
-                        ? "border-brand-600/60 bg-brand-50"
-                        : item.enabled
-                          ? "border-border bg-surface hover:border-border-strong"
-                          : "border-border-subtle bg-canvas-inset/50 text-fg-muted line-through"
+                      "group inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-[13px] transition-colors duration-fast",
+                      "border-border bg-surface hover:border-border-strong"
                     )}
                   >
-                    <Checkbox
-                      checked={checked}
-                      onChange={() => store.toggleWord(item.word)}
-                      aria-label={`选择 ${item.word}`}
-                      size="sm"
-                    />
                     <span className="font-medium">{item.word}</span>
-                    <span className="text-2xs text-fg-muted">
-                      {item.source === "seed" ? "内置" : item.source === "import" ? "导入" : "手动"}
-                    </span>
-                    {item.siteScope && (
-                      <span className="text-2xs text-fg-muted">{SITE_LABELS[item.siteScope] ?? item.siteScope}</span>
-                    )}
-                    {item.sourceUrl && (
-                      <a
-                        href={item.sourceUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        title="打开规则出处"
-                        aria-label={`${item.word} 的规则出处`}
-                        className="text-fg-muted hover:text-brand-700"
-                      >
-                        <ExternalLink className="size-3" />
-                      </a>
-                    )}
-                    <Switch
-                      checked={item.enabled}
-                      aria-label={`${item.enabled ? "停用" : "启用"} ${item.word}`}
-                      disabled={toggleEnabled.isPending}
-                      onChange={(checked) => {
-                        toggleEnabled.mutate(
-                          { enabled: checked, words: [item.word] },
-                          {
-                            onSuccess: () =>
-                              toast.success(
-                                checked ? `已启用「${item.word}」` : `已停用「${item.word}」`
-                              ),
-                            onError: (error) =>
-                              toast.error(checked ? "启用失败" : "停用失败", {
-                                description: apiErrorMessage(error),
-                              }),
-                          }
-                        );
-                      }}
-                    />
                     <button
                       type="button"
                       title={`删除 ${item.word}`}
                       className="ml-0.5 rounded-full p-0.5 text-fg-muted opacity-0 transition-opacity hover:text-danger-600 group-hover:opacity-100"
-                      onClick={() => {
-                        store.setWords([item.word]);
-                        setDeleteOpen(true);
-                      }}
+                      onClick={() =>
+                        mutate.mutate(
+                          { action: "remove-many", words: [item.word] },
+                          {
+                            onSuccess: () => toast.success(`已删除「${item.word}」`),
+                            onError: (error) =>
+                              toast.error("删除失败", { description: apiErrorMessage(error) }),
+                          }
+                        )
+                      }
                     >
-                      <Trash2 className="size-3" strokeWidth={1.75} />
+                      <Trash2 className="size-3" />
                     </button>
                   </span>
                 );

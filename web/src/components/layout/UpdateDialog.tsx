@@ -99,30 +99,21 @@ function UpdateDialogContent({
     });
   };
 
-  // 检查是否已有缓存包 → 自动安装；否则自动开始下载
+  // 只检查有没有已下好的包，**不自动下载、不自动安装**。
+  //
+  // 负责人 2026-11-23：「如果软件有新版本会自动弹出来说有新版本，但是用户
+  // 可以选择更新或者取消两种，正常大厂软件不都是这样吗」。
+  // 原来是弹出来就开始下、下完立刻装、装完重启 —— 用户正在处理商品时被
+  // 强行重启，编辑中的东西全丢。现在弹窗只告知，点「立即更新」才动手。
   useEffect(() => {
     if (!desktopUpdate || autoStartedRef.current) return;
     autoStartedRef.current = true;
     void desktopUpdate.pending().then((p: { path: string; version: string } | null) => {
-      if (p && p.version === version.latest) {
-        setPhase("done");
-        // 已有安装包，自动安装
-        handleInstall();
-      } else {
-        // 没有缓存，自动开始下载
-        startDownload();
-      }
+      // 已经有缓存包就直接算「待安装」，否则停在 idle 等用户点更新
+      if (p && p.version === version.latest) setPhase("done");
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [desktopUpdate]);
-
-  // 下载完成后自动安装
-  useEffect(() => {
-    if (phase === "done") {
-      handleInstall();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase]);
 
   return (
     <div
@@ -178,6 +169,17 @@ function UpdateDialogContent({
 
         {/* 操作按钮：只在出错时显示，正常流程全自动 */}
         <div className="mt-5 flex flex-col gap-2">
+          {/* idle 是默认状态：先说清楚，等用户决定 */}
+          {hasDesktop && phase === "idle" && (
+            <Button variant="primary" onClick={startDownload} className="w-full">
+              立即更新
+            </Button>
+          )}
+          {hasDesktop && phase === "done" && (
+            <Button variant="primary" onClick={handleInstall} className="w-full">
+              重启并安装
+            </Button>
+          )}
           {!hasDesktop && (
             <Button
               variant="primary"
@@ -201,7 +203,7 @@ function UpdateDialogContent({
             onClick={onClose}
             className="w-full"
           >
-            稍后再说
+            {phase === "downloading" ? "后台下载" : "取消"}
           </Button>
         </div>
       </div>

@@ -144,8 +144,10 @@ export function AuditLogPanel({ className }: AuditLogPanelProps) {
     <div className={cn("flex flex-col gap-3", className)}>
       {/* 筛选区 */}
       <Card padding="compact">
-        <div className="flex flex-wrap items-end gap-2.5">
-          <div className="w-[168px]">
+        {/* 四个筛选器压成一行（负责人 2026-11-23：「上面都没在一行整理一下」）。
+            用 grid 固定列宽，输入框吃剩余宽度，不会因为标签长短把哪一项挤下去。 */}
+        <div className="grid grid-cols-[140px_150px_112px_minmax(140px,1fr)_auto] items-end gap-2">
+          <div>
             <Field label="操作员">
               <Select
                 size="sm"
@@ -162,7 +164,7 @@ export function AuditLogPanel({ className }: AuditLogPanelProps) {
               />
             </Field>
           </div>
-          <div className="w-[176px]">
+          <div>
             <Field label="动作">
               <Select
                 size="sm"
@@ -173,7 +175,7 @@ export function AuditLogPanel({ className }: AuditLogPanelProps) {
               />
             </Field>
           </div>
-          <div className="w-[132px]">
+          <div>
             <Field label="结果">
               <Select
                 size="sm"
@@ -189,8 +191,8 @@ export function AuditLogPanel({ className }: AuditLogPanelProps) {
               />
             </Field>
           </div>
-          <div className="min-w-[200px] flex-1">
-            <Field label="搜索" hint="只在当前页内查找">
+          <div>
+            <Field label="搜索">
               <SearchInput
                 value={keyword}
                 placeholder="操作员 / 动作 / 对象 / 说明"

@@ -489,11 +489,10 @@ export function ProductDetailDrawer({
       onOpenChange={onOpenChange}
       size="lg"
       title={product?.title ? "商品详情" : "加载商品"}
-      description={
-        product
-          ? `${product.detailId} · ${product.shopName || "未关联店铺"} · ${formatCount(product.skuCount)} 个 SKU`
-          : productId ?? ""
-      }
+      // 副标题不再堆 detailId / 店铺 / SKU 数（负责人 2026-11-23：
+      // 「商品详情旁边的 3533603580 · Csupershop · 39 个 SKU 这种也去掉」）。
+      // 这些信息在下面的基本信息里都有，标题栏留着只是噪音。
+      description={undefined}
       footer={
         <>
           {canWrite && onRequestDelete && product && (

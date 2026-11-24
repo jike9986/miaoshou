@@ -122,12 +122,20 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
         (row) => String((row as unknown as { productId: number }).productId) === String(product.id),
       );
       setChecked(hit ?? { status: "missing" });
-    } catch (err) {
-      setError(apiErrorMessage(err));
+    } catch {
+      // 自动核验失败保持静默，不覆盖用户在编辑的链接输入
     } finally {
       setChecking(false);
     }
   }, [product.id]);
+
+  // 有货源链接就自动核验一次，不再要用户点「检查有效性」。
+  // 失败不弹错：这只是个辅助判断，不该因为它报错打断编辑。
+  useEffect(() => {
+    if (!stored) return;
+    void check().catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stored, product.id]);
 
   const status = checked?.status ?? (stored ? "ok" : "missing");
   const meta = STATUS_META[status] ?? STATUS_META.unknown;
@@ -143,10 +151,6 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
         <Link2 className="size-3.5 text-fg-muted" aria-hidden strokeWidth={1.75} />
       </div>
 
-      <p className="mt-2 text-xs leading-5 text-fg-muted">
-        出单后采购员要照着这个链接买货。载体生成会优先使用它，而不是链接池里轮换的那条。
-      </p>
-
       {editing ? (
         <div className="mt-3 space-y-2">
           <Input
@@ -155,9 +159,6 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
             placeholder="https://detail.1688.com/offer/123456789.html 或直接填 offer id"
             autoFocus
           />
-          <p className="text-xs text-fg-muted">
-            支持粘贴分享链接、移动端链接，或直接填 12 位 offer id。
-          </p>
           {error && <InlineError>{error}</InlineError>}
           <div className="flex justify-end gap-2">
             <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>取消</Button>
@@ -179,6 +180,24 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
                 {stored}
                 <ExternalLink className="size-3.5 shrink-0" strokeWidth={1.75} />
               </a>
+            ) : null}
+            {stored && editable ? (
+              <button
+                type="button"
+                onClick={startEdit}
+                className="ml-2 inline-flex items-center gap-1 text-xs text-fg-muted underline decoration-border hover:text-fg"
+              >
+                <Link2 className="size-3" />
+                修改
+              </button>
+            ) : editable ? (
+              <button
+                type="button"
+                onClick={startEdit}
+                className="text-[13px] text-fg-muted underline decoration-border hover:text-fg"
+              >
+                点击填写货源链接
+              </button>
             ) : (
               <p className="text-[13px] text-fg-muted">尚未记录货源链接</p>
             )}
@@ -190,6 +209,12 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
             )}
           </div>
 
+          {checking && !checked && (
+            <div className="mt-2 flex items-center gap-1.5 text-xs text-fg-muted">
+              <RefreshCw className="size-3 animate-spin" />
+              正在核验货源
+            </div>
+          )}
           {checked && (
             <div className="mt-2 flex items-start gap-1.5 text-xs">
               {checked.status === "verified" ? (
@@ -213,24 +238,6 @@ export function SourceLinkCard({ product }: SourceLinkCardProps) {
 
           {error && <div className="mt-2"><InlineError>{error}</InlineError></div>}
 
-          {editable && (
-            <div className="mt-3 flex justify-end gap-2">
-              {stored && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  icon={<RefreshCw />}
-                  loading={checking}
-                  onClick={() => void check()}
-                >
-                  检查有效性
-                </Button>
-              )}
-              <Button variant="secondary" size="sm" icon={<Link2 />} onClick={startEdit}>
-                {stored ? "修改链接" : "填写链接"}
-              </Button>
-            </div>
-          )}
         </>
       )}
     </Card>

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   CalendarClock,
+  Check,
   PackageCheck,
   History,
   Play,
@@ -1283,22 +1284,57 @@ function ScheduleFormDrawer({
             )}
           </Field>
 
-          <Field label="定价模板" hint={templates.length === 0 ? "还没有保存定价模板" : undefined}>
-            <Select
-              value={template}
-              onChange={(next) => {
-                // 记下「用户自己选过了」：之后即使 selectedTemplates 才回来，
-                // 也不能覆盖他——默认值错只是不方便，覆盖用户输入是丢数据。
-                templateTouchedRef.current = true;
-                setTemplate(next);
-              }}
-              options={templateOptions.map((item) => ({
-                value: item.name,
-                label: item.invalid ? `${item.name}（不可用）` : item.name,
-                disabled: item.invalid,
-              }))}
-              placeholder="不使用模板"
-            />
+          {/*
+            定价模板改成勾选开关（负责人 2026-11-23）：
+            「发布的时候不是说之前是把这个定价模板差分出来不是下拉吗，
+             是勾选开关的形式，上面店铺有哪些国家，下面的模板才允许勾选，
+             模板五个一行，之前版本弄过的啊」。
+
+            所以这里不再是下拉：只列出与已勾选店铺的国家对应的模板，
+            一行五个，点一下即选中（再点一下取消＝不使用模板）。
+            模板本身不可用（invalid）的灰掉不可点。
+          */}
+          <Field
+            label="定价模板"
+            error={errors.template ?? null}
+          >
+            {templateOptions.length === 0 ? (
+              <p className="text-sm text-fg-muted">
+                {templates.length === 0
+                  ? "还没有保存定价模板，先去设置里建一套"
+                  : "该国家还没有对应模板"}
+              </p>
+            ) : (
+              <div className="grid grid-cols-5 gap-2">
+                {templateOptions.map((item) => {
+                  const active = template === item.name;
+                  return (
+                    <button
+                      key={item.name}
+                      type="button"
+                      disabled={item.invalid}
+                      aria-pressed={active}
+                      onClick={() => {
+                        // 记下「用户自己选过了」：之后默认值晚到也不能覆盖他
+                        templateTouchedRef.current = true;
+                        setTemplate(active ? "" : item.name);
+                      }}
+                      className={cn(
+                        "flex items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs transition-colors duration-fast",
+                        item.invalid
+                          ? "cursor-not-allowed border-border-subtle text-fg-muted line-through"
+                          : active
+                            ? "border-brand-600 bg-brand-50 font-medium text-brand-700"
+                            : "border-border text-fg-secondary hover:border-border-strong hover:bg-surface-hover"
+                      )}
+                    >
+                      {active && <Check className="size-3" />}
+                      <span className="truncate">{item.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </Field>
         </div>
 

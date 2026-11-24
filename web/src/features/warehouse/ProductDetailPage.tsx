@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -8,7 +8,6 @@ import {
   ChevronUp,
   Images,
   Languages,
-  PencilLine,
   Ruler,
   Save,
   Tag,
@@ -35,7 +34,7 @@ import { copyImageToClipboard } from "@/lib/clipboard";
 import { SourceLinkCard } from "./SourceLinkCard";
 import { apiErrorMessage } from "@/lib/api";
 import { useOperatorIdentity } from "@/lib/operator";
-import { formatCount, formatDate, formatPrice, midImageUrl } from "@/lib/utils";
+import { formatCount, formatPrice, midImageUrl } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
 /**
@@ -329,44 +328,45 @@ export function ProductDetailPage() {
     );
   };
 
-  const saveQuality = (): void => {
+  /** 上次已保存的尺寸快照，用来避免重复提交（'' = 强制下次一定提交） */
+  const savedDimsRef = useRef<string>("");
+
+  /**
+   * 失焦自动保存：值与上次保存的相同就直接跳过，避免每点一下都发一次请求。
+   * 静默失败只提示不弹错 —— 用户只是切了个焦点，不该被判为操作失败。
+   */
+  const saveQualityQuiet = (): void => {
     if (!product) return;
-    // 四个数值都必须 > 0：后端也会校验，但在这里先拦一下，
-    // 免得用户填了空值点保存只看到一句笼统的失败。
-    const numbers = { weightKg: Number(weight), packageLength: Number(length),
-                      packageWidth: Number(width), packageHeight: Number(height) };
-    const invalid = Object.entries(numbers).find(([, value]) => !Number.isFinite(value) || value <= 0);
-    if (invalid) {
-      setQualityError("重量与三个边长都必须是大于 0 的数字");
-      return;
-    }
-    setQualityError(null);
+    const current = [weight, length, width, height].join(",");
+    if (current === savedDimsRef.current) return;
+    const numbers = [weight, length, width, height].map(Number);
+    if (numbers.some((value) => !Number.isFinite(value) || value <= 0)) return;
+    savedDimsRef.current = current;
     reviewQuality.mutate(
       {
         id: String(product.id),
         review: {
-          weightKg: Number(weight),
-          packageLength: Number(length),
-          packageWidth: Number(width),
-          packageHeight: Number(height),
-          // 界面不再要求填写：统一记成「详情页直接修改」，
-          // 保留操作痕迹但不打扰操作者（后端这两个字段是必填）。
+          weightKg: numbers[0],
+          packageLength: numbers[1],
+          packageWidth: numbers[2],
+          packageHeight: numbers[3],
           source: qualitySource.trim() || "详情页直接修改",
-          evidence: qualityEvidence.trim() || `操作者 ${identity?.name || "未知"} 于详情页直接修改`,
-          // 版本号用于并发冲突检测：详情页已加载的 revision 就是用户看到的那一版
+          evidence: qualityEvidence.trim()
+            || `操作者 ${identity?.name || "未知"} 于详情页直接修改`,
           expectedRevision: product.revision ?? 0,
         },
       },
       {
         onSuccess: () => {
           setQualityError(null);
-          toast.success("重量与尺寸已保存");
           void detail.refetch();
         },
         onError: (error) => {
+          // 存失败要把哨兵回退，否则下次失焦会误判「已保存过」不再重试
+          savedDimsRef.current = "";
           const message = apiErrorMessage(error);
           setQualityError(message);
-          toast.error("保存失败", { description: message });
+          toast.error("自动保存重量与尺寸失败", { description: message });
         },
       }
     );
@@ -488,29 +488,24 @@ export function ProductDetailPage() {
           <Card padding="normal">
             <div className="flex flex-wrap items-center gap-2">
               <SectionTitle>① 标题</SectionTitle>
-              {product.language && <Badge variant="info" size="sm">{product.language}</Badge>}
-              {product.site && <Badge variant="neutral" size="sm">{product.site}</Badge>}
               {product.needsRecollect && (
                 <Badge variant="warning" size="sm" title={product.needsRecollectReason}>
                   需重新采集
                 </Badge>
-              )}
-              {product.updatedBy && (
-                <span className="inline-flex items-center gap-1 text-2xs text-fg-muted">
-                  <PencilLine className="size-3" aria-hidden strokeWidth={1.75} />
-                  {product.updatedBy}
-                  {product.updatedAt ? ` 编辑于 ${formatDate(product.updatedAt, "HH:mm")}` : ""}
-                </span>
               )}
             </div>
             {isMember ? (
               <p className="mt-3 text-sm leading-6 text-fg">{product.title || "（无标题）"}</p>
             ) : (
               <div className="mt-3">
-                <Field hint="25–255 字符；改完点右上角「保存修改」">
+                {/* 字符数做成输入框内的计数，不再用一行小字解释
+                    （负责人 2026-11-23：「这个多少字符的也可以放到框里面，
+                    25–255 字符；改完点右上角「保存修改」这种解释清理掉」）。 */}
+                <Field>
                   <Input
                     value={title}
                     maxLength={255}
+                    suffix={`${title.length}/255`}
                     onChange={(event) => {
                       setTitle(event.currentTarget.value);
                       setTitleDirty(true);
@@ -876,31 +871,31 @@ export function ProductDetailPage() {
             ) : (
               <>
                 <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {/* 改完就自动保存（负责人 2026-11-23：「修改好就自动保存了
+                      不需要再点击一次」）。失焦即提交，不用再点按钮。 */}
                   <Field label="重量（kg）" required>
-                    <Input type="number" min="0" step="0.001" value={weight} onChange={(event) => setWeight(event.currentTarget.value)} />
+                    <Input type="number" min="0" step="0.001" value={weight}
+                      onChange={(event) => setWeight(event.currentTarget.value)}
+                      onBlur={saveQualityQuiet} suffix="kg" />
                   </Field>
                   <Field label="长（cm）" required>
-                    <Input type="number" min="0" step="0.1" value={length} onChange={(event) => setLength(event.currentTarget.value)} />
+                    <Input type="number" min="0" step="0.1" value={length}
+                      onChange={(event) => setLength(event.currentTarget.value)}
+                      onBlur={saveQualityQuiet} suffix="cm" />
                   </Field>
                   <Field label="宽（cm）" required>
-                    <Input type="number" min="0" step="0.1" value={width} onChange={(event) => setWidth(event.currentTarget.value)} />
+                    <Input type="number" min="0" step="0.1" value={width}
+                      onChange={(event) => setWidth(event.currentTarget.value)}
+                      onBlur={saveQualityQuiet} suffix="cm" />
                   </Field>
                   <Field label="高（cm）" required>
-                    <Input type="number" min="0" step="0.1" value={height} onChange={(event) => setHeight(event.currentTarget.value)} />
+                    <Input type="number" min="0" step="0.1" value={height}
+                      onChange={(event) => setHeight(event.currentTarget.value)}
+                      onBlur={saveQualityQuiet} suffix="cm" />
                   </Field>
                 </div>
                 {qualityError && <div className="mt-3"><InlineError>{qualityError}</InlineError></div>}
-                <div className="mt-3 flex justify-end">
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    icon={<Save />}
-                    loading={reviewQuality.isPending}
-                    onClick={saveQuality}
-                  >
-                    保存重量与尺寸
-                  </Button>
-                </div>
+
               </>
             )}
           </Card>
