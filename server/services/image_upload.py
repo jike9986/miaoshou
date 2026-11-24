@@ -769,8 +769,18 @@ def _ensure_derived(url: str) -> None:
         text = str(url or "").strip()
         if not text:
             return
-        _dir, product_base, local_product, _b = _zone_paths("product")
+        # 注意：`_zone_paths()` 的第 3 个返回值是**环境变量名**
+        # （"AOHUANG_IMAGE_PRODUCT_DIR"），不是路径。真正的本地目录要从
+        # 环境变量读出来 —— 直接拿名字当目录会拼出
+        # "AOHUANG_IMAGE_PRODUCT_DIR/xxx.jpg" 这种不存在的路径，
+        # is_file() 恒为 False，派生图一个都生不出来。
+        _dir, product_base, _local_env, _b = _zone_paths("product")
         if not text.startswith(product_base):
+            return
+        local_product = os.environ.get(_local_env, "").strip().rstrip("/")
+        if not local_product:
+            # 没配本地目录说明走的是远程模式，这条路不负责（远程搬运在
+            # promote_to_product_zone 里另有处理）
             return
         name = text[len(product_base):]
         if not name or "/" in name:
@@ -778,7 +788,6 @@ def _ensure_derived(url: str) -> None:
         stem = name.rsplit(".", 1)[0]
         if stem in _DERIVED_DONE:
             return
-        _DERIVED_DONE.add(stem)
 
         from pathlib import Path as _P
 
@@ -802,6 +811,9 @@ def _ensure_derived(url: str) -> None:
             path = target_dir / f"{stem}.jpg"
             path.write_bytes(data)
             os.chmod(path, 0o644)
+        # 只有真写成了才记进缓存：先前放在函数开头，一旦中途失败
+        # （比如路径算错）这个 stem 就被永久标记「处理过」，之后永远不再补
+        _DERIVED_DONE.add(stem)
     except Exception as exc:  # noqa: BLE001
         logger.warning("补生成派生图失败（不影响主流程）：%s", str(exc)[:120])
 
