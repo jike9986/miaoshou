@@ -151,33 +151,47 @@ SITE_CHARGE_FIELDS: dict[str, tuple[str, ...]] = {
         "vatChargePercent",
         "bcpChargePercent",
         "platformSupportCny",
+        "sfpChargePercent",
+        "affiliateChargePercent",
+        "activityChargePercent",
     ),
     "TH": (
         "vatChargePercent",
         # 泰国的「平台基础设施费」按 CNY 收，落到 orderProcessCny 这一格
         "orderProcessCny",
         "eCommerceGrowthChargePercent",
+        "sfpChargePercent",
+        "affiliateChargePercent",
+        "activityChargePercent",
     ),
     "VN": (
         "vatChargePercent",
         "orderProcessCny",
         "enterpriseWithholdPercent",
+        "affiliateChargePercent",
+        "activityChargePercent",
     ),
     "PH": (
         # 菲律宾没有 VAT，收的是包邮服务费 + 商家成长费
         "freeShippingChargePercent",
         "eCommerceGrowthChargePercent",
         "orderProcessCny",
+        "affiliateChargePercent",
+        "activityChargePercent",
     ),
     "SG": (
         # 新加坡的 GST（消费税），字段与别国 VAT 不共用
         "consumptionTaxChargePercent",
         "orderProcessCny",
+        "affiliateChargePercent",
+        "activityChargePercent",
     ),
     "ID": (
         "vatChargePercent",
         "orderProcessCny",
         "localConsumptionTaxChargePercent",
+        "affiliateChargePercent",
+        "activityChargePercent",
     ),
 }
 

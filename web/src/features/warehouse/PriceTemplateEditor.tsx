@@ -18,7 +18,7 @@
 // 用户只能看到「算出来的价和官方试算差一截」却无处可调。
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, Calculator, RefreshCw, Save, Trash2, Plus } from "lucide-react";
+import { Calculator, RefreshCw, Save, Trash2, Plus } from "lucide-react";
 import { apiErrorMessage } from "@/lib/api";
 import {
   useDeleteTemplate,
@@ -56,10 +56,6 @@ const SITE_OPTIONS = [
   { value: "SG", label: "新加坡" },
   { value: "ID", label: "印尼" },
 ];
-
-function siteLabel(site: string): string {
-  return SITE_OPTIONS.find((item) => item.value === site)?.label ?? site;
-}
 
 /**
  * 平台费用各字段的中文名。
@@ -308,7 +304,6 @@ export function PriceTemplateEditor({
   const [form, setForm] = useState<TemplateForm>(EMPTY_FORM);
   const [picked, setPicked] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(true);
   // 试算入参 + 结果
   const [purchaseCny, setPurchaseCny] = useState("");
   const [weightKg, setWeightKg] = useState("");
@@ -592,16 +587,6 @@ export function PriceTemplateEditor({
                   onChange={(value) => set("lastMileFreightCny", value === null ? "" : String(value))}
                 />
               </Field>
-              <Field label="重量取值">
-                <Select
-                  value={form.weightSource}
-                  onChange={(value) => set("weightSource", value)}
-                  options={[
-                    { value: "spu", label: "产品包裹重量" },
-                    { value: "sku", label: "SKU 重量" },
-                  ]}
-                />
-              </Field>
             </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <Field label="首重 g">
@@ -645,12 +630,7 @@ export function PriceTemplateEditor({
             切站点就换一组字段。后端算价仍然认全部 22 项，这里只管显示。
           */}
           <div className="flex flex-col gap-3 rounded-md border border-border p-3">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold text-fg-secondary">平台费用</div>
-              <div className="text-[11px] text-fg-tertiary">
-                按{SITE_CURRENCY[form.site] ? siteLabel(form.site) : "该站点"}实际收费项显示
-              </div>
-            </div>
+            <div className="text-xs font-semibold text-fg-secondary">平台费用</div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               {PLATFORM_FEE_FIELDS.filter((item) => visibleFields.has(item.key)).map((item) => (
                 <Field key={item.key} label={item.label} hint={item.hint}>
@@ -664,37 +644,6 @@ export function PriceTemplateEditor({
                 </Field>
               ))}
             </div>
-            {PLATFORM_FEE_FIELDS.some((item) => !visibleFields.has(item.key)) && (
-              <p className="text-[11px] leading-relaxed text-fg-tertiary">
-                {siteLabel(form.site)}没有
-                {PLATFORM_FEE_FIELDS.filter((item) => !visibleFields.has(item.key))
-                  .map((item) => item.label.replace(/率? %$| CNY$/, ""))
-                  .join("、")}
-                ，已隐藏。切站点会换成该国的费用项。
-              </p>
-            )}
-          </div>
-
-          {/* ---------- 高级（折叠） ---------- */}
-          <div className="rounded-md border border-border">
-            <button
-              type="button"
-              onClick={() => setAdvancedOpen((prev) => !prev)}
-              className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium text-fg-secondary transition-colors hover:bg-surface-hover"
-            >
-              <span>参数速查</span>
-              <ChevronDown
-                className={`size-3.5 transition-transform ${advancedOpen ? "rotate-180" : ""}`}
-              />
-            </button>
-            {advancedOpen && (
-              <div className="flex flex-col gap-1.5 border-t border-border p-3 text-[11px] leading-relaxed text-fg-tertiary">
-                <div>· 留空的费率按 0 计算，不是「未知」——想按官方价算，把税率填全。</div>
-                <div>· 固定 CNY 金额项（尾程运费 / 平台支持费 / 订单处理费 / 其它）先换成本币再计入成本。</div>
-                <div>· 折扣填 8.5 表示 8.5 折；留空不打折。</div>
-                <div>· 改模板后已入仓商品的售价不会自动重算，要重新处理才会应用。</div>
-              </div>
-            )}
           </div>
 
           {error && <InlineError>{error}</InlineError>}

@@ -807,12 +807,39 @@ function ScheduleFormDrawer({
     }
   };
 
+  /**
+   * 勾账号时把该账号下**全部店铺**一起勾上（负责人 2026-11-23：
+   * 「第一个勾选上面的时候自动把里面全部的店铺选上」）。
+   *
+   * 这样「勾账号」= 「这个账号的店全发」，不用再逐个点店铺；
+   * 想只发其中几个，勾完再取消掉不要的那几个即可。
+   * 取消勾账号则把它名下的店铺选择一起清掉，避免留下孤儿选择 ——
+   * 账号不发了、它的店铺却还在选择列表里，提交时会发到不该发的地方。
+   */
   const toggleAccount = (accId: string, checked: boolean): void => {
     if (checked) {
-      setCheckedAccountIds((prev) => [...prev, accId]);
-      void fetchShopsForAccount(accId);
+      setCheckedAccountIds((prev) => (prev.includes(accId) ? prev : [...prev, accId]));
+      void (async () => {
+        await fetchShopsForAccount(accId);
+        // fetchShopsForAccount 内部已 setState，这里从最新快照取
+        setShopsByAccount((prev) => {
+          const shops = prev[accId] ?? [];
+          if (shops.length > 0) {
+            setSelectedShopIdsByAccount((picked) => ({
+              ...picked,
+              [accId]: shops.map((shop) => shop.shopId),
+            }));
+          }
+          return prev;
+        });
+      })();
     } else {
       setCheckedAccountIds((prev) => prev.filter((id) => id !== accId));
+      setSelectedShopIdsByAccount((prev) => {
+        const next = { ...prev };
+        delete next[accId];
+        return next;
+      });
     }
   };
 
@@ -901,6 +928,40 @@ function ScheduleFormDrawer({
    * 模板覆盖掉。字符串是值比较，只在真的换了模板时才触发。
    */
   const preferredTemplate = selectedTemplates?.[String(accountId ?? "")] ?? "";
+
+  /**
+   * 只列出与已选店铺国家匹配的模板（负责人 2026-11-23）。
+   *
+   * 「上面勾选了哪个店铺的国家，下面的模板才可以选」—— 马来店只能用马来
+   * 模板。之前这个约束在后端 `_template_name_for_site` 里静默纠正（发布时
+   * 偷偷换成同站点模板），界面上却把五国模板全列出来让人选错。
+   *
+   * 一个店铺都没选时不收窄：那时还没有国家可言，列全反而方便先定模板。
+   */
+  const selectedSites = useMemo(() => {
+    const picked = selectedShopIdsByAccount[runAccountId || accountId] ?? [];
+    const all = shopOptions;
+    const sites = new Set<string>();
+    for (const shop of all) {
+      if (picked.includes(shop.shopId)) {
+        const site = String(shop.site ?? "").trim().toUpperCase();
+        if (site) sites.add(site);
+      }
+    }
+    return sites;
+  }, [selectedShopIdsByAccount, runAccountId, accountId, shopOptions]);
+
+  const templateOptions = useMemo(() => {
+    if (selectedSites.size === 0) return templates;
+    const matched = templates.filter((item) => {
+      const site = String(
+        (item.template as Record<string, unknown> | undefined)?.site ?? ""
+      ).trim().toUpperCase();
+      return site === "" || selectedSites.has(site);
+    });
+    // 一个都对不上时不要给空列表：那等于把「模板」这个必填项废掉
+    return matched.length > 0 ? matched : templates;
+  }, [templates, selectedSites]);
 
   useEffect(() => {
     if (!open || task) return;
@@ -1138,9 +1199,6 @@ function ScheduleFormDrawer({
                               </span>
                             </label>
                           ))}
-                          <p className="text-[11px] text-fg-muted">
-                            不勾则默认发到第一个店铺
-                          </p>
                         </div>
                       )}
                       {checked && !accShopsLoading && accShops.length === 1 && (
@@ -1234,7 +1292,7 @@ function ScheduleFormDrawer({
                 templateTouchedRef.current = true;
                 setTemplate(next);
               }}
-              options={templates.map((item) => ({
+              options={templateOptions.map((item) => ({
                 value: item.name,
                 label: item.invalid ? `${item.name}（不可用）` : item.name,
                 disabled: item.invalid,

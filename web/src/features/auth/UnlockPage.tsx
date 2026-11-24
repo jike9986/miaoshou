@@ -404,7 +404,9 @@ export function UnlockPage() {
               {accounts.length > 0 && (
                 <Card padding="normal">
                   <CardTitle className="text-h3">已保存账号</CardTitle>
-                  <ul className="mt-3 flex flex-col gap-1.5">
+                  {/* 账号会越攒越多（实测已 15+），列表本身要能滚，
+                      否则右侧整块被撑高，左边「连接」按钮跟着被推走。 */}
+                  <ul className="mt-3 flex max-h-[420px] flex-col gap-1.5 overflow-y-auto pr-1">
                     {accounts.map((account) => (
                       <li key={account.id}>
                         <button
