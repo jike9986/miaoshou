@@ -1930,6 +1930,12 @@ export interface TemplatesResponse {
   templates: PriceTemplateItem[];
   total: number;
   selected: Record<string, string>;
+  /**
+   * 每个站点该显示哪些费用项。后端按妙手各国的实际收费定义，
+   * 比如马来没有关税、菲律宾没有 VAT、新加坡收的是消费税（GST）。
+   * 缺失时前端退回「显示全部」而不是显示空表。
+   */
+  siteFields?: Record<string, string[]>;
 }
 
 export function useTemplates(enabled = true): UseQueryResult<TemplatesResponse> {

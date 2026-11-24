@@ -134,31 +134,62 @@ def save_workflow_defaults(db: Session, cleaned: dict[str, Any],
 
 
 def _templates_key(operator_id: int | None = None) -> str:
-    """模板库的存储键。operator_id 为空 = 共享库（老师/管理员写的那份）。"""
+    """模板库的存储键。每人一套，operator_id 为空时用共享键（仅历史数据/离线用）。"""
     if operator_id is None:
         return PRICING_TEMPLATES_KEY
     return f"{PRICING_TEMPLATES_KEY}.operator.{int(operator_id)}"
 
 
+def _seed_templates() -> dict[str, Any]:
+    """第一次打开时给这个人的那套初始值。
+
+    负责人 2026-11-23：「不是模板是每人一套默认的，可以自己去修改自己账号的
+    定价模板，没有共享模板」。所以新人进来看到的是按站点铺好的一套默认模板
+    （马来 / 泰国 / 越南 / 菲律宾 / 新加坡），改了就存他自己那份，
+    谁都不影响谁。
+    """
+    from services import price_template
+    from services.exchange_rate import currency_for_site
+
+    seeded: dict[str, Any] = {}
+    for site, name, profit in (
+        ("MY", "马来", 20.0),
+        ("TH", "泰国", 20.0),
+        ("VN", "越南", 20.0),
+        ("PH", "菲律宾", 20.0),
+        ("SG", "新加坡", 20.0),
+    ):
+        raw = dict(price_template.DEFAULT_TEMPLATE)
+        raw.update({"name": name, "site": site,
+                    "currency": currency_for_site(site),
+                    "profitPercent": profit})
+        try:
+            seeded[name] = price_template.normalize_template(raw)
+        except price_template.PriceTemplateError:
+            continue
+    return seeded
+
+
 def price_templates(db: Session,
                     operator_id: int | None = None) -> dict[str, Any]:
-    """模板库。
+    """这个操作员自己那套定价模板。
 
-    `operator_id` 有值（学员）时返回「共享 + 个人」的合并视图，同名个人优先：
-      · 共享库是老师/管理员定的基准，学员看得到、能拿来用；
-      · 个人库是学员自己改的那份 —— 负责人 2026-11-23 要求「定价模板
-        改成学员也可以自己编辑修改」，但模板直接决定售价，不能让一个
-        学员的改动把所有账号的价都改掉。所以写个人库、读合并视图。
+    每人一套，**没有共享模板**（负责人 2026-11-23 明确）。第一次读的时候
+    如果他还没有任何模板，就用内置默认值起一套并落库 —— 界面上不该是空表，
+    那会让人以为功能坏了。
 
-    老师/管理员（operator_id 为空）只拿共享库，与改造前完全一致。
+    注意：老版本把模板存在 `pricing.templates`（全局一份），那些数据留着
+    不动（审计/回滚要用），但不再被读取，也不会再被写入。
     """
-    shared = get(db, PRICING_TEMPLATES_KEY) or {}
-    shared = shared if isinstance(shared, dict) else {}
-    if operator_id is None:
-        return shared
-    personal = get(db, _templates_key(operator_id)) or {}
-    personal = personal if isinstance(personal, dict) else {}
-    return {**shared, **personal}
+    key = _templates_key(operator_id)
+    stored = get(db, key)
+    if isinstance(stored, dict) and stored:
+        return stored
+    # 首次：起一套默认的，落库，下次读就是真正的那份了
+    seeded = _seed_templates()
+    if seeded:
+        put(db, key, seeded)
+    return seeded
 
 
 def selected_templates(db: Session) -> dict[str, str]:
@@ -179,7 +210,7 @@ def select_template(db: Session, name: str, account: str = "") -> str:
 
 def save_template(db: Session, template: dict[str, Any],
                   operator_id: int | None = None) -> dict[str, Any]:
-    """保存模板。带 operator_id 时写进那个人的私有库（学员自己改自己的）。"""
+    """保存模板到他自己的那份。"""
     name = str(template.get("name") or "").strip()
     if not name:
         raise ValueError("模板名称不能为空")
@@ -193,11 +224,10 @@ def save_template(db: Session, template: dict[str, Any],
 
 def delete_template(db: Session, name: str,
                     operator_id: int | None = None) -> bool:
-    """删除模板。带 operator_id 时只能删掉那个人自己那份。
+    """删除他自己那份里的模板。
 
-    个人库里没有、只有共享库有时，这里要返回 False —— 学员不能删掉
-    老师定的基准模板，否则所有人都少一套模板。他「不想要」的正确表达
-    是改自己那份，不是把公用的删了。
+    每人一套之后删的就是自己那份，不再有「删了会影响别人」的问题；
+    删光了下次读会自动重新起一套默认值（见 `price_templates`）。
     """
     key = _templates_key(operator_id)
     templates = get(db, key) or {}

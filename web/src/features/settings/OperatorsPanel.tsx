@@ -11,12 +11,13 @@
 //   · 学员看不到停用 / 重置按钮（不是禁用，是不渲染）——
 //     权限不够的按钮摆在那里只会招来一串 403。
 
-import { useId, useMemo, useState } from "react";
+import { Fragment, useId, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
   BadgeCheck,
   CheckCircle2,
+  ChevronDown,
   KeyRound,
   Mail,
   Pencil,
@@ -584,9 +585,59 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
     mode: "created" | "rotated";
   } | null>(null);
 
+  // 展开哪一行的「妙手绑定」详情（一次只展开一个，避免整页撑开）
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // 重置软件登录密码（原「学员账号」面板唯一的独有操作，面板合并后留在这里）
+  const resetStudentPassword = useResetStudentPassword();
+  const [issuedPassword, setIssuedPassword] = useState<
+    { username: string; password: string; label: string } | null
+  >(null);
+  const resetPasswordFor = (target: { id: string; name: string; username?: string | null }) => {
+    const password = `Stu-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}!`;
+    const username = target.username ?? `student-${target.id}`;
+    resetStudentPassword.mutate(
+      { id: target.id, password, username },
+      {
+        onSuccess: () => setIssuedPassword({ username, password, label: target.name }),
+        onError: (error) =>
+          toast.error("重置密码失败", { description: apiErrorMessage(error) }),
+      }
+    );
+  };
+
   const operators = useMemo(
     () => operatorsQuery.data?.operators ?? [],
     [operatorsQuery.data]
+  );
+  /**
+   * 列表里显示哪些人、按什么顺序（负责人 2026-11-23）。
+   *
+   * 1. 已停用的账号不显示 —— 那都是之前测试建的、或者已经作废的，
+   *    留在列表里只是噪音。要重新启用就在「已停用」里翻（见下方折叠区）。
+   * 2. 顺序：管理员 → 老师 → 学员。管理半径大的人在上面，
+   *    否则十几个人混着排，找人要一行行读。
+   */
+  const ROLE_ORDER: Record<string, number> = { admin: 0, teacher: 1, member: 2 };
+  const activeOperators = useMemo(
+    () =>
+      operators
+        .filter((item) => item.enabled)
+        .slice()
+        .sort((a, b) => {
+          const ra = ROLE_ORDER[a.role ?? "member"] ?? 9;
+          const rb = ROLE_ORDER[b.role ?? "member"] ?? 9;
+          if (ra !== rb) return ra - rb;
+          // 同角色内：当前登录的人置顶，其余按名字，顺序稳定不跳
+          const selfA = a.id === identity?.id ? 0 : 1;
+          const selfB = b.id === identity?.id ? 0 : 1;
+          if (selfA !== selfB) return selfA - selfB;
+          return String(a.name ?? "").localeCompare(String(b.name ?? ""), "zh");
+        }),
+    [operators, identity?.id]
+  );
+  const disabledOperators = useMemo(
+    () => operators.filter((item) => !item.enabled),
+    [operators]
   );
   const me = useMemo(() => {
     const current = operatorsQuery.data?.current ?? null;
@@ -684,7 +735,6 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
     <div className={cn("flex flex-col gap-4", className)}>
       {passwordPanel}
       {accountEmailPanel}
-      <StudentAccountsPanel />
       {/* 2026-11-23：原来这里包着一层「兼容身份维护」折叠块，里面装的正是
           当前身份卡和操作员列表 —— 内容和上面的学员账号高度重叠，负责人要求
           合并。现在直接摊开显示，不再多一层折叠，也不再重复解释一遍。 */}
@@ -743,21 +793,32 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                   <th className="w-[88px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
                     状态
                   </th>
+                  <th className="w-[110px] border-b border-border px-3 text-left text-xs font-medium text-fg-muted">
+                    妙手绑定
+                  </th>
                   <th className="border-b border-border px-3 pr-4 text-right text-xs font-medium text-fg-muted">
                     操作
                   </th>
                 </tr>
               </thead>
               <tbody>
-                {operators.map((item) => {
+                {activeOperators.map((item) => {
                   const isSelf = identity?.id === item.id;
                   const isBuiltin = item.builtin === true || item.id === "local";
                   // 学员不渲染停用 / 重置（不是灰掉）：权限不够的按钮只会招 403
                   const canManageOthers = canManage && !isBuiltin;
+                  const bindings =
+                    item.miaoshouBindings ?? (item.miaoshouBinding ? [item.miaoshouBinding] : []);
+                  const expanded = expandedId === item.id;
                   return (
+                    <Fragment key={item.id}>
                     <tr
-                      key={item.id}
-                      className="border-b border-border-subtle transition-colors duration-fast last:border-0 hover:bg-surface-hover"
+                      onClick={() => setExpandedId(expanded ? null : item.id)}
+                      className={cn(
+                        "border-b border-border-subtle transition-colors duration-fast hover:bg-surface-hover",
+                        expanded && "bg-surface-hover",
+                        bindings.length > 0 && "cursor-pointer"
+                      )}
                     >
                       <td className="px-4 py-2.5">
                         <span className="flex flex-wrap items-center gap-1.5">
@@ -806,8 +867,47 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                           </Badge>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 pr-4">
+                      <td className="px-3 py-2.5">
+                        {bindings.length > 0 ? (
+                          <span className="inline-flex items-center gap-1">
+                            <Badge variant="success" size="sm">
+                              已绑定 {bindings.length} 个
+                            </Badge>
+                            <ChevronDown
+                              className={cn(
+                                "size-3 text-fg-muted transition-transform",
+                                expanded && "rotate-180"
+                              )}
+                            />
+                          </span>
+                        ) : (
+                          <span className="text-xs text-fg-muted">未绑定</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 pr-4" onClick={(event) => event.stopPropagation()}>
                         <span className="flex items-center justify-end gap-1">
+                          {/* 重置软件登录密码：管理员能给别人重置，自己也能重置自己 */}
+                          {(isSelf || canManageOthers) && !isBuiltin && (
+                            <Tooltip content="重置软件登录密码">
+                              <IconButton
+                                label={`重置 ${item.name} 的登录密码`}
+                                size="sm"
+                                variant="ghost"
+                                icon={<KeyRound />}
+                                disabled={
+                                  resetStudentPassword.isPending &&
+                                  resetStudentPassword.variables?.id === item.id
+                                }
+                                onClick={() =>
+                                  resetPasswordFor({
+                                    id: item.id,
+                                    name: item.name,
+                                    username: item.username,
+                                  })
+                                }
+                              />
+                            </Tooltip>
+                          )}
                           {/* 改名：自己随时能改，别人只有老师能改 */}
                           {(isSelf || canManageOthers) && !isBuiltin && (
                             <Tooltip content="改名字">
@@ -870,6 +970,54 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
                         </span>
                       </td>
                     </tr>
+                    {expanded && bindings.length > 0 && (
+                      <tr className="border-b border-border-subtle bg-canvas-inset/40">
+                        <td colSpan={6} className="px-4 py-3">
+                          <div className="flex flex-col gap-2">
+                            <div className="text-xs font-medium text-fg-secondary">
+                              「{item.name}」绑定的妙手账号
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {bindings.map((binding, index) => {
+                                const status = miaoshouBindingStatus(binding.status);
+                                return (
+                                  <span
+                                    key={`${binding.appIdHint ?? "b"}-${index}`}
+                                    className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border-subtle bg-surface px-2 py-1 text-xs"
+                                  >
+                                    <span>
+                                      App ID{" "}
+                                      <span className="font-mono text-fg">
+                                        {maskCredentialHint(binding.appIdHint) ?? "—"}
+                                      </span>
+                                    </span>
+                                    <span>
+                                      Secret{" "}
+                                      <span className="font-mono text-fg">
+                                        {maskCredentialHint(binding.secretHint) ?? "—"}
+                                      </span>
+                                    </span>
+                                    <Badge variant={status.variant} size="sm">
+                                      {status.label}
+                                    </Badge>
+                                    <span
+                                      className="text-fg-muted"
+                                      title={`绑定时间 ${formatDate(binding.boundAt)}`}
+                                    >
+                                      绑定于{" "}
+                                      {binding.boundAt === null
+                                        ? "时间未知"
+                                        : formatRelative(binding.boundAt)}
+                                    </span>
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -877,6 +1025,64 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
           </div>
         )}
       </Card>
+
+      {/*
+        已停用账号折叠区。负责人 2026-11-23：「前面我禁用的这些不是没有用的
+        账号吗去掉」—— 主列表不再显示它们。但停用不等于删除，这里留一个
+        折叠入口，需要重新启用某人时还能找到（否则他只能永远停着）。
+      */}
+      {disabledOperators.length > 0 && (
+        <details className="group rounded-md border border-border bg-surface">
+          <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 text-[13px] font-medium text-fg-secondary marker:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32">
+            <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+            已停用的账号
+            <Badge variant="neutral" size="sm">
+              {disabledOperators.length}
+            </Badge>
+            <span className="text-xs font-normal text-fg-muted">
+              主列表不显示，需要重新启用时在这里找
+            </span>
+          </summary>
+          <ul className="divide-y divide-border-subtle border-t border-border">
+            {disabledOperators.map((item) => (
+              <li
+                key={item.id}
+                className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs"
+              >
+                <span className="text-[13px] font-medium text-fg-secondary">{item.name}</span>
+                <Badge variant="neutral" size="sm">
+                  {roleLabel(item.role)}
+                </Badge>
+                <span className="font-mono text-2xs text-fg-muted">
+                  {item.shortId ? `#${item.shortId}` : item.id}
+                </span>
+                {canManage && !item.builtin && item.id !== "local" && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="ml-auto"
+                    icon={<CheckCircle2 />}
+                    loading={toggle.isPending && toggle.variables?.id === item.id}
+                    onClick={() =>
+                      toggle.mutate(
+                        { id: item.id, enabled: true },
+                        {
+                          onSuccess: () =>
+                            toast.success(`已重新启用「${item.name}」`),
+                          onError: (error) =>
+                            toast.error("启用失败", { description: apiErrorMessage(error) }),
+                        }
+                      )
+                    }
+                  >
+                    重新启用
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
 
 
       <CreateOperatorDialog
@@ -935,6 +1141,25 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
         </p>
       </ConfirmDialog>
 
+      {/* 重置后的初始密码（仅显示本次） */}
+      {issuedPassword && (
+        <div
+          className="rounded-md border border-success-600/25 bg-success-50 px-3 py-2 text-[13px] leading-5 text-success-700"
+          role="status"
+        >
+          <div className="font-medium">{issuedPassword.label} 的新密码（仅显示本次）</div>
+          <div>用户名：{issuedPassword.username}</div>
+          <div className="font-mono">密码：{issuedPassword.password}</div>
+          <button
+            type="button"
+            className="mt-1 text-xs font-medium text-success-700 underline"
+            onClick={() => setIssuedPassword(null)}
+          >
+            我已记录
+          </button>
+        </div>
+      )}
+
       {/* 一次性 token 展示框（新建 / 重置共用） */}
       <OneTimeTokenDialog
         open={issuedToken !== null}
@@ -953,71 +1178,6 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
       {/* 兜底提示：万一有人把一次性框截图丢了，这里再提醒一次不可恢复 */}
       <span className="sr-only">{ONE_TIME_TOKEN_NOTICE}</span>
     </div>
-  );
-}
-
-function StudentAccountsPanel() {
-  const list = useOperators();
-  const reset = useResetStudentPassword();
-  const [issued, setIssued] = useState<{ username: string; password: string; label: string } | null>(null);
-  const students = (list.data?.operators ?? []).filter((operator) => operator.role === "member");
-  const resetNow = (student: { id: string; name: string; username?: string | null }) => {
-    const password = `Stu-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}!`;
-    const username = student.username ?? `student-${student.id}`;
-    reset.mutate({ id: student.id, password, username }, {
-      onSuccess: () => setIssued({ username, password, label: student.name }),
-      onError: (error) => toast.error("重置密码失败", { description: apiErrorMessage(error) }),
-    });
-  };
-  return (
-    <Card padding="normal">
-      <CardTitle>学员账号</CardTitle>
-      {/* 创建学员表单已移除（负责人 2026-11-23：上面这个创建学员账号的也去掉）。
-          新学员改由老师账号沿用「新建操作员」入口创建，这里只做重置密码。 */}
-      {issued && <div className="mt-3 rounded-md border border-success-600/25 bg-success-50 px-3 py-2 text-[13px] leading-5 text-success-700" role="status">
-        <div className="font-medium">{issued.label} 的初始密码（仅显示本次）</div>
-        <div>用户名：{issued.username}</div><div className="font-mono">密码：{issued.password}</div>
-        <button type="button" className="mt-1 text-xs font-medium text-success-700 underline" onClick={() => setIssued(null)}>我已记录</button>
-      </div>}
-      <div className="mt-4 border-t border-border-subtle pt-3">
-        <div className="mb-2 flex items-center gap-2 text-[13px] font-medium text-fg">学员列表 <span className="text-xs font-normal text-fg-muted">{students.length}</span></div>
-        {list.isLoading ? <SkeletonRows rows={2} /> : list.isError ? <InlineError onRetry={() => void list.refetch()}>{apiErrorMessage(list.error)}</InlineError> : students.length === 0 ? <p className="py-3 text-[13px] text-fg-muted">还没有学员账号</p> : <ul className="divide-y divide-border-subtle">
-          {students.map((student) => {
-            // New API responses expose every account. Fall back to the
-            // singular field for servers that have not been upgraded yet.
-            const bindings = student.miaoshouBindings ?? (student.miaoshouBinding ? [student.miaoshouBinding] : []);
-            const linked = bindings.length > 0;
-            return (
-              <li key={student.id} className="flex min-h-11 flex-col gap-2 py-3 sm:flex-row sm:items-center sm:gap-3">
-                <div className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-medium text-fg">{student.name}</span>
-                  <span className="mt-0.5 block truncate text-xs text-fg-muted">{student.username ?? student.id}</span>
-                </div>
-                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-fg-secondary">
-                  <Badge variant={linked ? "success" : "neutral"} size="sm">
-                    {student.miaoshouBindings === undefined && student.miaoshouBinding === undefined
-                      ? "绑定状态不可用"
-                      : linked ? `已绑定${bindings.length > 1 ? `（${bindings.length} 个）` : ""}` : "未绑定"}
-                  </Badge>
-                  {bindings.map((binding, index) => {
-                    const status = miaoshouBindingStatus(binding.status);
-                    return <span key={`${binding.appIdHint ?? "binding"}-${binding.boundAt ?? index}`} className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border-subtle px-2 py-1">
-                      <span>App ID <span className="font-mono text-fg">{maskCredentialHint(binding.appIdHint) ?? "—"}</span></span>
-                      <span>Secret <span className="font-mono text-fg">{maskCredentialHint(binding.secretHint) ?? "—"}</span></span>
-                      <Badge variant={status.variant} size="sm">{status.label}</Badge>
-                      <span title={`绑定时间 ${formatDate(binding.boundAt)}`}>
-                        绑定于 {binding.boundAt === null ? "时间未知" : formatRelative(binding.boundAt)}
-                      </span>
-                    </span>;
-                  })}
-                </div>
-                <Button size="sm" variant="secondary" className="self-end sm:self-auto" loading={reset.isPending && reset.variables?.id === student.id} onClick={() => resetNow(student)}>重置密码</Button>
-              </li>
-            );
-          })}
-        </ul>}
-      </div>
-    </Card>
   );
 }
 

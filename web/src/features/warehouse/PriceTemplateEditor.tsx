@@ -57,6 +57,44 @@ const SITE_OPTIONS = [
   { value: "ID", label: "印尼" },
 ];
 
+function siteLabel(site: string): string {
+  return SITE_OPTIONS.find((item) => item.value === site)?.label ?? site;
+}
+
+/**
+ * 平台费用各字段的中文名。
+ *
+ * 键名与后端 `price_template.DEFAULT_TEMPLATE` 完全一致 ——
+ * `normalize_template` 不认识的键会被静默丢掉，改名等于这项永远不生效。
+ */
+const PLATFORM_FEE_FIELDS: Array<{
+  key: keyof TemplateForm;
+  label: string;
+  hint?: string;
+}> = [
+  { key: "platformCommissionPercent", label: "平台佣金率 %" },
+  { key: "paymentChargePercent", label: "交易手续费率 %" },
+  { key: "vatChargePercent", label: "增值税率 %" },
+  { key: "consumptionTaxChargePercent", label: "消费税率 %", hint: "留空为 0" },
+  { key: "localConsumptionTaxChargePercent", label: "本地消费税率 %", hint: "留空为 0" },
+  { key: "tariffChargePercent", label: "关税税率 %", hint: "留空为 0" },
+  { key: "withdrawChargePercent", label: "提现手续费率 %" },
+  { key: "sfpChargePercent", label: "SFP 服务费率 %", hint: "留空为 0" },
+  { key: "affiliateChargePercent", label: "达人佣金费率 %", hint: "留空为 0" },
+  { key: "bcpChargePercent", label: "BCP 活动费率 %" },
+  { key: "activityChargePercent", label: "活动费率 %", hint: "留空为 0" },
+  { key: "freeShippingChargePercent", label: "包邮服务费率 %", hint: "留空为 0" },
+  { key: "eCommerceGrowthChargePercent", label: "电商增长服务费率 %", hint: "留空为 0" },
+  { key: "enterpriseWithholdPercent", label: "企业商家代扣税率 %", hint: "留空为 0" },
+  { key: "lastMileFreightServiceTaxPercent", label: "尾程运费服务税率 %", hint: "留空为 0" },
+  { key: "platformSupportCny", label: "平台支持费 CNY" },
+  { key: "orderProcessCny", label: "订单处理服务费 CNY", hint: "留空为 0" },
+  { key: "otherChargeCny", label: "其它费用 CNY", hint: "留空为 0" },
+];
+
+/** 后端没下发 siteFields 时退回「全部显示」，而不是显示空表。 */
+const ALL_FEE_KEYS = PLATFORM_FEE_FIELDS.map((item) => String(item.key));
+
 /** 与后端 DEFAULT_TEMPLATE 同名的可编辑字段（全部 22 项）。 */
 export interface TemplateForm {
   name: string;
@@ -376,6 +414,13 @@ export function PriceTemplateEditor({
     );
   };
 
+  // 这个站点该显示哪些费用项：后端按妙手各国实际收费定义。
+  // 没下发（老后端）时退回全集 —— 显示多了只是冗余，显示空了才是 bug。
+  const siteFields = templatesQuery.data?.siteFields?.[form.site];
+  const visibleFields = new Set<string>(
+    Array.isArray(siteFields) && siteFields.length > 0 ? siteFields : ALL_FEE_KEYS
+  );
+
   const lines = preview?.lines ?? {};
   const currency = String(preview?.currency ?? form.currency ?? "");
   const price = preview?.price;
@@ -559,131 +604,47 @@ export function PriceTemplateEditor({
           </div>
 
           {/* ---------- 平台费用 ---------- */}
+          {/*
+            只列这个站点**真实存在**的费用项（负责人 2026-11-23：
+            「每个国家的有些东西是没有的，你不能全部弄出来」）。
+            清单来自后端 `price_template.SITE_CHARGE_FIELDS`，随
+            `/system/templates` 的 siteFields 一起下发：
+              · 马来 有 BCP 活动费 + 平台支持费，没有关税
+              · 泰国 有平台基础设施费（落到订单处理费）+ 电商增长服务费
+              · 越南 有订单处理服务费 + 企业商家代扣税
+              · 菲律宾 没有 VAT，收包邮服务费 + 商家成长费
+              · 新加坡 收消费税（GST），不是别国那个 VAT
+            切站点就换一组字段。后端算价仍然认全部 22 项，这里只管显示。
+          */}
           <div className="flex flex-col gap-3 rounded-md border border-border p-3">
-            <div className="text-xs font-semibold text-fg-secondary">平台费用</div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-              <Field label="平台佣金率 %">
-                <NumberInput
-                  value={form.platformCommissionPercent}
-                  onChange={(value) => set("platformCommissionPercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="交易手续费率 %">
-                <NumberInput
-                  value={form.paymentChargePercent}
-                  onChange={(value) => set("paymentChargePercent", value === null ? "" : String(value))}
-                />
-              </Field>
-              <Field label="增值税率 %">
-                <NumberInput
-                  value={form.vatChargePercent}
-                  onChange={(value) => set("vatChargePercent", value === null ? "" : String(value))}
-                />
-              </Field>
-              <Field label="消费税率 %">
-                <NumberInput
-                  value={form.consumptionTaxChargePercent}
-                  onChange={(value) => set("consumptionTaxChargePercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="本地消费税率 %">
-                <NumberInput
-                  value={form.localConsumptionTaxChargePercent}
-                  onChange={(value) => set("localConsumptionTaxChargePercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="关税税率 %">
-                <NumberInput
-                  value={form.tariffChargePercent}
-                  onChange={(value) => set("tariffChargePercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="提现手续费率 %">
-                <NumberInput
-                  value={form.withdrawChargePercent}
-                  onChange={(value) => set("withdrawChargePercent", value === null ? "" : String(value))}
-                />
-              </Field>
-              <Field label="SFP 服务费率 %">
-                <NumberInput
-                  value={form.sfpChargePercent}
-                  onChange={(value) => set("sfpChargePercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="达人佣金费率 %">
-                <NumberInput
-                  value={form.affiliateChargePercent}
-                  onChange={(value) => set("affiliateChargePercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="BCP 活动费率 %">
-                <NumberInput
-                  value={form.bcpChargePercent}
-                  onChange={(value) => set("bcpChargePercent", value === null ? "" : String(value))}
-                />
-              </Field>
-              <Field label="活动费率 %">
-                <NumberInput
-                  value={form.activityChargePercent}
-                  onChange={(value) => set("activityChargePercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="包邮服务费率 %">
-                <NumberInput
-                  value={form.freeShippingChargePercent}
-                  onChange={(value) => set("freeShippingChargePercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="电商增长服务费率 %">
-                <NumberInput
-                  value={form.eCommerceGrowthChargePercent}
-                  onChange={(value) => set("eCommerceGrowthChargePercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="企业商家代扣税率 %">
-                <NumberInput
-                  value={form.enterpriseWithholdPercent}
-                  onChange={(value) => set("enterpriseWithholdPercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="尾程运费服务税率 %">
-                <NumberInput
-                  value={form.lastMileFreightServiceTaxPercent}
-                  onChange={(value) => set("lastMileFreightServiceTaxPercent", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="平台支持费 CNY">
-                <NumberInput
-                  value={form.platformSupportCny}
-                  onChange={(value) => set("platformSupportCny", value === null ? "" : String(value))}
-                />
-              </Field>
-              <Field label="订单处理服务费 CNY">
-                <NumberInput
-                  value={form.orderProcessCny}
-                  onChange={(value) => set("orderProcessCny", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
-              <Field label="其它费用 CNY">
-                <NumberInput
-                  value={form.otherChargeCny}
-                  onChange={(value) => set("otherChargeCny", value === null ? "" : String(value))}
-                  placeholder="留空为 0"
-                />
-              </Field>
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold text-fg-secondary">平台费用</div>
+              <div className="text-[11px] text-fg-tertiary">
+                按{SITE_CURRENCY[form.site] ? siteLabel(form.site) : "该站点"}实际收费项显示
+              </div>
             </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {PLATFORM_FEE_FIELDS.filter((item) => visibleFields.has(item.key)).map((item) => (
+                <Field key={item.key} label={item.label} hint={item.hint}>
+                  <NumberInput
+                    value={form[item.key]}
+                    onChange={(value) =>
+                      set(item.key, value === null ? "" : String(value))
+                    }
+                    placeholder={item.hint?.includes("留空") ? "留空为 0" : undefined}
+                  />
+                </Field>
+              ))}
+            </div>
+            {PLATFORM_FEE_FIELDS.some((item) => !visibleFields.has(item.key)) && (
+              <p className="text-[11px] leading-relaxed text-fg-tertiary">
+                {siteLabel(form.site)}没有
+                {PLATFORM_FEE_FIELDS.filter((item) => !visibleFields.has(item.key))
+                  .map((item) => item.label.replace(/率? %$| CNY$/, ""))
+                  .join("、")}
+                ，已隐藏。切站点会换成该国的费用项。
+              </p>
+            )}
           </div>
 
           {/* ---------- 高级（折叠） ---------- */}

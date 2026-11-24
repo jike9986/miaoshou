@@ -1,7 +1,7 @@
-"""定价模板按操作员隔离（负责人 2026-11-23：学员也要能自己改模板）。
+"""定价模板：每人一套，没有共享模板（负责人 2026-11-23）。
 
-模板直接决定售价。让学员改共享库会把所有账号（含别的学员和老师）的价
-一起改掉，所以学员写自己的私有库，读「共享 ∪ 私有」，私有同名优先。
+「不是模板是每人一套默认的，可以自己去修改自己账号的定价模板，没有共享模板」
+所以这里不再有「共享库」概念 —— 每人的模板互不可见、互不影响。
 """
 from __future__ import annotations
 
@@ -25,19 +25,17 @@ def db():
 
 
 @pytest.fixture
-def actors(db):
+def people(db):
     suffix = uuid.uuid4().hex[:8]
     member, _ = operator_service.create(
-        db, f"tpl-scope-m-{suffix}", role=operator_service.ROLE_MEMBER)
+        db, f"tpl-p-m-{suffix}", role=operator_service.ROLE_MEMBER)
     teacher, _ = operator_service.create(
-        db, f"tpl-scope-t-{suffix}", role=operator_service.ROLE_TEACHER)
+        db, f"tpl-p-t-{suffix}", role=operator_service.ROLE_TEACHER)
     db.commit()
     yield member, teacher, suffix
-    # 清掉本用例写进去的模板，免得污染共享库
-    for operator_id in (None, member.id, teacher.id):
+    for operator_id in (member.id, teacher.id):
         for name in list(setting_service.price_templates(db, operator_id=operator_id)):
-            if name.endswith(suffix):
-                setting_service.delete_template(db, name, operator_id=operator_id)
+            setting_service.delete_template(db, name, operator_id=operator_id)
     db.commit()
 
 
@@ -49,63 +47,54 @@ def _save(db, name: str, *, operator_id=None, profit: float = 20.0) -> None:
     db.commit()
 
 
-def test_member_template_stays_private(db, actors):
-    """学员存模板只写自己的私有库，共享库看不到。"""
-    member, _teacher, suffix = actors
-    name = f"学员自建-{suffix}"
+def test_first_read_seeds_default_templates(db, people):
+    """新人第一次打开就有一套默认模板，不是空表。"""
+    member, _teacher, _suffix = people
+    templates = setting_service.price_templates(db, operator_id=member.id)
+    assert templates, "首次读取应该铺一套默认模板"
+    # 五个站点各一套
+    sites = {str(raw.get("site") or "").upper() for raw in templates.values()}
+    assert {"MY", "TH", "VN", "PH", "SG"} <= sites
+    # 落库了：第二次读是同一份
+    again = setting_service.price_templates(db, operator_id=member.id)
+    assert set(again) == set(templates)
+
+
+def test_each_person_has_own_copy(db, people):
+    """两个人各改各的，互不可见、互不影响。"""
+    member, teacher, suffix = people
+    name = f"我的模板-{suffix}"
     _save(db, name, operator_id=member.id, profit=35)
 
     assert name in setting_service.price_templates(db, operator_id=member.id)
-    assert name not in setting_service.price_templates(db), "共享库不该被学员写污染"
-    # 另一个学员也看不到
-    other, _ = operator_service.create(
-        db, f"tpl-scope-o-{suffix}", role=operator_service.ROLE_MEMBER)
-    db.commit()
-    assert name not in setting_service.price_templates(db, operator_id=other.id)
+    assert name not in setting_service.price_templates(db, operator_id=teacher.id)
 
 
-def test_member_sees_shared_templates(db, actors):
-    """共享库的模板学员看得到、能拿来用。"""
-    member, _teacher, suffix = actors
-    name = f"共享基准-{suffix}"
-    _save(db, name, operator_id=None)
+def test_same_name_does_not_collide(db, people):
+    """同名模板在两个人那里是两份不同的东西。"""
+    member, teacher, suffix = people
+    name = f"马来-{suffix}"
+    _save(db, name, operator_id=member.id, profit=30)
+    _save(db, name, operator_id=teacher.id, profit=10)
 
-    assert name in setting_service.price_templates(db, operator_id=member.id)
-
-
-def test_member_override_wins(db, actors):
-    """同名时学员自己那份优先 —— 他改的是「我这套怎么算」。"""
-    member, _teacher, suffix = actors
-    name = f"同覆盖-{suffix}"
-    _save(db, name, operator_id=None, profit=10)
-    _save(db, name, operator_id=member.id, profit=45)
-
-    merged = setting_service.price_templates(db, operator_id=member.id)
-    assert merged[name]["profitPercent"] == 45
-    # 共享那份没被动过
-    assert setting_service.price_templates(db)[name]["profitPercent"] == 10
+    assert setting_service.price_templates(db, operator_id=member.id)[name]["profitPercent"] == 30
+    assert setting_service.price_templates(db, operator_id=teacher.id)[name]["profitPercent"] == 10
 
 
-def test_member_cannot_delete_shared_template(db, actors):
-    """学员删不掉共享模板，否则他一个人能让所有人少一套模板。"""
-    member, _teacher, suffix = actors
-    name = f"不许删-{suffix}"
-    _save(db, name, operator_id=None)
+def test_delete_only_affects_self(db, people):
+    """删自己的不影响别人。"""
+    member, teacher, suffix = people
+    name = f"删我-{suffix}"
+    _save(db, name, operator_id=member.id)
+    _save(db, name, operator_id=teacher.id)
 
-    assert setting_service.delete_template(db, name, operator_id=member.id) is False
-    assert name in setting_service.price_templates(db)
+    assert setting_service.delete_template(db, name, operator_id=member.id) is True
+    assert name not in setting_service.price_templates(db, operator_id=member.id)
+    assert name in setting_service.price_templates(db, operator_id=teacher.id)
 
 
-def test_teacher_writes_shared_library(db):
-    """老师/管理员（operator_id=None）照旧读写共享库。"""
-    suffix = uuid.uuid4().hex[:8]
-    name = f"老师共享-{suffix}"
-    _save(db, name, operator_id=None, profit=25)
-    try:
-        assert name in setting_service.price_templates(db)
-        assert setting_service.delete_template(db, name, operator_id=None) is True
-    finally:
-        for leftover in list(setting_service.price_templates(db)):
-            if leftover.endswith(suffix):
-                setting_service.delete_template(db, leftover)
-        db.commit()
+def test_teacher_also_has_personal_templates(db, people):
+    """老师也是自己那套 —— 没有「老师定基准、学员抄」这回事了。"""
+    _member, teacher, _suffix = people
+    templates = setting_service.price_templates(db, operator_id=teacher.id)
+    assert templates, "老师首次读取也该铺默认模板"

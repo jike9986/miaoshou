@@ -242,16 +242,16 @@ def system_bootstrap(db: DbSession, operator: OperatorDep,
 
 
 def _template_scope(db: DbSession, operator: Operator | None) -> int | None:
-    """模板库的作用域：学员 → 自己的 id（读写私有那份），其余 → None（共享）。
+    """模板库的作用域：**每个人都是自己的那份**，没有共享模板。
 
-    负责人 2026-11-23：「定价模板改成学员也可以自己编辑修改」。
-    模板直接决定售价，所以不能让学员改到共享那份 —— 那会把所有账号
-    （包括别的学员和老师）的价一起改掉。学员写自己的私有库，读的是
-    「共享 ∪ 私有」，私有同名优先；老师/管理员仍然只读写共享库。
+    负责人 2026-11-23：「不是模板是每人一套默认的，可以自己去修改自己账号的
+    定价模板，没有共享模板」。所以这里不再区分角色 —— 老师、管理员、学员
+    各自一套，改自己的不影响任何人。
+
+    `operator` 为空（无鉴权的内部调用，例如同步任务）时返回 None，
+    落到 `pricing.templates` 这个历史键上，行为仅供离线/脚本使用。
     """
     if not isinstance(operator, Operator):
-        return None
-    if operator_service.role_of(operator) != operator_service.ROLE_MEMBER:
         return None
     return int(operator.id)
 
@@ -476,8 +476,13 @@ def templates(db: DbSession, operator: Operator | None = Depends(current_operato
         owned_ids = {row["id"] for row in account_service.account_summaries(db)}
         selected = {key: value for key, value in selected.items()
                     if key == "" or key in owned_ids}
+    # 每个站点该显示哪些费用项（负责人 2026-11-23：不能把没有的项全列出来）。
+    # 前端按这个清单渲染「平台费用」区，切站点就换一组字段。
+    site_fields = {site: price_template.site_charge_fields(site)
+                   for site in ("MY", "TH", "VN", "PH", "SG", "ID")}
     return {"templates": items, "total": len(items),
             "selected": selected,
+            "siteFields": site_fields,
             "available": setting_service.template_available(
                 db, None, account_id=account,
                 operator_id=_template_scope(db, operator)),

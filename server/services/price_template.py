@@ -121,6 +121,80 @@ EXTRA_CHARGE_FIELDS = (
 )
 
 
+# --- 每个站点实际收哪些费 ---------------------------------------------------
+#
+# 负责人 2026-11-23：「定价模板这里每个国家的有些东西是没有的，你不能全部
+# 弄出来」。妙手自己的模板编辑器就是按站点只列该国真实存在的费用项：
+#   · 马来     有 BCP 活动费（3.24%）、平台支持费（0.83 CNY），没有关税
+#   · 泰国     有平台基础设施费（0.21 CNY）、电商增长服务费（8.03%），没 BCP
+#   · 越南     有订单处理服务费（0.78 CNY）、企业商家代扣税（1%），没 BCP/关税
+#   · 菲律宾   有包邮服务费率（5.5%）、商家成长费率，没 VAT
+#   · 新加坡   有消费税（9%）—— 跟别国的「增值税」不是一个东西
+#
+# 这里只影响**界面显示哪些字段**；计算逻辑仍然认全部 22 项（模板里存了值就
+# 参与计算），所以老模板不会因为界面收敛而少算钱。
+SITE_CHARGE_FIELDS: dict[str, tuple[str, ...]] = {
+    # 公共项：所有站点都有
+    "_common": (
+        "profitPercent",
+        "discount",
+        "freightMode",
+        "lastMileFreightCny",
+        "weightSource",
+        "platformCommissionPercent",
+        "paymentChargePercent",
+        "withdrawChargePercent",
+        "lastMileFreightServiceTaxPercent",
+        "otherChargeCny",
+    ),
+    "MY": (
+        "vatChargePercent",
+        "bcpChargePercent",
+        "platformSupportCny",
+    ),
+    "TH": (
+        "vatChargePercent",
+        # 泰国的「平台基础设施费」按 CNY 收，落到 orderProcessCny 这一格
+        "orderProcessCny",
+        "eCommerceGrowthChargePercent",
+    ),
+    "VN": (
+        "vatChargePercent",
+        "orderProcessCny",
+        "enterpriseWithholdPercent",
+    ),
+    "PH": (
+        # 菲律宾没有 VAT，收的是包邮服务费 + 商家成长费
+        "freeShippingChargePercent",
+        "eCommerceGrowthChargePercent",
+        "orderProcessCny",
+    ),
+    "SG": (
+        # 新加坡的 GST（消费税），字段与别国 VAT 不共用
+        "consumptionTaxChargePercent",
+        "orderProcessCny",
+    ),
+    "ID": (
+        "vatChargePercent",
+        "orderProcessCny",
+        "localConsumptionTaxChargePercent",
+    ),
+}
+
+
+def site_charge_fields(site: Any) -> list[str]:
+    """这个站点该在编辑界面上显示哪些字段（公共项 + 该国特有项）。
+
+    未知站点返回公共项 —— 不猜，也不把全部 22 项摊开（那正是要修的问题）。
+    """
+    text = str(site or "").strip().upper()
+    fields = list(SITE_CHARGE_FIELDS["_common"])
+    for extra in SITE_CHARGE_FIELDS.get(text, ()):
+        if extra not in fields:
+            fields.append(extra)
+    return fields
+
+
 class PriceTemplateError(ValueError):
     """模板或输入不足以算出可信售价。"""
 
