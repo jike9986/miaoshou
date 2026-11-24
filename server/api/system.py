@@ -241,10 +241,25 @@ def system_bootstrap(db: DbSession, operator: OperatorDep,
     return view
 
 
+def _template_scope(db: DbSession, operator: Operator | None) -> int | None:
+    """模板库的作用域：学员 → 自己的 id（读写私有那份），其余 → None（共享）。
+
+    负责人 2026-11-23：「定价模板改成学员也可以自己编辑修改」。
+    模板直接决定售价，所以不能让学员改到共享那份 —— 那会把所有账号
+    （包括别的学员和老师）的价一起改掉。学员写自己的私有库，读的是
+    「共享 ∪ 私有」，私有同名优先；老师/管理员仍然只读写共享库。
+    """
+    if not isinstance(operator, Operator):
+        return None
+    if operator_service.role_of(operator) != operator_service.ROLE_MEMBER:
+        return None
+    return int(operator.id)
+
+
 def _bootstrap_templates(db: DbSession,
                          operator: Operator | None = None) -> dict[str, Any]:
     """模板库 + 当前选中名，单独成函数便于上面那段 try/except 包住。"""
-    stored = setting_service.price_templates(db)
+    stored = setting_service.price_templates(db, operator_id=_template_scope(db, operator))
     items = []
     for name, raw in stored.items():
         item: dict[str, Any] = {"name": name}
@@ -445,7 +460,7 @@ def templates(db: DbSession, operator: Operator | None = Depends(current_operato
     """
     from services import price_template
 
-    stored = setting_service.price_templates(db)
+    stored = setting_service.price_templates(db, operator_id=_template_scope(db, operator))
     items = []
     for name, raw in stored.items():
         try:
@@ -463,9 +478,11 @@ def templates(db: DbSession, operator: Operator | None = Depends(current_operato
                     if key == "" or key in owned_ids}
     return {"templates": items, "total": len(items),
             "selected": selected,
-            "available": setting_service.template_available(db, None,
-                                                            account_id=account),
-            "selectedName": setting_service.selected_template_name(db, account)}
+            "available": setting_service.template_available(
+                db, None, account_id=account,
+                operator_id=_template_scope(db, operator)),
+            "selectedName": setting_service.selected_template_name(
+                db, account, operator_id=_template_scope(db, operator))}
 
 
 @router.get("/templates/available", summary="定价模板合并视图（本地 + 上游）")
@@ -491,10 +508,13 @@ def templates_available(db: DbSession,
     upstream, upstream_error = sync_service.upstream_template_rows(
         db, site=site, account_id=account or None, credentials=credentials,
         refresh=refresh_flag)
-    available = setting_service.template_available(db, upstream, account_id=account)
+    available = setting_service.template_available(
+        db, upstream, account_id=account,
+        operator_id=_template_scope(db, operator))
     result: dict[str, Any] = {
         "available": available,
-        "selectedName": setting_service.selected_template_name(db, account),
+        "selectedName": setting_service.selected_template_name(
+            db, account, operator_id=_template_scope(db, operator)),
         "total": len(available),
         "site": (site or "").strip().upper(),
         "accountId": account,
@@ -553,11 +573,12 @@ def price_preview(payload: PricePreviewRequest, db: DbSession,
 
     account = _member_account_scope(db, operator, payload.accountId)
     name = str(payload.templateName or "").strip()
-    stored = setting_service.price_templates(db)
+    stored = setting_service.price_templates(db, operator_id=_template_scope(db, operator))
     pt_defaults = price_template.DEFAULT_TEMPLATE
     if not name:
         # 四级兜底：前端不传模板名也得算得出价，否则「选漏了按原价上架」。
-        name = setting_service.selected_template_name(db, account)
+        name = setting_service.selected_template_name(
+            db, account, operator_id=_template_scope(db, operator))
     if name and name not in stored:
         raise errors.not_found(f"定价模板「{name}」不存在", template=name)
     if not name:
@@ -609,7 +630,7 @@ def select_template(payload: dict[str, Any], db: DbSession,
     name = str(payload.get("name") or "").strip()
     if not name:
         raise errors.validation("请选择模板", field="name")
-    if name not in setting_service.price_templates(db):
+    if name not in setting_service.price_templates(db, operator_id=_template_scope(db, operator)):
         raise errors.not_found(f"模板「{name}」不存在", name=name)
     account = str(payload.get("account") or payload.get("accountId") or "").strip()
     setting_service.select_template(db, name, account=account)
@@ -623,8 +644,10 @@ def select_template(payload: dict[str, Any], db: DbSession,
             "selected": setting_service.selected_templates(db)}
 
 
-@router.post("/templates", summary="保存定价模板（校验后入库）",
-             dependencies=[require_permission("process")])
+@router.post("/templates", summary="保存定价模板（校验后入库）")
+# 不加 require_permission("process")：负责人 2026-11-23 要求学员也能改模板。
+# 权限靠数据隔离保证 —— 学员写的是自己那份私有库（`_template_scope`），
+# 碰不到老师定的共享基准，也碰不到别的学员的模板。
 def save_template(payload: dict[str, Any], db: DbSession,
                   operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
@@ -640,7 +663,8 @@ def save_template(payload: dict[str, Any], db: DbSession,
         except price_template.PriceTemplateError as exc:
             raise errors.AppError(errors.TEMPLATE_INVALID, f"定价模板不可用：{exc}",
                                   status=422, details={"field": "template"}) from None
-        setting_service.save_template(db, normalized)
+        setting_service.save_template(db, normalized,
+                                     operator_id=_template_scope(db, operator))
         db.commit()
     audit_service.record(db, operator=operator, action="template.save",
                          target_kind="template",
@@ -648,16 +672,20 @@ def save_template(payload: dict[str, Any], db: DbSession,
                          detail={"name": normalized.get("name"),
                                  "version": normalized.get("version")})
     db.commit()
-    return {"template": normalized, "templates": templates(db)["templates"]}
+    return {"template": normalized,
+            "templates": templates(db, operator)["templates"]}
 
 
-@router.delete("/templates/{name}", summary="删除定价模板",
-               dependencies=[require_permission("process")])
+@router.delete("/templates/{name}", summary="删除定价模板")
+# 同上不挂权限：学员只能删掉自己私有库里那份。
+# 共享库里有的模板学员删不掉（delete_template 只翻私有库，返回 False →
+# 404），否则他一个人就能让所有人少一套模板。
 def delete_template(name: str, db: DbSession,
                     operator: OperatorDep) -> dict[str, Any]:
     require_writable(db)
 
-    if not setting_service.delete_template(db, name):
+    if not setting_service.delete_template(
+            db, name, operator_id=_template_scope(db, operator)):
         raise errors.not_found(f"定价模板「{name}」不存在", template=name)
     db.commit()
     audit_service.record(db, operator=operator, action="template.delete",
@@ -665,7 +693,7 @@ def delete_template(name: str, db: DbSession,
                          detail={"name": name})
     db.commit()
     return {"deleted": True, "name": name,
-            "templates": templates(db)["templates"]}
+            "templates": templates(db, operator)["templates"]}
 
 
 @router.get("/logs/tail", summary="服务端运行日志尾部（排查用）",

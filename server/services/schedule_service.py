@@ -733,7 +733,8 @@ def _verify_shop(db: Session, account_id: int | None, shop_id: str) -> None:
     require_shop(db, account, shop_id)
 
 
-def _verify_template(db: Session, template: str, *, required: bool = False) -> None:
+def _verify_template(db: Session, template: str, *, required: bool = False,
+                     operator_id: int | None = None) -> None:
     from services import setting_service
 
     if not str(template or "").strip():
@@ -743,7 +744,8 @@ def _verify_template(db: Session, template: str, *, required: bool = False) -> N
             raise errors.validation("请选择用哪套定价模板", field="template")
         # 局部更新允许暂时不绑模板（例如只改日期），发布时按「不使用模板」处理
         return
-    if template not in setting_service.price_templates(db):
+    # 模板库按操作员隔离：学员用自己的私有模板建任务，不该被共享库的存在性拦住。
+    if template not in setting_service.price_templates(db, operator_id=operator_id):
         raise errors.not_found(f"定价模板「{template}」不存在", template=template)
 
 
@@ -767,7 +769,8 @@ def create(db: Session, payload: Mapping[str, Any],
     if len(eligible) != len(fields["selected_product_ids"]):
         raise errors.validation("部分所选商品不可用于该账号发布，请刷新商品列表后重选",
                                 field="selectedProductIds")
-    _verify_template(db, fields["template_name"], required=True)
+    _verify_template(db, fields["template_name"], required=True,
+                     operator_id=operator.id if operator else None)
     _verify_shop(db, fields["account_id"], fields["shop_id"])
     for target in (fields.get("targets") or []):
         if str(target.get("shopId") or "") != str(fields["shop_id"]):
@@ -797,7 +800,8 @@ def update(db: Session, task_id: str, payload: Mapping[str, Any],
     fields = normalize(db, payload, partial=True, existing=row)
     _assert_operator_account_access(db, fields["account_id"], operator)
     _assert_member_schedule_mode(operator, fields["claim_only"])
-    _verify_template(db, fields["template_name"])
+    _verify_template(db, fields["template_name"],
+                     operator_id=operator.id if operator else None)
     # 受限分组闸门：改定时任务时把新选中的商品再验一次，
     # 否则「先建空任务、再 PATCH 塞受限商品」就绕过去了。
     if payload.get("selectedProductIds"):

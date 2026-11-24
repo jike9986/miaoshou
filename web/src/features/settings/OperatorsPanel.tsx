@@ -36,7 +36,6 @@ import type { Operator, OperatorsResponse } from "@/lib/types";
 import { queryKeys } from "@/lib/queryKeys";
 import {
   useCreateOperator,
-  useCreateStudent,
   useConfirmEmailVerification,
   useOperators,
   useRequestEmailVerificationCode,
@@ -686,14 +685,9 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
       {passwordPanel}
       {accountEmailPanel}
       <StudentAccountsPanel />
-      <details className="group rounded-md border border-border bg-surface">
-        <summary className="flex min-h-10 cursor-pointer list-none items-center px-3 text-[13px] font-medium text-fg-secondary marker:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/32">
-          兼容身份维护
-        </summary>
-        <div className="flex flex-col gap-4 border-t border-border p-3">
-          <p className="text-xs leading-[18px] text-fg-muted">
-            用于维护旧版操作员令牌。学员登录请使用上方的软件用户名和密码。
-          </p>
+      {/* 2026-11-23：原来这里包着一层「兼容身份维护」折叠块，里面装的正是
+          当前身份卡和操作员列表 —— 内容和上面的学员账号高度重叠，负责人要求
+          合并。现在直接摊开显示，不再多一层折叠，也不再重复解释一遍。 */}
       <IdentityCard onSwitch={() => setSwitchOpen(true)} onCreated={() => setCreateOpen(true)} />
 
       <Card padding="none">
@@ -958,31 +952,15 @@ export function OperatorsPanel({ className }: OperatorsPanelProps) {
 
       {/* 兜底提示：万一有人把一次性框截图丢了，这里再提醒一次不可恢复 */}
       <span className="sr-only">{ONE_TIME_TOKEN_NOTICE}</span>
-        </div>
-      </details>
     </div>
   );
 }
 
 function StudentAccountsPanel() {
   const list = useOperators();
-  const create = useCreateStudent();
   const reset = useResetStudentPassword();
-  const [name, setName] = useState("");
-  const [username, setUsername] = useState("");
   const [issued, setIssued] = useState<{ username: string; password: string; label: string } | null>(null);
   const students = (list.data?.operators ?? []).filter((operator) => operator.role === "member");
-  const createNow = () => {
-    const password = `Stu-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}!`;
-    create.mutate({ name: name.trim(), username: username.trim(), password }, {
-      onSuccess: (result) => {
-        setIssued({ username: username.trim(), password, label: result.operator.name });
-        setName("");
-        setUsername("");
-      },
-      onError: (error) => toast.error("创建学员失败", { description: apiErrorMessage(error) }),
-    });
-  };
   const resetNow = (student: { id: string; name: string; username?: string | null }) => {
     const password = `Stu-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}!`;
     const username = student.username ?? `student-${student.id}`;
@@ -994,11 +972,8 @@ function StudentAccountsPanel() {
   return (
     <Card padding="normal">
       <CardTitle>学员账号</CardTitle>
-      <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
-        <Field label="学员姓名" required><Input value={name} maxLength={80} onChange={(event) => setName(event.currentTarget.value)} /></Field>
-        <Field label="登录用户名" required><Input value={username} maxLength={80} autoComplete="off" onChange={(event) => setUsername(event.currentTarget.value)} /></Field>
-        <Button loading={create.isPending} disabled={!name.trim() || !username.trim()} icon={<UserPlus />} onClick={createNow}>创建学员</Button>
-      </div>
+      {/* 创建学员表单已移除（负责人 2026-11-23：上面这个创建学员账号的也去掉）。
+          新学员改由老师账号沿用「新建操作员」入口创建，这里只做重置密码。 */}
       {issued && <div className="mt-3 rounded-md border border-success-600/25 bg-success-50 px-3 py-2 text-[13px] leading-5 text-success-700" role="status">
         <div className="font-medium">{issued.label} 的初始密码（仅显示本次）</div>
         <div>用户名：{issued.username}</div><div className="font-mono">密码：{issued.password}</div>

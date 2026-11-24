@@ -133,9 +133,32 @@ def save_workflow_defaults(db: Session, cleaned: dict[str, Any],
     return workflow_defaults(db, operator_id)
 
 
-def price_templates(db: Session) -> dict[str, Any]:
-    value = get(db, PRICING_TEMPLATES_KEY) or {}
-    return value if isinstance(value, dict) else {}
+def _templates_key(operator_id: int | None = None) -> str:
+    """模板库的存储键。operator_id 为空 = 共享库（老师/管理员写的那份）。"""
+    if operator_id is None:
+        return PRICING_TEMPLATES_KEY
+    return f"{PRICING_TEMPLATES_KEY}.operator.{int(operator_id)}"
+
+
+def price_templates(db: Session,
+                    operator_id: int | None = None) -> dict[str, Any]:
+    """模板库。
+
+    `operator_id` 有值（学员）时返回「共享 + 个人」的合并视图，同名个人优先：
+      · 共享库是老师/管理员定的基准，学员看得到、能拿来用；
+      · 个人库是学员自己改的那份 —— 负责人 2026-11-23 要求「定价模板
+        改成学员也可以自己编辑修改」，但模板直接决定售价，不能让一个
+        学员的改动把所有账号的价都改掉。所以写个人库、读合并视图。
+
+    老师/管理员（operator_id 为空）只拿共享库，与改造前完全一致。
+    """
+    shared = get(db, PRICING_TEMPLATES_KEY) or {}
+    shared = shared if isinstance(shared, dict) else {}
+    if operator_id is None:
+        return shared
+    personal = get(db, _templates_key(operator_id)) or {}
+    personal = personal if isinstance(personal, dict) else {}
+    return {**shared, **personal}
 
 
 def selected_templates(db: Session) -> dict[str, str]:
@@ -154,22 +177,35 @@ def select_template(db: Session, name: str, account: str = "") -> str:
     return str(name or "")
 
 
-def save_template(db: Session, template: dict[str, Any]) -> dict[str, Any]:
-    templates = price_templates(db)
+def save_template(db: Session, template: dict[str, Any],
+                  operator_id: int | None = None) -> dict[str, Any]:
+    """保存模板。带 operator_id 时写进那个人的私有库（学员自己改自己的）。"""
     name = str(template.get("name") or "").strip()
     if not name:
         raise ValueError("模板名称不能为空")
+    key = _templates_key(operator_id)
+    templates = get(db, key) or {}
+    templates = templates if isinstance(templates, dict) else {}
     templates[name] = template
-    put(db, PRICING_TEMPLATES_KEY, templates)
+    put(db, key, templates)
     return template
 
 
-def delete_template(db: Session, name: str) -> bool:
-    templates = price_templates(db)
+def delete_template(db: Session, name: str,
+                    operator_id: int | None = None) -> bool:
+    """删除模板。带 operator_id 时只能删掉那个人自己那份。
+
+    个人库里没有、只有共享库有时，这里要返回 False —— 学员不能删掉
+    老师定的基准模板，否则所有人都少一套模板。他「不想要」的正确表达
+    是改自己那份，不是把公用的删了。
+    """
+    key = _templates_key(operator_id)
+    templates = get(db, key) or {}
+    templates = templates if isinstance(templates, dict) else {}
     if name not in templates:
         return False
     templates.pop(name, None)
-    put(db, PRICING_TEMPLATES_KEY, templates)
+    put(db, key, templates)
     return True
 
 
@@ -236,7 +272,8 @@ def set_miaoshou_selected(db: Session, name: str, account_id: str = "") -> str:
     return name
 
 
-def selected_template_name(db: Session, account_id: str | None = None) -> str:
+def selected_template_name(db: Session, account_id: str | None = None,
+                           operator_id: int | None = None) -> str:
     """按四级兜底取当前选中模板名，取不到返回 ""。
 
     1. 该账号显式选中的（pricing.selected.accounts[accountId]）
@@ -253,7 +290,7 @@ def selected_template_name(db: Session, account_id: str | None = None) -> str:
     刚连上妙手、还没同步模板时不能假装「没有选择」。
     """
     wanted = str(account_id or "").strip()
-    stored = price_templates(db)
+    stored = price_templates(db, operator_id=operator_id)
     known = {str(name) for name in stored}
     selected = selected_templates(db)
 
@@ -276,7 +313,8 @@ def selected_template_name(db: Session, account_id: str | None = None) -> str:
 
 
 def template_available(db: Session, upstream: list | None = None, *,
-                       account_id: str = "") -> list[dict[str, Any]]:
+                       account_id: str = "",
+                       operator_id: int | None = None) -> list[dict[str, Any]]:
     """本地自建 + 上游模板合成一份列表，每行带 selected / source。
 
     source: "local" | "upstream" | "both"
@@ -304,7 +342,7 @@ def template_available(db: Session, upstream: list | None = None, *,
             "selected": False,
         }
 
-    for raw_name, raw in price_templates(db).items():
+    for raw_name, raw in price_templates(db, operator_id=operator_id).items():
         name = str(raw_name or "").strip()
         if not name:
             continue

@@ -1042,7 +1042,8 @@ def _weight_of(payload: Mapping[str, Any]) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
-def _template_name_for_site(db: Session, name: Any, site: str) -> Any:
+def _template_name_for_site(db: Session, name: Any, site: str,
+                            *, operator_id: int | None = None) -> Any:
     """模板站点与目标店铺站点不一致时，换成同站点的模板（找不到就原样返回）。
 
     为什么需要：多店铺账号常常同时发 MY 和 PH，而模板是按国家配的
@@ -1057,7 +1058,8 @@ def _template_name_for_site(db: Session, name: Any, site: str) -> Any:
     chosen = str(name or "").strip()
     if not chosen:
         return name
-    stored = setting_service.price_templates(db)
+    # 模板库按操作员隔离：学员改的是自己那份，找同站点模板也要找他自己的。
+    stored = setting_service.price_templates(db, operator_id=operator_id)
     if not isinstance(stored, dict) or not stored:
         return name
     chosen_raw = stored.get(chosen)
@@ -1076,11 +1078,12 @@ def _template_name_for_site(db: Session, name: Any, site: str) -> Any:
     return name
 
 
-def _find_template(db: Session, name: str | None) -> Mapping[str, Any] | None:
+def _find_template(db: Session, name: str | None,
+                   *, operator_id: int | None = None) -> Mapping[str, Any] | None:
     wanted = str(name or "").strip()
     if not wanted:
         return None
-    raw = setting_service.price_templates(db).get(wanted)
+    raw = setting_service.price_templates(db, operator_id=operator_id).get(wanted)
     if not raw:
         raise errors.AppError(errors.TEMPLATE_INVALID, f"定价模板「{wanted}」不存在",
                               status=422, details={"field": "template"})
@@ -1183,7 +1186,8 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     template_name = payload.get("template")
     member_claimed_publish = member_publish and not member_automation_publish
     if member_claimed_publish and not str(template_name or "").strip():
-        template_name = setting_service.selected_template_name(db, str(account.id))
+        template_name = setting_service.selected_template_name(
+            db, str(account.id), operator_id=operator_id)
     # 模板站点必须和目标店铺站点一致，否则报价必错：
     # 一个「马来」模板（MYR 费率、VAT 10%）套到菲律宾店铺，
     # 会用 MYR 的费率结构算出一个 PHP 数字，既不是马来价也不是菲律宾价。
@@ -1193,8 +1197,9 @@ def publish(db: Session, payload: Mapping[str, Any], *,
     #   · 定时任务等非弹窗路径没有前端参与。
     # 只在「传进来的模板站点 ≠ 目标站点」且「库里存在同站点模板」时才替换，
     # 不做任何隐式猜测（找不到同站点模板就保持原样，让上游自己报错）。
-    template_name = _template_name_for_site(db, template_name, str(target_shop.get("site") or ""))
-    template = _find_template(db, template_name)
+    template_name = _template_name_for_site(
+        db, template_name, str(target_shop.get("site") or ""), operator_id=operator_id)
+    template = _find_template(db, template_name, operator_id=operator_id)
     if member_claimed_publish and template is None:
         raise errors.AppError(errors.TEMPLATE_INVALID,
                               "学员发布需要先选择可用的定价模板",
