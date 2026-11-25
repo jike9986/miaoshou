@@ -1,9 +1,10 @@
 """定价模板与认领价格的币种换算测试。
 
-对应负责人 2026-11-18 口径：
-  - 仓库价格是人民币，认领到店铺要换算成当地币种；
-  - 认领到采集箱不套定价模板（模板在妙手那边套）；
-  - 只允许妙手成本下限的兜底微调。
+对应负责人口径：
+  - 2026-11-18：仓库价格是人民币，认领到店铺要换算成当地币种；
+  - 2026-11-18：认领到采集箱不套定价模板（模板在妙手那边套）；
+  - 2026-11-25：「认领到采集箱不是拿货价增一点点，比如 23 就 27、28 人民币」
+    → 加价在**人民币**层面做（× CLAIM_PRICE_BUMP），换算成外币看是浮动的。
 """
 import time
 from decimal import Decimal
@@ -48,15 +49,19 @@ def _pin_rate(currency: str, rate: str) -> None:
 
 
 def test_claim_price_reset_uses_purchase_price_not_template_price():
-    """认领时 skuMap.price 必须重置成拿货价换算值，不能沿用模板售价。
+    """认领时 skuMap.price 必须重置成「拿货价 + 一点点」，不能沿用模板售价。
 
     原来沿用 payload 里入仓时算好的售价：22 CNY 的商品进采集箱变成
     40+ MYR（约 67 CNY），看起来像凭空涨价。
+
+    加价在人民币层面（负责人 2026-11-25）。汇率钉成 1 CNY = 2 MYR：
+      · sku-a 拿货 20 CNY → 20 × 1.18 = 23.60 CNY → 11.80 MYR
+      · sku-b 拿货 30 CNY → 30 × 1.18 = 35.40 CNY → 17.70 MYR
     """
     import services.collect_box_service as cbs
     from services import exchange_rate
 
-    _pin_rate("MYR", "2")   # 1 MYR = 2 CNY -> 20 CNY = 10.00 MYR
+    _pin_rate("MYR", "2")   # 1 MYR = 2 CNY
 
     class _Shop:
         id = 1
@@ -83,12 +88,47 @@ def test_claim_price_reset_uses_purchase_price_not_template_price():
         exchange_rate.reset_cache()
 
     skus = payloads[0]["skuMap"]
-    assert skus["sku-a"]["price"] == "10.00"
-    assert skus["sku-b"]["price"] == "15.00"
-    assert skus["sku-a"]["priceIncludeVat"] == "10.00"
+    assert skus["sku-a"]["price"] == "11.80"
+    assert skus["sku-b"]["price"] == "17.70"
+    assert skus["sku-a"]["priceIncludeVat"] == "11.80"
     assert adjustments and adjustments[0]["stage"] == "claimPrice"
     assert adjustments[0]["currency"] == "MYR"
     assert adjustments[0]["skuCount"] == 2
+
+
+def test_claim_price_bump_is_applied_in_cny_not_local_currency():
+    """加价必须作用在人民币拿货价上（负责人 2026-11-25 的 23→27、28）。
+
+    23 CNY × 1.18 = 27.14 CNY，落在负责人给的 27~28 区间。
+    如果反过来「先换算再加外币百分比」，折回人民币看就不是加一点点，
+    而且汇率一变数字就跟着乱跳。
+    """
+    import services.collect_box_service as cbs
+    from services import exchange_rate
+
+    _pin_rate("MYR", "2")
+
+    class _Shop:
+        id = 1
+        name = "test"
+
+    payloads = [{"site": "MY", "skuMap": {
+        "sku-a": {"price": "0", "originPrice": "23"}}}]
+
+    original = cbs.require_shop
+    cbs.require_shop = lambda *_a, **_k: {"site": "MY", "shopId": "1"}
+    try:
+        cbs._reset_claim_prices_to_purchase(
+            None, _Shop(), payloads, [{"warehouseId": "w1"}],
+            target_shop_id="1")
+    finally:
+        cbs.require_shop = original
+        exchange_rate.reset_cache()
+
+    quoted_myr = Decimal(payloads[0]["skuMap"]["sku-a"]["price"])
+    quoted_cny = quoted_myr * Decimal("2")      # 汇率 1 CNY = 2 MYR
+    assert Decimal("26") <= quoted_cny <= Decimal("29"), quoted_cny
+    assert quoted_cny == Decimal("27.14"), quoted_cny
 
 
 def test_claim_price_reset_uses_target_site_currency():
@@ -96,7 +136,7 @@ def test_claim_price_reset_uses_target_site_currency():
     import services.collect_box_service as cbs
     from services import exchange_rate
 
-    _pin_rate("PHP", "0.1")   # 1 PHP = 0.1 CNY -> 20 CNY = 200.00 PHP
+    _pin_rate("PHP", "0.1")   # 1 PHP = 0.1 CNY
 
     class _Shop:
         id = 2
@@ -115,7 +155,8 @@ def test_claim_price_reset_uses_target_site_currency():
         cbs.require_shop = original
         exchange_rate.reset_cache()
 
-    assert payloads[0]["skuMap"]["sku-a"]["price"] == "200.00"
+    # 20 CNY × 1.18 = 23.60 CNY ÷ 0.1 = 236.00 PHP
+    assert payloads[0]["skuMap"]["sku-a"]["price"] == "236.00"
     assert adjustments[0]["currency"] == "PHP"
     assert adjustments[0]["site"] == "PH"
 

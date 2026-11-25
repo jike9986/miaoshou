@@ -1410,7 +1410,16 @@ def _reset_claim_prices_to_purchase(
                 continue
             if purchase_d <= 0:
                 continue
-            local = (purchase_d / rate_d).quantize(
+            # 加价在**人民币**层面（负责人 2026-11-25：
+            # 「认领到采集箱不是拿货价增一点点，比如 23 就 27、28 人民币」）。
+            #
+            # 23 CNY × 1.18 = 27.14 CNY → 16.70 MYR。
+            # 先换算再加价是错的：那样加的是「外币的 18%」，
+            # 折回人民币看就不是「加一点点」，与负责人的口径对不上。
+            # 系数与 carrier_service._raise_price_to_reported_floor 同一来源。
+            quoted = (purchase_d * carrier_service.CLAIM_PRICE_BUMP).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+            local = (quoted / rate_d).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
             old = sku.get("price")
             try:

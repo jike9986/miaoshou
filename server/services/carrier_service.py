@@ -66,20 +66,16 @@ _COST_FLOOR_VALUE = re.compile(
     r"基础成本.*?([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
 MAX_COST_FLOOR_RETRIES = 12
 # 认领到采集箱时「价格低就往上提一点」的加价率（负责人 2026-11-25：
-# 「认领到采集箱不能套模板，必须不能套，价格低就往上提一点」）。
+# 认领到采集箱的加价系数，作用在**人民币拿货价**上（负责人 2026-11-25：
+# 「认领到采集箱不是拿货价增一点点，比如 23 就 27、28 人民币」）。
 #
-# 认领只做「拿货价 → 目标站点币种」的换算，不套定价模板；
-# 妙手成本校验不过时最多按这个倍率往上提，绝不用它报的全成本。
-CLAIM_PRICE_BUMP_RATIO = Decimal("1.15")
-# 认领提价的硬上限：最多比「拿货价换算成的目标站点币种金额」高 60%。
-# 妙手报的「基础成本」是它自己的全成本口径（实测能到拿货价的 2.7 倍），
-# 认领这一步不该把那个虚高传导给客户，所以给一个天花板；
-# 到顶还过不了校验就抛错交给人，宁可失败也不出错误价格。
-CLAIM_PRICE_MAX_BUMP = Decimal("1.6")
-# 提价基准钉在 payload 上，多轮重试不再漂（见 _raise_price_to_reported_floor）。
-_PRICE_BASE_KEY = "_claimPriceBase"
-# 顶到上限的跨轮标记：再被拒就不加了，交给调用方抛错。
-_PRICE_CAPPED_KEY = "_claimPriceCapped"
+#   23 CNY × 1.18 = 27.14 CNY → 16.70 MYR
+#   5.5 CNY × 1.18 = 6.49 CNY  → 3.99 MYR
+#
+# 加价永远在人民币层面做。先换算成外币再加百分比是错的 ——
+# 那样加的是外币的 18%，折回人民币看就不是「加一点点」。
+# collect_box_service 用同一个常量，两处口径必须一致。
+CLAIM_PRICE_BUMP = Decimal("1.18")
 # 新建载体的 ossMd5 会被上游连续改写几轮。只重读 1 次在 70 件实测里会漏
 # （2026-11-05，id=26/80 首轮就是这么失败的）。按 CLAIM_STANDARD 第 4 节
 # 重试 MAX_VERSION_REFRESH 轮，每轮重新读一次 md5。
@@ -120,35 +116,33 @@ def _claim_site_rate(site: str) -> Decimal | None:
 
 def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouError
                                    ) -> dict[str, Any] | None:
-    """妙手报「无法覆盖产品基础成本」时，在**拿货价**基础上提一点，绝不套定价模板。
+    """妙手报「无法覆盖产品基础成本」时，在**人民币拿货价**上加一点点。
 
     ## 负责人口径（2026-11-25）
 
-      「认领到采集箱不能套模板，必须不能套，价格低就往上提一点」
+      「认领到采集箱不是拿货价增一点点，比如 23 就 27、28 人民币」
 
-    认领到采集箱这一步只做一件事：把拿货价换成目标站点币种。
-    定价模板是**发布时**在妙手那边套的，不能在这一步套。
+    认领到采集箱这一步只做一件事：拿货价加一点点，再换成目标站点币种。
 
-    ## 原来为什么会看起来像套了模板
+      · 23 CNY × 1.18 = 27.14 CNY → 16.70 MYR
+      · 5.5 CNY × 1.18 = 6.49 CNY → 3.99 MYR
 
-    老实现直接把妙手报的「产品基础成本」当成售价（`floor + 0.01`）。
-    但妙手那个基础成本是它自己的**全成本口径**（采购价 + 头程运费 +
-    平台费 + 各类附加），实测 25 CNY 拿货价的商品被顶到 38.41 MYR
-    （≈ 62 CNY，2.7 倍）—— 数字上完全像套了一套 15% 利润的模板。
-    于是同一批里拿货价高的商品看起来「只加一点」，拿货价低的看起来
-    「套了模板」，负责人一眼就看出不对。
+    **加价永远在人民币层面做**。先换算成外币再加百分比是错的 ——
+    那样加的是外币的 18%，折回人民币看就不是「加一点点」。
 
-    ## 现在的规则
+    ## 绝不去够妙手的成本线
 
-    1. 目标价 = 当前价 × `CLAIM_PRICE_BUMP_RATIO`（默认 1.15，即加 15%）；
-       妙手报的 `floor` 比这个高时，一次提到 `floor + 0.01`，
-       但**硬上限**是 `当前价 × CLAIM_PRICE_MAX_BUMP`（默认 1.6）。
-       这样既一次到位过校验，又不会把全成本口径传导进来。
-    2. 当前价已经 ≥ `floor` 时不改 —— 说明妙手报的这个错误另有原因
-       （规格/类目/重量对不上），抬价治不了它，硬抬只会把价格弄错。
-    3. 提到上限仍被拒 → 返回 None，调用方照原样抛错，交给人处理。
+    妙手报的「产品基础成本」是它自己的**全成本口径**（采购价 + 头程运费 +
+    平台费 + 各类附加）。实测 23 CNY 的货它报 38.40 MYR（≈62 CNY，2.7 倍）——
+    那是「卖到这个价才保本」，不是「拿货价」。
 
-    连续提价 `MAX_COST_FLOOR_RETRIES` 次仍被拒同样抛错，不会无限加价。
+    老实现直接 `new_price = floor + 0.01`，于是每件货都被顶到全成本，
+    看起来就像套了一套 2.7 倍利润的定价模板，负责人一眼就看出不对。
+
+    现在：妙手报的成本线**只用于判断这件货做不做得成**，不用来定价。
+    · 加价后仍低于成本线 → 这件货按这个价卖是亏的，返回 None，
+      调用方抛错交给人处理；
+    · 不会为了过校验把价格顶到全成本。
     """
     message = str((exc.payload or {}).get("message")
                   or (exc.payload or {}).get("msg") or exc)
@@ -166,10 +160,12 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
     if not isinstance(sku_map, dict):
         return None
 
+    site = str(payload.get("site") or "").strip().upper()
+    rate = _claim_site_rate(site)
+
     changed: list[str] = []
     old_price: Decimal | None = None
     new_price: Decimal | None = None
-    capped = False
     for key, sku in sku_map.items():
         if not isinstance(sku, dict) or str(sku.get("isDelete", "0")) == "1":
             continue
@@ -180,79 +176,36 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
         if current <= 0:
             continue
 
-        # 已经高于妙手报的基础成本 → 这个报错不是「价格太低」引起的，
-        # 抬价只会把价格弄错，跳过。
-        if floor > 0 and current >= floor:
+        # 目标价一律从**人民币拿货价**算，不用当前价、不用妙手成本线。
+        #
+        # 为什么不拿当前价：调用方在妙手反复报错时会重试多轮，每轮都调
+        # 本函数。拿当前价当基准等于每轮复利，15.38 会滚成
+        # 24.61 → 39.38 → 63.01 → 100.82，比直接用全成本还离谱。
+        purchase = sku.get("originPrice")
+        if purchase in (None, ""):
             continue
-
-        # 基准 = 拿货价换成的售价，**不是当前价**。
-        #
-        # 为什么不拿当前价（2026-11-25 实测踩到）：调用方在妙手反复报错时
-        # 会重试最多 MAX_COST_FLOOR_RETRIES 轮，每轮都调本函数。拿当前价当
-        # 基准等于每轮复利，15.38 会滚成 24.61 → 39.38 → 63.01 → 100.82，
-        # 比直接用妙手全成本还离谱。基准必须是稳定的原始值。
-        #
-        # 稳定基准的取法（依次尝试）：
-        #   1. payload 上记的基准（首轮算好后钉住，后续重试都用它）；
-        #   2. SKU 的 originPrice / 站点汇率；
-        #   3. 实在拿不到就用当前价，但配合下面的「已到顶就停」防止复利。
-        base = payload.get(_PRICE_BASE_KEY)
         try:
-            base_d = Decimal(str(base)) if base not in (None, "") else None
+            purchase_d = Decimal(str(purchase))
         except (InvalidOperation, TypeError, ValueError):
-            base_d = None
-        if base_d is not None and base_d > 0:
-            base = base_d
-        else:
-            base = current
-            purchase = sku.get("originPrice")
-            if purchase not in (None, ""):
-                try:
-                    purchase_d = Decimal(str(purchase))
-                except (InvalidOperation, TypeError, ValueError):
-                    purchase_d = None
-                if purchase_d is not None and purchase_d > 0:
-                    site = str(payload.get("site") or "").strip().upper()
-                    rate = _claim_site_rate(site)
-                    if rate is not None and rate > 0:
-                        base = (purchase_d / rate).quantize(
-                            Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        # 钉住基准，后续重试不会再漂
-                        try:
-                            payload[_PRICE_BASE_KEY] = str(base)  # type: ignore[index]
-                        except Exception:  # noqa: BLE001
-                            pass
-
-        # 主路径：拿货价换算值上加一点。
-        target = (base * CLAIM_PRICE_BUMP_RATIO).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if floor > 0:
-            floor_target = (floor + Decimal("0.01")).quantize(Decimal("0.01"))
-            if floor_target > target:
-                # 一次提到位，避免多轮重试把价格滚上去。
-                target = floor_target
-        # 硬上限：最多比基准高 60%，且永远以 base 为准。
-        cap = (base * CLAIM_PRICE_MAX_BUMP).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP)
-        # 上一轮已经顶到上限 → 本轮不再动。
-        #
-        # base 在极端情况（SKU 没有 originPrice、也拿不到汇率）会退化成
-        # 当前价，此时 cap 跟着价格一起涨，多轮重试就成了复利。
-        # 打一个跨轮标记：一旦顶到 cap，后续重试一律放弃，让调用方抛错。
-        if payload.get(_PRICE_CAPPED_KEY):
             continue
-        if target > cap:
-            target = cap
-            capped = True
-            try:
-                payload[_PRICE_CAPPED_KEY] = True  # type: ignore[index]
-            except Exception:  # noqa: BLE001
-                pass
+        if purchase_d <= 0:
+            continue
+
+        quoted_cny = (purchase_d * CLAIM_PRICE_BUMP).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if rate is not None and rate > 0:
+            target = (quoted_cny / rate).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+        else:
+            # 拿不到汇率就按当前比例平移，至少不会凭空造数。
+            target = (current * (quoted_cny / purchase_d)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # 加价后仍低于妙手成本线 → 这件货按这个价卖是亏的。
+        # 不去够它（够了就等于套全成本），直接放弃，让调用方抛错。
+        if floor > 0 and target < floor:
+            return None
         if target <= current:
-            # 到顶了（或已经更高）→ 本轮没有再提的空间，交给调用方抛错。
-            #
-            # 这一条是多轮重试的刹车：即使 base 退化成当前价，
-            # 每轮最多涨 60%，且一旦碰上 cap 就不会继续加。
             continue
         if old_price is None:
             old_price = current
@@ -273,9 +226,7 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
     return {"oldPrice": format(old_price or 0, ".2f"),
             "costFloor": format(floor, ".2f"),
             "newPrice": format(new_price or 0, ".2f"),
-            "bumpRatio": str(CLAIM_PRICE_BUMP_RATIO),
-            "maxBump": str(CLAIM_PRICE_MAX_BUMP),
-            "capped": capped,
+            "bumpRatio": str(CLAIM_PRICE_BUMP),
             "skuKeys": changed}
 
 LINK_POOL_KEY = "carrier.links"
