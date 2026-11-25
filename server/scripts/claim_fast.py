@@ -90,62 +90,76 @@ def prepare_payload(payload: dict) -> tuple[dict, list[str]]:
     return data, notes
 
 
-COST_FLOOR_RE = re.compile(
-    r"基础成本[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)\s*MYR", re.I)
-LOCAL_PRICE_RE = re.compile(
-    r"(?:本地(?:显示|展示)价|售价展示(?:价)?)[^0-9]{0,16}"
-    r"([0-9]+(?:\.[0-9]+)?)\s*MYR", re.I)
+# 妙手报的「基础成本」不再用于定价（负责人 2026-11-25），
+# 正则也一并去掉，避免有人又照着抬价。
 
 
 def _raise_to_cost_floor(body: dict, message: str) -> str | None:
-    """按妙手报的「基础成本 Y MYR」把 skuMap 里的售价抬到 Y 之上。
+    """微微上挑；还不够就抬到妙手报的成本线 + 0.01，刚好不报错。
 
-    妙手的报错自带准确成本线，比我们自己算汇率+运费可靠。
-    返回新的价格字符串；无法解析返回 None。
+    负责人口径（2026-11-25）：
+      「只需要微微上挑让他不报成本不够就行了」
+
+    与 `carrier_service._raise_price_to_reported_floor` 完全同一套：
+      1. 拿货价 × CLAIM_PRICE_BUMP(1.18) → 微微上挑；
+      2. 若仍低于妙手报的成本线，抬到 成本线 + 0.01 为止，不多抬。
+
+    第 2 步是兜底，不是定价 —— 妙手报的是全成本口径（含尾程运费等），
+    真正的定价由负责人在妙手那边套模板完成。
     """
-    from decimal import Decimal, ROUND_HALF_UP  # noqa: I001
+    from decimal import ROUND_HALF_UP, Decimal  # noqa: I001
 
-    floor_match = COST_FLOOR_RE.search(message)
-    if floor_match is None:
-        return None
-    try:
-        floor = Decimal(floor_match.group(1))
-    except Exception:
-        return None
-    if floor <= 0:
-        return None
-    old_match = LOCAL_PRICE_RE.search(message)
-    old_price = None
-    if old_match:
+    floor = None
+    floor_match = re.search(
+        r"基础成本[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)\s*MYR", message, re.I)
+    if floor_match:
         try:
-            old_price = Decimal(old_match.group(1))
-        except Exception:
-            old_price = None
+            floor = Decimal(floor_match.group(1))
+        except Exception:  # noqa: BLE001
+            floor = None
 
-    # 妙手的成本线会随售价微调（实测 11.57→12.87→13.05 逐步上浮），
-    # 只加 0.01 会反复擦线。加 3% 余量（至少 0.15）一次到位。
-    margin = max(Decimal("0.15"), (floor * Decimal("0.03")).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP))
-    target = (floor + margin).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     sku_map = body.get("skuMap") or {}
     if not isinstance(sku_map, dict):
         return None
+
+    site = str(body.get("site") or "").strip().upper()
+    rate = carrier_service._claim_site_rate(site)
+
     changed = 0
+    target_last = None
     for sku in sku_map.values():
         if not isinstance(sku, dict) or str(sku.get("isDelete", "0")) == "1":
             continue
+        purchase = sku.get("originPrice")
+        if purchase in (None, ""):
+            continue
         try:
-            current = Decimal(str(sku.get("priceIncludeVat") or 0))
-        except Exception:
+            purchase_d = Decimal(str(purchase))
+        except Exception:  # noqa: BLE001
             continue
-        # 只抬低于成本线的，已满足的不动
-        if old_price is not None and current != old_price and current >= target:
+        if purchase_d <= 0:
             continue
+        quoted_cny = (purchase_d * carrier_service.CLAIM_PRICE_BUMP).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if rate is None or rate <= 0:
+            continue
+        target = (quoted_cny / rate).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # 微微上挑还不够 → 抬到成本线 + 0.01
+        if floor is not None and target < floor:
+            target = (floor + Decimal("0.01")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP)
+        try:
+            current = Decimal(str(sku.get("price") or 0))
+        except Exception:  # noqa: BLE001
+            current = Decimal("0")
         if current >= target:
             continue
+        sku["price"] = format(target, ".2f")
         sku["priceIncludeVat"] = format(target, ".2f")
+        target_last = target
         changed += 1
-    return format(target, ".2f") if changed else None
+    return format(target_last, ".2f") if changed else None
 
 
 def main() -> int:

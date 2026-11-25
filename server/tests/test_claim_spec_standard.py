@@ -103,24 +103,113 @@ def test_duplicate_labels_are_deduplicated_and_keys_remapped():
     assert any("规格SKU规范化" in note for note in notes)
 
 
-def test_raise_to_cost_floor_respects_reported_floor():
+def test_raise_to_cost_floor_bumps_purchase_price_then_clears_floor():
+    """先按拿货价微微上挑；还不够就抬到成本线 + 0.01，刚好不报错。
+
+    负责人口径（2026-11-25）：
+      「只需要微微上挑让他不报成本不够就行了」
+    """
+    from services import carrier_service
     from scripts.claim_fast import _raise_to_cost_floor
 
-    body = {"skuMap": {
-        ";a;b;": {"priceIncludeVat": "11.57", "isDelete": "0"},
-        ";a;c;": {"priceIncludeVat": "13.90", "isDelete": "0"},
-        ";a;d;": {"priceIncludeVat": "1.00", "isDelete": "1"},
-    }}
-    message = ("产品设置的本地展示价11.57MYR，无法覆盖产品基础成本"
-               "(跨境物流运费+关税+增值税)：12.87MYR，售卖可能导致亏损")
-    raised = _raise_to_cost_floor(body, message)
-    assert raised is not None
-    target = Decimal(raised)
-    assert target > Decimal("12.87")
-    # 低于成本线的抬上去，已经够的不动，删除态不动
-    assert body["skuMap"][";a;b;"]["priceIncludeVat"] == raised
-    assert body["skuMap"][";a;c;"]["priceIncludeVat"] == "13.90"
+    # 1 CNY = 2 MYR（钉住汇率）
+    import time
+
+    from services import exchange_rate
+
+    exchange_rate.reset_cache()
+    exchange_rate._cache["MYR"] = {
+        "rate": Decimal("2"), "at": time.time(),
+        "source": "test", "failedAt": None}
+    try:
+        body = {
+            "site": "MY",
+            "skuMap": {
+                # 拿货 10 CNY → 上挑 5.90 MYR，成本线 12.87 → 抬到 12.88
+                ";a;b;": {"price": "1.00", "priceIncludeVat": "1.00",
+                          "originPrice": "10", "isDelete": "0"},
+                # 拿货 30 CNY → 上挑 17.70 MYR，已高于成本线 → 保持 17.70
+                ";a;c;": {"price": "2.00", "priceIncludeVat": "2.00",
+                          "originPrice": "30", "isDelete": "0"},
+                # 删除态：不动
+                ";a;d;": {"price": "1.00", "priceIncludeVat": "1.00",
+                          "originPrice": "40", "isDelete": "1"},
+            },
+        }
+        message = ("产品设置的本地展示价1.00MYR，无法覆盖产品基础成本"
+                   "(跨境物流运费+关税+增值税)：12.87MYR，售卖可能导致亏损")
+        raised = _raise_to_cost_floor(body, message)
+    finally:
+        exchange_rate.reset_cache()
+
+    # 低于成本线的抬到 12.87 + 0.01
+    assert body["skuMap"][";a;b;"]["priceIncludeVat"] == "12.88"
+    # 已经很够的保持自己的上挑值
+    assert body["skuMap"][";a;c;"]["priceIncludeVat"] == "17.70"
+    # 删除态不动
     assert body["skuMap"][";a;d;"]["priceIncludeVat"] == "1.00"
+
+    # 抬价幅度只有 0.01，不是「成本线 + 30%」那种过冲
+    assert Decimal(body["skuMap"][";a;b;"]["priceIncludeVat"]) == Decimal("12.88")
+
+    # 和客户端函数同一系数
+    assert carrier_service.CLAIM_PRICE_BUMP == Decimal("1.18")
+
+
+def test_raise_to_cost_floor_never_lowers_price():
+    """只往上挑，绝不把高价商品压回去。"""
+    import time
+
+    from services import exchange_rate
+    from scripts.claim_fast import _raise_to_cost_floor
+
+    exchange_rate.reset_cache()
+    exchange_rate._cache["MYR"] = {
+        "rate": Decimal("2"), "at": time.time(),
+        "source": "test", "failedAt": None}
+    try:
+        body = {
+            "site": "MY",
+            "skuMap": {
+                # 目标 5.90，当前 99.00 → 保持 99.00
+                ";high;": {"price": "99.00", "priceIncludeVat": "99.00",
+                           "originPrice": "10", "isDelete": "0"},
+            },
+        }
+        raised = _raise_to_cost_floor(body, "无法覆盖产品基础成本 12.87MYR")
+    finally:
+        exchange_rate.reset_cache()
+
+    assert body["skuMap"][";high;"]["priceIncludeVat"] == "99.00"
+    assert raised is None, raised
+
+
+def test_raise_to_cost_floor_without_floor_only_bumps():
+    """妙手没报成本线时，就只做微微上挑。"""
+    import time
+
+    from services import exchange_rate
+    from scripts.claim_fast import _raise_to_cost_floor
+
+    exchange_rate.reset_cache()
+    exchange_rate._cache["MYR"] = {
+        "rate": Decimal("2"), "at": time.time(),
+        "source": "test", "failedAt": None}
+    try:
+        body = {
+            "site": "MY",
+            "skuMap": {
+                ";a;": {"price": "1.00", "priceIncludeVat": "1.00",
+                        "originPrice": "10", "isDelete": "0"},
+            },
+        }
+        raised = _raise_to_cost_floor(body, "无法覆盖产品基础成本")
+    finally:
+        exchange_rate.reset_cache()
+
+    # 10 CNY × 1.18 ÷ 2 = 5.90 MYR
+    assert body["skuMap"][";a;"]["priceIncludeVat"] == "5.90"
+    assert raised == "5.90", raised
 
 
 def test_raise_to_cost_floor_returns_none_without_floor_in_message():

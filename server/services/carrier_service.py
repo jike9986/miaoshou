@@ -65,15 +65,18 @@ _COST_FLOOR_PRICE = re.compile(
 _COST_FLOOR_VALUE = re.compile(
     r"基础成本.*?([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
 MAX_COST_FLOOR_RETRIES = 12
-# 认领到采集箱时「价格低就往上提一点」的加价率（负责人 2026-11-25：
-# 认领到采集箱的加价系数，作用在**人民币拿货价**上（负责人 2026-11-25：
-# 「认领到采集箱不是拿货价增一点点，比如 23 就 27、28 人民币」）。
+# 认领到采集箱的加价系数，作用在**人民币拿货价**上。
+#
+# 负责人口径（2026-11-25）：
+#   「我从成品仓库采集只需要卖家价格微微上挑一点，
+#     我还会在妙手重新套用模板改价」
+#   「认领到采集箱不是拿货价增一点点，比如 23 就 27、28 人民币」
 #
 #   23 CNY × 1.18 = 27.14 CNY → 16.70 MYR
 #   5.5 CNY × 1.18 = 6.49 CNY  → 3.99 MYR
 #
 # 加价永远在人民币层面做。先换算成外币再加百分比是错的 ——
-# 那样加的是外币的 18%，折回人民币看就不是「加一点点」。
+# 那样加的是外币的 18%，折回人民币看就不是「微微上挑」。
 # collect_box_service 用同一个常量，两处口径必须一致。
 CLAIM_PRICE_BUMP = Decimal("1.18")
 # 新建载体的 ossMd5 会被上游连续改写几轮。只重读 1 次在 70 件实测里会漏
@@ -116,45 +119,37 @@ def _claim_site_rate(site: str) -> Decimal | None:
 
 def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouError
                                    ) -> dict[str, Any] | None:
-    """妙手报「无法覆盖产品基础成本」时，在**人民币拿货价**上加一点点。
+    """把售价微微上挑，让妙手不再报「无法覆盖产品基础成本」。
 
     ## 负责人口径（2026-11-25）
 
-      「认领到采集箱不是拿货价增一点点，比如 23 就 27、28 人民币」
+      「我从成品仓库采集只需要卖家价格微微上挑一点，
+        我还会在妙手重新套用模板改价」
+      「只需要微微上挑让他不报成本不够就行了」
 
-    认领到采集箱这一步只做一件事：拿货价加一点点，再换成目标站点币种。
+    认领到采集箱**不是定价环节**。这一步只做两件事：
+      1. 拿货价微微上挑（`CLAIM_PRICE_BUMP`，人民币层面 ×1.18）：
+         23 CNY → 27.14 CNY → 16.70 MYR；
+      2. 妙手若还嫌低，就抬到它报的成本线 + 0.01 —— **刚好不报错**为止，
+         不多抬一分。
 
-      · 23 CNY × 1.18 = 27.14 CNY → 16.70 MYR
-      · 5.5 CNY × 1.18 = 6.49 CNY → 3.99 MYR
-
-    **加价永远在人民币层面做**。先换算成外币再加百分比是错的 ——
-    那样加的是外币的 18%，折回人民币看就不是「加一点点」。
-
-    ## 绝不去够妙手的成本线
-
-    妙手报的「产品基础成本」是它自己的**全成本口径**（采购价 + 头程运费 +
-    平台费 + 各类附加）。实测 23 CNY 的货它报 38.40 MYR（≈62 CNY，2.7 倍）——
-    那是「卖到这个价才保本」，不是「拿货价」。
-
-    老实现直接 `new_price = floor + 0.01`，于是每件货都被顶到全成本，
-    看起来就像套了一套 2.7 倍利润的定价模板，负责人一眼就看出不对。
-
-    现在：妙手报的成本线**只用于判断这件货做不做得成**，不用来定价。
-    · 加价后仍低于成本线 → 这件货按这个价卖是亏的，返回 None，
-      调用方抛错交给人处理；
-    · 不会为了过校验把价格顶到全成本。
+    第 2 步只在妙手坚持时兜底。它报的是自己的全成本口径（马来模板里
+    光尾程运费就 16.17 CNY/单，再叠一堆比例费用），不是拿货价，
+    所以绝不能拿来当常规定价；但为了「不报错」这个目的，抬到它的底线
+    是唯一办法，抬多了没有意义。真正的定价由负责人在妙手套模板完成。
     """
     message = str((exc.payload or {}).get("message")
                   or (exc.payload or {}).get("msg") or exc)
     if "无法覆盖产品基础成本" not in message:
         return None
+
+    floor: Decimal | None = None
     floor_match = _COST_FLOOR_VALUE.search(message)
-    if floor_match is None:
-        return None
-    try:
-        floor = Decimal(str(floor_match.group(1)))
-    except InvalidOperation:
-        return None
+    if floor_match is not None:
+        try:
+            floor = Decimal(str(floor_match.group(1)))
+        except InvalidOperation:
+            floor = None
 
     sku_map = payload.get("skuMap")
     if not isinstance(sku_map, dict):
@@ -166,6 +161,7 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
     changed: list[str] = []
     old_price: Decimal | None = None
     new_price: Decimal | None = None
+    used_floor = False
     for key, sku in sku_map.items():
         if not isinstance(sku, dict) or str(sku.get("isDelete", "0")) == "1":
             continue
@@ -176,11 +172,8 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
         if current <= 0:
             continue
 
-        # 目标价一律从**人民币拿货价**算，不用当前价、不用妙手成本线。
-        #
-        # 为什么不拿当前价：调用方在妙手反复报错时会重试多轮，每轮都调
-        # 本函数。拿当前价当基准等于每轮复利，15.38 会滚成
-        # 24.61 → 39.38 → 63.01 → 100.82，比直接用全成本还离谱。
+        # 从**人民币拿货价**算，不用当前价 —— 调用方会重试多轮，
+        # 拿当前价当基准会复利滚价。
         purchase = sku.get("originPrice")
         if purchase in (None, ""):
             continue
@@ -197,36 +190,29 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
             target = (quoted_cny / rate).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
         else:
-            # 拿不到汇率就按当前比例平移，至少不会凭空造数。
             target = (current * (quoted_cny / purchase_d)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        # 加价后仍低于妙手成本线 → 这件货按这个价卖是亏的。
-        # 不去够它（够了就等于套全成本），直接放弃，让调用方抛错。
-        if floor > 0 and target < floor:
-            return None
+        # 微微上挑还不够 → 抬到妙手报的成本线 + 0.01，刚好不报错。
+        if floor is not None and target < floor:
+            target = (floor + Decimal("0.01")).quantize(Decimal("0.01"))
+            used_floor = True
+
         if target <= current:
             continue
         if old_price is None:
             old_price = current
             new_price = target
         sku["price"] = format(target, ".2f")
-        include_vat = target
-        try:
-            old_include_vat = Decimal(str(sku.get("priceIncludeVat")))
-            if old_include_vat.is_finite() and current > 0:
-                include_vat = (old_include_vat * target / current).quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP)
-        except (InvalidOperation, TypeError, ValueError):
-            pass
-        sku["priceIncludeVat"] = format(include_vat, ".2f")
+        sku["priceIncludeVat"] = format(target, ".2f")
         changed.append(str(key))
     if not changed:
         return None
     return {"oldPrice": format(old_price or 0, ".2f"),
-            "costFloor": format(floor, ".2f"),
             "newPrice": format(new_price or 0, ".2f"),
+            "costFloor": format(floor, ".2f") if floor is not None else None,
             "bumpRatio": str(CLAIM_PRICE_BUMP),
+            "usedFloor": used_floor,
             "skuKeys": changed}
 
 LINK_POOL_KEY = "carrier.links"
