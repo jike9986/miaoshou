@@ -708,6 +708,17 @@ function ScheduleFormDrawer({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerSelected, setPickerSelected] = useState<string[]>([]);
   /**
+   * 选择发布商品弹窗的分组筛选（负责人 2026-11-25）：
+   * 「选择发布产品这里应该也加上像产品仓库一样的分组可以选择，
+   *  学员不能发的三个分组依旧看不到也选不了」。
+   *
+   * 选项来自后端 facets（`/warehouse` 返回的 `facets.groups`），
+   * 那里已经用 `group_access.filter_group_options` 把受限三组剔掉了 ——
+   * 学员拿不到这三个选项，也就选不了。纯前端过滤不够，
+   * 真正的闸门在 `publish_job_service` / `group_access.guard_products`。
+   */
+  const [pickerGroupId, setPickerGroupId] = useState<string>("");
+  /**
    * 用户是否手动选过模板。
    *
    * 用 ref 而不是 state：它只用来阻止「异步数据晚到时覆盖用户输入」，
@@ -797,9 +808,12 @@ function ScheduleFormDrawer({
     pageSize: 100,
     accountId: runAccountId,
     claimAccountId: runAccountId,
+    groupId: pickerGroupId || undefined,
     sort: "savedDesc",
   });
   const products = productsQuery.data?.items ?? [];
+  /** 分组筛选栏的选项（后端已按权限剔除受限分组）。 */
+  const pickerGroups = productsQuery.data?.facets?.groups ?? [];
   const shopOptions = useMemo(
     () =>
       switched
@@ -1558,6 +1572,12 @@ function ScheduleFormDrawer({
         page={productPage}
         onPageChange={setProductPage}
         totalPages={Math.ceil((productsQuery.data?.total ?? 0) / 100)}
+        groups={pickerGroups}
+        groupId={pickerGroupId}
+        onGroupChange={(next) => {
+          setPickerGroupId(next);
+          setProductPage(1);   // 换分组回到第一页，否则停在超出范围的页码上
+        }}
       />
     </Dialog>
   );

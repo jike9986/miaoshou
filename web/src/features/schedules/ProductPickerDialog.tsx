@@ -5,8 +5,10 @@
 //   · 点确认把选中的 id 交回给表单。
 
 import { useMemo, useState } from "react";
+import { Folder } from "lucide-react";
 import { Dialog, Button, SkeletonRows } from "@/components/ui";
-import { cn } from "@/lib/utils";
+import type { GroupFacet } from "@/lib/types";
+import { cn, formatCount } from "@/lib/utils";
 
 export interface PickerProduct {
   id: string;
@@ -27,6 +29,16 @@ export interface ProductPickerDialogProps {
   page: number;
   onPageChange: (page: number) => void;
   totalPages: number;
+  /**
+   * 分组筛选（负责人 2026-11-25：「选择发布产品这里应该也加上像产品仓库
+   * 一样的分组可以选择，学员不能发的三个分组依旧看不到也选不了」）。
+   *
+   * `groups` 来自后端 `facets.groups`，那里已经按权限剔掉受限分组，
+   * 所以学员这个栏里只有普通分组 —— 不是前端藏起来的。
+   */
+  groups?: GroupFacet[];
+  groupId?: string;
+  onGroupChange?: (groupId: string) => void;
 }
 
 type Filter = "all" | "claimed" | "unclaimed";
@@ -40,6 +52,7 @@ const FILTER_OPTIONS: Array<{ value: Filter; label: string }> = [
 export function ProductPickerDialog({
   open, onOpenChange, products, loading, selected, onConfirm,
   hasMore, page, onPageChange, totalPages,
+  groups, groupId, onGroupChange,
 }: ProductPickerDialogProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [pending, setPending] = useState<string[]>(selected);
@@ -82,6 +95,55 @@ export function ProductPickerDialog({
       }
     >
       <div className="flex flex-col gap-3">
+        {/* 分组筛选：和成品仓库页一致（横向滚动不换行，chip + 计数）。
+            选项由后端 facets 给，受限三组对学员根本不在列表里。 */}
+        {(groups?.length ?? 0) > 0 && onGroupChange && (
+          <div className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-0.5">
+            <button
+              type="button"
+              aria-pressed={!groupId}
+              onClick={() => onGroupChange("")}
+              className={cn(
+                "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[13px] font-medium transition-colors duration-fast",
+                !groupId
+                  ? "border-brand-600 bg-brand-50 text-brand-700"
+                  : "border-border bg-surface text-fg-secondary hover:border-border-strong",
+              )}
+            >
+              <Folder className="size-3.5" />
+              <span>全部分组</span>
+            </button>
+            {groups!.map((group) => {
+              const active = groupId === String(group.id);
+              return (
+                <button
+                  key={group.id}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => onGroupChange(active ? "" : String(group.id))}
+                  title={group.name}
+                  className={cn(
+                    "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[13px] font-medium transition-colors duration-fast",
+                    active
+                      ? "border-brand-600 bg-brand-50 text-brand-700"
+                      : "border-border bg-surface text-fg-secondary hover:border-border-strong",
+                  )}
+                >
+                  <span className="max-w-[160px] truncate">{group.name}</span>
+                  <span
+                    className={cn(
+                      "num rounded-xs px-1 text-2xs leading-4",
+                      active ? "bg-brand-100 text-brand-800" : "bg-canvas-inset text-fg-muted",
+                    )}
+                  >
+                    {group.count > 9999 ? "9999+" : formatCount(group.count)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div className="flex items-center justify-between">
           <div className="flex gap-2">
             {FILTER_OPTIONS.map((option) => (
@@ -130,8 +192,10 @@ export function ProductPickerDialog({
             <SkeletonRows rows={4} />
           ) : filtered.length === 0 ? (
             <p className="p-6 text-center text-sm text-fg-muted">
-              {filter === "claimed" ? "没有已认领的商品" :
-                filter === "unclaimed" ? "没有未认领的商品" : "当前账号没有可选仓库商品"}
+              {groupId
+                ? "这个分组下没有可选商品"
+                : filter === "claimed" ? "没有已认领的商品" :
+                  filter === "unclaimed" ? "没有未认领的商品" : "当前账号没有可选仓库商品"}
             </p>
           ) : (
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">

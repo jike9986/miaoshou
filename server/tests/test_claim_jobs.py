@@ -337,10 +337,16 @@ def test_recovery_is_opt_in_and_never_retries(monkeypatch):
         items[0].status = "ok"
         items[1].status = "running"
         db.commit()
+        # 2026-11-25 语义反转：原来必须显式设 "1" 才恢复，而生产上这个变量
+        # 从来没人设过 —— 结果进程重启后卡住的认领批次永远收不了尾，
+        # 界面上「认领中」挂 19 小时、还不能重新认领。
+        # 现在默认就恢复（单 worker 部署），只有显式设 "0" 才跳过。
         monkeypatch.delenv("AOHUANG_CLAIM_RECOVER_SINGLE_WORKER", raising=False)
-        assert claim_job_service.recover_interrupted_on_startup() == 0
-        monkeypatch.setenv("AOHUANG_CLAIM_RECOVER_SINGLE_WORKER", "1")
         assert claim_job_service.recover_interrupted_on_startup() == 1
+        # 关掉开关时不恢复：多 worker 部署会互相把对方的任务误判成中断
+        monkeypatch.setenv("AOHUANG_CLAIM_RECOVER_SINGLE_WORKER", "0")
+        assert claim_job_service.recover_interrupted_on_startup() == 0
+        monkeypatch.delenv("AOHUANG_CLAIM_RECOVER_SINGLE_WORKER", raising=False)
         db.expire_all()
         batch = claim_job_service.get(db, batch.id, account.id)
         items = batch_service.items_of(db, batch.id)
