@@ -1232,7 +1232,14 @@ function ScheduleFormDrawer({
                 模板 5 个按钮：flex-1 均分 → 每个约 78px（gap 6×4=24）
                 最长「马来西亚」约 48px + 勾选图标 12 + padding 12 = 72px，
                 78px 排得下，所以 5 个是一行。 */}
-          <div className="grid gap-3 md:grid-cols-[148px_minmax(0,1fr)]">
+          {/* 店铺 + 模板这一行必须 `sm:col-span-2`。
+              外层是 `<div className="grid gap-3 sm:grid-cols-2">`（1117 行），
+              这一行如果不横跨两列，在 ≥640px 的窗口下只拿到**半宽**：
+              模板区从 592px 掉到 290px（窄屏时只有 130px），
+              5 个按钮只能排 2 个一行、堆成三行。
+              这就是「改了三次还是一列」的真正原因 —— 之前几次都在调
+              内层列宽，而外层的半宽约束一直没动。 */}
+          <div className="grid gap-3 sm:col-span-2 md:grid-cols-[148px_minmax(0,1fr)]">
           <Field
             label="目标店铺"
             required
