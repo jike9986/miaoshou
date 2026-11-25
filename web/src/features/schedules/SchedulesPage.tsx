@@ -889,15 +889,15 @@ function ScheduleFormDrawer({
     setSelectedProductIds([]);
     setPlannedRuns(1);
     setProductPage(1);
-    setShopId(shops[0]?.shopId ?? "");
+    // 店铺也留空，等用户自己选（同上，不替用户做主）
+    setShopId("");
     setRunAccountId(accountId);
-    // 多账号模式：默认全选所有账号（老师新建任务）
-    if (isTeacher && !task && accounts.length > 1) {
-      setCheckedAccountIds(accounts.map((a) => a.id));
-      // 不预加载——账号渲染后 useEffect 会按需触发
-    } else {
-      setCheckedAccountIds([]);
-    }
+    // 新建任务时一个账号都不预选（负责人 2026-11-24：
+    // 「创建定时任务不要自动全选店铺」）。
+    // 原来老师模式下默认 `setCheckedAccountIds(accounts.map(...))` 把九个账号
+    // 全勾上 —— 一个任务等于一次性发到所有账号的所有店铺，代价太大。
+    // 现在让用户自己勾，勾了哪个就只发哪个。
+    setCheckedAccountIds([]);
     setShopsByAccount({});
     setSelectedShopIdsByAccount({});
     // 模板默认值单独一个 effect（见下），因为它依赖异步回来的 selectedTemplates
@@ -1228,11 +1228,11 @@ function ScheduleFormDrawer({
 
               上一版错在把整张对话框从 640px 加到 880px —— 该改的是这一行的
               宽度分配，不是页面宽度。现在保持 lg(640px)：
-                内容 592px = 店铺 180px + gap 12 + 模板 400px
-                模板 5 个按钮：(400 - 4×6) / 5 = 75px 每个，一行排得下
-                （最长「马来西亚」+ 勾选图标约 60px，还有余量）。
-              店铺 180px 显示「C ZYM SHOP · 马来」，完整名字悬停可看 title。 */}
-          <div className="grid gap-3 sm:grid-cols-[180px_minmax(0,1fr)]">
+                内容 592px = 店铺 168px + gap 12 + 模板 412px
+                模板 5 个按钮：flex-1 均分 → 每个约 78px（gap 6×4=24）
+                最长「马来西亚」约 48px + 勾选图标 12 + padding 12 = 72px，
+                78px 排得下，所以 5 个是一行。 */}
+          <div className="grid gap-3 md:grid-cols-[148px_minmax(0,1fr)]">
           <Field
             label="目标店铺"
             required
@@ -1310,9 +1310,25 @@ function ScheduleFormDrawer({
                   : "该国家还没有对应模板"}
               </p>
             ) : (
-              // 模板名必须完整显示（负责人 2026-11-23：「这个模板肯定要全部
-              // 显示出来啊」）。原来用 truncate 截成「马…」「菲…」，等于没法选。
-              <div className="flex flex-wrap gap-2">
+              // 模板按钮自适应列宽：宽窗口一行 5 个，窗口窄时自动降成 3+2/2+2+1。
+              //
+              // 踩过两次坑，记下来避免再犯：
+              //   ① flex-wrap + flex-1 —— 换行取决于「内容宽度 + min-content」，
+              //      字体/DPI 一变就挤成一列（实测过）。
+              //   ② grid-cols-5 硬定 5 列 —— 窗口窄到模板区只剩 232px 时，
+              //      每个按钮 41px，文字全被截成省略号（也实测过）。
+              //   ③ 按钮上的 overflow-hidden 会让 flex 子项的 min-width:auto
+              //      解析成 0，文字明明放得下也被压成「…」（本次的坑）。
+              //   ④ 窗口只有 640px 左右时，店铺 148 + 模板 292 → 每列只剩
+              //      53px，「马来」+ 勾选图标放不下，还是截。
+              //
+              // 所以两层一起解决：
+              //   · 店铺/模板同一行的断点从 sm(640) 提到 md(768) ——
+              //     窗口窄时自动改成上下两行，模板独占整行 452px，
+              //     5 个按钮每个 85px，很宽松；
+              //   · 模板容器用 auto-fit + minmax(60px,1fr) ——
+              //     就算真挤到一行，也只会排 4 列而不是把 5 个都压成省略号。
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(60px,1fr))] gap-1.5">
                 {templateOptions.map((item) => {
                   const active = template === item.name;
                   return (
@@ -1327,11 +1343,10 @@ function ScheduleFormDrawer({
                         setTemplate(active ? "" : item.name);
                       }}
                       className={cn(
-                        // 模板按钮铺满一行：basis 按 5 个算（gap 8px 扣掉），
-                        // 负责人原话就是「定价模板这五个弄成一行」。
-                        // 模板不足 5 个时 flex-1 会让它们均分整行，不留空档；
-                        // 超过 5 个才折到第二行。
-                        "flex min-w-[72px] flex-1 basis-[calc(20%-7px)] items-center justify-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition-colors duration-fast",
+                        // 格子由外层 grid 决定（5 等分），按钮自己铺满格子即可。
+                        // text 用 truncate 兜底：万一以后模板名变长，
+                        // 宁可显示「马来尼…」也不要撑破一行。
+                        "flex w-full items-center justify-center gap-1 rounded-md border px-1 py-1.5 text-xs transition-colors duration-fast",
                         item.invalid
                           ? "cursor-not-allowed border-border-subtle text-fg-muted line-through"
                           : active
@@ -1339,8 +1354,8 @@ function ScheduleFormDrawer({
                             : "border-border text-fg-secondary hover:border-border-strong hover:bg-surface-hover"
                       )}
                     >
-                      {active && <Check className="size-3 shrink-0" />}
-                      <span className="whitespace-nowrap">{item.name}</span>
+                      {active && <Check className="size-2.5 shrink-0" />}
+                      <span className="min-w-0 truncate">{item.name}</span>
                     </button>
                   );
                 })}
