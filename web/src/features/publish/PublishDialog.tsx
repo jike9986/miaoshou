@@ -423,7 +423,9 @@ export function PublishDialog({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      size={result ? "lg" : "md"}
+      // 与「新建定时任务」同宽（负责人 2026-11-25：「这个弹窗大小和定时发布的
+      // 一样啊」）。原来是 md=480px，账号两列挤得很难看；lg=640px 刚好放下三列。
+      size="lg"
       title={result ? "发布结果" : "发布到店铺"}
       description={result ? "结果保留在弹窗里，关闭后可在发布记录里回看。" : ""}
       closeOnOverlay={false}
@@ -510,17 +512,13 @@ export function PublishDialog({
             </InlineError>
           )}
 
-          <div className="rounded-md border border-border-subtle bg-canvas-inset/60 p-3">
-            <div className="flex items-center justify-between">
-              <p className="text-[13px] font-medium text-fg-secondary">发布清单</p>
-              <Badge variant="neutral">
-                <span className="num">{warehouseIds.length}</span> 件
-              </Badge>
-            </div>
-            <p className="mt-1 font-mono text-2xs leading-4 text-fg-muted">
-              {warehouseIds.slice(0, 12).join(", ")}
-              {warehouseIds.length > 12 ? ` …等 ${warehouseIds.length} 件` : ""}
-            </p>
+          {/* 负责人 2026-11-25：「发布清单显示多少件就行了」——
+              原来下面还挂一行商品 ID（前 12 个 + 等 N 件），既看不懂也占地方。 */}
+          <div className="flex items-center justify-between rounded-md border border-border-subtle bg-canvas-inset/60 px-3 py-2">
+            <p className="text-[13px] font-medium text-fg-secondary">发布清单</p>
+            <Badge variant="neutral">
+              <span className="num">{warehouseIds.length}</span> 件
+            </Badge>
           </div>
 
           {shopsQuery.isLoading ? (
@@ -554,7 +552,7 @@ export function PublishDialog({
                     </button>
                   </div>
                   <div className="max-h-56 overflow-y-auto rounded-md border border-border-subtle p-2">
-                    <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-1 sm:grid-cols-3">
                     {accounts.map((account) => {
                       const checked = checkedAccountIds.includes(account.id);
                       const accShopsRaw = shopsByAccount[account.id];
@@ -727,13 +725,6 @@ export function PublishDialog({
                       </button>
                     );
                   })}
-                {templateSites.filter((site) => selectedShopSites.includes(site)).length === 0 && (
-                  <span className="text-xs text-fg-muted">
-                    {templatesQuery.isLoading
-                      ? "正在读取定价模板…"
-                      : "在上面勾选店铺后，这里会出现对应国家的模板"}
-                  </span>
-                )}
               </div>
               {templatesQuery.isError && (
                 <InlineError onRetry={() => void templatesQuery.refetch()}>
