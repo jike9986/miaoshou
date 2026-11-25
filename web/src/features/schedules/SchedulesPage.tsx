@@ -998,6 +998,12 @@ function ScheduleFormDrawer({
     return selectedShopIdsByAccount[key] ?? [];
   }, [selectedShopIdsByAccount, runAccountId, accountId]);
 
+  /** 当前账号的店铺 id 集合：过滤掉属于别的账号的残留 id。 */
+  const currentAccountShopIds = useMemo(
+    () => new Set(shopOptions.map((shop) => shop.shopId)),
+    [shopOptions]
+  );
+
   /** 已勾店铺的摘要文字（一个显示全名，多个显示数量）。 */
   const pickedShopSummary = useMemo(() => {
     const shops = pickedShopIdsNow
@@ -1016,31 +1022,36 @@ function ScheduleFormDrawer({
       const site = String(shop?.site ?? "").trim().toUpperCase();
       if (site) sites.add(site);
     };
+    // 只认本账号的店铺 id —— 别的账号的 id 混进来会把错误的国家带进筛选
     // ① 账号卡片里勾选的店铺（主路径）
-    for (const id of pickedShopIdsNow) addShop(id);
-    // ② 一个都没勾时才看下拉兜底值
-    if (pickedShopIdsNow.length === 0) addShop(shopId);
+    for (const id of pickedShopIdsNow) {
+      if (currentAccountShopIds.has(id)) addShop(id);
+    }
     return sites;
-  }, [pickedShopIdsNow, shopId, shopOptions]);
+  }, [pickedShopIdsNow, currentAccountShopIds, shopOptions]);
 
   /**
    * 模板列表 + 「是否在当前店铺国家范围内」。
    *
-   * 2026-11-25 负责人：「上面选择的只有马来和菲律宾店铺，定价模板自动勾选，
-   * 但是其他的定价模板是不能选择的是灰的」——
-   * 原来是**过滤掉**（列表里只剩马来/菲律宾），但用户希望看到全部 5 个、
-   * 不属于当前国家的置灰。这样一眼能看清「我选了哪些国家、对应哪些模板」，
-   * 而不是模板凭空消失只剩两个。
+   * 2026-11-25 负责人：「像上面只有马来和菲律宾，其他国家的定价模板
+   * 根本不能选择懂不懂」——
+   * 所以不是置灰，是**根本不列出**。勾了几个国家的店铺，就只出现那几个
+   * 国家的模板；没有对应国家的模板直接不渲染，用户不可能选错。
+   *
+   * 一个店铺都没勾时不收窄（还没有国家可言，先列全便于先定模板）。
+   * 当前国家若一套模板都没有，退回全列 —— 否则「定价模板」这个必填项
+   * 会变成空列表，任务根本建不出来。
    */
   const templateOptions = useMemo(() => {
-    return templates.map((item) => {
+    if (selectedSites.size === 0) return templates;
+    const matched = templates.filter((item) => {
       const site = String(
         (item.template as Record<string, unknown> | undefined)?.site ?? ""
       ).trim().toUpperCase();
-      // 没选店铺时不收窄（还没有国家可言）；选了就只放行对应的
-      const outOfScope = selectedSites.size > 0 && site !== "" && !selectedSites.has(site);
-      return { ...item, outOfScope };
+      // site 为空的模板（老数据没记站点）视为通用，保留
+      return site === "" || selectedSites.has(site);
     });
+    return matched.length > 0 ? matched : templates;
   }, [templates, selectedSites]);
 
   useEffect(() => {
@@ -1333,64 +1344,20 @@ function ScheduleFormDrawer({
             required={pickedShopIdsNow.length === 0}
             error={errors.shopId ?? null}
           >
-            {pickedShopIdsNow.length > 0 ? (
-              /* 上面已经勾好店铺了，这里只做摘要确认，不再给一个会互相打架的
-                 下拉框（负责人 2026-11-25：「上面都可以选店铺，下面这个目标
-                 店铺没有用吧」）。 */
-              <div className="flex h-9 items-center overflow-hidden rounded-md border border-border-subtle bg-canvas-inset px-2 text-xs text-fg-secondary">
-                <span className="truncate">{pickedShopSummary}</span>
-              </div>
-            ) : shopOptions.length > 1 ? (
-              <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border-subtle p-2">
-                {shopOptions.map((shop) => {
-                  const picked = (selectedShopIdsByAccount[runAccountId || accountId] ?? []);
-                  const checked = picked.includes(shop.shopId);
-                  return (
-                    <label
-                      key={shop.shopId}
-                      className="flex cursor-pointer items-center gap-2 text-xs"
-                    >
-                      <input
-                        type="checkbox"
-                        className="h-3.5 w-3.5 cursor-pointer rounded border-border accent-brand-500"
-                        checked={checked}
-                        onChange={(e) => {
-                          setSelectedShopIdsByAccount((prev) => {
-                            const key = runAccountId || accountId;
-                            const list = prev[key] ?? [];
-                            return {
-                              ...prev,
-                              [key]: e.target.checked
-                                ? [...list, shop.shopId]
-                                : list.filter((id) => id !== shop.shopId),
-                            };
-                          });
-                        }}
-                      />
-                      <span className="truncate text-fg-secondary">
-                        {shop.name}
-                        <span className="ml-1 text-fg-muted">
-                          · {shop.siteName || shop.site}
-                        </span>
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            ) : (
-              <Select
-                value={shopId}
-                onChange={setShopId}
-                options={shopOptions.map((shop) => ({
-                  value: shop.shopId,
-                  label: `${shop.name} · ${shop.siteName || shop.site}`,
-                }))}
-                placeholder={shopOptions.length === 0 ? "该账号下没有店铺" : "选择店铺"}
-                disabled={shopOptions.length === 0}
-              />
-            )}
+            {/* 目标店铺彻底只读：上面账号卡片勾哪个店就发哪个店。
+                负责人 2026-11-25：「下拉框兜底。不需要，去掉这个」——
+                所以连兜底下拉也删了，一个都没勾时只给一句提示，
+                不让用户在这里再选一次（两处都能决定发哪个店必然打架）。 */}
+            <div className="flex h-9 items-center overflow-hidden rounded-md border border-border-subtle bg-canvas-inset px-2 text-xs text-fg-secondary">
+              <span className="truncate">
+                {pickedShopIdsNow.length > 0
+                  ? pickedShopSummary
+                  : shopOptions.length === 0
+                    ? "该账号下没有店铺"
+                    : "在上面的账号里勾选要发的店铺"}
+              </span>
+            </div>
           </Field>
-
           {/*
             定价模板改成勾选开关（负责人 2026-11-23）：
             「发布的时候不是说之前是把这个定价模板差分出来不是下拉吗，
@@ -1413,8 +1380,8 @@ function ScheduleFormDrawer({
             action={
               <span className="text-2xs text-fg-muted">
                 {selectedSites.size === 0
-                  ? "选好目标店铺后自动收窄"
-                  : `可多选（${[...selectedSites].join("、")} 店铺已选）`}
+                  ? "勾选店铺后只显示对应国家的模板"
+                  : `只显示 ${[...selectedSites].join("、")} 的模板，可多选`}
               </span>
             }
           >
@@ -1448,15 +1415,14 @@ function ScheduleFormDrawer({
                   // 多选：点一下加入、再点一下移出（负责人 2026-11-25
                   // 「怎么只能单选定价模板」）。不同国家的店铺各用自己那套。
                   const active = pickedTemplates.includes(item.name);
-                  const disabled = item.invalid || item.outOfScope;
+                  // 不在当前国家范围内的模板压根不会出现在这个列表里
+                  // （见 templateOptions 的过滤），所以只需要管 invalid。
+                  const disabled = Boolean(item.invalid);
                   return (
                     <button
                       key={item.name}
                       type="button"
                       disabled={disabled}
-                      title={item.outOfScope
-                        ? "当前目标店铺里没有这个国家的店，这套模板用不上"
-                        : undefined}
                       aria-pressed={active}
                       onClick={() => {
                         // 记下「用户自己选过了」：之后默认值晚到也不能覆盖他
@@ -1474,9 +1440,7 @@ function ScheduleFormDrawer({
                         "flex w-full items-center justify-center gap-1 rounded-md border px-1 py-1.5 text-xs transition-colors duration-fast",
                         item.invalid
                           ? "cursor-not-allowed border-border-subtle text-fg-muted line-through"
-                          : item.outOfScope
-                            ? "cursor-not-allowed border-border-subtle bg-canvas-inset text-fg-disabled"
-                            : active
+                          : active
                             ? "border-brand-600 bg-brand-50 font-medium text-brand-700"
                             : "border-border text-fg-secondary hover:border-border-strong hover:bg-surface-hover"
                       )}
