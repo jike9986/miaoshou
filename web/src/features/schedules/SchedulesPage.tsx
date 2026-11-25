@@ -984,6 +984,30 @@ function ScheduleFormDrawer({
    * 于是五个国家模板全亮着（负责人：「这个定价模板怎么不是根据上面的店铺
    * 来可以选择的」）。现在把下拉框选中的店铺也计入。
    */
+  /**
+   * 当前运行账号下已勾选的店铺（2026-11-25）。
+   *
+   * 负责人：「上面都可以选店铺，下面这个目标店铺没有用吧」——
+   * 对。上面账号卡片里已经把每个账号的店铺勾好了，这里再放一个下拉框
+   * 只会让人以为要再选一次，而且它和上面的勾选互相打架（下拉选 A 店、
+   * 上面勾 B 店，到底发哪个？）。
+   * 现在店目标完全由上面决定，下拉只在「上面一个都没勾」时兜底显示。
+   */
+  const pickedShopIdsNow = useMemo(() => {
+    const key = runAccountId || accountId;
+    return selectedShopIdsByAccount[key] ?? [];
+  }, [selectedShopIdsByAccount, runAccountId, accountId]);
+
+  /** 已勾店铺的摘要文字（一个显示全名，多个显示数量）。 */
+  const pickedShopSummary = useMemo(() => {
+    const shops = pickedShopIdsNow
+      .map((id) => shopOptions.find((item) => item.shopId === id))
+      .filter((shop): shop is NonNullable<typeof shop> => Boolean(shop));
+    if (shops.length === 0) return "";
+    if (shops.length === 1) return `${shops[0].name} · ${shops[0].siteName || shops[0].site}`;
+    return `已选 ${shops.length} 个店铺`;
+  }, [pickedShopIdsNow, shopOptions]);
+
   const selectedSites = useMemo(() => {
     const sites = new Set<string>();
     const addShop = (id: string | undefined | null): void => {
@@ -992,24 +1016,31 @@ function ScheduleFormDrawer({
       const site = String(shop?.site ?? "").trim().toUpperCase();
       if (site) sites.add(site);
     };
-    // ① 目标店铺下拉框当前选中的那一个
-    addShop(shopId);
-    // ② 账号卡片里勾选的店铺（多店铺模式）
-    const picked = selectedShopIdsByAccount[runAccountId || accountId] ?? [];
-    for (const id of picked) addShop(id);
+    // ① 账号卡片里勾选的店铺（主路径）
+    for (const id of pickedShopIdsNow) addShop(id);
+    // ② 一个都没勾时才看下拉兜底值
+    if (pickedShopIdsNow.length === 0) addShop(shopId);
     return sites;
-  }, [shopId, selectedShopIdsByAccount, runAccountId, accountId, shopOptions]);
+  }, [pickedShopIdsNow, shopId, shopOptions]);
 
+  /**
+   * 模板列表 + 「是否在当前店铺国家范围内」。
+   *
+   * 2026-11-25 负责人：「上面选择的只有马来和菲律宾店铺，定价模板自动勾选，
+   * 但是其他的定价模板是不能选择的是灰的」——
+   * 原来是**过滤掉**（列表里只剩马来/菲律宾），但用户希望看到全部 5 个、
+   * 不属于当前国家的置灰。这样一眼能看清「我选了哪些国家、对应哪些模板」，
+   * 而不是模板凭空消失只剩两个。
+   */
   const templateOptions = useMemo(() => {
-    if (selectedSites.size === 0) return templates;
-    const matched = templates.filter((item) => {
+    return templates.map((item) => {
       const site = String(
         (item.template as Record<string, unknown> | undefined)?.site ?? ""
       ).trim().toUpperCase();
-      return site === "" || selectedSites.has(site);
+      // 没选店铺时不收窄（还没有国家可言）；选了就只放行对应的
+      const outOfScope = selectedSites.size > 0 && site !== "" && !selectedSites.has(site);
+      return { ...item, outOfScope };
     });
-    // 一个都对不上时不要给空列表：那等于把「模板」这个必填项废掉
-    return matched.length > 0 ? matched : templates;
   }, [templates, selectedSites]);
 
   useEffect(() => {
@@ -1299,10 +1330,17 @@ function ScheduleFormDrawer({
           <div className="grid gap-3 sm:col-span-2 md:grid-cols-[148px_minmax(0,1fr)]">
           <Field
             label="目标店铺"
-            required
+            required={pickedShopIdsNow.length === 0}
             error={errors.shopId ?? null}
           >
-            {shopOptions.length > 1 ? (
+            {pickedShopIdsNow.length > 0 ? (
+              /* 上面已经勾好店铺了，这里只做摘要确认，不再给一个会互相打架的
+                 下拉框（负责人 2026-11-25：「上面都可以选店铺，下面这个目标
+                 店铺没有用吧」）。 */
+              <div className="flex h-9 items-center overflow-hidden rounded-md border border-border-subtle bg-canvas-inset px-2 text-xs text-fg-secondary">
+                <span className="truncate">{pickedShopSummary}</span>
+              </div>
+            ) : shopOptions.length > 1 ? (
               <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border-subtle p-2">
                 {shopOptions.map((shop) => {
                   const picked = (selectedShopIdsByAccount[runAccountId || accountId] ?? []);
@@ -1410,11 +1448,15 @@ function ScheduleFormDrawer({
                   // 多选：点一下加入、再点一下移出（负责人 2026-11-25
                   // 「怎么只能单选定价模板」）。不同国家的店铺各用自己那套。
                   const active = pickedTemplates.includes(item.name);
+                  const disabled = item.invalid || item.outOfScope;
                   return (
                     <button
                       key={item.name}
                       type="button"
-                      disabled={item.invalid}
+                      disabled={disabled}
+                      title={item.outOfScope
+                        ? "当前目标店铺里没有这个国家的店，这套模板用不上"
+                        : undefined}
                       aria-pressed={active}
                       onClick={() => {
                         // 记下「用户自己选过了」：之后默认值晚到也不能覆盖他
@@ -1432,7 +1474,9 @@ function ScheduleFormDrawer({
                         "flex w-full items-center justify-center gap-1 rounded-md border px-1 py-1.5 text-xs transition-colors duration-fast",
                         item.invalid
                           ? "cursor-not-allowed border-border-subtle text-fg-muted line-through"
-                          : active
+                          : item.outOfScope
+                            ? "cursor-not-allowed border-border-subtle bg-canvas-inset text-fg-disabled"
+                            : active
                             ? "border-brand-600 bg-brand-50 font-medium text-brand-700"
                             : "border-border text-fg-secondary hover:border-border-strong hover:bg-surface-hover"
                       )}

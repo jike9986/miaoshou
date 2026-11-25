@@ -28,6 +28,15 @@ KIND = "warehouse_claim"
 # 批次表，只是 kind 不同。批次页要能同时看到两种，所以这里放行两个 kind。
 VISIBLE_KINDS = (KIND, "publish_job")
 MAX_ITEMS = 5000
+# 一个认领批次多久没动静就判定「已经死了」。
+#
+# 认领是进程内跑的，进程被杀时没人把 status 改回来。启动恢复
+# （recover_interrupted_on_startup）能收拾「重启前」的残留，但如果进程
+# 一直活着、那条 worker 线程自己死了（比如卡在一个永不返回的 HTTP 上），
+# 启动恢复管不到 —— 它会一直挂着，并且把「重新认领」拦住。
+#
+# 这个超时是最后一道闸：超过它，任何一次新建认领都会顺手把这条标记成失败。
+STALE_JOB_SECONDS = 30 * 60
 COPY_BATCH_SIZE = 100
 
 
@@ -46,6 +55,8 @@ def create(db: Session, body: dict[str, Any], account_id: int, operator_id: int 
     _validate_member_items(db, ids, operator, account_id)
     hold_for_session(db, [f"claim-create:{account_id}:{operator_id}"], blocking=False,
                      busy_message="认领任务正在创建，请稍后查看批次")
+    # 先收掉已经死掉的批次，否则下面那条「已在认领」会把它永久拦死
+    reap_stale(db, account_id=account_id)
     active = db.query(Batch).filter(
         Batch.account_id == account_id, Batch.operator_id == operator_id,
         Batch.shop_id == str(body["shopId"]),
@@ -63,6 +74,40 @@ def create(db: Session, body: dict[str, Any], account_id: int, operator_id: int 
     db.add_all([BatchItem(batch_id=batch.id, detail_id=value, status="pending") for value in ids])
     db.flush()
     return batch
+
+
+def reap_stale(db: Session, *, account_id: int | None = None) -> int:
+    """把长时间没动静的 pending/running 认领批次标记为失败。
+
+    返回处理条数。**只动认领类批次**（`settings.kind == KIND`），
+    发布批次有自己的 recover 逻辑，不要在这里顺手改。
+    """
+    cutoff = now_ts() - STALE_JOB_SECONDS
+    query = db.query(Batch).filter(Batch.status.in_(["pending", "running"]))
+    if account_id is not None:
+        query = query.filter(Batch.account_id == account_id)
+    reaped = 0
+    for batch in query.all():
+        if (batch.settings or {}).get("kind") != KIND:
+            continue
+        # 用 updated_at 判断：worker 每推进一件都会 touch 一次
+        touched = float(batch.updated_at or batch.created_at or 0)
+        if touched >= cutoff:
+            continue
+        for item in batch_service.items_of(db, batch.id):
+            if item.status in {"pending", "running"}:
+                item.status = "failed"
+                item.message = "任务长时间没有进展，已判定中断，可以重新认领"
+        batch.status = "failed"
+        batch.errors = [*(batch.errors or []),
+                        "任务长时间没有进展，已判定中断"]
+        batch.finished_at = now_ts()
+        batch.updated_at = now_ts()
+        reaped += 1
+    if reaped:
+        db.commit()
+        logger.warning("回收了 %d 个卡死的认领批次", reaped)
+    return reaped
 
 
 def _validate_member_items(db: Session, warehouse_ids: list[str],
@@ -251,8 +296,33 @@ def list_jobs(db: Session, account_id: int, limit: int,
 
 
 def recover_interrupted_on_startup() -> int:
-    """Enable only when this service is the sole worker using the database."""
-    if os.getenv("AOHUANG_CLAIM_RECOVER_SINGLE_WORKER") != "1":
+    """把上次进程死掉时残留的 pending/running 认领批次收尾。
+
+    ## 为什么必须做
+
+    认领是**进程内**跑的（`run()` 里直接循环调妙手），进程一重启，那些
+    停在 `running` 的批次就再也没人推进了。表现为：
+
+      · 界面一直显示「认领中」，一天都不动
+      · 进度停在 0/203（子项还全是 running）
+      · 想重新认领 —— `create()` 里有 `Batch.status.in_(["pending","running"])`
+        的去重检查，会被当成「任务还在跑」直接拦住
+
+    ## 原实现为什么没生效
+
+    第一行是 `if os.getenv("AOHUANG_CLAIM_RECOVER_SINGLE_WORKER") != "1":
+    return 0`，而这个变量谁都没设过（2026-11-25 在
+    `/etc/aohuang-listing-v2.env` 里确认不存在）。于是这个函数**从来没
+    执行过一次**，两个批次就这样卡了 19 小时。
+
+    现在的取值规则（默认就恢复，不要靠人去设环境变量）：
+      · 显式设 `0` → 不恢复（多 worker 部署时用，避免互相踩）
+      · 其他任何情况 → 恢复
+
+    多 worker 之所以需要关掉：几个 worker 同时启动，A 会把 B 正在跑的任务
+    误判成「服务中断」。当前服务是 `--workers 1`，所以默认开。
+    """
+    if os.getenv("AOHUANG_CLAIM_RECOVER_SINGLE_WORKER", "1") == "0":
         return 0
     count = 0
     db = SessionLocal()
