@@ -984,51 +984,32 @@ function ScheduleFormDrawer({
    * 于是五个国家模板全亮着（负责人：「这个定价模板怎么不是根据上面的店铺
    * 来可以选择的」）。现在把下拉框选中的店铺也计入。
    */
+
   /**
-   * 当前运行账号下已勾选的店铺（2026-11-25）。
+   * 已勾选账号下、又被勾选的店铺对应的国家集合。
    *
-   * 负责人：「上面都可以选店铺，下面这个目标店铺没有用吧」——
-   * 对。上面账号卡片里已经把每个账号的店铺勾好了，这里再放一个下拉框
-   * 只会让人以为要再选一次，而且它和上面的勾选互相打架（下拉选 A 店、
-   * 上面勾 B 店，到底发哪个？）。
-   * 现在店目标完全由上面决定，下拉只在「上面一个都没勾」时兜底显示。
+   * ★ 数据源必须是 `shopsByAccount`（**所有**已勾账号的店铺），不是
+   * `shopOptions`（只含当前登录账号的店铺）。
+   *
+   * 2026-11-25 实测问题：老师在多账号模式里勾了「梁静」这个**别的**账号，
+   * 它的店铺在 `shopsByAccount["9"]` 里、不在 `shopOptions` 里。原来拿
+   * `shopOptions` 查，`currentAccountShopIds.has(id)` 恒为 false，
+   * `selectedSites` 永远是空集 → `templateOptions` 退回全列，
+   * 于是「只勾了马来和菲律宾，泰国/越南/新加坡的模板却还能点」。
    */
-  const pickedShopIdsNow = useMemo(() => {
-    const key = runAccountId || accountId;
-    return selectedShopIdsByAccount[key] ?? [];
-  }, [selectedShopIdsByAccount, runAccountId, accountId]);
-
-  /** 当前账号的店铺 id 集合：过滤掉属于别的账号的残留 id。 */
-  const currentAccountShopIds = useMemo(
-    () => new Set(shopOptions.map((shop) => shop.shopId)),
-    [shopOptions]
-  );
-
-  /** 已勾店铺的摘要文字（一个显示全名，多个显示数量）。 */
-  const pickedShopSummary = useMemo(() => {
-    const shops = pickedShopIdsNow
-      .map((id) => shopOptions.find((item) => item.shopId === id))
-      .filter((shop): shop is NonNullable<typeof shop> => Boolean(shop));
-    if (shops.length === 0) return "";
-    if (shops.length === 1) return `${shops[0].name} · ${shops[0].siteName || shops[0].site}`;
-    return `已选 ${shops.length} 个店铺`;
-  }, [pickedShopIdsNow, shopOptions]);
-
   const selectedSites = useMemo(() => {
     const sites = new Set<string>();
-    const addShop = (id: string | undefined | null): void => {
-      if (!id) return;
-      const shop = shopOptions.find((item) => item.shopId === id);
-      const site = String(shop?.site ?? "").trim().toUpperCase();
-      if (site) sites.add(site);
-    };
-    // 只认本账号的店铺 id —— 别的账号的 id 混进来会把错误的国家带进筛选
-    // ① 账号卡片里勾选的店铺（主路径）
-    for (const id of pickedShopIdsNow) {
-      if (currentAccountShopIds.has(id)) addShop(id);
+    for (const accId of checkedAccountIds) {
+      const accShops = shopsByAccount[accId] ?? [];
+      const picked = selectedShopIdsByAccount[accId] ?? [];
+      for (const shop of accShops) {
+        if (!picked.includes(shop.shopId)) continue;
+        const site = String(shop.site ?? "").trim().toUpperCase();
+        if (site) sites.add(site);
+      }
     }
     return sites;
-  }, [pickedShopIdsNow, currentAccountShopIds, shopOptions]);
+  }, [checkedAccountIds, shopsByAccount, selectedShopIdsByAccount]);
 
   /**
    * 模板列表 + 「是否在当前店铺国家范围内」。
@@ -1321,43 +1302,11 @@ function ScheduleFormDrawer({
             )
           )}
 
-          {/* 店铺和定价模板**同一行**，模板那 5 个按钮也**同一行**。
-              负责人 2026-11-24：「不是说定价模板这五个弄成一行吗，你给这个
-              页面加宽干什么」、「不是我是说店铺和模板在同一行」。
-
-              上一版错在把整张对话框从 640px 加到 880px —— 该改的是这一行的
-              宽度分配，不是页面宽度。现在保持 lg(640px)：
-                内容 592px = 店铺 168px + gap 12 + 模板 412px
-                模板 5 个按钮：flex-1 均分 → 每个约 78px（gap 6×4=24）
-                最长「马来西亚」约 48px + 勾选图标 12 + padding 12 = 72px，
-                78px 排得下，所以 5 个是一行。 */}
-          {/* 店铺 + 模板这一行必须 `sm:col-span-2`。
-              外层是 `<div className="grid gap-3 sm:grid-cols-2">`（1117 行），
-              这一行如果不横跨两列，在 ≥640px 的窗口下只拿到**半宽**：
-              模板区从 592px 掉到 290px（窄屏时只有 130px），
-              5 个按钮只能排 2 个一行、堆成三行。
-              这就是「改了三次还是一列」的真正原因 —— 之前几次都在调
-              内层列宽，而外层的半宽约束一直没动。 */}
-          <div className="grid gap-3 sm:col-span-2 md:grid-cols-[148px_minmax(0,1fr)]">
-          <Field
-            label="目标店铺"
-            required={pickedShopIdsNow.length === 0}
-            error={errors.shopId ?? null}
-          >
-            {/* 目标店铺彻底只读：上面账号卡片勾哪个店就发哪个店。
-                负责人 2026-11-25：「下拉框兜底。不需要，去掉这个」——
-                所以连兜底下拉也删了，一个都没勾时只给一句提示，
-                不让用户在这里再选一次（两处都能决定发哪个店必然打架）。 */}
-            <div className="flex h-9 items-center overflow-hidden rounded-md border border-border-subtle bg-canvas-inset px-2 text-xs text-fg-secondary">
-              <span className="truncate">
-                {pickedShopIdsNow.length > 0
-                  ? pickedShopSummary
-                  : shopOptions.length === 0
-                    ? "该账号下没有店铺"
-                    : "在上面的账号里勾选要发的店铺"}
-              </span>
-            </div>
-          </Field>
+          {/* 定价模板独占一行。
+              2026-11-25 负责人：「这个下面的目标店铺去掉，定价模板一行」——
+              目标店铺那一格整块删掉（上面账号卡片勾哪个店就发哪个店），
+              模板因此可以用满整行 592px。 */}
+          <div className="sm:col-span-2">
           {/*
             定价模板改成勾选开关（负责人 2026-11-23）：
             「发布的时候不是说之前是把这个定价模板差分出来不是下拉吗，
