@@ -65,6 +65,21 @@ _COST_FLOOR_PRICE = re.compile(
 _COST_FLOOR_VALUE = re.compile(
     r"基础成本.*?([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
 MAX_COST_FLOOR_RETRIES = 12
+# 认领到采集箱时「价格低就往上提一点」的加价率（负责人 2026-11-25：
+# 「认领到采集箱不能套模板，必须不能套，价格低就往上提一点」）。
+#
+# 认领只做「拿货价 → 目标站点币种」的换算，不套定价模板；
+# 妙手成本校验不过时最多按这个倍率往上提，绝不用它报的全成本。
+CLAIM_PRICE_BUMP_RATIO = Decimal("1.15")
+# 认领提价的硬上限：最多比「拿货价换算成的目标站点币种金额」高 60%。
+# 妙手报的「基础成本」是它自己的全成本口径（实测能到拿货价的 2.7 倍），
+# 认领这一步不该把那个虚高传导给客户，所以给一个天花板；
+# 到顶还过不了校验就抛错交给人，宁可失败也不出错误价格。
+CLAIM_PRICE_MAX_BUMP = Decimal("1.6")
+# 提价基准钉在 payload 上，多轮重试不再漂（见 _raise_price_to_reported_floor）。
+_PRICE_BASE_KEY = "_claimPriceBase"
+# 顶到上限的跨轮标记：再被拒就不加了，交给调用方抛错。
+_PRICE_CAPPED_KEY = "_claimPriceCapped"
 # 新建载体的 ossMd5 会被上游连续改写几轮。只重读 1 次在 70 件实测里会漏
 # （2026-11-05，id=26/80 首轮就是这么失败的）。按 CLAIM_STANDARD 第 4 节
 # 重试 MAX_VERSION_REFRESH 轮，每轮重新读一次 md5。
@@ -84,28 +99,77 @@ SEASON_VALUE_IDS = {
 }
 
 
+def _claim_site_rate(site: str) -> Decimal | None:
+    """站点币种的汇率（1 CNY = N 目标币种）。取不到返回 None。"""
+    from services import exchange_rate
+
+    currency = exchange_rate.currency_for_site(site) if site else "MYR"
+    rate, _source = exchange_rate.cached_rate(currency=currency)
+    if rate is None:
+        rate, _source = exchange_rate.live_rate(currency=currency)
+    if rate is None:
+        rate = exchange_rate.fallback_rate(currency)
+    if rate is None:
+        return None
+    try:
+        value = Decimal(str(rate))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouError
                                    ) -> dict[str, Any] | None:
+    """妙手报「无法覆盖产品基础成本」时，在**拿货价**基础上提一点，绝不套定价模板。
+
+    ## 负责人口径（2026-11-25）
+
+      「认领到采集箱不能套模板，必须不能套，价格低就往上提一点」
+
+    认领到采集箱这一步只做一件事：把拿货价换成目标站点币种。
+    定价模板是**发布时**在妙手那边套的，不能在这一步套。
+
+    ## 原来为什么会看起来像套了模板
+
+    老实现直接把妙手报的「产品基础成本」当成售价（`floor + 0.01`）。
+    但妙手那个基础成本是它自己的**全成本口径**（采购价 + 头程运费 +
+    平台费 + 各类附加），实测 25 CNY 拿货价的商品被顶到 38.41 MYR
+    （≈ 62 CNY，2.7 倍）—— 数字上完全像套了一套 15% 利润的模板。
+    于是同一批里拿货价高的商品看起来「只加一点」，拿货价低的看起来
+    「套了模板」，负责人一眼就看出不对。
+
+    ## 现在的规则
+
+    1. 目标价 = 当前价 × `CLAIM_PRICE_BUMP_RATIO`（默认 1.15，即加 15%）；
+       妙手报的 `floor` 比这个高时，一次提到 `floor + 0.01`，
+       但**硬上限**是 `当前价 × CLAIM_PRICE_MAX_BUMP`（默认 1.6）。
+       这样既一次到位过校验，又不会把全成本口径传导进来。
+    2. 当前价已经 ≥ `floor` 时不改 —— 说明妙手报的这个错误另有原因
+       （规格/类目/重量对不上），抬价治不了它，硬抬只会把价格弄错。
+    3. 提到上限仍被拒 → 返回 None，调用方照原样抛错，交给人处理。
+
+    连续提价 `MAX_COST_FLOOR_RETRIES` 次仍被拒同样抛错，不会无限加价。
+    """
     message = str((exc.payload or {}).get("message")
                   or (exc.payload or {}).get("msg") or exc)
     if "无法覆盖产品基础成本" not in message:
         return None
-    old_match = _COST_FLOOR_PRICE.search(message)
     floor_match = _COST_FLOOR_VALUE.search(message)
-    if old_match is None or floor_match is None:
+    if floor_match is None:
         return None
     try:
-        old_price = Decimal(old_match.group(1))
-        floor = Decimal(floor_match.group(1))
+        floor = Decimal(str(floor_match.group(1)))
     except InvalidOperation:
         return None
-    if old_price <= 0 or floor < old_price:
-        return None
-    new_price = floor + Decimal("0.01")
+
     sku_map = payload.get("skuMap")
     if not isinstance(sku_map, dict):
         return None
+
     changed: list[str] = []
+    old_price: Decimal | None = None
+    new_price: Decimal | None = None
+    capped = False
     for key, sku in sku_map.items():
         if not isinstance(sku, dict) or str(sku.get("isDelete", "0")) == "1":
             continue
@@ -113,24 +177,92 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
             current = Decimal(str(sku.get("price")))
         except (InvalidOperation, TypeError, ValueError):
             continue
-        # 不再要求 `current == old_price`（2026-11-21 修）。
-        #
-        # 妙手报的「本地展示价」和它收到的 SKU price**不是同一个数**：
-        # 实测 detailId=3549609998 —— 提交 price=4.31（拿货价 7 CNY 换算），
-        # 妙手报「本地展示价 6.29MYR，基础成本 6.79MYR」。
-        # 原来按 `current != old_price` 跳过，于是没有任何 SKU 被改，
-        # 函数返回 None，调用方按原样抛错 —— 抬价机制对这类商品从未生效。
-        #
-        # 正确做法：把「所有低于下限的 SKU」都抬到下限 + 0.01。
-        # 已经高于下限的不动，避免把贵的商品无故涨价。
-        if current >= new_price:
+        if current <= 0:
             continue
-        sku["price"] = format(new_price, ".2f")
-        include_vat = new_price
+
+        # 已经高于妙手报的基础成本 → 这个报错不是「价格太低」引起的，
+        # 抬价只会把价格弄错，跳过。
+        if floor > 0 and current >= floor:
+            continue
+
+        # 基准 = 拿货价换成的售价，**不是当前价**。
+        #
+        # 为什么不拿当前价（2026-11-25 实测踩到）：调用方在妙手反复报错时
+        # 会重试最多 MAX_COST_FLOOR_RETRIES 轮，每轮都调本函数。拿当前价当
+        # 基准等于每轮复利，15.38 会滚成 24.61 → 39.38 → 63.01 → 100.82，
+        # 比直接用妙手全成本还离谱。基准必须是稳定的原始值。
+        #
+        # 稳定基准的取法（依次尝试）：
+        #   1. payload 上记的基准（首轮算好后钉住，后续重试都用它）；
+        #   2. SKU 的 originPrice / 站点汇率；
+        #   3. 实在拿不到就用当前价，但配合下面的「已到顶就停」防止复利。
+        base = payload.get(_PRICE_BASE_KEY)
+        try:
+            base_d = Decimal(str(base)) if base not in (None, "") else None
+        except (InvalidOperation, TypeError, ValueError):
+            base_d = None
+        if base_d is not None and base_d > 0:
+            base = base_d
+        else:
+            base = current
+            purchase = sku.get("originPrice")
+            if purchase not in (None, ""):
+                try:
+                    purchase_d = Decimal(str(purchase))
+                except (InvalidOperation, TypeError, ValueError):
+                    purchase_d = None
+                if purchase_d is not None and purchase_d > 0:
+                    site = str(payload.get("site") or "").strip().upper()
+                    rate = _claim_site_rate(site)
+                    if rate is not None and rate > 0:
+                        base = (purchase_d / rate).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        # 钉住基准，后续重试不会再漂
+                        try:
+                            payload[_PRICE_BASE_KEY] = str(base)  # type: ignore[index]
+                        except Exception:  # noqa: BLE001
+                            pass
+
+        # 主路径：拿货价换算值上加一点。
+        target = (base * CLAIM_PRICE_BUMP_RATIO).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if floor > 0:
+            floor_target = (floor + Decimal("0.01")).quantize(Decimal("0.01"))
+            if floor_target > target:
+                # 一次提到位，避免多轮重试把价格滚上去。
+                target = floor_target
+        # 硬上限：最多比基准高 60%，且永远以 base 为准。
+        cap = (base * CLAIM_PRICE_MAX_BUMP).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # 上一轮已经顶到上限 → 本轮不再动。
+        #
+        # base 在极端情况（SKU 没有 originPrice、也拿不到汇率）会退化成
+        # 当前价，此时 cap 跟着价格一起涨，多轮重试就成了复利。
+        # 打一个跨轮标记：一旦顶到 cap，后续重试一律放弃，让调用方抛错。
+        if payload.get(_PRICE_CAPPED_KEY):
+            continue
+        if target > cap:
+            target = cap
+            capped = True
+            try:
+                payload[_PRICE_CAPPED_KEY] = True  # type: ignore[index]
+            except Exception:  # noqa: BLE001
+                pass
+        if target <= current:
+            # 到顶了（或已经更高）→ 本轮没有再提的空间，交给调用方抛错。
+            #
+            # 这一条是多轮重试的刹车：即使 base 退化成当前价，
+            # 每轮最多涨 60%，且一旦碰上 cap 就不会继续加。
+            continue
+        if old_price is None:
+            old_price = current
+            new_price = target
+        sku["price"] = format(target, ".2f")
+        include_vat = target
         try:
             old_include_vat = Decimal(str(sku.get("priceIncludeVat")))
             if old_include_vat.is_finite() and current > 0:
-                include_vat = (old_include_vat * new_price / current).quantize(
+                include_vat = (old_include_vat * target / current).quantize(
                     Decimal("0.01"), rounding=ROUND_HALF_UP)
         except (InvalidOperation, TypeError, ValueError):
             pass
@@ -138,9 +270,12 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
         changed.append(str(key))
     if not changed:
         return None
-    return {"oldPrice": format(old_price, ".2f"),
+    return {"oldPrice": format(old_price or 0, ".2f"),
             "costFloor": format(floor, ".2f"),
-            "newPrice": format(new_price, ".2f"),
+            "newPrice": format(new_price or 0, ".2f"),
+            "bumpRatio": str(CLAIM_PRICE_BUMP_RATIO),
+            "maxBump": str(CLAIM_PRICE_MAX_BUMP),
+            "capped": capped,
             "skuKeys": changed}
 
 LINK_POOL_KEY = "carrier.links"

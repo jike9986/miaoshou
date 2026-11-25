@@ -2570,6 +2570,71 @@ def normalize_size_chart_url(value: Any) -> str:
     return url
 
 
+def _price_warehouse_at_purchase(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """把 payload 的售价改写成「拿货价按站点汇率换算」的结果。
+
+    负责人口径（2026-11-25）：
+
+      「成品仓库里面的价格是不能套模板的，就是拿货价，然后只有发布才套模板」
+
+    成品仓库只记拿货价，定价发生在发布时（publish_service._repricing）。
+    这里做的换算和认领时的 `collect_box_service._reset_claim_prices_to_purchase`
+    完全同口径 —— 目标币种按站点取，拿货价取 originPrice（CNY），
+    priceIncludeVat 同步成同一个数 —— 保证仓库卡片、认领进采集箱的数字一致。
+
+    拿货价缺失（没有 originPrice）时原样返回，不去猜价格。
+    """
+    from decimal import ROUND_HALF_UP, Decimal
+
+    from services import exchange_rate
+
+    sku_map = payload.get("skuMap")
+    if not isinstance(sku_map, dict) or not sku_map:
+        return dict(payload)
+
+    site = str(payload.get("site") or "").strip().upper()
+    currency = exchange_rate.currency_for_site(site) if site else "MYR"
+    rate, source = exchange_rate.cached_rate(currency=currency)
+    if rate is None:
+        rate, source = exchange_rate.live_rate(currency=currency)
+    if rate is None:
+        rate = exchange_rate.fallback_rate(currency)
+        source = "内置兜底"
+    try:
+        rate_d = Decimal(str(rate))
+    except Exception:  # noqa: BLE001 - 汇率不可用时不改价，别把商品弄坏
+        return dict(payload)
+    if rate_d <= 0:
+        return dict(payload)
+
+    result = dict(payload)
+    new_map = dict(sku_map)
+    for key, sku in sku_map.items():
+        if not isinstance(sku, dict) or str(sku.get("isDelete", "0")) == "1":
+            continue
+        purchase = sku.get("originPrice")
+        if purchase in (None, ""):
+            continue
+        try:
+            purchase_d = Decimal(str(purchase))
+        except Exception:  # noqa: BLE001
+            continue
+        if purchase_d <= 0:
+            continue
+        local = (purchase_d / rate_d).quantize(Decimal("0.01"),
+                                               rounding=ROUND_HALF_UP)
+        entry = dict(sku)
+        entry["price"] = format(local, ".2f")
+        entry["priceIncludeVat"] = format(local, ".2f")
+        new_map[key] = entry
+    result["skuMap"] = new_map
+    result["_warehousePriceRate"] = {"site": site or "MY",
+                                     "currency": currency,
+                                     "rate": str(rate_d),
+                                     "rateSource": source}
+    return result
+
+
 def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient, *,
                           detail_id: str, shop_id: str, language: str = "",
                           group_id: Any = None, price_template: str | None = None,
@@ -2718,20 +2783,31 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     translation_report: dict[str, Any] = {}
     coverage: dict[str, Any] = {}
 
+    # === 成品仓库不套定价模板（负责人 2026-11-25）===
+    #
+    #   「成品仓库里面的价格是不能套模板的，就是拿货价，
+    #     然后只有发布才套模板」
+    #
+    # 成品仓库是「货」的账本，里面只记拿货价；定价模板是**发布时**在
+    # 妙手那边套的（见 publish_service._repricing）。原来这里入仓就套了
+    # 模板，于是 skuMap.price 变成模板售价，后面认领/发布一路带着它走：
+    #   · 成品仓库卡片显示拿货价，payload 里却是售价，两套数字对不上；
+    #   · 认领到采集箱时必须专门写一段 `_reset_claim_prices_to_purchase`
+    #     把它改回去，改漏一件就变成「同一批商品有的按拿货价、有的像套了模板」；
+    #   · 妙手成本校验拿这个虚高的售价去比，又把价格顶到全成本口径。
+    # 根子上不再给仓库商品定价，这些补丁就都不需要了。
+    #
+    # 仍然校验模板是否存在：调用方传了名字却查不到，说明前端状态或模板
+    # 已被删，早报错比到发布时才发现好。
     template = None
     if price_template:
-        # 必须按操作员取模板（2026-11-23）。模板改成每人一套后，读共享键
-        # `pricing.templates` 永远拿不到东西 —— 于是 template 为 None，
-        # 定价整段被跳过，商品按原价（拿货价当本币）提交，被妙手成本校验打回：
-        #   「本地展示价 18.71PHP，无法覆盖产品基础成本 225.50PHP」
-        # 这就是学员认领失败的根因。
         raw = setting_service.price_templates(
             db, operator_id=operator_id).get(str(price_template))
         if not raw:
             raise errors.AppError(errors.TEMPLATE_INVALID,
                                   f"定价模板「{price_template}」不存在",
                                   status=422, details={"field": "template"})
-        template = raw
+        # 只验证存在，不用它定价（负责人 2026-11-25）。
     # 注意：定价必须在「重量加完增量之后」再算 —— 运费按最终包裹重量计费，
     # 先用原始重量算价、再把重量加 0.1 保存，会导致「价格按 1.85kg 算、实际存 1.95kg」，
     # 报价与实际重量不符（老版 product_workflow 是 prepare_weight 之后才 apply 定价）。
@@ -2852,6 +2928,16 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     _source_weight = payload.get("_sourceWeight")
     payload, _report = product_service.process_price(payload, template=template,
                                                      exchange_rate=exchange_rate)
+    # 成品仓库的价格 = 拿货价（负责人 2026-11-25：
+    # 「成品仓库里面的价格是不能套模板的，就是拿货价，然后只有发布才套模板」）。
+    #
+    # 不套模板时 process_price 原样返回，skuMap 里还留着妙手采集时的 price ——
+    # 那个数是妙手按它自己的口径算的，不是拿货价。这里统一改写成
+    # 「originPrice（CNY）按站点汇率换算」，与认领时
+    # collect_box_service._reset_claim_prices_to_purchase 用的口径完全一致，
+    # 这样仓库里看到的价格、认领进采集箱的价格是同一个数，不会两套。
+    if template is None:
+        payload = _price_warehouse_at_purchase(payload)
     # process_price 返回的是 payload 的副本；把记账字段补回去，供下次重复入仓比对
     if _source_weight is not None:
         payload["_sourceWeight"] = _source_weight

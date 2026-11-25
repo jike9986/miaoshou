@@ -61,14 +61,22 @@ def active_skus(info: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def purchase_range(info: Mapping[str, Any]) -> tuple[float | None, float | None]:
-    """采购价区间：有效 SKU 的 originPrice 最小 / 最大值（缺失回退 price）。"""
+    """采购价区间：有效 SKU 的 originPrice 最小 / 最大值。
+
+    只认 originPrice（CNY 拿货价）。**不再回退到 `price`**（2026-11-25）：
+
+    `price` 是目标站点币种的售价 —— 历史数据里它可能是入仓时套模板算出的
+    售价，也可能是认领时按汇率换算的值，两种都不是拿货价。原来拿它兜底，
+    结果拿货价缺失的商品在仓库卡片上显示出一个「看起来像拿货价」的售价，
+    负责人核对时发现「成品仓库里面有些价格不对」，却查不到钱从哪来的。
+
+    缺失就拿不到，宁可让卡片留空，也不要显示一个错的数字。
+    """
     values: list[float] = []
     for sku in active_skus(info).values():
-        for field in ("originPrice", "price"):
-            number = to_decimal(sku.get(field))
-            if number is not None and number > 0:
-                values.append(float(number))
-                break
+        number = to_decimal(sku.get("originPrice"))
+        if number is not None and number > 0:
+            values.append(float(number))
     if not values:
         return None, None
     return min(values), max(values)
