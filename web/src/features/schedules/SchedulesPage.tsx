@@ -475,7 +475,6 @@ export function SchedulesPage({ tab: initialTab }: { tab?: "schedules" | "histor
         accounts={auth?.accounts?.map((item) => ({ id: item.id, name: item.name })) ?? []}
         shops={shops}
         templates={templates}
-        selectedTemplates={templatesQuery.data?.selected}
         submitting={createSchedule.isPending || patchSchedule.isPending}
         onSubmit={async (payloads) => {
           if (editing) {
@@ -655,7 +654,6 @@ interface ScheduleFormDrawerProps {
     template?: Record<string, unknown>;
   }>;
   /** 账号 → 当前模板名；新建任务时用它当默认值 */
-  selectedTemplates?: Record<string, string>;
   submitting: boolean;
   onSubmit: (payloads: Array<{
     name: string;
@@ -686,7 +684,6 @@ function ScheduleFormDrawer({
   accounts,
   shops,
   templates,
-  selectedTemplates,
   submitting,
   onSubmit,
 }: ScheduleFormDrawerProps) {
@@ -949,26 +946,7 @@ function ScheduleFormDrawer({
     setCheckedAccountIds([]);
     setShopsByAccount({});
     setSelectedShopIdsByAccount({});
-    // 模板默认值单独一个 effect（见下），因为它依赖异步回来的 selectedTemplates
   }, [open, task, accountId, shops]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /**
-   * 新建任务时把模板默认值设成「该账号当前的定价模板」。
-   *
-   * 为什么单独拆一个 effect：`selectedTemplates` 是 `useTemplates()` 的异步
-   * 结果，首次打开抽屉时它多半还没回来。原来这条 setTemplate 写在上面那个
-   * effect 里、依赖数组又漏了 `selectedTemplates`，于是：
-   *   首次打开 → selectedTemplates 是 undefined → 落到 `templates[0]`
-   *   数据回来了 → 依赖没变，effect 不重跑 → 模板停在第一套
-   * 表现就是「我上次选的模板没被记住，每次都是列表第一套」，
-   * 而且这个错值会被直接提交进定时任务。eslint 早就报了这条
-   * （react-hooks/exhaustive-deps），只是被当成 warning 忽略了。
-   *
-   * 依赖用 `preferredTemplate`（字符串）而不是 `selectedTemplates`（对象）：
-   * 对象每次 render 都是新引用，放进依赖会让 effect 反复跑、把用户手选的
-   * 模板覆盖掉。字符串是值比较，只在真的换了模板时才触发。
-   */
-  const preferredTemplate = selectedTemplates?.[String(accountId ?? "")] ?? "";
 
   /**
    * 只列出与已选店铺国家匹配的模板（负责人 2026-11-23）。
@@ -1035,12 +1013,21 @@ function ScheduleFormDrawer({
     return matched.length > 0 ? matched : templates;
   }, [templates, selectedSites]);
 
+  /**
+   * 新建任务时**不预选任何模板**。
+   *
+   * 2026-11-25 负责人：「为什么打开自动勾选了马来模板」。
+   * 原来这里会取「该账号当前定价模板」（`preferredTemplate`），取不到再取
+   * `templates[0]` —— 于是每次打开抽屉都有一块已经勾亮，用户以为是自己选的。
+   *
+   * 现在只在**编辑已有任务**时回填（那个在另一条 effect 里，按 targets 取）；
+   * 新建一律留空，由用户按店铺国家自己勾。
+   */
   useEffect(() => {
     if (!open || task) return;
-    // 用户已经自己选过了就别再动他——数据晚到时覆盖用户输入比默认值错了更糟
     if (templateTouchedRef.current) return;
-    setPickedTemplates(preferredTemplate ? [preferredTemplate] : (templates[0]?.name ? [templates[0].name] : []));
-  }, [open, task, preferredTemplate, templates]);
+    setPickedTemplates([]);
+  }, [open, task]);
 
   const patch = (next: Partial<ScheduleFormDraft>): void =>
     setDraft((prev) => ({ ...prev, ...next }));
@@ -1326,13 +1313,6 @@ function ScheduleFormDrawer({
           <Field
             label="定价模板"
             error={errors.template ?? null}
-            action={
-              <span className="text-2xs text-fg-muted">
-                {selectedSites.size === 0
-                  ? "勾选店铺后只显示对应国家的模板"
-                  : `只显示 ${[...selectedSites].join("、")} 的模板，可多选`}
-              </span>
-            }
           >
             {templateOptions.length === 0 ? (
               <p className="text-sm text-fg-muted">
@@ -1551,7 +1531,6 @@ function ScheduleFormDrawer({
             </Field>
           </div>
         )}
-
 
         {Object.keys(errors).length > 0 && (
           <InlineError>有 {Object.keys(errors).length} 项需要修正后再提交。</InlineError>
