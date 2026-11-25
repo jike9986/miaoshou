@@ -1323,6 +1323,26 @@ def publish(db: Session, payload: Mapping[str, Any], *,
                 payloads, adjustments = prepare_claim_payloads(
                     db, source_payloads, entries, operator_id=log_operator_id)
                 claim_adjustments.extend(adjustments)
+                # === 认领必须按目标站点币种重算价格（负责人 2026-11-25）===
+                #
+                #   「现在的价格是人民币，认领到对应的国家店铺就换算成
+                #     对应的国家价格，再套定价模板修改」
+                #
+                # `prepare_claim_payloads` 只做清洗/图片/重量，**不动价格**，
+                # 于是 skuMap.price 还是库里存的原值。这一步漏了，认领任务
+                # （claim_job_service → publish → 这条 claimOnly 分支）就会把
+                # 马币售价原样发给菲律宾店铺 —— 实测 18.71（马币口径）被当成
+                # 18.71 PHP 提交，妙手按菲律宾运费表算出 225.50 PHP 的成本线，
+                # 直接被拒：「本地展示价 18.71PHP，无法覆盖基础成本 225.50PHP」。
+                #
+                # `claim_site_batch` / `claim_carrier_batch` 早就有这一步，只有
+                # 这条路径漏了，所以「别人认领 9 个一直失败」而单件认领正常。
+                from services import collect_box_service
+
+                claim_adjustments.extend(
+                    collect_box_service._reset_claim_prices_to_purchase(
+                        db, account, payloads, entries,
+                        target_shop_id=str(target_shop_id)))
                 carrier_service.harvest_from_payloads(db, payloads)
                 try:
                     listing = client.common_box_list(page_no=1, page_size=20)
