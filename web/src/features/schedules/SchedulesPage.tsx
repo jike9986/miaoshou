@@ -693,7 +693,18 @@ function ScheduleFormDrawer({
   const [draft, setDraft] = useState<ScheduleFormDraft>(EMPTY_SCHEDULE_FORM);
   const [enabled, setEnabled] = useState(true);
   const [shopId, setShopId] = useState("");
-  const [template, setTemplate] = useState("");
+  /**
+   * 选中的定价模板名（**可多选**）。
+   *
+   * 2026-11-25 负责人：「怎么只能单选定价模板」。
+   * 语义上每个店铺用一套模板，而一个任务可以发多个国家的店铺
+   * （马来店 + 菲律宾店），所以这里必须能同时勾多套：
+   * 提交时 `targetsForAccount()` 按每个店铺自己的 site 去这套里取，
+   * 取不到才回落到第一套。
+   */
+  const [pickedTemplates, setPickedTemplates] = useState<string[]>([]);
+  // 后端 `template_name` 是单值字段（第一个店铺的模板），取第一个即可
+  const template = pickedTemplates[0] ?? "";
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [plannedRuns, setPlannedRuns] = useState(1);
   const [productPage, setProductPage] = useState(1);
@@ -738,13 +749,29 @@ function ScheduleFormDrawer({
     }
     return map;
   }, [templates]);
-  /** 某个店铺该用哪套模板：按它自己的站点找，找不到回落到全局选的模板。 */
+  /**
+   * 某个店铺该用哪套模板。
+   *
+   * 优先级：用户勾选的模板里挑与这个店铺同站点的那一套 → 没勾就按站点
+   * 自动取 → 都没有才回落到第一套。这样多选「马来 + 菲律宾」时，
+   * 马来店拿到马来模板、菲律宾店拿到菲律宾模板，不会互相串。
+   */
   const templateForShop = useCallback(
     (shop: { site?: string } | undefined): string => {
       const site = String(shop?.site ?? "").trim().toUpperCase();
-      return (site && templateNameBySite[site]) || template;
+      if (!site) return template;
+      // ① 用户勾过的、且站点对得上的
+      for (const name of pickedTemplates) {
+        const item = templates.find((tpl) => tpl.name === name);
+        const tplSite = String(
+          (item?.template as { site?: unknown } | undefined)?.site ?? ""
+        ).trim().toUpperCase();
+        if (tplSite === site) return name;
+      }
+      // ② 没勾到就按站点自动取
+      return templateNameBySite[site] || template;
     },
-    [templateNameBySite, template]
+    [pickedTemplates, templates, templateNameBySite, template]
   );
   /** 某个账号本次要发的店铺列表（没勾就回落第一个）。 */
   const targetsForAccount = useCallback(
@@ -809,22 +836,36 @@ function ScheduleFormDrawer({
   };
 
   /**
-   * 勾账号时把该账号下**全部店铺**一起勾上（负责人 2026-11-23：
-   * 「第一个勾选上面的时候自动把里面全部的店铺选上」）。
+   * 勾账号时把该账号下**全部店铺**一起勾上（负责人 2026-11-23）。
    *
    * 这样「勾账号」= 「这个账号的店全发」，不用再逐个点店铺；
    * 想只发其中几个，勾完再取消掉不要的那几个即可。
    * 取消勾账号则把它名下的店铺选择一起清掉，避免留下孤儿选择 ——
    * 账号不发了、它的店铺却还在选择列表里，提交时会发到不该发的地方。
+   *
+   * 注意区分两件事（2026-11-25 负责人：「为什么我勾选上面的，下面的店铺
+   * 不会自动勾选」）：
+   *   · 新建任务时**不预选任何账号** —— 这是 11-24 的要求，别回退；
+   *   · 但用户**主动勾某个账号**时，就该把它下面的店全勾上 —— 这是 11-23
+   *     的要求。上一轮为了满足前者，把这里也一起删了，删过头。
    */
   const toggleAccount = (accId: string, checked: boolean): void => {
     if (checked) {
       setCheckedAccountIds((prev) => (prev.includes(accId) ? prev : [...prev, accId]));
-      // 只把店铺列表拉回来，**不替用户勾选任何店铺**。
-      // 负责人 2026-11-24：「创建定时任务不要自动全选店铺」。
-      // 原来这里会把这个账号下所有店铺全勾上，用户以为只发一两个店，
-      // 实际一次发到全部 —— 多发一个店就是多发一批商品，代价很实。
-      void fetchShopsForAccount(accId);
+      void (async () => {
+        await fetchShopsForAccount(accId);
+        // fetchShopsForAccount 内部已 setState，这里从最新快照取
+        setShopsByAccount((prev) => {
+          const shops = prev[accId] ?? [];
+          if (shops.length > 0) {
+            setSelectedShopIdsByAccount((picked) => ({
+              ...picked,
+              [accId]: shops.map((shop) => shop.shopId),
+            }));
+          }
+          return prev;
+        });
+      })();
     } else {
       setCheckedAccountIds((prev) => prev.filter((id) => id !== accId));
       setSelectedShopIdsByAccount((prev) => {
@@ -874,7 +915,15 @@ function ScheduleFormDrawer({
           .map((item) => String(item.shopId || ""))
           .filter(Boolean),
       });
-      setTemplate(task.template);
+      // 回填**所有** targets 用到的模板，不是只回填 task.template。
+      // 一个任务可能发马来店 + 菲律宾店，各用一套模板；只填第一套的话，
+      // 编辑时会把另一套静默丢掉（保存后那家店就按错模板算价了）。
+      const taskTemplates = [...new Set(
+        taskTargets.map((item) => String(item.template || "").trim()).filter(Boolean)
+      )];
+      setPickedTemplates(taskTemplates.length > 0
+        ? taskTemplates
+        : (task.template ? [task.template] : []));
       setRunAccountId(task.accountId || accountId);
       setSelectedProductIds(task.selectedProductIds ?? []);
       setPlannedRuns(task.plannedRuns ?? 1);
@@ -929,19 +978,27 @@ function ScheduleFormDrawer({
    * 偷偷换成同站点模板），界面上却把五国模板全列出来让人选错。
    *
    * 一个店铺都没选时不收窄：那时还没有国家可言，列全反而方便先定模板。
+   *
+   * **2026-11-25 修**：原来只统计「账号卡片下的小复选框」，而主路径是
+   * 上面那个「目标店铺」下拉框 —— 下拉选了马来，`selectedSites` 仍是空集，
+   * 于是五个国家模板全亮着（负责人：「这个定价模板怎么不是根据上面的店铺
+   * 来可以选择的」）。现在把下拉框选中的店铺也计入。
    */
   const selectedSites = useMemo(() => {
-    const picked = selectedShopIdsByAccount[runAccountId || accountId] ?? [];
-    const all = shopOptions;
     const sites = new Set<string>();
-    for (const shop of all) {
-      if (picked.includes(shop.shopId)) {
-        const site = String(shop.site ?? "").trim().toUpperCase();
-        if (site) sites.add(site);
-      }
-    }
+    const addShop = (id: string | undefined | null): void => {
+      if (!id) return;
+      const shop = shopOptions.find((item) => item.shopId === id);
+      const site = String(shop?.site ?? "").trim().toUpperCase();
+      if (site) sites.add(site);
+    };
+    // ① 目标店铺下拉框当前选中的那一个
+    addShop(shopId);
+    // ② 账号卡片里勾选的店铺（多店铺模式）
+    const picked = selectedShopIdsByAccount[runAccountId || accountId] ?? [];
+    for (const id of picked) addShop(id);
     return sites;
-  }, [selectedShopIdsByAccount, runAccountId, accountId, shopOptions]);
+  }, [shopId, selectedShopIdsByAccount, runAccountId, accountId, shopOptions]);
 
   const templateOptions = useMemo(() => {
     if (selectedSites.size === 0) return templates;
@@ -959,7 +1016,7 @@ function ScheduleFormDrawer({
     if (!open || task) return;
     // 用户已经自己选过了就别再动他——数据晚到时覆盖用户输入比默认值错了更糟
     if (templateTouchedRef.current) return;
-    setTemplate(preferredTemplate || templates[0]?.name || "");
+    setPickedTemplates(preferredTemplate ? [preferredTemplate] : (templates[0]?.name ? [templates[0].name] : []));
   }, [open, task, preferredTemplate, templates]);
 
   const patch = (next: Partial<ScheduleFormDraft>): void =>
@@ -1305,10 +1362,23 @@ function ScheduleFormDrawer({
             所以这里不再是下拉：只列出与已勾选店铺的国家对应的模板，
             一行五个，点一下即选中（再点一下取消＝不使用模板）。
             模板本身不可用（invalid）的灰掉不可点。
+
+            2026-11-25 补两点：
+              · 支持多选 —— 一个任务可以发不同国家的店，每个店用自己那套；
+                提交时 targetsForAccount() 按每个店铺的 site 从这里挑。
+              · 联动依据补上「目标店铺」下拉框（原来只看账号卡片的小复选框，
+                下拉选了马来模板也不收窄）。
           */}
           <Field
             label="定价模板"
             error={errors.template ?? null}
+            action={
+              <span className="text-2xs text-fg-muted">
+                {selectedSites.size === 0
+                  ? "选好目标店铺后自动收窄"
+                  : `可多选（${[...selectedSites].join("、")} 店铺已选）`}
+              </span>
+            }
           >
             {templateOptions.length === 0 ? (
               <p className="text-sm text-fg-muted">
@@ -1337,7 +1407,9 @@ function ScheduleFormDrawer({
               //     就算真挤到一行，也只会排 4 列而不是把 5 个都压成省略号。
               <div className="grid grid-cols-[repeat(auto-fit,minmax(60px,1fr))] gap-1.5">
                 {templateOptions.map((item) => {
-                  const active = template === item.name;
+                  // 多选：点一下加入、再点一下移出（负责人 2026-11-25
+                  // 「怎么只能单选定价模板」）。不同国家的店铺各用自己那套。
+                  const active = pickedTemplates.includes(item.name);
                   return (
                     <button
                       key={item.name}
@@ -1347,7 +1419,11 @@ function ScheduleFormDrawer({
                       onClick={() => {
                         // 记下「用户自己选过了」：之后默认值晚到也不能覆盖他
                         templateTouchedRef.current = true;
-                        setTemplate(active ? "" : item.name);
+                        setPickedTemplates((prev) => (
+                          prev.includes(item.name)
+                            ? prev.filter((name) => name !== item.name)
+                            : [...prev, item.name]
+                        ));
                       }}
                       className={cn(
                         // 格子由外层 grid 决定（5 等分），按钮自己铺满格子即可。
