@@ -16,6 +16,13 @@ FILES = [
     ("services/setting_service.py",         "services/setting_service.py"),
     ("services/price_template.py",          "services/price_template.py"),
     ("services/sync_service.py",            "services/sync_service.py"),
+    # 认领价格口径（负责人 2026-11-25）：
+    #   · carrier_service   —— 微微上挑 + 抬到成本线
+    #   · collect_box_service —— 认领时把 skuMap.price 重置成拿货价口径
+    #   · product_service   —— purchase_range 不再回退到 price
+    ("services/carrier_service.py",         "services/carrier_service.py"),
+    ("services/collect_box_service.py",     "services/collect_box_service.py"),
+    ("services/product_service.py",         "services/product_service.py"),
     ("api/sync.py",                         "api/sync.py"),
     ("services/publish_service.py",         "services/publish_service.py"),
     ("services/group_service.py",           "services/group_service.py"),
