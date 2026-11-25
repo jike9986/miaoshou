@@ -827,6 +827,43 @@ function ScheduleFormDrawer({
     [switched, scopedShops, shops]
   );
 
+  /**
+   * 本次提交真正会发到哪些店铺（用于校验，不用于渲染）。
+   *
+   * 目标店铺下拉框在 2026-11-25 被整块删掉之后，`shopId` 这个 state 在
+   * 新建任务时**永远不会被赋值**（只有编辑已有任务、切换账号时才写），
+   * 而 `validate()` 里还留着 `if (!shopId) next.shopId = "请选择目标店铺"`
+   * —— 于是新建任务必然卡在「有 1 项需要修正后再提交」，界面上又找不到
+   * 任何「目标店铺」控件可以填，表现为**根本创建不了**。
+   *
+   * 正确口径：店铺目标完全由上面账号卡片决定，所以校验也看它。
+   *   · 老师多账号模式 → 每个勾选账号下勾的店铺
+   *   · 单账号         → 当前账号下勾的店铺（与 targetsForAccount 同源）
+   */
+  const submitTargetShopIds = useMemo(() => {
+    const ids: string[] = [];
+    const collect = (accId: string): void => {
+      const accShops = shopsByAccount[accId] ?? [];
+      const picked = selectedShopIdsByAccount[accId] ?? [];
+      const chosen = picked.length > 0
+        ? accShops.filter((shop) => picked.includes(shop.shopId))
+        : accShops.slice(0, 1);
+      for (const shop of chosen) ids.push(shop.shopId);
+    };
+    // 勾了账号就按勾的算（1 个或多个都一样）。
+    // 原来写成 `length > 1`，只勾一个账号时会走 else 分支用 runAccountId，
+    // 而 runAccountId 是**当前登录账号**、不是被勾的那个 ——
+    // 于是被勾账号的店铺一个都找不到，校验判定「没有可用店铺」。
+    // 负责人截图正是这种情况：勾了「梁静」（别的账号），一个店都算不出来。
+    if (isTeacher && !task && checkedAccountIds.length > 0) {
+      for (const accId of checkedAccountIds) collect(accId);
+    } else {
+      collect(runAccountId || accountId);
+    }
+    return ids;
+  }, [isTeacher, task, checkedAccountIds, shopsByAccount,
+      selectedShopIdsByAccount, runAccountId, accountId]);
+
   // 换了账号后原店铺不属于新账号，自动落到新账号的第一个店铺
   useEffect(() => {
     if (!switched || shopOptions.length === 0) return;
@@ -1051,7 +1088,19 @@ function ScheduleFormDrawer({
     if (draft.name.trim().length > LIMITS.scheduleNameLength) {
       next.name = `名称最多 ${LIMITS.scheduleNameLength} 个字符`;
     }
-    if (!shopId) next.shopId = "请选择目标店铺";
+    // 不再看 `shopId`（那个 state 在新建时恒为空，见 submitTargetShopIds 注释）
+    if (submitTargetShopIds.length === 0) {
+      next.shopId = checkedAccountIds.length === 0 && isTeacher && !task
+        ? "请至少勾选一个账号"
+        : "请至少勾选一个店铺";
+      if (checkedAccountIds.length > 0) {
+        // 账号勾了但店铺一个都没勾、且该账号店铺还没加载完/没有店铺
+        const anyShops = checkedAccountIds.some(
+          (accId) => (shopsByAccount[accId] ?? []).length > 0
+        );
+        if (!anyShops) next.shopId = "所选账号下没有可用店铺";
+      }
+    }
     if (!task && selectedProductIds.length === 0) next.selectedProductIds = "请至少选择一件仓库商品";
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(draft.time)) next.time = "时间格式应为 HH:MM";
     if (draft.perRun < LIMITS.schedulePerRun.min || draft.perRun > 2000) {
@@ -1105,10 +1154,13 @@ function ScheduleFormDrawer({
 
   const submit = (): void => {
     if (!validate()) return;
+    // 新建任务时 `shopId` 这个 state 是空的（目标店铺下拉已删），
+    // 用本次实际要发的第一个店铺兜底 —— 否则会把 shopId:"" 发给后端 422。
+    const fallbackShopId = submitTargetShopIds[0] || shopId;
     const basePayload = {
       name: draft.name.trim() || defaultScheduleName(),
       enabled,
-      shopId,
+      shopId: fallbackShopId,
       template,
       frequency: draft.frequency,
       days: draft.frequency === "weekly" ? draft.days : [],
@@ -1125,9 +1177,14 @@ function ScheduleFormDrawer({
       claimOnly: false,
     };
 
-    // 老师多账号模式：同时为多个账号创建任务（每个账号一条）。
+    // 老师多账号模式：为每个勾选的账号各建一条任务。
     // 每个账号里勾了多个店铺时，任务带 targets 一次发多店。
-    if (isTeacher && !task && checkedAccountIds.length > 1) {
+    //
+    // ★ 判据从 `length > 1` 改成 `length > 0`（2026-11-25）。
+    // 原来只勾**一个**别的账号时走下面「单账号」分支，用 runAccountId
+    // （当前登录账号）建任务 —— 任务会挂到错的账号下，或者因为那个账号
+    // 没有可用店铺而报「没有可用店铺」。负责人截图就是只勾了「梁静」一个。
+    if (isTeacher && !task && checkedAccountIds.length > 0) {
       const payloads = checkedAccountIds
         .map((accId) => {
           const targets = targetsForAccount(accId);
@@ -1151,7 +1208,9 @@ function ScheduleFormDrawer({
 
     // 单账号模式：当前账号勾了几个店铺就发几个
     const singles = targetsForAccount(runAccountId || accountId);
-    const targets = singles.length > 0 ? singles : [{ shopId, template }];
+    // validate() 已保证 submitTargetShopIds 非空，这里正常不会走到 [] 分支；
+    // 真走到了也只能用 fallbackShopId，绝不能再拼出 shopId:""。
+    const targets = singles.length > 0 ? singles : [{ shopId: fallbackShopId, template }];
     onSubmit([{
       ...basePayload,
       accountId: runAccountId || accountId,
