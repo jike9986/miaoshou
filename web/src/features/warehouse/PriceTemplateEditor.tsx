@@ -693,7 +693,7 @@ export function PriceTemplateEditor({
         </div>
 
         {/* ================= 右：售价试算 ================= */}
-        <div className="flex h-fit flex-col gap-3 rounded-md border border-border bg-surface-sunken p-3 lg:sticky lg:top-0">
+        <div className="flex h-fit flex-col gap-3 rounded-md border border-border bg-canvas-inset p-3 lg:sticky lg:top-0">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-fg-secondary">
             <Calculator className="size-3.5" />
             售价试算
