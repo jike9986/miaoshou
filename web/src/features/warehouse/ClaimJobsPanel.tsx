@@ -246,41 +246,51 @@ export function ClaimJobsPanel({ accountId, operatorId, list, focusJobId }: {
                 )}
               </div>
             </div>
+            {/*
+              2026-11-25 负责人：「这种认领的时候这些东西太多了能不能精简一点」。
+
+              原来一张卡片里有四行数字，全在说同一件事：
+                ① 进度条自带「已处理 0 / 1 件」+ 0%
+                ② 下面一行「成功 0 件 · 失败 0 件 · 待处理 1 件」
+                ③ 再一行「正在写入商品（第 1–1 件）· 本组已处理 0/1 ·
+                    成功 0 件 · 失败 0 件 · 当前商品 586」
+
+              现在只保留：
+                · 进度条（只显示百分比，不再重复「已处理 X/Y」）
+                · 一行汇总「3 / 10 件 · 成功 2 · 失败 1」
+                · 在跑时一行状态（只留阶段名和当前商品，不再重复成功/失败）
+            */}
             <Progress
-              className="mt-3"
-              label={isPublishJob
-                ? `已处理 ${done} / ${publishAttempted} 件`
-                : `已处理 ${done} / ${total} 件`}
+              className="mt-2.5"
               value={publishAttempted ? Math.round(done * 100 / publishAttempted) : 0}
               tone={job.status === "failed" ? "danger" : job.status === "done" ? "success" : "brand"}
               showValue
             />
-            <p className="mt-2 text-sm text-fg-secondary" role="status">
-              {isPublishProcessing
-                ? <>已提交 <span className="num">{submittedCount}</span> 件，等待平台回执（点「刷新任务」获取最新结果）</>
-                : <>成功 <span className="num">{succeeded}</span> 件 · 失败 <span className="num">{failed}</span> 件 · {active ? "待处理" : "未处理"} <span className="num">{pending}</span> 件</>
-              }
+            <p className="mt-1.5 text-xs text-fg-secondary" role="status">
+              {isPublishProcessing ? (
+                <>已提交 <span className="num">{submittedCount}</span> 件，等待平台回执（点「刷新任务」获取最新结果）</>
+              ) : (
+                <>
+                  <span className="num">{done}</span> / <span className="num">{publishAttempted}</span> 件
+                  {succeeded > 0 && <> · 成功 <span className="num">{succeeded}</span></>}
+                  {failed > 0 && <> · <span className="text-danger-700">失败 <span className="num">{failed}</span></span></>}
+                  {pending > 0 && active && <> · 待处理 <span className="num">{pending}</span></>}
+                </>
+              )}
             </p>
             {active && isPublishJob && (
-              <p className="mt-2 text-sm text-fg-muted" role="status">
+              <p className="mt-1 text-xs text-fg-muted" role="status">
                 正在发布第 {Math.max(1, progress?.shopIndex ?? 0)} / {progress?.shopTotal ?? 1} 个店铺
-                {typeof progress?.attempted === "number" && ` · 本轮 ${progress.attempted} 件`}
-                {typeof progress?.succeeded === "number" && ` · 成功 ${progress.succeeded} 件`}
-                {typeof progress?.failed === "number" && progress.failed > 0 && ` · 失败 ${progress.failed} 件`}
-                。每个店铺都要在妙手重建载体，单店约 30~60 秒。
+                ，单店约 30~60 秒
               </p>
             )}
             {active && !isPublishJob && progress ? (
-              <p className="mt-2 text-sm text-fg-muted" role="status">
+              <p className="mt-1 text-xs text-fg-muted" role="status">
                 {stageLabels[progress.stage] ?? "正在处理当前组"}
                 {(progress.groupSize ?? 0) > 0 && `（第 ${(progress.offset ?? 0) + 1}–${Math.min(total, (progress.offset ?? 0) + (progress.groupSize ?? 0))} 件）`}
-                {typeof progress.processed === "number" && ` · 本组已处理 ${progress.processed}/${progress.groupSize}`}
-                {typeof progress.verified === "number" && ` · 成功 ${progress.verified} 件`}
-                {typeof progress.failed === "number" && ` · 失败 ${progress.failed} 件`}
                 {progress.warehouseId && ` · 当前商品 ${progress.warehouseId}`}
-                。
               </p>
-            ) : active && done === 0 && !isPublishJob && <p className="mt-2 text-sm text-fg-muted">正在准备并导入商品，进度会在每批完成后更新。</p>}
+            ) : active && done === 0 && !isPublishJob && <p className="mt-1 text-xs text-fg-muted">正在准备并导入商品，进度会在每批完成后更新。</p>}
             {job.status === "failed" && (
               <p className="mt-2 break-words text-sm text-danger-700">
                 {failureMessage || "任务未全部完成，请展开明细查看结果。"}

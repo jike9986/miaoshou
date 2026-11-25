@@ -4,7 +4,7 @@
 // 直到用户主动关闭弹窗；「刷新回执」直接放在结果区，不再只靠 8 秒 toast。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, PackageCheck, RefreshCw, Send } from "lucide-react";
+import { AlertTriangle, Check, PackageCheck, RefreshCw, Send } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { apiErrorMessage, api } from "@/lib/api";
@@ -209,23 +209,45 @@ export function PublishDialog({
 
 
   // 老师多账号：勾选账号时懒加载店铺。null = 加载中
-  const fetchShopsForAccount = async (accId: string): Promise<void> => {
-    if (accId in shopsByAccount) return;
+  const fetchShopsForAccount = async (accId: string): Promise<Shop[]> => {
+    const cached = shopsByAccount[accId];
+    if (Array.isArray(cached)) return cached;
     setShopsByAccount((prev) => ({ ...prev, [accId]: null }));
     try {
       const result = await api.get<{ shops: Shop[] }>(`/shops?accountId=${encodeURIComponent(accId)}`);
-      setShopsByAccount((prev) => ({ ...prev, [accId]: result.shops ?? [] }));
+      const list = result.shops ?? [];
+      setShopsByAccount((prev) => ({ ...prev, [accId]: list }));
+      return list;
     } catch {
       setShopsByAccount((prev) => ({ ...prev, [accId]: [] }));
+      return [];
     }
   };
 
+  /**
+   * 勾账号 → 自动勾上它名下全部店铺（2026-11-25 与「新建定时任务」对齐）。
+   *
+   * 原来只加载店铺、一个都不勾，用户还得在下面逐个点一遍；
+   * 而定时任务那边勾账号就是全勾。两个弹窗同一件事应当同一行为。
+   * 取消勾账号 → 清掉它名下的店铺选择，避免孤儿选择发到不该发的地方。
+   */
   const toggleAccount = (accId: string, checked: boolean): void => {
     if (checked) {
-      setCheckedAccountIds((prev) => [...prev, accId]);
-      void fetchShopsForAccount(accId);
+      setCheckedAccountIds((prev) => (prev.includes(accId) ? prev : [...prev, accId]));
+      void fetchShopsForAccount(accId).then((list) => {
+        if (list.length === 0) return;
+        setSelectedShopIdsByAccount((prev) => ({
+          ...prev,
+          [accId]: list.map((shop) => shop.shopId),
+        }));
+      });
     } else {
       setCheckedAccountIds((prev) => prev.filter((id) => id !== accId));
+      setSelectedShopIdsByAccount((prev) => {
+        const next = { ...prev };
+        delete next[accId];
+        return next;
+      });
     }
   };
 
@@ -249,14 +271,13 @@ export function PublishDialog({
 
     setShopId(defaultShopId);
     setResult(null);
-    // 老师多账号：打开时默认全选，重置状态，让 useEffect 按需加载
-    if (isTeacher && accounts.length > 1) {
-      setCheckedAccountIds(accounts.map((a) => a.id));
-      setShopsByAccount({});
-      setSelectedShopIdsByAccount({});
-    } else {
-      setCheckedAccountIds([]);
-    }
+    // 打开时**不预选任何账号**（2026-11-25 与「新建定时任务」对齐）。
+    // 原来老师多账号会默认全选，一打开就是十几个账号展开、每个都拖着
+    // 一行「→ 店铺名」，卡片又长又乱；而且默认全选容易误发到所有店铺。
+    // 现在一律从空开始，由用户自己勾。
+    setCheckedAccountIds([]);
+    setShopsByAccount({});
+    setSelectedShopIdsByAccount({});
   }, [open, defaultShopId, auth?.accountId, templatesQuery.data?.selected]);
 
   // 店铺列表到手后校验默认值
@@ -533,7 +554,7 @@ export function PublishDialog({
                     </button>
                   </div>
                   <div className="max-h-56 overflow-y-auto rounded-md border border-border-subtle p-2">
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-1">
                     {accounts.map((account) => {
                       const checked = checkedAccountIds.includes(account.id);
                       const accShopsRaw = shopsByAccount[account.id];
@@ -541,8 +562,8 @@ export function PublishDialog({
                       const accShopsLoading = accShopsRaw === null || (checked && accShopsRaw === undefined);
                       const accShops = accShopsRaw ?? [];
                       return (
-                        <div key={account.id} className="rounded-md border border-border-subtle bg-canvas-inset/40 p-2">
-                          <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <div key={account.id} className="rounded-md border border-border-subtle bg-canvas-inset/40 px-2 py-1.5">
+                          <label className="flex cursor-pointer items-center gap-2 text-[13px]">
                             <input
                               type="checkbox"
                               className="h-4 w-4 cursor-pointer rounded border-border accent-brand-500"
@@ -594,15 +615,18 @@ export function PublishDialog({
                             </div>
                           )}
                           {checked && !accShopsLoading && accShops.length === 1 && (
-                            <p className="mt-0.5 truncate text-xs text-fg-secondary">
+                            <p className="mt-0.5 truncate text-2xs text-fg-secondary">
                               → {accShops[0].name}
                               <span className="ml-1 text-fg-muted">
                                 · {accShops[0].siteName || accShops[0].site}
                               </span>
                             </p>
                           )}
+                          {/* 未绑定的账号只在**勾选后**提示，且用灰字：
+                              原来一打开满屏红字「暂无店铺（未绑定）」，
+                              既刺眼又和用户当前操作无关。 */}
                           {checked && !accShopsLoading && accShops.length === 0 && (
-                            <p className="mt-0.5 text-xs text-danger-600">暂无店铺（未绑定）</p>
+                            <p className="mt-0.5 text-xs text-fg-muted">暂无店铺（未绑定）</p>
                           )}
                         </div>
                       );
@@ -642,35 +666,34 @@ export function PublishDialog({
               }
             >
               {/*
-                一行显示五国模板复选框（负责人 2026-11-18：不要下拉）。
-                上方店铺选了哪个国家，这里对应国家的模板才能勾 ——
-                没选的国家灰掉，避免「勾了菲律宾却没有菲律宾店铺」这种无效配置。
+                与「新建定时任务」弹窗保持同一套观感（负责人 2026-11-25：
+                「成品仓库的发布页面像定时发布的页面同步一下」）：
+
+                  · 按钮式勾选，一行排开，不用复选框
+                  · **只列出上面勾了店铺的国家** —— 没选的国家根本不渲染，
+                    不再是「灰着但仍占位置」的五格（原来五国全在，
+                    只有泰国一个店时另外四格都是灰的，看着很杂乱）
+
+                真正算价仍由 targets[].template 按每个店铺的 site 决定，
+                这里选的是「要不要用模板重算」，两者口径一致。
               */}
-              {/* 一行五个，不换行：负责人 2026-11-18 明确「一行显示」 */}
-              <div className="flex flex-nowrap items-center justify-between gap-x-2 py-1">
-                {templateSites.map((site) => {
-                  const enabled = selectedShopSites.includes(site);
-                  const checked = enabled && useTemplateSites.includes(site);
-                  return (
-                    <label
-                      key={site}
-                      title={enabled
-                        ? `按「${templateNameBySite[site]}」模板重算 ${SITE_LABELS[site] || site} 店铺售价`
-                        : `上方没有选择${SITE_LABELS[site] || site}的店铺`}
-                      className={cn(
-                        "flex shrink-0 items-center gap-1 whitespace-nowrap text-xs",
-                        enabled
-                          ? "cursor-pointer text-fg"
-                          : "cursor-not-allowed text-fg-muted opacity-50"
-                      )}
-                    >
-                      <input
-                        type="checkbox"
-                        className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-border accent-brand-500 disabled:cursor-not-allowed"
-                        checked={checked}
-                        disabled={!enabled || templatesQuery.isLoading}
-                        onChange={(e) => {
-                          const on = e.target.checked;
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(76px,1fr))] gap-1.5">
+                {templateSites
+                  .filter((site) => selectedShopSites.includes(site))
+                  .map((site) => {
+                    const checked = useTemplateSites.includes(site);
+                    const siteLabel = SITE_LABELS[site] || site;
+                    return (
+                      <button
+                        key={site}
+                        type="button"
+                        aria-pressed={checked}
+                        disabled={templatesQuery.isLoading}
+                        title={checked
+                          ? `按「${templateNameBySite[site]}」模板重算 ${siteLabel} 店铺售价`
+                          : `不重算 ${siteLabel} 店铺售价`}
+                        onClick={() => {
+                          const on = !checked;
                           setUseTemplateSites((prev) =>
                             on ? [...prev.filter((s) => s !== site), site]
                                : prev.filter((s) => s !== site)
@@ -692,14 +715,23 @@ export function PublishDialog({
                             );
                           }
                         }}
-                      />
-                      <span>{SITE_LABELS[site] || site}</span>
-                    </label>
-                  );
-                })}
-                {templateSites.length === 0 && (
+                        className={cn(
+                          "flex w-full items-center justify-center gap-1 rounded-md border px-1 py-1.5 text-xs transition-colors duration-fast",
+                          checked
+                            ? "border-brand-600 bg-brand-50 font-medium text-brand-700"
+                            : "border-border text-fg-secondary hover:border-border-strong hover:bg-surface-hover"
+                        )}
+                      >
+                        {checked && <Check className="size-2.5 shrink-0" />}
+                        <span className="min-w-0 truncate">{siteLabel}</span>
+                      </button>
+                    );
+                  })}
+                {templateSites.filter((site) => selectedShopSites.includes(site)).length === 0 && (
                   <span className="text-xs text-fg-muted">
-                    暂无可用模板，请先在仓库的定价模板中创建
+                    {templatesQuery.isLoading
+                      ? "正在读取定价模板…"
+                      : "在上面勾选店铺后，这里会出现对应国家的模板"}
                   </span>
                 )}
               </div>
