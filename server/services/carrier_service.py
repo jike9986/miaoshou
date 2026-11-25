@@ -59,11 +59,17 @@ def _kind(value: Any) -> str:
         return "size"
     return ""
 
-_COST_FLOOR_PRICE = re.compile(
-    r"(?:本地(?:显示|展示)价|售价展示(?:价)?)[^0-9]{0,16}"
-    r"([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
+# 妙手报错里的两个数字。币种不能写死 MYR（2026-11-25 修）。
+#
+# 原来两个正则都以 `\s*MYR` 结尾，于是：
+#   · 马来店报「…95.89MYR…基础成本 225.50MYR」→ 命中，抬价生效
+#   · 菲律宾店报「…95.89PHP…225.50PHP」→ 一个字都匹配不上，
+#     `_raise_price_to_reported_floor` 直接返回 None，抬价逻辑从未被调用，
+#     认领必然失败。
+# 负责人反馈「其他国家也是一样的」，就是这一条：只有 MY 能用，
+# PH / TH / VN / SG 全部卡在同一处。
 _COST_FLOOR_VALUE = re.compile(
-    r"基础成本.*?([0-9]+(?:\.[0-9]+)?)\s*MYR", re.IGNORECASE)
+    r"基础成本[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)\s*[A-Z]{3}", re.IGNORECASE)
 MAX_COST_FLOOR_RETRIES = 12
 # 认领到采集箱的加价系数，作用在**人民币拿货价**上。
 #

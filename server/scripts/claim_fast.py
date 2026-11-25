@@ -110,8 +110,11 @@ def _raise_to_cost_floor(body: dict, message: str) -> str | None:
     from decimal import ROUND_HALF_UP, Decimal  # noqa: I001
 
     floor = None
+    # 币种不能写死 MYR（2026-11-25 修，与 carrier_service._COST_FLOOR_VALUE 同）。
+    # 写死 MYR 时，菲律宾/泰国/越南/新加坡店报的成本线一个字都匹配不上，
+    # 抬价逻辑等于不存在，认领必然失败。
     floor_match = re.search(
-        r"基础成本[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)\s*MYR", message, re.I)
+        r"基础成本[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)\s*[A-Z]{3}", message, re.I)
     if floor_match:
         try:
             floor = Decimal(floor_match.group(1))

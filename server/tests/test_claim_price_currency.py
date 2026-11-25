@@ -189,3 +189,67 @@ def test_claim_price_reset_skips_missing_purchase_price():
 
     assert payloads[0]["skuMap"]["sku-a"]["price"] == "41.20"
     assert payloads[0]["skuMap"]["sku-b"]["price"] == "41.20"
+
+
+def test_cost_floor_regex_matches_every_site_currency():
+    """成本线解析必须认所有站点的币种，不能写死 MYR。
+
+    2026-11-25 线上事故：正则以 `\\s*MYR` 结尾，于是
+      · 马来店「…16.70MYR…38.40MYR」→ 命中，抬价生效
+      · 菲律宾店「…95.89PHP…225.50PHP」→ 一个字都匹配不上，
+        `_raise_price_to_reported_floor` 返回 None，抬价从未被调用，
+        认领必然失败。
+    负责人反馈「其他国家也是一样的」，就是这一条。
+    """
+    from services import carrier_service
+
+    cases = [
+        ("PH", "产品设置的本地展示价95.89PHP，无法覆盖产品基础成本"
+               "(跨境物流运费+关税+增值税)：225.50PHP，售卖可能导致亏损", "225.50"),
+        ("MY", "产品设置的本地展示价16.70MYR，无法覆盖产品基础成本"
+               "(跨境物流运费+关税+增值税)：38.40MYR，售卖可能导致亏损", "38.40"),
+        ("TH", "产品设置的本地展示价58.20THB，无法覆盖产品基础成本"
+               "(跨境物流运费+关税+增值税)：310.00THB，售卖可能导致亏损", "310.00"),
+        ("VN", "产品设置的本地展示价45000VND，无法覆盖产品基础成本"
+               "(跨境物流运费+关税+增值税)：128000VND，售卖可能导致亏损", "128000"),
+        ("SG", "产品设置的本地展示价3.20SGD，无法覆盖产品基础成本"
+               "(跨境物流运费+关税+增值税)：8.50SGD，售卖可能导致亏损", "8.50"),
+    ]
+    for site, message, expect in cases:
+        match = carrier_service._COST_FLOOR_VALUE.search(message)
+        assert match is not None, f"{site} 的成本线没解析出来"
+        assert match.group(1) == expect, f"{site}: {match.group(1)} != {expect}"
+
+
+def test_raise_uses_cost_floor_for_php_like_myr():
+    """菲律宾的成本线和马来一样生效：抬到「成本线 + 0.01」。"""
+    import time
+
+    from services import carrier_service, exchange_rate
+
+    exchange_rate.reset_cache()
+    exchange_rate._cache["PHP"] = {
+        "rate": Decimal("0.1045"), "at": time.time(),
+        "source": "test", "failedAt": None}
+    try:
+        payload = {"site": "PH", "skuMap": {
+            ";a;": {"originPrice": "8.49", "price": "95.89",
+                    "priceIncludeVat": "95.89", "isDelete": "0"},
+        }}
+
+        class _Err(Exception):
+            def __init__(self, message):
+                self.payload = {"message": message}
+                super().__init__(message)
+
+        message = ("妙手接口失败 [fail]：产品设置的本地展示价95.89PHP，"
+                   "无法覆盖产品基础成本(跨境物流运费+关税+增值税)："
+                   "225.50PHP，售卖可能导致亏损")
+        result = carrier_service._raise_price_to_reported_floor(payload, _Err(message))
+    finally:
+        exchange_rate.reset_cache()
+
+    assert result is not None, "菲律宾的成本线没有被识别"
+    assert payload["skuMap"][";a;"]["price"] == "225.51"
+    assert result["usedFloor"] is True
+    assert result["costFloor"] == "225.50"
