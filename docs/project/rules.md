@@ -553,6 +553,73 @@ assert h.hexdigest() == manifest["sha256"], "CDN 上的文件和清单不一致"
 
 ---
 
+## ★ 固定下载链接不能是软链接（2026-11-26 事故，瞒了 6 个版本）
+
+**这是比上一条更狠的同类坑：清单全绿，用户装的是旧包。**
+
+### 现场
+
+```
+version.json           →  AohuangShangpin-0.1.54-daa2c7bf-Setup.exe  ✅ 71459602 / daa2c7bf
+.com/latest-Setup.exe  →  71460377 / f5295be4…   ❌ 这是 0.1.44
+.xyz/latest-Setup.exe  →  71460377 / f5295be4…   ❌ 同上，cf-cache-status: HIT, Age: 235408
+服务器上的软链接        →  指向 0.1.54-daa2c7bf（源站是对的！）
+```
+
+也就是说：**源站早就指对了，CDN 一直在发 0.1.44**。差 6 个版本，用户点「下载安装包」
+拿到的还是旧的。
+
+### 根因
+
+`latest-Setup.exe` 是个**可变**软链接，却落在目录级长缓存里：
+
+```nginx
+location ^~ /miaoshou-downloads/ {
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+}
+```
+
+`immutable` 等于「内容永不改变，一年内别再来问我」。对带哈希的文件名这是
+正确答案，对**可变的软链接**是灾难 —— Cloudflare 忠实地把 0.1.44 缓存了一年。
+
+`docs/project/cloudflare-cdn-downloads-2026-11-20.md:85` 早就写过这个隐患
+「要么删掉它，要么单独给它 `no-cache`」，一直没落地。
+
+### 为什么六个版本都没被发现
+
+`verify_release.py` 只校验 `version.json` 里那个**带哈希**的地址。那条链路
+从来没坏过，所以每次发布校验都是满绿。固定链接不在校验范围里 ——
+**校验没覆盖到的入口，等于没校验。**
+
+### 现在的规则
+
+1. 固定链接由 **nginx 精确匹配 location** 处理，不进目录级长缓存：
+   ```nginx
+   location = /miaoshou-downloads/latest-Setup.exe {
+       add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+       include /etc/nginx/snippets/miaoshou-latest-redirect.conf;
+   }
+   ```
+2. 它 **302 到带内容哈希的文件名**。URL 每次发版都变 → 缓存天然失效。
+3. 跳转目标写在 `/etc/nginx/snippets/miaoshou-latest-redirect.conf`，
+   由 `scripts/publish_release.py` 每次发版覆写。**发版时必须跑完这个脚本**，
+   只上传文件不算发完。
+4. `verify_release.py` 第 4 步专门校验「固定链接最终落地的字节」，
+   两个域名都查。
+5. 主域 `.com`/`.cn`/`www` **直连源站（不经 CF）**，所以源站一改它们立刻正确；
+   `.xyz` 走 Cloudflare，若仍返回旧字节需要清缓存：
+   ```bash
+   python -X utf8 scripts/purge_cdn.py                 # 需要 CF_API_TOKEN
+   ```
+   没有 token 时去 Dashboard → Caching → Purge Cache 按 URL 清。
+
+### 一句话记住
+
+> 带哈希的文件名可以 `immutable` 缓存一年；
+> 任何**内容会变**的入口（软链接、固定链接、汇总页）必须 `no-store`。
+
+---
+
 ## Cloudflare 上分段下载是负优化（2026-11-20 实测）
 
 同一份 74MB 安装包，两条路径的最优策略**完全相反**：

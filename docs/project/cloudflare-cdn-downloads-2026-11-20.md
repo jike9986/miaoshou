@@ -86,6 +86,25 @@ URL 变了，CDN 自然去取新文件。旧文件仍被缓存也无害（没人
 所以要么删掉它，要么单独给它 `no-cache`。实测现在指向 0.1.23，已经过时，
 建议直接删。
 
+> **2026-11-26 事后确认：这条隐患真的发生了。**
+> 当时只是「建议删」，没落地。后来 `latest-Setup.exe` 被重新建起来并继续做软链接，
+> 于是 Cloudflare 按 `immutable` 把 **0.1.44** 的字节缓存了整整一年，
+> 而源站早就指向 0.1.54 —— 用户下载固定链接拿到的永远是旧包，瞒了 6 个版本。
+>
+> 现在的做法（已实施）：
+>
+> ```nginx
+> location = /miaoshou-downloads/latest-Setup.exe {
+>     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+>     add_header Pragma "no-cache" always;
+>     include /etc/nginx/snippets/miaoshou-latest-redirect.conf;   # return 302 到带哈希文件名
+> }
+> ```
+>
+> 精确匹配 `=` 优先级高于 `^~`，固定链接不再进目录级长缓存；
+> 跳转目标由 `scripts/publish_release.py` 每次发版重写，永远指向带内容哈希的文件名。
+> 详见 [fixed-download-link-2026-11-26.md](fixed-download-link-2026-11-26.md)。
+
 ---
 
 ## 四、Cloudflare 侧的配置
