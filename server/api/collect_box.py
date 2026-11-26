@@ -582,9 +582,25 @@ def _run_image_translation(job: dict[str, Any]) -> None:
                            or item.operator_id != job.get("operatorId") for item in jobs)):
                 raise errors.AppError(
                     "IMAGE_FAILED", "图片任务归属发生变化，已阻止发布", status=409)
-            if any(item.status in {"failed", "unknown"} for item in jobs):
-                raise errors.AppError(
-                    "IMAGE_FAILED", "图片翻译失败或结果未知，请先核对", status=409)
+            # **2026-11-26 修**：单张失败不再作废整件。
+            #
+            # 原来只要有任意一张 failed/unknown 就 raise，整件商品的图片
+            # 写回全部放弃 —— 已经翻好的 5 张也白花钱、白等待，商品停在
+            # 「图片没处理」状态，负责人要人工重跑一遍。
+            #
+            # 实测 product 596（2026-11-26 试跑 5 件时）：6 个 job 里 5 个
+            # ready、1 个 unknown（上游超时），结果整件报
+            # 「图片翻译失败或结果未知」。
+            #
+            # 现在的口径：ready 的照常写回，失败的记进 state 让界面显示
+            # 「N 张未完成」，用户想补就单独重试那几张。
+            # 真正需要拦的只剩「任务归属变了」——那条在上面。
+            broken = [item for item in jobs if item.status in {"failed", "unknown"}]
+            if broken:
+                reasons = "；".join(
+                    str(item.message or item.error or item.status)[:60]
+                    for item in broken[:3])
+                state["reason"] = f"{len(broken)} 张图片未完成：{reasons}"[:300]
             state["jobs"] = [image_service.serialize(item) for item in jobs]
             pending = [item for item in jobs if item.status != "ready"]
             if not pending:
@@ -617,9 +633,21 @@ def _run_image_translation(job: dict[str, Any]) -> None:
                 "CONFLICT", "账号绑定或操作权限已变化，未继续保存草稿", status=409)
         payload = deepcopy(saved_payload)
         applied = warehouse_service.apply_image_results(db, row, payload, job_ids=job_ids)
-        if applied.get("error") or applied.get("missing"):
+        # 2026-11-26：`missing` 不再拦截保存。
+        #
+        # missing 是「有翻译任务但这张拿不到译文地址」的源图 —— 单张超时
+        # 或失败就会出现在这里。原来一并 raise，等于 1 张没翻成、
+        # 整件商品的图就全不写回（上面那条 unknown 的判断已改，这里同步）。
+        # 现在：拿到的译文照常写回，没拿到的保留原图，并在 state 里
+        # 记明几张未完成。`error` 仍然要拦 —— 那是「读任务/上传整体失败」，
+        # 说明我们的映射根本不可信，不能拿半成品去覆盖 payload。
+        if applied.get("error"):
             raise errors.AppError(
                 "IMAGE_UPLOAD_FAILED", "译文图片尚未完整上传，未继续保存或发布", status=409)
+        if applied.get("missing"):
+            state["missing"] = len(applied["missing"])
+            row.automation_images = dict(state)
+            db.commit()
         client = account_service.account_client(account)
         try:
             fresh = product_service.detail_block(client.shop_detail(row.detail_id, row.shop_id))

@@ -1102,16 +1102,19 @@ def translate(db: Session, payload: Mapping[str, Any],
             # 加上 source 后，同一张图在主图位和 SKU 位各建一个 job。
             # 代价是同一张图可能被翻两次（各 0.024 元）：这是负责人要的
             # 「每个颜色的图都要翻」，不能为了省钱让 SKU 图停在中文。
+            # digest **不含 source**：同一张图在 main 和 sku 各提交一次时
+            # 会算出同一个 id，第二次直接复用 —— 这正是我们要的。
+            #
+            # 曾经以为必须把 source 算进来才能让 SKU 图拿到译文，那是错的：
+            # `apply_image_results` 是按 **source_url** 建 replacements 映射的，
+            # 与 job.source 无关。同一张图只翻一次，写回时 main 位和 SKU 位
+            # 都能命中同一条映射（实测 product 596：6 个 job 里 2 个是
+            # main/sku 重复的同一张图，白扣了 2 次费）。
             digest = sha256_hex(
-                f"{digest}:{owner_operator_id}:{item.get('productId') or ''}"
-                f":{item.get('source') or ''}".encode())
+                f"{digest}:{owner_operator_id}:{item.get('productId') or ''}".encode())
         else:
-            # 没有 owner 的路径（管理端批量修图）同样要把 source 算进去：
-            # 它是**同一个商品里两个不同的图位**，共用一个 job 会让
-            # SKU 图拿不到自己的译文，理由同上。
             digest = sha256_hex(
-                f"{digest}:{item.get('productId') or ''}"
-                f":{item.get('source') or ''}".encode())
+                f"{digest}:{item.get('productId') or ''}".encode())
         existing = db.query(ImageJob).filter(ImageJob.id == digest).one_or_none()
         if (existing is not None and owner_operator_id is not None
                 and existing.operator_id != owner_operator_id):
