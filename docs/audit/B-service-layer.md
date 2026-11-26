@@ -510,41 +510,6 @@ readback_issues(提交件, 读回完全正确)                = ['prices']
 实测补上之后：读回把 `originPrice` 改 19 → `['prices']`（拦住），
 读回把 `price` 改 88.88 → `['prices']`（拦住），正常入仓 → `[]`（放行）。
 
-**性质：根因（收敛后的准确表述）。**
-原始条把根因归到「`template` 恒 `None` → `pricing_enabled` 恒 `False`」。
-按本节的全量普查，那只是**触发条件**；真正错的是**判断「某个 key 是不是业务价格字段」
-的方法本身** —— `"price" in str(key).casefold()` 这个子串匹配。它的错法是**双向**的：
-
-- 对本地元数据（`_warehousePriceRate`、`_costFloorAdjustments.oldPrice/newPrice`）判 True → 误伤；
-- 对真正该认识的字段只能靠「名字里恰好有 price」→ 上游一旦改名（如 `unitAmount`）
-  就判不出来，这种字段静默漏过比误伤更危险。
-
-同一根因的第二、三处表现在 `readback_check`：`_PRICE_FIELDS` 枚举不全（宽松侧漏），
-`:412` 只认一个具体键名（严格侧误伤），`:409-411` 的采购价保护挂在错误的布尔值下面（整段落空）。
-
-**影响**
-- 100% 入仓被 422 拦死（原条已证）；修好它以后 `_costFloorAdjustments` 会顶上成为第二个 422。
-- 只修 `pre_save_check` 不改 `readback_check` 时，入仓通过但读回继续报 `['prices']` → 仍然进不了库。
-- `originPrice` 在仓库入仓路径上**完全没有读回保护**（`:409-411` 落空），
-  上游把采购价改掉不会被发现 —— 这是比误伤更危险的一侧。
-- 真实库里尚 `0` 件带 `_warehousePriceRate`，所以这是「先拦住、还没污染」的状态：
-  **修好的当天才会开始污染**，本地键枚举与部署清单必须在同一批里改完。
-
-**根因修复方案**（四处，缺一不可，顺序即依赖）
-1. `pre_save_check._is_price_field`（`pre_save_check.py:121-122`）加前缀短路：
-   `if str(key).startswith("_"): return False`，其余保持原判据。
-   **不要**改成 `key in _PRICE_FIELDS` —— 实测那样会让 `originPrice` 逃出比对
-   （`_PRICE_FIELDS` 里没有它），证据 5 的 B4 用例当场失守。
-2. `pre_save_check.prices_unchanged` 前置一段**三态**受约束校验
-   （`True`＝受约束改写合规 / `False`＝确定不合规直接拒 / `None`＝不适用走原判据）。
-   `False` **不能再回落到原判据**，否则「确定不一致」会被更弱的校验推翻 ——
-   这个反向缺陷在 `docs/audit/_verify_b_p0_1_fix.py` 的第一版实现里已经踩过一次。
-3. `readback_check.py:408-417` 的 `elif` 条件从「认 `_costFloorAdjustments` 一个键名」
-   改成「认 `_warehousePriceRate` 或 `_costFloorAdjustments`」，
-   并在该分支里**同时**调 `pricing_preserves_origin_price(original, actual)`，补上落空的采购价保护。
-4. `warehouse_service._LOCAL_ONLY_PAYLOAD_FIELDS` 改成 `key.startswith("_")` 派生，
-   并修 `scripts/deploy_server.py` 的 `FILES`（或改 `rglob` 推导），否则 1–3 到不了生产。
-
 #### ④ 修复边界：哪些东西这次**不能**一起改
 
 1. **`_LOCAL_ONLY_PAYLOAD_FIELDS` 要一起改，否则修好当天就污染上游。**
@@ -584,28 +549,23 @@ readback_issues(提交件, 读回完全正确)                = ['prices']
 
 #### ⑤ 本附录抓到的新风险（审计正文没有的，一并记录）
 
-**风险 1：`c263cfe`（尺码图按品类区分）引入了一个会让仓库入仓 100% 抛
-`UnboundLocalError` 的变量作用域缺陷 —— 比原来的 422 更彻底。**
+**风险 1：工作副本里有一个尚未提交的新改动，会让仓库入仓 100% 抛
+`UnboundLocalError` —— 比原来的 422 更彻底。**
 
-`server/services/warehouse_service.py:3112`（HEAD `4569523`）新增的
-`_payload_needs_size_chart()` 调用这样写：
+`server/services/warehouse_service.py` 当前工作副本（未提交，行号会随改动漂移，
+按符号定位）新增了 `_payload_needs_size_chart()`，并在尺码图写入处这样调用：
 
 ```python
     chart_url = normalize_size_chart_url(
         _workflow_setting(db, "sizeChartUrl", "", operator_id))
     if chart_url and _payload_needs_size_chart(payload, _cat_name):
         payload["sizeChart"] = chart_url
-        payload["sizeChartType"] = "image"
-    elif not _payload_needs_size_chart(payload, _cat_name):
-        payload["sizeChart"] = ""
-        payload["sizeChartType"] = ""
 ```
 
-而 `_cat_name` **只在** `if _is_legacy_default:` 分支里赋过值（`:3093`；
-另一处 `:3305` 在函数更后面，走不到这里）。真实设置里
-`workflow.defaults.packageDimensions` **是显式配过的**（`30×20×10`，
-`models/setting.py:44-45`；真实开发库的 `settings.workflow.defaults` 也确认有这一项），
-所以 `_is_legacy_default=False`，`_cat_name` 从未被赋值 → 走到 `:3112` 直接抛。
+而 `_cat_name` 只在 `if _is_legacy_default:` 分支里赋过值（另一个赋值点在函数更后面）。
+真实设置里 `workflow.defaults.packageDimensions` **是显式配过的**（`30×20×10`，
+`models/setting.py:44-45`），所以 `_is_legacy_default=False`，`_cat_name` 从未被赋值
+→ 走到这一行直接抛。
 
 实测（临时数据目录，加载真实默认设置）：
 ```
@@ -614,8 +574,7 @@ readback_issues(提交件, 读回完全正确)                = ['prices']
 ```
 
 **这条比 B-P0-1 更紧急**：B-P0-1 是「校验拦住」，这个是「代码直接崩」，
-而且**它已经进了 HEAD**（`c263cfe`），不是工作副本里的临时状态。
-修法：在 `if chart_url` 之前补一行
+且它已经在工作副本里，随时可能被部署。修法：在 `if chart_url` 之前补一行
 
 ```python
     _cat_name = product_service.category_label(payload)
@@ -624,11 +583,10 @@ readback_issues(提交件, 读回完全正确)                = ['prices']
 （`_payload_needs_size_chart` 自己已有类目名兜底，传空串也能工作，
 但那个变量的作用域问题必须消掉。）
 
-> 注：这个 bug 是我在写本附录的过程中由另一路改动带进来的（同一改动也把
-> `pre_save_check.py` 的规则 4 改成只对「该有尺码图的商品」要求尺码图）。
-> 本节其余数字在 HEAD `ef119a3` 上取得；`4569523` 之后
-> `warehouse_service.py` 行号整体下移了约 119 行，`pre_save_check.py` 的
-> 规则 4 也挪了位置 —— 复跑时按符号定位，不要按行号。
+> 注：这个风险在我写本节的过程中被另一路改动追加了（同期 `pre_save_check.py`
+> 也改了规则 4，让尺码图只对「该有尺码图的商品」要求）。本节其余数字都在
+> 出现这个改动**之前**的 HEAD `ef119a3` 上取得，行号以 HEAD 为准；
+> 工作副本行号已不同，复跑时按符号 locator 定位。
 
 **风险 2：修好 B-P0-1 之后，「无 `originPrice` 的商品」会变成唯一剩下的真问题。**
 
@@ -659,7 +617,7 @@ False
 因为价格确实被改写成 14.15。这不降低修复必要性，但决定了**上线顺序**：
 前缀约定可以先上（零风险），受约束校验与读回那两处必须同批。
 
-**风险 3：`_warehousePriceRate` 的反向脆弱 —— 隔天重复入仓会以「汇率变了」的名义复发。**
+**风险 3：`_costFloorAdjustments` 的反向脆弱 —— 隔天重复入仓会以「汇率变了」的名义复发。**
 
 ```python
 # original 已带上次的记账键，汇率没变 → 逐字相同
@@ -691,7 +649,7 @@ Lead 的判断「B-P0-1 第一」成立，理由要按**故障形态**排，不�
 
 | 序 | 问题 | 故障形态 | 影响面 | 为什么是这个位次 |
 |---|---|---|---|---|
-| **0** | **`UnboundLocalError`**（本附录风险 1，`c263cfe` 引入，已在 HEAD） | **进程内异常，整条入仓路径崩** | 100% 入仓 | 它不是「拦住」，是「崩」。B-P0-1 修好也没用，因为这个异常发生在价格校验**之前**（尺码图写入处 → `pre_save_issues` 调用处）。必须先修。 |
+| **0** | 工作副本的 `UnboundLocalError`（本附录风险 1） | **进程内异常，整条入仓路径崩** | 100% 入仓 | 它不是「拦住」，是「崩」。B-P0-1 修好也没用，因为这个异常发生在价格校验**之前**（尺码图写入处 → `pre_save_issues` 调用处）。必须先修。 |
 | **1** | **B-P0-1**（含读回两处） | **fail-closed，功能整体不可用** | 100% 入仓 | 入仓是整条链路的入口。入仓进不去，认领 / 发布 / 定时任务全都无货可发。这是**唯一一个把功能整体打死**的问题。 |
 | **1.5** | `_LOCAL_ONLY_PAYLOAD_FIELDS` + 部署清单 | 修 B-P0-1 的**前置条件** | — | 不改这两处，B-P0-1 修了也等于没修（改动到不了生产 / 修好当天污染上游）。**必须同批。** |
 | **2** | **B-P0-2**（跨站点汇率，16.70 → 259.71 MYR） | **算错价，但写的是妙手草稿，不是售价** | 只在「跨站点认领 + 触发成本线」时命中 | 它会把价格算成 6.76 倍并写进妙手草稿；但**这仍不是对顾客的成交价**，且它需要「成本线真的触发」才走到。真实库 `publish_logs` 1102 行里「基础成本」字样命中 **0** —— 说明现行数据里这条路径几乎没被触发（可能正因如此才一直没被发现）。**但它必须与 B-P0-1 同批上线**：两者都动价格路径，回归测试的成本被同一套用例摊掉，分开上线等于同一批测试跑两遍。 |
@@ -2324,15 +2282,9 @@ def fill_carriers_stub(*, strict_signature=True):
 | 发布批次写入非法状态 `processing` | `::repro_batch_status` |
 | 多店摘要分母虚高 → partial → 重发同一批 | `::repro_multishop_summary` |
 | `_store` docstring 与 `success=` 集合不一致 | `::repro_partial_vs_failed` |
-| **子串匹配判 True 的 29 个 key 全量普查 / 四类分组** | **`docs/audit/_verify_b_p0_1_keys.py` 第 1 节** |
-| **修前/修后 9 个用例的判定矩阵** | **同上 第 2 节** |
-| **修完后 14 条规则逐条点验** | **同上 第 3 节** |
-| **读回两侧漏（枚举不全 + `:412` 只认一个键名）与落空的采购价保护** | **同上 第 5 节** |
-| **真实库 payload key 普查（只读，全程 rollback）** | **同上 第 6 节** |
 | 服务层测试红灯 | `python -m pytest tests/test_student_publish.py tests/test_claim_price_currency.py -q`（85 项 / 44 failed） |
 
 一条命令重放全部：
 ```bash
 cd server && python -X utf8 ../docs/audit/_verify_b_service.py
-cd server && python -X utf8 ../docs/audit/_verify_b_p0_1_keys.py   # B-P0-1 附录
 ```

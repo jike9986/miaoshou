@@ -444,7 +444,9 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
 
 def details(payload: Mapping[str, Any], actual: Mapping[str, Any],
             original: Mapping[str, Any], coverage: Mapping[str, Any], *,
-            pricing_enabled: bool = False, image_only: bool = False,
+            pricing_enabled: bool = False,
+            warehouse_purchase_pricing: bool = False,
+            image_only: bool = False,
             translate_images: bool = False) -> list[dict[str, Any]]:
     """给界面用的逐项结果（老版 renderDiagnostics 吃的是这个形状）。"""
     failed = set(readback_issues(

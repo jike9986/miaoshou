@@ -697,42 +697,12 @@ def _fill_claim_package_dimensions(
     return adjustments
 
 
-def _payload_has_size_axis(payload: Mapping[str, Any]) -> bool:
-    """这件商品该不该套尺码图 —— 与 warehouse_service 同一判据。
-
-    负责人口径（2026-11-25）：
-      「像帽子，户外椅帽子什么的都是不需要套尺码图的啊」
-
-    第一次实测踩的坑：以为「有没有尺码维度」就是判据，结果帽子**也有**
-    尺码维度（值 = 均码 / 可调节 / 55-60cm），47 顶帽子全被判成需要。
-
-    真正的判据是「尺码值像不像鞋号/服装号」，实现在
-    warehouse_service._payload_needs_size_chart，这里直接复用它，
-    避免两处判据漂移。
-    """
-    return warehouse_service._payload_needs_size_chart(payload)
-
-
 def _fill_claim_size_chart(
         payloads: list[dict[str, Any]], entries: list[dict[str, Any]],
         default_url: str) -> list[dict[str, Any]]:
     default_chart = warehouse_service.normalize_size_chart_url(default_url)
     adjustments: list[dict[str, Any]] = []
     for payload, entry in zip(payloads, entries, strict=True):
-        if not _payload_has_size_axis(payload):
-            # 没有尺码维度：不套尺码图，已存在的也清掉。
-            #
-            # 为什么连 payload 自带的也清：仓库里的历史 payload 是旧逻辑
-            # 无条件写进去的，帽子上那张鞋码表就是这么来的。
-            if payload.get("sizeChart"):
-                payload["sizeChart"] = ""
-                payload["sizeChartType"] = ""
-                adjustments.append({
-                    "warehouseId": entry.get("warehouseId"),
-                    "stage": "size_chart",
-                    "source": "cleared_no_size_axis",
-                })
-            continue
         try:
             chart = warehouse_service.normalize_size_chart_url(
                 payload.get("sizeChart"))
