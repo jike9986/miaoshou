@@ -3107,12 +3107,22 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     #   「像帽子，户外椅帽子什么的都是不需要套尺码图的啊」
     # 原来这里无条件写 sizeChart，帽子/椅子/桌子的详情页也挂一张鞋码表。
     # 实测黄映明 229 件里 65 件（47 帽 + 10 椅 + 6 配件 + 2 包）本不该有。
+    #
+    # 这里**不能**复用上面包裹尺寸分支里的 `_cat_name`：
+    # 那个变量只在 `_is_legacy_default` 分支里赋值，运营显式配过
+    # packageDimensions 时根本没定义 —— 2026-11-26 上线后直接
+    # `UnboundLocalError: local variable '_cat_name' referenced before assignment`，
+    # 采集箱「处理」按钮全部 500。
+    # 让 `_payload_needs_size_chart` 自己从 payload 的 cid / 类目名取，
+    # 两条分支都安全。
     chart_url = normalize_size_chart_url(
         _workflow_setting(db, "sizeChartUrl", "", operator_id))
-    if chart_url and _payload_needs_size_chart(payload, _cat_name):
+    _needs_chart = _payload_needs_size_chart(
+        payload, product_service.category_label(payload))
+    if chart_url and _needs_chart:
         payload["sizeChart"] = chart_url
         payload["sizeChartType"] = "image"
-    elif not _payload_needs_size_chart(payload, _cat_name):
+    elif not _needs_chart:
         # 没有尺码维度：连历史 payload 里带进来的也清掉。
         payload["sizeChart"] = ""
         payload["sizeChartType"] = ""
