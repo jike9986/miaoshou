@@ -185,9 +185,20 @@ def test_claim_package_estimate_preserves_existing_measurements():
 
 
 def test_claim_adds_configured_size_chart_to_copy_and_preserves_valid_source():
+    """有尺码轴的鞋：没带图的补配置图，已带有效图的保留自己的。
+
+    2026-11-25 起 `_fill_claim_size_chart` 会先判「这件商品该不该有尺码图」，
+    没有尺码轴的（帽子/椅子/桌子）不再套图 —— 见 test_size_chart_axis.py。
+    这个用例固定鞋类的原行为不变。
+    """
     configured = "https://assets.example/default-size-chart.png"
     source = "https://assets.example/product-size-chart.png"
-    payloads = [{}, {"sizeChart": source, "sizeChartType": "image"}]
+    shoe_dims = [{"attrName": "尺码",
+                  "attrValueList": [{"attrValue": "36-37"},
+                                    {"attrValue": "38-39"}]}]
+    payloads = [{"skuPropertyList": shoe_dims},
+                {"skuPropertyList": shoe_dims,
+                 "sizeChart": source, "sizeChartType": "image"}]
 
     adjustments = publish_service._fill_claim_size_chart(
         payloads, [{"warehouseId": "20"}, {"warehouseId": "21"}], configured)
@@ -200,6 +211,22 @@ def test_claim_adds_configured_size_chart_to_copy_and_preserves_valid_source():
         "warehouseId": "20", "stage": "size_chart",
         "source": "workflow_setting",
     }]
+
+
+def test_claim_does_not_add_size_chart_to_hats():
+    """帽子没有鞋码，不该被套上尺码图（负责人 2026-11-25）。"""
+    configured = "https://assets.example/default-size-chart.png"
+    hat = {"skuPropertyList": [
+        {"attrName": "颜色",
+         "attrValueList": [{"attrValue": "黑色"}, {"attrValue": "军绿"}]},
+        {"attrName": "尺码", "attrValueList": [{"attrValue": "均码"}]},
+    ]}
+
+    adjustments = publish_service._fill_claim_size_chart(
+        [hat], [{"warehouseId": "30"}], configured)
+
+    assert not hat.get("sizeChart"), "帽子被套上了尺码图"
+    assert adjustments == []
 
 
 def test_claim_uses_consistent_sku_weight_only_for_missing_product_weight():

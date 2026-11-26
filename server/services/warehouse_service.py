@@ -2557,6 +2557,132 @@ def normalize_package_dimensions(value: Any = None) -> dict[str, float]:
     return normalized
 
 
+# 鞋码专用判定（负责人 2026-11-25）。
+#
+# 为什么不能只看「有没有尺码维度」：实测帽子**也有**尺码维度，
+# 值是「均码 / 可调节 / 55-60cm」，而鞋是「36 / 36-37 / 38-39【内长235mm】」。
+# 只看维度会把 47 顶帽子全判成需要尺码图 —— 第二次实测就是这么错的。
+#
+# 判据是「尺码值长得像不像鞋号/服装号」：
+#   鞋：36、36-37、24/25码、38-39【内长235mm】
+#   服：S、M、L、XL、XXL
+#   帽：均码、可调节、55-60cm  ← 一个都不该命中
+_SHOE_SIZE_NUM = re.compile(r"(?<![0-9.])[2-5][0-9](?![0-9.])")
+_SHOE_SIZE_RANGE = re.compile(r"\b[2-5][0-9]\s*[-/]\s*[2-5][0-9]\b")
+
+# 容量/重量/长度这类单位后面的数字不是鞋号（实测「12L / 20L」水桶被误判成鞋）。
+_NOT_SIZE_UNITS = re.compile(
+    r"[0-9]\s*(?:l|ml|kg|g|lb|cm|mm|m|寸|升|克|公斤|斤|ml|oz|w|v|watt)\b",
+    re.IGNORECASE)
+
+# 「均码/可调节/头围」这类说明是帽子特征，出现就不算鞋码
+_UNISEX_SIZE_WORDS = ("均码", "可调节", "無料", "无尺码", "头围", "free size",
+                      "onesize", "one size", "universal")
+
+
+def _is_shoe_or_clothes_size(values: list[str]) -> bool:
+    """这组尺码值是不是鞋号 / 服装号（而不是帽子的均码/头围）。
+
+    只在**有尺码维度**的商品上调用，用来决定要不要挂尺码对照图。
+    """
+    texts = [str(v or "").strip() for v in values if str(v or "").strip()]
+    if not texts:
+        return False
+    hits = 0
+    for text in texts:
+        lower = text.lower()
+        # 均码 / 可调节 / 头围 → 明确不是鞋号，跳过
+        if any(w in lower for w in _UNISEX_SIZE_WORDS):
+            continue
+        # 服装号：S/M/L/XL/XXL 单值
+        if lower in ("xs", "s", "m", "l", "xl", "xxl", "xxxl", "2xl", "3xl", "4xl"):
+            hits += 1
+            continue
+        # 鞋号：36 / 36-37 / 38-39【内长235mm】/ 24/25码
+        if _SHOE_SIZE_RANGE.search(text):
+            hits += 1
+            continue
+        # 12L / 20L / 500ml 这类容量重量值不是鞋号
+        if _NOT_SIZE_UNITS.search(text):
+            continue
+        if _SHOE_SIZE_NUM.search(text) and len(text) <= 24:
+            hits += 1
+    # 半数以上是鞋号/服装号才算 —— 混了均码的按帽子处理
+    return hits * 2 >= len(texts)
+
+
+def _payload_needs_size_chart(payload: Mapping[str, Any],
+                              category_name: str = "") -> bool:
+    """这件商品该不该套尺码对照图。
+
+    负责人口径（2026-11-25）：
+      「像帽子，户外椅帽子什么的都是不需要套尺码图的啊」
+
+    第一次实测踩的坑：以为「有没有尺码维度」就是判据，结果帽子**也有**
+    尺码维度（值 = 均码 / 可调节 / 55-60cm），47 顶帽子全被判成需要。
+
+    真正的判据是「尺码值像不像鞋号/服装号」：
+      鞋  36 / 36-37 / 24\25码 / 38-39【内长235mm】  → 需要
+      服  S / M / L / XL                             → 需要
+      帽  均码 / 可调节 / 55-60cm(可调节)             → 不需要
+      椅  只有颜色，没有尺码维度                      → 不需要
+
+    判定：
+      1. 类目名明确是鞋/服 → 需要（最可靠，有真类目就一锤定音）
+      2. 找到尺码维度 → 值是鞋号/服装号 → 需要
+      3. 类目名明确是帽/包/椅/桌/帐 → 不需要
+      4. 其它默认不需要（宁可少挂一张图，也不要给帽子挂鞋码表）
+    """
+    # 1. 类目名优先。
+    #
+    # 为什么类目优先于尺码值：实测「户外迷彩战术帽定制」的尺码值是 ['58','60']，
+    # 纯数字头围，和鞋号 58/60 完全无法区分。但它 cid=603654 → 本地类目表
+    # 查到 name_cn='运动与户外帽'，一眼就能定。类目名是妙手给的权威值，
+    # 比从规格值猜准得多。
+    category = str(category_name or "").strip()
+    if not category:
+        category = str(payload.get("categoryName") or
+                       payload.get("categoryNameChinese") or
+                       payload.get("cidNameCn") or
+                       payload.get("cidName") or "").strip()
+    if not category:
+        # 只有 cid 时查本地类目表（product_service 已有带缓存的映射）
+        cid = str(payload.get("cid") or "").strip()
+        if cid:
+            from services import product_service
+            category = product_service._category_name_from_db(cid)
+
+    if category:
+        for hint in ("鞋", "靴", "服", "裤", "袜", "泳", "裙"):
+            if hint in category:
+                return True
+        for hint in ("帽", "包", "袋", "椅", "凳", "桌", "帐", "伞", "床",
+                     "套", "垫", "架", "灯", "杯", "壶"):
+            if hint in category:
+                return False
+
+    # 2. 按尺码值判
+    size_values: list[str] = []
+    for prop in (payload.get("skuPropertyList") or []):
+        if not isinstance(prop, Mapping):
+            continue
+        name = str(prop.get("attrNameCn") or prop.get("attrName")
+                   or prop.get("propName") or "").strip().lower()
+        is_size_axis = bool(name) and name in _SIZE_ATTR_NAMES
+        values = [str(av.get("attrValue") or "")
+                  for av in (prop.get("attrValueList") or [])
+                  if isinstance(av, Mapping)]
+        if is_size_axis:
+            size_values.extend(values)
+            continue
+        if not name and values and _is_shoe_or_clothes_size(values):
+            size_values.extend(values)
+
+    if size_values:
+        return _is_shoe_or_clothes_size(size_values)
+    return False
+
+
 def normalize_size_chart_url(value: Any) -> str:
     """尺码图必须是公开 HTTPS 地址；空串表示不设置。"""
     url = str(value or "").strip()
@@ -2977,11 +3103,19 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     else:
         dimensions = _configured_dims
     payload.update(dimensions)
+    # 尺码图只给真正有尺码维度的商品（负责人 2026-11-25）：
+    #   「像帽子，户外椅帽子什么的都是不需要套尺码图的啊」
+    # 原来这里无条件写 sizeChart，帽子/椅子/桌子的详情页也挂一张鞋码表。
+    # 实测黄映明 229 件里 65 件（47 帽 + 10 椅 + 6 配件 + 2 包）本不该有。
     chart_url = normalize_size_chart_url(
         _workflow_setting(db, "sizeChartUrl", "", operator_id))
-    if chart_url:
+    if chart_url and _payload_needs_size_chart(payload, _cat_name):
         payload["sizeChart"] = chart_url
         payload["sizeChartType"] = "image"
+    elif not _payload_needs_size_chart(payload, _cat_name):
+        # 没有尺码维度：连历史 payload 里带进来的也清掉。
+        payload["sizeChart"] = ""
+        payload["sizeChartType"] = ""
 
     # 图片固化：把上游（1688/妙手）的图片地址全部换成我们自己的图床地址。
     #

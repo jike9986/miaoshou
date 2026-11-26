@@ -180,24 +180,36 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
 
         # 从**人民币拿货价**算，不用当前价 —— 调用方会重试多轮，
         # 拿当前价当基准会复利滚价。
+        #
+        # originPrice 缺失时不能直接跳过（2026-11-25 修）：妙手已经明确
+        # 报了成本线，此时不抬价就等于放任这件商品认领失败。没有拿货价
+        # 就没有「微微上挑」的基准，只能直接用成本线兜底 —— 而且**只**
+        # 用成本线，不拿当前价乘任何系数，所以不会滚价。
         purchase = sku.get("originPrice")
-        if purchase in (None, ""):
-            continue
-        try:
-            purchase_d = Decimal(str(purchase))
-        except (InvalidOperation, TypeError, ValueError):
-            continue
-        if purchase_d <= 0:
-            continue
+        purchase_d: Decimal | None = None
+        if purchase not in (None, ""):
+            try:
+                value = Decimal(str(purchase))
+                if value > 0:
+                    purchase_d = value
+            except (InvalidOperation, TypeError, ValueError):
+                purchase_d = None
 
-        quoted_cny = (purchase_d * CLAIM_PRICE_BUMP).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if rate is not None and rate > 0:
-            target = (quoted_cny / rate).quantize(
+        if purchase_d is not None:
+            quoted_cny = (purchase_d * CLAIM_PRICE_BUMP).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if rate is not None and rate > 0:
+                target = (quoted_cny / rate).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP)
+            else:
+                target = (current * (quoted_cny / purchase_d)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP)
+        elif floor is not None:
+            # 没有拿货价：只能用成本线兜底，不做任何比例上挑
+            target = current
         else:
-            target = (current * (quoted_cny / purchase_d)).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP)
+            # 既没拿货价也没成本线：无从下手，不猜
+            continue
 
         # 微微上挑还不够 → 抬到妙手报的成本线 + 0.01，刚好不报错。
         if floor is not None and target < floor:

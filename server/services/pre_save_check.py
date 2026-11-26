@@ -308,9 +308,20 @@ def pre_save_issues(
                 if _ci(payload, key) != want:
                     issues.append("package dimensions do not match the selected settings")
                     break
-        # 4. 尺码图必须是本次选中的那张
-        if size_chart_url and _ci(payload, "sizeChart") != size_chart_url:
-            issues.append("selected size chart is missing")
+        # 4. 尺码图：只有该有尺码图的商品才要求「是本次选中的那张」
+        #
+        # 负责人 2026-11-25：「像帽子，户外椅帽子什么的都是不需要套尺码图的啊」
+        # 帽子/椅子/桌子被 `_payload_needs_size_chart` 判为不需要尺码图时，
+        # payload 里的 sizeChart 会被主动清空。这里如果还要求它等于选中值，
+        # 每顶帽子都会被判成「selected size chart is missing」拦死。
+        #
+        # 为什么在函数内导入：本模块定位是纯函数，模块级导入
+        # warehouse_service 会形成 services 内部循环引用。
+        if size_chart_url:
+            from services import warehouse_service
+            if warehouse_service._payload_needs_size_chart(payload):
+                if _ci(payload, "sizeChart") != size_chart_url:
+                    issues.append("selected size chart is missing")
 
     # 5. 主图必须有，且不超本地设置上限
     main_images = _ci(payload, "imgUrls")
