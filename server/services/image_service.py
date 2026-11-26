@@ -387,6 +387,18 @@ SHRINK_LIMIT = 500 * 1024
 SHRINK_MAX_SIDE = 1200
 SHRINK_QUALITY = 85
 
+# 翻译结果图落盘时的编码参数（2026-11-26）。
+#
+# 与上面的 SHRINK_* 是两回事：
+#   SHRINK_*  用在**送翻译前的源图**上（限 1200px / q85，为省上传流量）；
+#   RESULT_*  用在**翻译回来的结果图**上（不降分辨率，q95 保文字）。
+#
+# 为什么不复用同一条：结果图是要发给妙手当商品图的终态，
+# 「限 1200px + q85」两者都会让文字变软。实测见 _shrink_result 的注释。
+RESULT_JPEG_QUALITY = 95
+# 已经是 JPEG 且小于这个体积就原样保留，不重编码（重编码只白掉一次画质）
+RESULT_KEEP_AS_IS_BYTES = 300 * 1024
+
 
 def _shrink(raw: bytes) -> bytes:
     """超大图先降采样再上传——这是省流量、省时长最有效的一步。
@@ -780,15 +792,89 @@ def _product_id(db: Session, value: Any) -> int | None:
     return row.id
 
 
+def _shrink_result(raw: bytes) -> tuple[bytes, str]:
+    """翻译结果图落盘前转 JPEG —— **不降分辨率**，只换编码。
+
+    ## 为什么只换编码、不缩尺寸（2026-11-26 实测）
+
+    负责人：「你压缩了后面原图不是很模糊吗」
+
+    PNG 是无损格式，照片存 PNG 会大得离谱。实测 job
+    9f0a7b34e05b（商品 3563411743 的 Hitam 颜色图）：
+
+        翻译结果  1254 x 1254  PNG  2 307 339 字节 (2.20 MB)
+        原始中文图  800 x  800  JPG     92 556 字节
+
+    也就是说**翻译服务把 800x800 放大到了 1254x1254** —— 放大的图本来
+    就没有更多细节，只要不缩小分辨率，JPEG 压不出「更模糊」。
+
+    实测各质量档（保持 1254x1254，subsampling=0）：
+
+        q=95   558 KB   全图 PSNR 44.62 dB   文字块 42.76 dB  视觉无损
+        q=92   421 KB   全图 PSNR 42.72 dB   文字块 40.32 dB  视觉无损
+        q=90   379 KB   全图 PSNR 41.82 dB   文字块 39.12 dB  几乎无差别
+        q=85   300 KB   全图 PSNR 40.07 dB   文字块 36.89 dB  文字边缘变软
+        q=80   253 KB   全图 PSNR 38.83 dB   文字块 35.36 dB  能看出
+
+    商品图上最怕糊的就是**翻译后的文字**，所以取 q=95（文字块 42.76 dB，
+    与无损不可区分），体积降到 24%。q85 省得更多但文字会软 —— 不取。
+
+    ## 不做的事
+
+    · 不调用 `thumbnail()`：`_shrink` 是给「送翻译前的源图」用的，
+      它会缩到 1200px 且用 q85，两者都会让结果图变差。
+    · 带 alpha 的图合成白底再转（否则透明区变黑），沿用 `_shrink` 的做法。
+    · **永不失败**：Pillow 没装、图坏了、转完反而更大，一律原样返回。
+
+    返回 (字节, 扩展名)。
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        detected = _image_type(raw)
+        if detected is None:
+            return raw, "jpg"
+        mime, extension = detected
+        # 本来就是 JPEG 且体积不大：没必要重编码，重编码只会白掉一次画质
+        if mime == "image/jpeg" and len(raw) <= RESULT_KEEP_AS_IS_BYTES:
+            return raw, extension
+        with Image.open(io.BytesIO(raw)) as image:
+            has_alpha = image.mode in ("RGBA", "LA") or (
+                image.mode == "P" and "transparency" in image.info)
+            if has_alpha:
+                if image.mode != "RGBA":
+                    image = image.convert("RGBA")
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                background.paste(image, mask=image.split()[3])
+                image = background
+            else:
+                image = image.convert("RGB")
+            buffer = io.BytesIO()
+            # subsampling=0（4:4:4）：不做色度抽样，文字边缘的彩色镶边才不会糊。
+            # 默认的 4:2:0 会把色度分辨率砍半，q 再高文字边也不干净。
+            image.save(buffer, format="JPEG", quality=RESULT_JPEG_QUALITY,
+                       optimize=True, subsampling=0)
+        smaller = buffer.getvalue()
+        if len(smaller) < len(raw):
+            return smaller, "jpg"
+        return raw, extension
+    except Exception:  # noqa: BLE001 - 优化失败绝不能把翻译成果弄丢
+        logging.getLogger(__name__).warning(
+            "翻译结果转 JPEG 失败，按原格式保存", exc_info=True)
+        detected = _image_type(raw)
+        return raw, (detected[1] if detected else "jpg")
+
+
 def _write_result(raw: bytes, job_id: str) -> str:
     settings = get_settings()
     settings.ensure_dirs()
-    detected = _image_type(raw)
     # 上游回的不一定是图（HTML 错误页、截断文件）。老版在这种情况直接报错，
     # 不能落盘成 .jpg 再以 image/jpeg 吐给前端——用户看到裂图，钱已经花了。
-    if detected is None:
+    raw, extension = _shrink_result(raw)
+    if _image_type(raw) is None:
         raise errors.upstream("图片服务返回的不是有效图片")
-    _mime, extension = detected
     name = f"{safe_filename(job_id)}.{extension}"
     target: Path = settings.image_results_dir / name
     target.write_bytes(raw)
