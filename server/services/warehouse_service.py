@@ -2909,22 +2909,29 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     translation_report: dict[str, Any] = {}
     coverage: dict[str, Any] = {}
 
-    # === 成品仓库不套定价模板（负责人 2026-11-25）===
+    # === 定价模板：自动化处理套，手动入库不套（负责人 2026-11-25）===
     #
-    #   「成品仓库里面的价格是不能套模板的，就是拿货价，
-    #     然后只有发布才套模板」
+    #   「自动化处理是可以套模板的，都是入库是需要我手动处理选择入库，
+    #     入库的时候价格是没有套模板的价格」
     #
-    # 成品仓库是「货」的账本，里面只记拿货价；定价模板是**发布时**在
-    # 妙手那边套的（见 publish_service._repricing）。原来这里入仓就套了
-    # 模板，于是 skuMap.price 变成模板售价，后面认领/发布一路带着它走：
-    #   · 成品仓库卡片显示拿货价，payload 里却是售价，两套数字对不上；
-    #   · 认领到采集箱时必须专门写一段 `_reset_claim_prices_to_purchase`
-    #     把它改回去，改漏一件就变成「同一批商品有的按拿货价、有的像套了模板」；
-    #   · 妙手成本校验拿这个虚高的售价去比，又把价格顶到全成本口径。
-    # 根子上不再给仓库商品定价，这些补丁就都不需要了。
+    # 同一个函数服务两种入仓，必须按 automation_result 区分：
     #
-    # 仍然校验模板是否存在：调用方传了名字却查不到，说明前端状态或模板
-    # 已被删，早报错比到发布时才发现好。
+    #   automation_result=True  ← 桌面端跑批的「自动化处理」
+    #     套模板定价。这批商品还要给负责人挑选，卡片上要能看到按模板算的售价，
+    #     也方便他判断值不值得入库。
+    #
+    #   automation_result=False ← 负责人在「自动化处理结果」页手动点入库
+    #     只记拿货价，不套模板。成品仓库是「货」的账本，里面只记拿货价；
+    #     定价模板是**发布时**在妙手那边套的（见 publish_service._repricing）。
+    #     原来这里无条件套了模板，于是 skuMap.price 变成模板售价，
+    #     认领/发布一路带着走：仓库卡片显示拿货价、payload 里却是售价，两套数字；
+    #     认领时要专门写 `_reset_claim_prices_to_purchase` 改回去，改漏一件就乱；
+    #     妙手成本校验拿虚高售价去比，又把价格顶到全成本口径。
+    #
+    # 2026-11-26 的教训：上一版把 template 无条件设成 None，结果自动化处理
+    # 套了模板改价、校验却拿到 pricing_enabled=False，于是每一件都报
+    # 「保存前校验未通过：one or more price fields changed」——
+    # 采集箱「处理」按钮全废。模板启用状态必须与**实际是否定价**一致。
     template = None
     if price_template:
         raw = setting_service.price_templates(
@@ -2933,7 +2940,10 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             raise errors.AppError(errors.TEMPLATE_INVALID,
                                   f"定价模板「{price_template}」不存在",
                                   status=422, details={"field": "template"})
-        # 只验证存在，不用它定价（负责人 2026-11-25）。
+        if automation_result:
+            # 自动化处理：套模板定价
+            template = raw
+        # 手动入库：只验证模板存在，不用它定价
     # 注意：定价必须在「重量加完增量之后」再算 —— 运费按最终包裹重量计费，
     # 先用原始重量算价、再把重量加 0.1 保存，会导致「价格按 1.85kg 算、实际存 1.95kg」，
     # 报价与实际重量不符（老版 product_workflow 是 prepare_weight 之后才 apply 定价）。
@@ -3297,6 +3307,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         process_images_enabled=True,
         image_only=False,
         pricing_enabled=template is not None,
+        # 只放行 price / priceIncludeVat，originPrice 仍受保护。
+        warehouse_purchase_pricing=(template is None),
         # 闸门结果并进 issue 清单：规则 13/14 与上面 gate 共用同一份判定，
         # 各写一套迟早出现「预览说有、入仓说没有」。
         title_review_words=(gate.get("title") or {}).get("reviewWords") or [],
@@ -3404,6 +3416,7 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             client, detail_id=str(detail_id), shop_id=str(shop_id),
             oss_md5=str(block["ossMd5"]), payload=upstream_payload, original=info,
             coverage=coverage, pricing_enabled=template is not None,
+            warehouse_purchase_pricing=(template is None),
         )
         draft_verified = True
 
@@ -4449,7 +4462,8 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
                          oss_md5: str, payload: Mapping[str, Any],
                          original: Mapping[str, Any],
                          coverage: Mapping[str, Any],
-                         pricing_enabled: bool) -> None:
+                         pricing_enabled: bool,
+                         warehouse_purchase_pricing: bool = False) -> None:
     """Write the processed product to Miaoshou and fail closed on readback mismatch."""
     from services import product_service, readback_check  # noqa: I001
 
@@ -4554,6 +4568,7 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
     # （2026-11-10 实测：3522040694 提交 upstream 后仍报 weight/prices 不一致）。
     mismatches = readback_check.readback_issues(
         upstream_payload, actual, original, coverage, pricing_enabled=pricing_enabled,
+        warehouse_purchase_pricing=warehouse_purchase_pricing,
     )
 
     # 退避重试读回。只在不一致时进入，正常路径零开销。
@@ -4572,6 +4587,7 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
         retried_mismatches = readback_check.readback_issues(
             upstream_payload, retried_info, original, coverage,
             pricing_enabled=pricing_enabled,
+            warehouse_purchase_pricing=warehouse_purchase_pricing,
         )
         if len(retried_mismatches) < len(mismatches):
             logger.info("读回重试生效 detailId=%s 第%d次 %s -> %s",
@@ -4584,7 +4600,8 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
         # 同一句话连报多天，没人知道是 weight 还是 prices 还是规格）。
         try:
             rows = readback_check.details(upstream_payload, actual, original,
-                                          coverage, pricing_enabled=pricing_enabled)
+                                          coverage, pricing_enabled=pricing_enabled,
+                                          warehouse_purchase_pricing=warehouse_purchase_pricing)
         except Exception:
             rows = []
         logger.error("读回不一致 detailId=%s：%s", detail_id, mismatches)

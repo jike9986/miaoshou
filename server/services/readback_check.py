@@ -348,6 +348,7 @@ def _sku_image_slots_match(original: Mapping[str, Any],
 def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
                     original: Mapping[str, Any], coverage: Mapping[str, Any], *,
                     pricing_enabled: bool = False,
+                    warehouse_purchase_pricing: bool = False,
                     image_only: bool = False,
                     translate_images: bool = False) -> list[str]:
     """逐项比对；返回不通过的字段名（空列表＝真的存进去了）。
@@ -407,6 +408,12 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
 
     if pricing_enabled:
         # 开定价时销售价必须与处理结果一致，采购价必须原样返回。
+        comparisons["prices"] = _prices_match(payload, actual)
+        comparisons["originPriceUnchanged"] = pricing_preserves_origin_price(original, actual)
+    elif warehouse_purchase_pricing:
+        # 手动入库（automation_result=False）：售价被改写成拿货价口径，
+        # 那是负责人的口径（「入库的时候价格是没有套模板的价格」），
+        # 属于预期内改写。基准用提交的那份，采购价仍要求原样返回。
         comparisons["prices"] = _prices_match(payload, actual)
         comparisons["originPriceUnchanged"] = pricing_preserves_origin_price(original, actual)
     elif payload.get("_costFloorAdjustments"):

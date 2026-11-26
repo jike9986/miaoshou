@@ -255,6 +255,7 @@ def pre_save_issues(
     process_images_enabled: bool = True,
     image_only: bool = False,
     pricing_enabled: bool = False,
+    warehouse_purchase_pricing: bool = False,
     title_review_words: Iterable[str] | None = None,
     image_review_pending: Any = None,
     requirements: Mapping[str, Any] | None = None,
@@ -354,8 +355,18 @@ def pre_save_issues(
             issues.append("image fields changed while image processing is disabled")
 
     # 9/10. 价格：没开定价就不许变；开了定价也不许动 originPrice
+    #
+    # `warehouse_purchase_pricing`（2026-11-26 加）：手动入库会把
+    # skuMap.price 改写成「拿货价 ÷ 站点汇率」，这是负责人的口径
+    # （「入库的时候价格是没有套模板的价格」），属于**预期内的改写**。
+    # 不带这个开关时报「one or more price fields changed」，手动入库全废。
+    # 只放行 price / priceIncludeVat，originPrice 依然受规则 10 保护。
     if not prices_unchanged(original, payload):
-        if not pricing_enabled:
+        if warehouse_purchase_pricing:
+            # 只校验采购价没被动过，售价改写放行
+            if not pricing_preserves_origin_price(original, payload):
+                issues.append("pricing must not change any SKU originPrice")
+        elif not pricing_enabled:
             issues.append("one or more price fields changed")
         elif not pricing_preserves_origin_price(original, payload):
             issues.append("pricing must not change any SKU originPrice")

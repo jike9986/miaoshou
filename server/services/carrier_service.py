@@ -212,7 +212,12 @@ def _raise_price_to_reported_floor(payload: Mapping[str, Any], exc: MiaoshouErro
             continue
 
         # 微微上挑还不够 → 抬到妙手报的成本线 + 0.01，刚好不报错。
-        if floor is not None and target < floor:
+        #
+        # 用 `<=` 而不是 `<`（2026-11-26 修）：价格**正好等于**成本线时
+        # 妙手照样报「无法覆盖产品基础成本」，必须比成本线高才放行。
+        # 原测试 test_reported_cost_floor_equal_to_price_still_adds_one_cent
+        # 就是这个意思（9.66 → 9.67），但代码一直写成 `<`，那个用例红着。
+        if floor is not None and target <= floor:
             target = (floor + Decimal("0.01")).quantize(Decimal("0.01"))
             used_floor = True
 
