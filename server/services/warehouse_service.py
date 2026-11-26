@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 import threading
 import time
@@ -1823,6 +1824,73 @@ def delete(db: Session, ident: Any) -> dict[str, Any]:
     }
 
 
+# 进程内缓存：同一张图在一批商品里会被反复取指纹
+_IMAGE_FP_CACHE: dict[str, str] = {}
+_IMAGE_FP_LOCK = threading.Lock()
+_IMAGE_FP_CACHE_LIMIT = 512
+
+
+def _image_content_fingerprint(url: str) -> str:
+    """取图片内容的指纹，用于「是不是同一张图」判断；取不到返回空串。
+
+    ## 为什么不能拿 OCR 文字当判据（2026-11-26 实测）
+
+    负责人：「正常sku这么多个颜色的图片肯定都是不一样的啊，可能是外面中文
+    一样里面的鞋子颜色不一样，不可能只翻译一个啊」
+
+    det 3563411743 的两张 SKU 图，OCR 文字逐字相同（同一个促销模板：
+    「全新升级 / 做工更精致 / 穿着更舒适」），但画面：
+
+        平均像素差 46.3/255
+        差异 >30 的像素占 36.7%
+        一个是黑鞋，一个是白鞋
+
+    用文字判重 → 第二张永远不翻 → 全库 220 件有颜色维度的商品里
+    210 件（95%）没有 SKU 翻译任务。
+
+    ## 为什么用「缩小后 + 内容哈希」而不是原始字节哈希
+
+    同一张图在不同位置可能是不同尺寸/格式（800x800 jpg vs 1254x1254 png，
+    翻译服务还会放大），原始字节哈希永远对不上。这里缩到 32x32 灰度再
+    量化成 6 级，容得下重编码/缩放，又足以区分「黑鞋 vs 白鞋」。
+
+    ## 失败策略
+
+    网络不通、Pillow 没装、图坏了 → 返回空串，调用方退回按 URL 去重。
+    **绝不因为取不到指纹就漏翻一张图**。
+    """
+    text = str(url or "").strip()
+    if not text.startswith(("http://", "https://")):
+        return ""
+    with _IMAGE_FP_LOCK:
+        cached = _IMAGE_FP_CACHE.get(text)
+    if cached is not None:
+        return cached
+    fingerprint = ""
+    try:
+        import io
+        import urllib.request
+
+        from PIL import Image
+
+        request = urllib.request.Request(
+            text, headers={"User-Agent": "AOHUANG-Fingerprint/1.0"})
+        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
+            raw = response.read(8 * 1024 * 1024)
+        with Image.open(io.BytesIO(raw)) as image:
+            small = image.convert("L").resize((32, 32))
+            # 量化到 6 级：抹掉 jpeg 压缩噪声与轻微缩放差异，保留画面结构
+            pixels = bytes((value * 6) // 256 for value in small.getdata())
+        fingerprint = hashlib.sha256(pixels).hexdigest()[:32]
+    except Exception:  # noqa: BLE001 - 取不到就当没有，调用方退回 URL 判重
+        fingerprint = ""
+    with _IMAGE_FP_LOCK:
+        if len(_IMAGE_FP_CACHE) >= _IMAGE_FP_CACHE_LIMIT:
+            _IMAGE_FP_CACHE.clear()
+        _IMAGE_FP_CACHE[text] = fingerprint
+    return fingerprint
+
+
 def select_translatable_images(
     payload: dict[str, Any], *, main_limit: int = MAIN_IMAGE_LIMIT,
     detail_limit: int = DETAIL_IMAGE_HARD_LIMIT, sku_limit: int = MAIN_IMAGE_LIMIT,
@@ -1874,21 +1942,51 @@ def select_translatable_images(
                      if str((by_url.get(u) or {}).get("action") or "") != "remove"]
         candidates = survivors[:limit]
         picked: list[str] = []
-        seen_text: set[str] = set()
+        # 去重判据：**整张图的内容哈希**，不是 OCR 文字（2026-11-26 修）。
+        #
+        # 负责人当时的原话：
+        #   「正常sku这么多个颜色的图片肯定都是不一样的啊，可能是外面中文一样
+        #     里面的鞋子颜色不一样，不可能只翻译一个啊」
+        #
+        # 他说得对。原来的去重用的是 OCR 文字：
+        #     if text in seen_text: continue
+        # 而同一套促销模板套在不同颜色商品上，文字逐字相同（「全新升级 /
+        # 做工更精致 / 穿着更舒适」），鞋子却一黑一白。实测 det 3563411743：
+        #     两张 SKU 图 OCR 文字完全相同
+        #     但画面平均像素差 46.3/255，差异>30 的像素占 36.7%
+        # 于是第二张被 `continue` 掉，永远不提交翻译 ——
+        # 全库 220 件有颜色维度的商品里，210 件（95%）从来没有 SKU 翻译任务。
+        #
+        # 真正的判据是「这两张图是不是同一张图」。按图片字节哈希判断：
+        # 同一张图重复出现只翻一次（省钱），不同图哪怕文字一样也各翻各的。
+        # 取不到字节（网络失败）时退回按 URL 判断，绝不因为拿不到图就漏翻。
+        seen_images: set[str] = set()
         for url in candidates:
             row = by_url.get(url) or {}
             if row.get("error"):
                 picked.append(url)
                 continue
             action = str(row.get("action") or "")
-            # review = OCR 一行字都没识别到。实测（2026-11-11，12 张详情图）            # 这类图全是纯产品照，图上确实没有文字，不需要翻译。            # 之前这里「照翻」是怕 OCR 漏识别深色底白字/艺术字，但代价是            # 每件多翻 2-3 张纯产品图（每张 0.024 元），而实测 OCR 对中文            # 的召回很稳（同一批 7 行中文全部识别到，置信度 0.98-1.0）。            # 负责人口径：只翻有中文的图。            if action == "review":                continue  # noqa: E501
+            # review = OCR 一行字都没识别到。实测（2026-11-11，12 张详情图）
+            # 这类图全是纯产品照，图上确实没有文字，不需要翻译。
+            # 之前这里「照翻」是怕 OCR 漏识别深色底白字/艺术字，但代价是
+            # 每件多翻 2-3 张纯产品图（每张 0.024 元），而实测 OCR 对中文
+            # 的召回很稳（同一批 7 行中文全部识别到，置信度 0.98-1.0）。
+            # 负责人口径：只翻有中文的图。
+            if action == "review":
+                continue
             if action != "translate":
                 continue
-            text = re.sub(r"\s+", "", str(row.get("text") or ""))
-            if text:
-                if text in seen_text:
+            fingerprint = _image_content_fingerprint(url)
+            if fingerprint:
+                if fingerprint in seen_images:
+                    continue  # 真的是同一张图，只翻一次
+                seen_images.add(fingerprint)
+            else:
+                # 拿不到图内容：退回按 URL 去重（同一 URL 只翻一次）
+                if url in seen_images:
                     continue
-                seen_text.add(text)
+                seen_images.add(url)
             picked.append(url)
         return picked
 

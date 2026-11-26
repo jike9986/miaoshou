@@ -1082,8 +1082,36 @@ def translate(db: Session, payload: Mapping[str, Any],
         if owner_operator_id is not None:
             # A job has one product and one owner. Global content deduplication
             # would leave the next user's/product's result on somebody else's row.
+            #
+            # **2026-11-26 加上 source**：
+            #
+            # 负责人的现场问题：「为什么这个只翻译了第一个颜色」
+            #
+            # 同一张图会同时出现在主图和 SKU 图里（商品的宣传图往往就是
+            # 颜色图）。digest 不含 source 时，`main` 先提交建了 job，
+            # 紧接着 `sku` 提交同一张图就命中 existing、直接 reused ——
+            # job 的 source 永远停在 `main`。
+            #
+            # 而写回时 `apply_image_results` 是按 `source_url` 匹配的，
+            # 更关键的是 `automation_images.jobs` 里永远不会有
+            # `source=sku` 的记录。实测 det 3563411743：
+            #     main 提交 → 312afd5a  source=main  reused=False
+            #     sku  提交 → 312afd5a  source=main  reused=True
+            # 全库 220 件有颜色维度的商品，210 件（95%）没有 sku 任务。
+            #
+            # 加上 source 后，同一张图在主图位和 SKU 位各建一个 job。
+            # 代价是同一张图可能被翻两次（各 0.024 元）：这是负责人要的
+            # 「每个颜色的图都要翻」，不能为了省钱让 SKU 图停在中文。
             digest = sha256_hex(
-                f"{digest}:{owner_operator_id}:{item.get('productId') or ''}".encode())
+                f"{digest}:{owner_operator_id}:{item.get('productId') or ''}"
+                f":{item.get('source') or ''}".encode())
+        else:
+            # 没有 owner 的路径（管理端批量修图）同样要把 source 算进去：
+            # 它是**同一个商品里两个不同的图位**，共用一个 job 会让
+            # SKU 图拿不到自己的译文，理由同上。
+            digest = sha256_hex(
+                f"{digest}:{item.get('productId') or ''}"
+                f":{item.get('source') or ''}".encode())
         existing = db.query(ImageJob).filter(ImageJob.id == digest).one_or_none()
         if (existing is not None and owner_operator_id is not None
                 and existing.operator_id != owner_operator_id):

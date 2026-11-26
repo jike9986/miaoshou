@@ -11,7 +11,6 @@ LOCAL_BASE = Path(r"D:\缓存文件夹\codex工作台\p006\miaoshou\server")
 FILES = [
     ("services/automation_run_service.py", "services/automation_run_service.py"),
     ("services/color_service.py",          "services/color_service.py"),
-    ("services/warehouse_service.py",       "services/warehouse_service.py"),
     ("services/schedule_service.py",        "services/schedule_service.py"),
     ("services/setting_service.py",         "services/setting_service.py"),
     ("services/price_template.py",          "services/price_template.py"),
@@ -22,6 +21,13 @@ FILES = [
     #   · product_service   —— purchase_range 不再回退到 price
     ("services/carrier_service.py",         "services/carrier_service.py"),
     ("services/collect_box_service.py",     "services/collect_box_service.py"),
+    ("services/image_service.py",           "services/image_service.py"),
+    ("services/image_store.py",             "services/image_store.py"),
+    ("services/image_upload.py",            "services/image_upload.py"),
+    ("services/image_review_service.py",    "services/image_review_service.py"),
+    ("services/readback_check.py",          "services/readback_check.py"),
+    ("services/pre_save_check.py",          "services/pre_save_check.py"),
+    ("services/warehouse_service.py",       "services/warehouse_service.py"),
     ("services/product_service.py",         "services/product_service.py"),
     ("api/sync.py",                         "api/sync.py"),
     ("services/publish_service.py",         "services/publish_service.py"),
