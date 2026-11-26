@@ -260,9 +260,50 @@ services/publish_service.py:1547     verify_readback=False
 
 ---
 
-## 五、修复顺序：先修机制，再修 P0
+## 五、已验证可行的修法（不是提案，是跑过的）
 
 如果按「P0 严重度」排序，会先修 `short_id`、`shared_mode`、`version` 穿越这些。但它们修完，机制还在，下一轮照样长。
+
+### 已验证可行的修法（不是提案，是跑过的）
+
+每个根因类 P0 的修法都写成了可复跑脚本，**且都验证了「不误伤正常业务」**：
+
+| 问题 | 验证脚本 | 修法验证结果 |
+|---|---|---|
+| A-P0-1 `short_id` 无约束 | `_verify_a_shortid_fix.py` | ✅ 三件套缺一不可：迁移 + 补偿函数 + **先查重再建索引**。关键细节：必须用部分唯一索引 `WHERE short_id IS NOT NULL`，否则历史 NULL 记录会互相冲突 |
+| B-P0-1 入仓 422 | `_verify_b_p0_1_fix.py` | ✅ 放行合法改写，改价/改拿货价/删 SKU 全部拦住（见第二节那张表） |
+| C-P0-1 `shared_mode` 双源 | `_verify_c_p0_1_fix.py` | ✅ 三个鉴权函数**都拿得到 db**，改 2 行即可，不必动 40+ 个端点 |
+| C-P0-2 分组闸门零接入 | `_verify_c_p0_2_fix.py` | ✅ `guard_group` 角色矩阵**本来就对**（member 拦、teacher/admin 放行、普通组不误伤），只需接线 |
+| E-P0-1 version 路径穿越 | `_verify_e_p0_1_fix.mjs` | ✅ 正向白名单拦住 8 种攻击，5 个真实版本号全放行 |
+
+#### 验证过程中发现的、审计报告里没有的三个新风险
+
+这是「验证修法」比「提修法」多出来的价值：
+
+**① `short_id` 用普通唯一索引会让升级崩溃**
+历史记录（没生成过 short_id 的老账号）的 `short_id` 是 NULL。SQLite 的普通唯一索引允许多个 NULL，但**如果实现时加了 `NOT NULL` 或用了错的谓词，老库升级会直接 IntegrityError**。必须用 `WHERE short_id IS NOT NULL AND trim(short_id) <> ''` 的部分索引。
+
+**② `guard_group(None)` 会被拦住 → 会打死定时任务**
+```
+=== operator 为 None（内部调用/定时任务）时的行为 ===
+  None → 拦住 (FORBIDDEN)
+```
+定时任务、后台线程、认领任务这些内部路径很可能不传 operator。直接接线会让它们全部 403。**接线前必须确认那 4 个调用点的 operator 真的有值。**
+
+**③ `RESTRICTED_GROUP_IDS = {1,2,3}` 的 id 兜底会误判新库**
+```
+新插入的普通组 id=1 → is_restricted_group = True（误判成精品组！）
+                         id=2 → True
+                         id=3 → True
+                         id=4 → False（正常）
+```
+生产库没问题（1/2/3 确实是精品组），但**新部署从头建库时，前三个普通组会被当成受限组，学员全部看不到**。我在写验证脚本时自己就踩到了这个坑（造的「普通款」拿到 id=1 被拦）。
+
+> 这三条都说明：**审计发现的「问题」和「修法」之间还有一段路。** 不跑验证就接线，等于用新补丁盖旧补丁 —— 正是这个项目 42% 补丁叠补丁的成因。
+
+---
+
+## 六、修复顺序（按依赖关系排，不按严重度）
 
 **建议的顺序：**
 
@@ -302,7 +343,7 @@ services/publish_service.py:1547     verify_readback=False
 
 ---
 
-## 六、一句话
+## 七、一句话
 
 > 这套代码的基础设施纪律高于平均水平（`_guarded` 依赖树、`_verify_baseline` 逐列比对、`validateUpdateUrl` 精确匹配、26 个迁移全有真实 downgrade）。
 >
@@ -316,19 +357,36 @@ services/publish_service.py:1547     verify_readback=False
 ## 附：本文所有结论的复跑命令
 
 ```bash
-# 机制 1：手工白名单
-cd server && python -X utf8 ../docs/audit/_verify_b_p0_1.py     # 入仓 422 复现
-grep -n "_is_price_field\|_PRICE_FIELDS\|_LOCAL_ONLY" services/pre_save_check.py services/readback_check.py services/warehouse_service.py
+# ── 机制 1：手工白名单 ─────────────────────────────────────
+cd server && python -X utf8 ../docs/audit/_verify_b_p0_1.py      # 入仓 422 复现
+cd server && python -X utf8 ../docs/audit/_verify_b_p0_1_fix.py  # 修法验证（含反例）
+grep -n "_is_price_field\|_PRICE_FIELDS\|_LOCAL_ONLY" \
+     services/pre_save_check.py services/readback_check.py services/warehouse_service.py
 
-# 机制 2：没接通路
-grep -rn "resolve_product(" --include=*.py server/ | grep -v tests   # 23 处，0 处传 account_id
-git show --stat 3c2028f | grep publish_service                       # 无输出
+# ── 机制 2：没接通路 ──────────────────────────────────────
+grep -rn "resolve_product(" --include=*.py server/ | grep -v tests  # 23 处，0 处传 account_id
+git show --stat 3c2028f | grep publish_service                      # 无输出
 
-# 机制 3：闸门不在必经之路
-cd server && python -m pytest tests -m unit -q --co | tail -1        # 78 项（全量 1243）
-python migrations/_verify_baseline.py                                # exit 1（正确检出，但不在 CI）
-python -m ruff check .                                               # 40 errors
+# ── 机制 3：闸门不在必经之路 ───────────────────────────────
+cd server && python -m pytest tests -m unit -q --co | tail -1   # 78 项（全量 1243）
+cd server && python migrations/_verify_baseline.py             # exit 1（正确检出，但不在 CI）
+cd server && python -m ruff check .                            # 40 errors
 
-# 96 个失败归类
+# ── 96 个失败归类 ─────────────────────────────────────────
 cd server && python -X utf8 ../docs/audit/_triage_tests.py
+
+# ── 各 P0 的复现 + 修法验证（全部在 mkdtemp 临时库，不碰真实数据）──
+cd server && python -X utf8 ../docs/audit/_verify_a_shortid.py       # A-P0-1 复现（三路径）
+cd server && python -X utf8 ../docs/audit/_verify_a_shortid_fix.py   # A-P0-1 修法
+cd server && python -X utf8 ../docs/audit/_verify_c_p0_1.py          # C-P0-1 复现
+cd server && python -X utf8 ../docs/audit/_verify_c_p0_1_fix.py      # C-P0-1 修法（含可行性）
+cd server && python -X utf8 ../docs/audit/_verify_c_p0_2.py          # C-P0-2 复现（AST）
+cd server && python -X utf8 ../docs/audit/_verify_c_p0_2_fix.py      # C-P0-2 修法（含误伤检查）
+node docs/audit/_verify_e_p0_1_fix.mjs                               # E-P0-1 修法
+cd server && python -X utf8 ../docs/audit/_verify_b_service.py       # B 全部 17 段
+cd .. && python -X utf8 docs/audit/_verify_f_deploy.py               # F 生产 vs 本地比对
 ```
+
+> **修法验证脚本和复现脚本是两类东西。**
+> 复现脚本证明「问题真实存在」；修法验证脚本证明「这样改能修好、且不误伤」。
+> 后者更重要 —— 它抓出了 3 个审计报告里没有的新风险（见第五节）。

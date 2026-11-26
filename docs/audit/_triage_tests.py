@@ -16,6 +16,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -78,7 +79,8 @@ def classify(line: str) -> tuple[str, str] | None:
 def main() -> None:
     print("正在跑全量测试…", file=sys.stderr)
     out = run_pytest()
-    Path("_triage_raw.txt").write_text(out, encoding="utf-8")
+    raw_path = Path(tempfile.gettempdir()) / "audit_triage_raw.txt"
+    raw_path.write_text(out, encoding="utf-8")
 
     failed = re.findall(r"^FAILED (tests/[^\s]+)", out, re.M)
     errored = re.findall(r"^ERROR (tests/[^\s]+)", out, re.M)

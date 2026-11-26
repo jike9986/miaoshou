@@ -1163,3 +1163,81 @@ resolve_product 调用点总数（server/，排除 tests/）：23
 
 C 报告已经给出了正确的测试方案（`test_resolve_product_requires_account_context`，用正则扫源码断言 `account_id=` 存在）。Lead 补充一点：
 **建议用 AST 而不是正则**，因为 `resolve_product(db, ident, account_id=...)` 的正则容易被注释、字符串、跨行调用骗过。可直接复用 `_verify_c_p0_2.py` 里的 `scan_calls()` 实现。
+
+---
+
+## 附二：C-P0-2 修复方案的可执行性验证（Lead 实测）
+
+审计给出了「把 `guard_group` 接到 4 个地方」的方案。但**接线前必须先确认两件事**，
+否则接上去就是把正常业务打死：
+
+```bash
+cd server && python -X utf8 ../docs/audit/_verify_c_p0_2_fix.py
+```
+
+### 好消息：guard_group 本身的角色矩阵是正确的
+
+```
+=== may_access_restricted：角色矩阵 ===
+  member   可访问受限分组: False
+  teacher  可访问受限分组: True
+  admin    可访问受限分组: True
+
+=== guard_group 对受限组的实际行为 ===
+  member   → 拦住 (403 FORBIDDEN)   ✓
+  teacher  → 放行                    ✓
+  admin    → 放行                    ✓
+
+=== 非受限组（id=5，避开 id 兜底集合）===
+  member   普通组 → 放行 ✓
+  teacher  普通组 → 放行 ✓
+  admin    普通组 → 放行 ✓
+```
+
+**结论：`guard_group` 不需要改，只需要「接上」。** 这是最低风险的一类修复。
+
+### 但发现两个必须一起处理的风险
+
+#### 风险 1：`operator=None` 会被拦住 → 会打死定时任务
+
+```
+=== operator 为 None（内部调用/定时任务）时的行为 ===
+  None → 拦住 (FORBIDDEN)
+```
+
+`guard_group` 的 `may_access_restricted(None)` 返回 False，所以 `None` 被当成「无权」。
+而**定时任务 / 后台线程 / 认领任务**这些内部路径很可能不传 operator。
+直接把闸门接进 `publish_service` 或 `schedule_service`，会让这些路径全部 403。
+
+> 接线前必须先确认：那 4 个调用点的 `operator` 参数是真的有值，
+> 而不是 `None`（或者显式接受「None 时放行，因为内部调用已经过了鉴权」）。
+
+#### 风险 2：`RESTRICTED_GROUP_IDS = {1,2,3}` 的 id 兜底会误判新库
+
+`is_restricted_group` 的实现是「名字匹配 **或** id 在 {1,2,3} 里」。
+生产库里 1/2/3 确实是那三个精品组，所以没问题。
+
+但**新部署 / 测试库从头建**时，自增 id 从 1 开始：
+```
+  新插入的普通组 id=1 → is_restricted_group = True（误判成精品组！）
+  新插入的普通组 id=2 → True（误判）
+  新插入的普通组 id=3 → True（误判）
+  新插入的普通组 id=4 → False（正常）
+```
+
+后果：新环境里前三个普通组会被当成受限组，学员全部看不到。
+这不是理论风险 —— 本报告第一条验证脚本就踩到了（我造的「普通款」拿到 id=1，被拦）。
+
+> 建议：id 兜底只在「名字匹配不到、但库里确实存在这三个组」时启用；
+> 或者干脆去掉 id 兜底，只认名字（名字是业务概念，id 是实现细节）。
+
+### 修复清单（已验证可执行）
+
+| 位置 | 改动 |
+|---|---|
+| `api/warehouse.py:450` `warehouse_detail` | 加 `guard_group(db, operator, 商品.groupId)` |
+| `api/warehouse.py:466` `claim_product` | 同上 |
+| `services/publish_service.py:536` | 加 `guard_products(db, operator, [warehouseId])` |
+| `services/publish_service.py:560` | 同上（detailId 分支） |
+| `services/group_access.py` | 修 id 兜底误判（风险 2） |
+| 4 个调用点 | 确认 operator 不为 None（风险 2 的前置） |
