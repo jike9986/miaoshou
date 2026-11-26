@@ -303,7 +303,65 @@ services/publish_service.py:1547     verify_readback=False
 
 ---
 
+## 五之二、一条必须连带处理的因果链（B 组实测补充）
+
+修 B-P0-1 有一个**当天就会发作**的连带风险。这不是理论推演，是真实库普查结果：
+
+```
+真实库 products 共 4091 件；可解析 payload 1502 件（含 skuMap 245）
+  payload 含 _warehousePriceRate   = 0 件
+  payload 含 _costFloorAdjustments = 0 件
+```
+
+**为什么是 0 件？** 不是因为这行代码不会写，而是因为：
+
+```
+写入 _warehousePriceRate  →  下一行就被 422 拦在落库之前
+```
+
+也就是说，现在这个 bug 的形态是「**先拦住，所以还没污染**」。
+一旦把 422 修掉、入仓能跑通，这个本地键**当天就会开始进库**。
+
+而 `_strip_local_only_fields`（`warehouse_service.py`）的枚举里**没有它**：
+
+```
+实测 _strip_local_only_fields 之后：
+  _warehousePriceRate   仍在  → 会被推给妙手
+  _costFloorAdjustments 仍在  → 会被推给妙手
+```
+
+> **所以 B-P0-1 必须和 `_LOCAL_ONLY_PAYLOAD_FIELDS` 同批改。**
+> 只修 422 不加排除，等于把「入仓不可用」换成「入仓能用了、但往上游推本地垃圾字段」。
+> 这正是跷跷板：修好 A，B 立刻坏。而它在修之前测不出来，因为根本走不到那一步。
+
+### 还有两处必须一起改，否则等于没修
+
+B 组逐条验了 `readback_check`，发现它是同一个根因的**另一面，而且两侧都漏**：
+
+| 位置 | 问题 | 实测 |
+|---|---|---|
+| `readback_check.py:412` 宽松侧 | 只看显式白名单，新建 `promoPrice` 被改 9999 看不见 | `pre_save` 判 False、`readback` 判 True |
+| `readback_check.py:412` 严格侧 | 只认 `_costFloorAdjustments` 一个键名 | 同一个键名换成 `_ warehousePriceRate` → `['prices']`；换成 `_costFloorAdjustments` → `[]` |
+| `readback_check.py:409-411` | `pricing_preserves_origin_price` 挂在 `if pricing_enabled` 下，而仓库入仓恒 False | 读回把 originPrice 23 改成 19，结果与完全正确时**一模一样** |
+
+第三条尤其隐蔽：**originPrice 在仓库入仓路径上根本没有读回保护。** 改坏了看不出来。
+
+> 结论：只改 `pre_save_check` 的话，**入仓放行、读回还拦**，一件也进不了库。
+> 三处（`pre_save_check` + `readback` 宽松侧 + `readback` 严格侧）必须同一批。
+
+---
+
 ## 六、修复顺序（按依赖关系排，不按严重度）
+
+### 已修掉的（本轮审计期间发现并已入库）
+
+| 问题 | 状态 |
+|---|---|
+| `UnboundLocalError` —— 采集箱「处理」按钮全部 500 | ✅ 已修 `2f2147f`，配 4 项静态防回归测试 |
+
+这条是审计过程中**新发现的**，比 B-P0-1 更急：B-P0-1 是「拦住」（422，有可读错误），
+这条是「崩」（500，整个按钮不可用），而且在价格校验之前。
+`c263cfe` 引入，同日修复。**它证明了一件事：审计本身就会抓出正在发生的线上事故。**
 
 **建议的顺序：**
 
@@ -315,10 +373,13 @@ services/publish_service.py:1547     verify_readback=False
 5. `verify_readback` 那条：**确认 11-18 口径是否仍有效**，然后让测试和代码一致（不是改测试让它过）
 
 > 做完这一步，96 → 0。**不做这一步，后面每一步修复都无法验证是否真的修好了。**
+>
+> 反例就在眼前：`UnboundLocalError` 是靠「线上 500」发现的，不是靠测试发现的。
+> 如果 CI 是绿的、96 个红灯是清的，`c263cfe` 提交时就会被那 4 项防回归测试拦下。
 
 ### 第 1 步（一天）：把已有的闸门搬上必经之路
 6. `_verify_baseline.py` 进 CI，替换 `ci_migration_check.py`
-7. CI 的 `-m unit` 改成全量（或至少加入 3 个鉴权/多租户测试文件）
+7. CI 的 `-m unit` 改成全量（或至少加入 3 个鉴权/多租户测试文件 + `test_warehouse_local_scope.py`）
 8. `build.ps1` 末尾强制调用 `verify_release.py`
 9. 加结构性断言：AST 扫「所有 `resolve_product` 调用都显式传 `account_id`」
 
@@ -328,18 +389,26 @@ services/publish_service.py:1547     verify_readback=False
 12. `manifest.version` 路径校验（E-P0-1，开机自启级）
 13. `resolve_product` 的 `account_id` 改必传（C-P0-6，跨租户级）
 
-### 第 3 步（两周）：消除手工白名单
-14. `_is_price_field` 复用 `readback_check._PRICE_FIELDS`，并写对照表证明没放松校验
-15. `_LOCAL_ONLY_PAYLOAD_FIELDS` 改成 `key.startswith("_")`
-16. 部署清单改成 `rglob` 推导
-17. 前端错误文案从 `errors.py` 枚举生成
-18. 建「补偿函数 ↔ 迁移」对照表 + 同步测试
+### 第 3 步：B-P0-1 一批（四处必须同批，见第五之二节）
+14. `pre_save_check._is_price_field` 加 `_` 前缀短路
+15. `pre_save_check.prices_unchanged` 加受约束校验
+16. `readback_check:412` 宽松侧 + 严格侧一起改
+17. `readback_check:409-411` 的 originPrice 保护从 `pricing_enabled` 分支里提出来
+18. **`_LOCAL_ONLY_PAYLOAD_FIELDS` 改 `key.startswith("_")`（不同批改这条，修好当天就往上游推本地键）**
+19. **`deploy_server.py` 的 `FILES` 加上 `pre_save_check.py` / `readback_check.py`（不加，改了也到不了生产）**
 
-### 第 4 步（一月）：划定唯一权威
-19. 「售价」收拢到单一实现（B-P0-4：现在有 4 套实现 / 3 个汇率源 / 3 种类型）
-20. 「币种由目标店决定」全链路传 `target_shop_site`（B-P0-2）
-21. 单一事务契约：服务层永不 commit
-22. `weight` / `payload.sourceUrl` / `qualityReview.verifiedRevision` 升为真实列（A-P1-3：塞在 JSON 里物理上无法索引）
+> 14–17 是「让它能跑通」，18–19 是「跑通之后不出新事」。**两者必须同一批上线。**
+
+### 第 4 步（两周）：消除其余手工白名单
+20. 部署清单改成 `rglob` 推导（把第 19 条的做法推广开）
+21. 前端错误文案从 `errors.py` 枚举生成
+22. 建「补偿函数 ↔ 迁移」对照表 + 同步测试
+
+### 第 5 步（一月）：划定唯一权威
+23. 「售价」收拢到单一实现（B-P0-4：现在有 4 套实现 / 3 个汇率源 / 3 种类型）
+24. 「币种由目标店决定」全链路传 `target_shop_site`（B-P0-2，建议与 B-P0-1 同批）
+25. 单一事务契约：服务层永不 commit
+26. `weight` / `payload.sourceUrl` / `qualityReview.verifiedRevision` 升为真实列（A-P1-3：塞在 JSON 里物理上无法索引）
 
 ---
 
