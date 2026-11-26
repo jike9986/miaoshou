@@ -17,9 +17,20 @@
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
 
-from scripts.release_fixed_link import (
+# 纯逻辑模块在仓库根的 scripts/ 下（不是 server/scripts/）。
+# conftest 只把 server/ 放进 sys.path，所以这里要显式补上仓库根 ——
+# pytest 的 rootdir 在 CI 里是 server/，在本地可能被从仓库根调用，
+# 两种情况都要能导入。
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts.release_fixed_link import (  # noqa: E402
     FIXED_LINK_PATH,
     artifact_name,
     artifact_url,

@@ -271,6 +271,437 @@ def test_readback_accepts_rewritten_purchase_price_without_cost_floor():
 
 ---
 
+### B-P0-1 附录：根因收敛与修复边界
+
+> 这一节是追加的收敛篇，回答三个具体问题：
+> **① `_is_price_field` 的子串匹配到底误判了哪些 key；② 修好它之后会不会把别的校验一起弄塌；
+> ③ `readback_check.py:408-417` 是不是同一个根因的第二处表现。**
+>
+> 新增复现脚本：`docs/audit/_verify_b_p0_1_keys.py`（一条命令重放本节全部数字）：
+> ```bash
+> cd miaoshou/server && python -X utf8 ../docs/audit/_verify_b_p0_1_keys.py
+> ```
+>
+> 对原始条的修正（**不是推翻，是把根因往里收一层**）：
+> 正文本节前面的版本把根因写成「`template` 恒 `None` → `pricing_enabled` 恒 `False`」。
+> 那是**触发条件**，不是根因。真正的根因是 `_is_price_field` 用
+> `"price" in str(key).casefold()` 这种**子串匹配**判断「这个 key 是不是业务价格字段」——
+> 即使明天 `template` 不再是 `None`、`pricing_enabled` 变成 `True`，任何新加的
+> `*Price*` 元数据键仍然会踩同一个坑（届时换报错文案：从
+> `one or more price fields changed` 变成 `pricing must not change any SKU originPrice`）。
+
+#### ① Q1：子串匹配的误判清单（AST 全量扫描，不是 grep 估数）
+
+**证据 1：扫描口径。**
+对本仓 24 个相关文件做 AST 遍历，收四类字面量：dict 键、`x["key"]` 下标、
+`.get()/.pop()/.setdefault()` 的第一个实参，然后交给真实的 `_is_price_field` 判定。
+
+```python
+from services.pre_save_check import _is_price_field
+hit = {k: files for k, files in collect_keys().items() if _is_price_field(k)}
+```
+
+输出（`_verify_b_p0_1_keys.py` 第 1 节）：
+
+```
+扫描 24 个文件 / 候选字面量 772 / 判 True 29
+```
+
+**证据 2：29 个判 True 的 key，按「会不会真的进 product payload」分四类。**
+
+| 类别 | 个数 | key |
+|---|---|---|
+| **A 真实上游价格字段**（必须继续比） | **4** | `price`、`priceIncludeVat`、`originPrice`、`purchasePrice` |
+| **B 本地记账键，确实写进 payload** | **1** | **`_warehousePriceRate`** |
+| **C 永不进 payload**（误判但当前无实际后果） | **22** | `continuedUnitPrice`、`firstWeightPrice`、`newPrice`、`oldPrice`、`originPriceUnchanged`、`pretaxPrice`、`priceAdjustments`、`priceAfter`、`priceAsc`、`priceBefore`、`priceDesc`、`priceIncludeVatAfter`、`priceIncludeVatBefore`、`priceTemplateList`、`price_currency`、`price_max`、`price_min`、`prices`、`purchasePriceCny`、`purchasePriceMax`、`purchasePriceMin`、`repriced` |
+| **D 未归类**（路由路径片段） | **2** | `/price-defaults`、`/price-templates/preview` |
+
+C 类为什么「当前无实际后果」，逐个给落点（`file:line` 全部实测 grep 过）：
+
+- `price_min` / `price_max` / `price_currency` → `product_service.py:323-325`，是 `build_product()`
+  返回给**前端详情页**的字段；`payload=dict(info)` 在 `:327`，这三个在返回字典的**同层**，
+  不在 `payload` 里面，`_price_fields` 递归不到。
+- `purchasePriceMin` / `purchasePriceMax` / `priceAsc` / `priceDesc` → `warehouse_service.py:64-65`
+  （排序键）和 `:138-139`（列表卡片字段），同样不在 payload 内。
+- `priceBefore` / `priceAfter` / `priceIncludeVatBefore` / `priceIncludeVatAfter` →
+  `transform_service.py:136-139` 写在 `report["prices"]["samples"]` 里，
+  `transform_item` 返回 `(result, report)`（`:241`），调用方 `api/warehouse.py:748`
+  只把 **`result`** 写回 payload（`apply_transformed_payload`），`report` 走响应体。
+- `priceAdjustments` → `carrier_service.py:2157`、`:2321` 是**返回值**的键，
+  `collect_box_service.py:1141` 是 `filled` 字典的键，都不进 payload。
+- `prices` → `readback_check.py:410-417` 是 `comparisons` 字典的键（诊断结果），不是 payload。
+- `priceTemplateList` / `pretaxPrice` / `purchasePriceCny` / `bySalePriceProfit` /
+  `continuedUnitPrice` / `firstWeightPrice` → `price_template.py` 里的上游响应体键、
+  模板配置键与报价明细键。
+- `repriced` → `publish_service.py:1665`、`api/warehouse.py:443` 的批次统计字段。
+
+**证据 3：真实 payload 形态下，`_price_fields` 实际收到的全部路径。**
+
+```python
+real = {"site": "MY", "cid": "603751", ..., "_warehousePriceRate": {...},
+        "_costFloorAdjustments": [{"oldPrice": "14.15", "newPrice": "38.40", ...}],
+        "_sourceWeight": "0.6",
+        "skuMap": {";1;2;": {"price": "14.15", "priceIncludeVat": "14.15",
+                             "originPrice": "23", "isDelete": "0", "stock": "9"}}}
+sorted(pre_save_check._price_fields(real))
+```
+```
+_costFloorAdjustments[0].newPrice            本地记账 ★误判
+_costFloorAdjustments[0].oldPrice            本地记账 ★误判
+_warehousePriceRate                          本地记账 ★误判
+skuMap.;1;2;.originPrice                     真实价格
+skuMap.;1;2;.price                           真实价格
+skuMap.;1;2;.priceIncludeVat                 真实价格
+```
+
+**这就是「根因清单」的准确答案：真实会踩坑的不是 29 个，是 3 个路径、2 个键。**
+
+1. **`_warehousePriceRate`**（`warehouse_service.py:2631` 新建的顶层键）——
+   它不在 `original` 里，所以 `prices_unchanged()` 的第二个循环
+   （`pre_save_check.py:153-158`，`after.keys() - before.keys()` 一律 `return False`）
+   直接判定「变了」。**这是本次 422 的唯一直接原因。**
+2. **`_costFloorAdjustments[0].oldPrice` / `.newPrice`**（`warehouse_service.py:4384` 写入，
+   `carrier_service.py:215-218` 生成）—— 键名里带 `Price`，递归进去被当业务字段。
+   它现在是「被第一层 422 挡住所以还没机会发作」，一旦 B-P0-1 修好、成本线抬价
+   在仓库入仓路径上真的开始生效，**它立刻变成第二个 422**。
+3. **`_sourceWeight` 不命中**——`weight` 里没有 `price`，安全。
+
+**证据 4：`priceIncludeVat` 不是误判。**
+Lead 点名的三个候选里，`priceIncludeVat` 属于 A 类真上游字段：它出现在
+`warehouse_service.py:2624-2625` 的受约束改写里（`entry["priceIncludeVat"] = format(local, ".2f")`），
+本来就是必须一起比、一起改的字段。`originPriceCny` 在本仓**不存在**（AST 扫描 772 个
+候选字面量里没有这个 key，`grep -rn originPriceCny` 零命中），lead 记的名是 `purchasePriceCny`
+（`price_template.py:717`），而那个只在报价明细里，不进 payload。
+
+#### ② Q2：修完会不会「牵连爆炸」——对照表
+
+**证据 5：三种改法的判定矩阵（同一个 payload 集合，只换判定函数）。**
+
+基准：`originPrice=23` CNY、`rate=1.62550086` → 受约束改写应得 `14.15`。
+
+| 用例 | 现状（子串） | 只改 `_is_price_field` | 前缀约定 + 受约束校验 | 期望 |
+|---|---|---|---|---|
+| A1 正常入仓：草稿 38.41 → 改写 14.15 | 拦 ✗ | 拦 ✗ | **放 ✓** | 放 |
+| A2 正常入仓 + 成本线抬价记录 | 拦 ✗ | 拦 ✗ | **放 ✓** | 放 |
+| A3 草稿价已等于改写结果（重复入仓） | 放 ✓ | 放 ✓ | **放 ✓** | 放 |
+| B1 手改售价 99.99（不再等于 origin/rate） | 拦 ✓ | 拦 ✓ | **拦 ✓** | 拦 |
+| B2 手改 1 分（14.15 → 14.16） | 拦 ✓ | 拦 ✓ | **拦 ✓** | 拦 |
+| B3 只改 `priceIncludeVat` | 拦 ✓ | 拦 ✓ | **拦 ✓** | 拦 |
+| B4 改采购价 `originPrice` 23 → 19 | 拦 ✓ | 拦 ✓ | **拦 ✓** | 拦 |
+| B5 凭空多一个 SKU | 拦 ✓ | 拦 ✓ | **拦 ✓** | 拦 |
+| B6 没有记账键的改价（受约束校验不该生效） | 拦 ✓ | 拦 ✓ | **拦 ✓** | 拦 |
+
+**读法（这一栏是本节的结论）：**
+
+- **A1/A2 现状被拦，说明「修之前」错在误伤。**
+- **只改 `_is_price_field` 不足以修好**：A1/A2 仍然被拦。因为价格确实被
+  `_price_warehouse_at_purchase` 改写了，而「没开定价就不许改价」这条不变量本身没错。
+  **这一步很关键 —— 它证明「把子串匹配改掉」只是摘掉噪声，不是关掉校验。**
+- **B 组六个用例在三种改法下全部保持「拦」**，也就是说无论怎么修，
+  真实改价 / 改采购价 / 增删 SKU 一个都没放过。
+- 只有「前缀约定 + 三态受约束校验」两点一起改，9 个用例才全部符合期望。
+
+**证据 6：`pre_save_issues` 其余 13 条规则逐条点验（修完之后）。**
+
+| 规则 | 触发方式 | 修完后的返回 |
+|---|---|---|
+| 基线 | 合规 payload | `[]`（放行） |
+| 1 译文完整 | `coverage={"complete": False}` | `translation coverage is incomplete` |
+| 2 类目 cid | `cid=""` | `category cid is missing` |
+| 3 包裹尺寸 | `packageLength=40`（设置是 33） | `package dimensions do not match the selected settings` |
+| 4 尺码图 | `sizeChart` 换成别的 URL | `selected size chart is missing` |
+| 5 主图 | 删空 / 12 张 | `at least one main image is required` / `main image count exceeds its configured limit` |
+| 6 详情图硬上限 | 31 张 | `detail image count 31 exceeds the platform limit of 30` |
+| 7 详情区纯图 | 混入文字 | `detail contains text or non-image layout` |
+| 8 图片字段 | 关掉图片处理又换主图 | `image fields changed while image processing is disabled` |
+| 10 originPrice | 开定价且改 `originPrice` | `pricing must not change any SKU originPrice` |
+| 11 类目必填属性 | `requirements.requiredAttributes=["材质","产地"]` | `类目必填属性未填：材质、产地` |
+| 12 类目要求尺寸 | `packageLength=""` + `packageDimensionRequired=True` | `类目要求包裹长宽高，当前商品未填完整` |
+| 13 标题复核词 | `title_review_words=["包邮","爆款"]` | `title contains words that require review: 包邮, 爆款` |
+| 14 主图 OCR | `image_review_pending={"blocked":True,...}` | `main image classification needs review: ...` |
+
+**14 条里 14 条全部命中，基线放行。** 也就是说这次改的只有两件事：
+「哪几个 key 算价格字段」和「哪些价格改写是受约束的」。
+图片 / 尺寸 / 尺码图 / 标题 / OCR / 类目 / 译文 **一条都没动**。
+
+#### ③ Q3：`readback_check.py:408-417` 是不是同一处
+
+**证据 7：不是同一种写法，但确实是同一个根因的第二处表现。**
+
+```bash
+grep -n '"price" in \|casefold()' server/services/readback_check.py   # 零命中
+```
+```python
+# readback_check.py:26-28
+_PRICE_FIELDS = ("price", "priceIncludeVat", "shopPrice", "salePrice")
+_ORIGIN_PRICE_FIELDS = ("originPrice", "originPriceIncludeVat", "purchasePrice")
+```
+
+它用的是**显式元组**，不是子串匹配。所以严格答：**Q3 的答案是否** ——
+`readback_check` 没有 `"price" in key` 这种写法。
+
+但它是同一个根因的**另一面**，而且**两侧都漏**：
+
+- **宽松侧（枚举不全 → 静默忽略新字段）**：构造一个 `promoPrice` 键，读回被改成 9999：
+  ```
+  pre_save_check.prices_unchanged = False    ← 子串匹配能发现
+  readback._prices_unchanged     = True     ← 枚举里没这个名字，看不见
+  readback._prices_match         = True     ← 同上
+  ```
+- **严格侧（只认一个键名 → 该放行的拦死）**：`readback_check.py:408-417`
+  ```python
+      if pricing_enabled:
+          comparisons["prices"] = _prices_match(payload, actual)
+          comparisons["originPriceUnchanged"] = pricing_preserves_origin_price(original, actual)
+      elif payload.get("_costFloorAdjustments"):
+          comparisons["prices"] = _prices_match(payload, actual)
+      else:
+          comparisons["prices"] = _prices_unchanged(original, actual)
+  ```
+  实测（提交 14.15 = 23/1.6255 的受约束改写、读回 14.15、上游原价 38.41）：
+  ```
+  带 _warehousePriceRate                 -> ['prices']
+  把同一个键换成 _costFloorAdjustments     -> []
+  ```
+  **只差一个键名，判定就从「不一致」翻成「一致」。** 这说明 `:412` 认的是
+  「这一轮有没有触发成本线抬价」这一个**具体键名**，而不是「这一轮价格是不是被
+  有意改写过了」这个**语义**。修 B-P0-1 只改 `pre_save_check` 的话，
+  入仓放行了、读回还在 `['prices']` 上拦 —— 一条也进不了库。
+
+**结论：必须一次改两处。** 但两处改法**不一样**，不能照抄：
+
+- `pre_save_check`：`_is_price_field` 改成**前缀约定**（`key.startswith("_")` → 不是业务字段），
+  这样以后新加任何 `_xxx` 本地键都自动免疫。
+- `readback_check`：把 `:412` 那个「只认一个具体键名」的条件改成
+  **「有没有本地记账键」的语义判定**：
+  ```python
+      elif payload.get("_warehousePriceRate") or payload.get("_costFloorAdjustments"):
+          comparisons["prices"] = _prices_match(payload, actual)
+          comparisons["originPriceUnchanged"] = pricing_preserves_origin_price(original, actual)
+  ```
+  （更彻底的做法是 `elif any(str(k).startswith("_") for k in payload):`，
+  但要注意 `_sourceWeight` 这类键并不代表「价格被改写」，直接上位会误放行 ——
+  所以这里必须按**这两个具体记账键**判，不能按前缀判。**两处的判据本来就不该一样**：
+  `pre_save_check` 要「排除本地键」，`readback_check` 要「识别改写来源」。）
+  **不要**反过来把 `_PRICE_FIELDS` 从元组改成子串匹配 —— 那会把
+  `priceBefore` / `priceAdjustments` / `priceTemplateList` 这类键
+  也拉进读回比对，制造一批新的假阳性。
+
+**证据 8：顺带抓到的第三处（比 Q3 问的那两处更严重）。**
+
+`readback_check.py:409-411` 把 `pricing_preserves_origin_price`（采购价保护）
+挂在 `if pricing_enabled` 下面。而仓库入仓恒 `pricing_enabled=False`（B-P0-1 证据 4），
+于是走 `:417` 的 else，**采购价保护整段落空**：
+
+```
+readback_issues(提交件, 读回把 originPrice 改成 19) = ['prices']
+readback_issues(提交件, 读回完全正确)                = ['prices']
+```
+
+两者结果一模一样 —— 也就是说 `originPrice` 在仓库入仓这条路上**根本没有读回保护**。
+修 `:412` 的时候必须同时把这一步补上：
+
+```python
+    elif payload.get("_warehousePriceRate"):
+        comparisons["prices"] = _prices_match(payload, actual)
+        comparisons["originPriceUnchanged"] = pricing_preserves_origin_price(original, actual)
+```
+
+实测补上之后：读回把 `originPrice` 改 19 → `['prices']`（拦住），
+读回把 `price` 改 88.88 → `['prices']`（拦住），正常入仓 → `[]`（放行）。
+
+#### ④ 修复边界：哪些东西这次**不能**一起改
+
+1. **`_LOCAL_ONLY_PAYLOAD_FIELDS` 要一起改，否则修好当天就污染上游。**
+   `warehouse_service.py:4138-4143` 那份枚举现在是：
+   ```python
+   _LOCAL_ONLY_PAYLOAD_FIELDS = (
+       "colorMap", "sizeMap", "colorPropName", "sizePropName",
+       "_sourceWeight", "weightAutoFixed", "weightBeforeCap",
+       "translation", "violations", "removedWords", "needsRecollect",
+       "needsRecollectReason",
+   )
+   ```
+   没有 `_warehousePriceRate`、没有 `_costFloorAdjustments`。实测：
+   ```
+   _strip_local_only_fields 之后仍留在上游 payload 里的本地键：
+     _warehousePriceRate        仍在（会推给妙手）
+     _costFloorAdjustments      仍在（会推给妙手）
+     _sourceWeight              已剔除
+     translation                已剔除
+   ```
+   **现在的状态是「被 422 挡住所以还没推出去」**——真实库里 1502 件可解析 payload 里
+   `_warehousePriceRate` 命中数 **0**、`_costFloorAdjustments` **0**、`originPrice` **0**。
+   一旦第 1、2 处修好，这两个键会立刻开始进库、进上游 payload。
+   所以这一改**必须和 B-P0-1 同批上线**，并且按 `01-root-cause.md` 第 15 条改成
+   `key.startswith("_")`（前缀约定），不要继续枚举。
+
+2. **部署清单先修，否则修了等于没修。**
+   `scripts/deploy_server.py:11-28` 的 `FILES` 白名单共 28 条，
+   `server/services/pre_save_check.py`、`readback_check.py` **都不在里面**
+   （`server/services/` + `server/core/` 下另有 44 个 .py 不在清单内）。也就是说按现在的部署脚本，
+   **B-P0-1 的两处改动一行都到不了生产服务器**。
+   这是 `01-root-cause.md` 第 16 条的同一条问题，修 B-P0-1 之前必须先让它可部署。
+
+3. **不要顺手把 `_PRICE_FIELDS` 扩成子串。** 见证据 7 结尾。
+
+4. **不要用「删掉规则 9/10」的办法让它过。** 证据 5 的 B 组证明那六种真变化必须继续拦。
+
+#### ⑤ 本附录抓到的新风险（审计正文没有的，一并记录）
+
+**风险 1：工作副本里有一个尚未提交的新改动，会让仓库入仓 100% 抛
+`UnboundLocalError` —— 比原来的 422 更彻底。**
+
+`server/services/warehouse_service.py` 当前工作副本（未提交，行号会随改动漂移，
+按符号定位）新增了 `_payload_needs_size_chart()`，并在尺码图写入处这样调用：
+
+```python
+    chart_url = normalize_size_chart_url(
+        _workflow_setting(db, "sizeChartUrl", "", operator_id))
+    if chart_url and _payload_needs_size_chart(payload, _cat_name):
+        payload["sizeChart"] = chart_url
+```
+
+而 `_cat_name` 只在 `if _is_legacy_default:` 分支里赋过值（另一个赋值点在函数更后面）。
+真实设置里 `workflow.defaults.packageDimensions` **是显式配过的**（`30×20×10`，
+`models/setting.py:44-45`），所以 `_is_legacy_default=False`，`_cat_name` 从未被赋值
+→ 走到这一行直接抛。
+
+实测（临时数据目录，加载真实默认设置）：
+```
+现状：生产形态（无 originPrice）                  -> UnboundLocalError: cannot access local variable '_cat_name' where it is not associated with a value
+只修① _is_price_field：生产形态（无 originPrice）   -> UnboundLocalError: 同上
+```
+
+**这条比 B-P0-1 更紧急**：B-P0-1 是「校验拦住」，这个是「代码直接崩」，
+且它已经在工作副本里，随时可能被部署。修法：在 `if chart_url` 之前补一行
+
+```python
+    _cat_name = product_service.category_label(payload)
+```
+
+（`_payload_needs_size_chart` 自己已有类目名兜底，传空串也能工作，
+但那个变量的作用域问题必须消掉。）
+
+> 注：这个风险在我写本节的过程中被另一路改动追加了（同期 `pre_save_check.py`
+> 也改了规则 4，让尺码图只对「该有尺码图的商品」要求）。本节其余数字都在
+> 出现这个改动**之前**的 HEAD `ef119a3` 上取得，行号以 HEAD 为准；
+> 工作副本行号已不同，复跑时按符号 locator 定位。
+
+**风险 2：修好 B-P0-1 之后，「无 `originPrice` 的商品」会变成唯一剩下的真问题。**
+
+真实库普查（1502 件可解析 payload）：`originPrice` 命中 **0 件**，
+`skuMap` 里只有 `price` / `isDelete` / `stock` / `itemNum` 四个键。
+但 `_price_warehouse_at_purchase` 的记账键是**无条件写的**（`warehouse_service.py:2631`
+在 SKU 循环外面），`originPrice` 缺失只让 `skuMap` 不变（`:2616-2617` 的 `continue`）：
+
+```python
+>>> out = warehouse_service._price_warehouse_at_purchase(
+...     {"site": "MY", "skuMap": {";1;": {"price": "38.41", "isDelete": "0"}}})
+>>> out["skuMap"] != node["skuMap"]          # 价格一个字没改
+False
+>>> sorted(set(out) - set(node))             # 但记账键照样写进去了
+['_warehousePriceRate']
+```
+
+于是：
+
+```
+未修：生产形态（无 originPrice）   -> 422 ['one or more price fields changed']
+只修①：生产形态（无 originPrice）  -> 放行
+```
+
+也就是说**对真实库里的商品，「前缀约定」这一处就够放行**；
+「受约束校验」是为将来出现 `originPrice` 的商品准备的 —— 而那种商品一旦出现，
+**只改前缀约定不放行**：实测「草稿 38.41 + originPrice 23」→ 只修① 仍然 422，
+因为价格确实被改写成 14.15。这不降低修复必要性，但决定了**上线顺序**：
+前缀约定可以先上（零风险），受约束校验与读回那两处必须同批。
+
+**风险 3：`_costFloorAdjustments` 的反向脆弱 —— 隔天重复入仓会以「汇率变了」的名义复发。**
+
+```python
+# original 已带上次的记账键，汇率没变 → 逐字相同
+prices_unchanged = True
+# 汇率变了（rate 从 1.6393 变 1.62550086）→ 记账键内容变了
+prices_unchanged = False
+```
+`_warehousePriceRate` 里存了 `rate` / `rateSource`，这两个值随汇率刷新而变。
+所以「同一件商品隔天再入一次仓」会以「价格字段变了」的名义被拦，
+**而且报错文案完全指不到汇率**。前缀约定同时把这条消掉（因为整个键不再参与比对）。
+
+#### ⑥ 修完之后仍然存在的边界（诚实标注）
+
+1. **`readback_check._prices_unchanged` 的宽松侧没修**：新加任何 `*price*` 键
+   （如 `promoPrice`）读回被改，两处都看不见。这属于「枚举永远补不完」的机制问题
+   （`01-root-cause.md` 机制 1），本附录只指出，不在 B-P0-1 的修复范围内。
+2. **`image_only=True` 分支没有任何调用方**（`grep -rn "image_only=True" server/` 零命中），
+   但 `pre_save_check.py:294-301` 的 `_non_image_data(original) != _non_image_data(payload)`
+   同样会被 `_warehousePriceRate` 打中（实测
+   `_non_image_data(info) == _non_image_data(priced)` → `False`，只因为多了那个记账键）。
+   前缀约定不影响它（`_non_image_data` 不做字段过滤），这一条要在真启用 image_only 之前单独处理。
+3. **`_warehousePriceRate` 里存 `str(rate_d)`（`Decimal` 的字符串形式）**，
+   而不是数值列。将来若要按汇率回溯核价，这个字段无法索引、无法聚合 ——
+   属于 A 层「塞在 JSON 里物理上无法索引」的同类问题，本附录只记录。
+
+#### ⑦ 优先级：B-P0-1 vs B-P0-2 vs B-P0-6
+
+Lead 的判断「B-P0-1 第一」成立，理由要按**故障形态**排，不是按严重度排：
+
+| 序 | 问题 | 故障形态 | 影响面 | 为什么是这个位次 |
+|---|---|---|---|---|
+| **0** | 工作副本的 `UnboundLocalError`（本附录风险 1） | **进程内异常，整条入仓路径崩** | 100% 入仓 | 它不是「拦住」，是「崩」。B-P0-1 修好也没用，因为这个异常发生在价格校验**之前**（尺码图写入处 → `pre_save_issues` 调用处）。必须先修。 |
+| **1** | **B-P0-1**（含读回两处） | **fail-closed，功能整体不可用** | 100% 入仓 | 入仓是整条链路的入口。入仓进不去，认领 / 发布 / 定时任务全都无货可发。这是**唯一一个把功能整体打死**的问题。 |
+| **1.5** | `_LOCAL_ONLY_PAYLOAD_FIELDS` + 部署清单 | 修 B-P0-1 的**前置条件** | — | 不改这两处，B-P0-1 修了也等于没修（改动到不了生产 / 修好当天污染上游）。**必须同批。** |
+| **2** | **B-P0-2**（跨站点汇率，16.70 → 259.71 MYR） | **算错价，但写的是妙手草稿，不是售价** | 只在「跨站点认领 + 触发成本线」时命中 | 它会把价格算成 6.76 倍并写进妙手草稿；但**这仍不是对顾客的成交价**，且它需要「成本线真的触发」才走到。真实库 `publish_logs` 1102 行里「基础成本」字样命中 **0** —— 说明现行数据里这条路径几乎没被触发（可能正因如此才一直没被发现）。**但它必须与 B-P0-1 同批上线**：两者都动价格路径，回归测试的成本被同一套用例摊掉，分开上线等于同一批测试跑两遍。 |
+| **3** | **B-P0-6**（勾选式任务重复发布） | **重复发布，不是重复扣费** | 比预想的窄 | 需要「勾选了商品 + 多店铺」同时成立。真实库 486 条 `schedules` 里 `targets>1` 的 **0 条**、`selected_product_ids` 非空的 31 条，两者同时成立 **0 条**。而单店铺场景下的重复发布需要 `partial` 才算错账，实测那条路径存在但要「一件成功一件失败」才触发。修法（`summarize` / `_store` / `pick_products`）与价格路径完全正交，可以独立排期。 |
+
+**一句话排序：`UnboundLocalError` → （B-P0-1 + 读回两处 + 本地键枚举 + 部署清单，一批）→ B-P0-2（同批）→ B-P0-6（下一批）。**
+
+Lead 说的「B-P0-1 第一」在**业务影响**上完全成立（入仓不可用 = 整个功能死）。
+补一条工程约束：**它不能单独上线**，因为
+(a) 只改 `pre_save_check` 不改 `readback_check`，入仓还是 422（证据 7）；
+(b) 不改 `_LOCAL_ONLY_PAYLOAD_FIELDS`，修好当天就把本地键推给妙手（证据 8 后的第 1 条）；
+(c) 不改 `deploy_server.py` 的 `FILES`，改动根本到不了生产（同节第 2 条）。
+
+#### 回归测试（本附录新增的 4 条）
+
+```python
+def test_local_underscore_keys_are_never_price_fields():
+    """前缀约定：以后任何 _xxx 都自动免疫，不需要记得去维护清单。"""
+    for key in ("_warehousePriceRate", "_costFloorAdjustments",
+                "_sourceWeight", "_newThingAddedNextYear"):
+        assert pre_save_check._is_price_field(key) is False
+
+def test_cost_floor_adjustment_metadata_does_not_trip_price_gate():
+    """成本线抬价记录只加 _costFloorAdjustments，价格数字未动 → 必须放行。"""
+    info = {"site": "MY", "skuMap": {";1;": {"price": "16.70", "originPrice": "23"}}}
+    payload = {**info,
+               "_warehousePriceRate": {"rate": "1.62550086"},
+               "_costFloorAdjustments": [{"oldPrice": "16.70", "newPrice": "38.40"}]}
+    assert pre_save_check.prices_unchanged(info, payload) is False   # 现状
+    # 修复后断言 True；但 price 真被改成 38.40 时必须仍是 False —— 两条都要测
+
+def test_readback_accepts_rate_rewrite_both_bookkeeping_keys():
+    """:412 的条件必须按「有没有本地记账键」判，不是按具体键名。"""
+    upstream = {"skuMap": {";1;": {"price": "38.41", "originPrice": "23"}}}
+    for key in ("_warehousePriceRate", "_costFloorAdjustments"):
+        submitted = {"skuMap": {";1;": {"price": "14.15", "originPrice": "23"}},
+                     key: {...}}
+        assert readback_check.readback_issues(submitted, submitted, upstream, {}) == []
+
+def test_readback_guards_origin_price_even_without_pricing_enabled():
+    """仓库入仓恒 pricing_enabled=False，采购价保护不能跟着挂掉。"""
+    upstream = {"skuMap": {";1;": {"price": "38.41", "originPrice": "23"}}}
+    submitted = {"_warehousePriceRate": {"rate": "1.62550086"},
+                 "skuMap": {";1;": {"price": "14.15", "originPrice": "23"}}}
+    tampered = {"_warehousePriceRate": {"rate": "1.62550086"},
+                "skuMap": {";1;": {"price": "14.15", "originPrice": "19"}}}
+    assert readback_check.readback_issues(submitted, submitted, upstream, {}) == []
+    assert "prices" in readback_check.readback_issues(submitted, tampered, upstream, {})
+```
+
+---
+
 ### B-P0-2 成本线抬价用源站点汇率算目标站点价格：实测 38.41 MYR 被抬到 259.71 MYR
 
 **证据：`site` 取自 payload（采集地），不是目标店铺。**
