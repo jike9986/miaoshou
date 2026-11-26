@@ -324,7 +324,8 @@ def _retained_sku_images_unchanged(original: Mapping[str, Any],
 
 
 def _sku_image_slots_match(original: Mapping[str, Any],
-                           actual: Mapping[str, Any]) -> bool:
+                           actual: Mapping[str, Any],
+                           dropped_slots: Iterable[str] | None = None) -> bool:
     """读回后 SKU 图还在不在 —— 不要求 URL 相同，也不要求位置下标相同。
 
     ## 为什么不能比 URL（2026-11-21 实测）
@@ -388,6 +389,13 @@ def _sku_image_slots_match(original: Mapping[str, Any],
     before_map = slot_map(original)
     after_map = slot_map(actual)
 
+    # 图片固化阶段因死链主动清空的槽位（`_droppedSkuImages`，本地字段）。
+    # 这些是**我们决定不要的图**，不是读回丢失，必须放行 ——
+    # 否则一张 1688 死链就能让整件商品永远卡在读回校验里。
+    # （调用方从 payload 的 `_droppedSkuImages` 传进来 —— 那是本地字段，
+    #   草稿 original 里没有。）
+    dropped_set = {str(item) for item in (dropped_slots or ())}
+
     # 名字能对上：逐个核验「原来有图，现在还有图」
     matched_any = False
     for key, url in before_map.items():
@@ -395,6 +403,8 @@ def _sku_image_slots_match(original: Mapping[str, Any],
             continue
         if key in after_map:
             matched_any = True
+            if key in dropped_set:
+                continue  # 死链被我们主动清空，不算丢图
             if not after_map[key]:
                 return False  # 这个规格值的图真丢了
     if matched_any:
@@ -466,7 +476,10 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
     #
     # 真正要保证的是「保留范围内的颜色仍然各自有图、图的数量没少」，
     # 不是 URL 字符串一致。搬图是本地正常动作，不该算不一致。
-    comparisons["skuImages"] = _sku_image_slots_match(original, actual)
+    comparisons["skuImages"] = _sku_image_slots_match(
+        original, actual,
+        dropped_slots=(payload.get("_droppedSkuImages")
+                       if isinstance(payload, Mapping) else None))
 
     if pricing_enabled:
         # 开定价时销售价必须与处理结果一致，采购价必须原样返回。

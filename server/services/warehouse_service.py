@@ -4152,6 +4152,9 @@ _LOCAL_ONLY_PAYLOAD_FIELDS = (
     "_sourceWeight", "weightAutoFixed", "weightBeforeCap",
     "translation", "violations", "removedWords", "needsRecollect",
     "needsRecollectReason",
+    # 2026-11-26：图片固化时因死链被清空的 SKU 图槽位（「属性名|值名」）。
+    # 只给 readback_check 放行用，不能发给妙手。
+    "_droppedSkuImages",
 )
 
 
