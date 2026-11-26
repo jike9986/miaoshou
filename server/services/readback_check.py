@@ -325,24 +325,86 @@ def _retained_sku_images_unchanged(original: Mapping[str, Any],
 
 def _sku_image_slots_match(original: Mapping[str, Any],
                            actual: Mapping[str, Any]) -> bool:
-    """两次读回的 SKU 图「位置」一致，不要求 URL 相同。
+    """读回后 SKU 图还在不在 —— 不要求 URL 相同，也不要求位置下标相同。
 
     ## 为什么不能比 URL（2026-11-21 实测）
 
     入库会把图从 `auto-temp` 搬到 `products`，`imgUrl` 随之改变。
-    原来 `sku_image_refs(original) == sku_image_refs(actual)` 比的是
-    `{path, url}` 完整列表，搬图后两边 URL 必然不同 —— 于是**每一件
-    经过搬运的商品**都被判成「SKU 图被换了」，卡在读回校验里出不来
-    （实测 detailId=3549609998 反复失败，日志 mismatches=['skuImages']）。
+    比 URL 的完整列表，搬图后两边必然不同 —— 于是**每一件经过搬运的商品**
+    都被判成「SKU 图被换了」，卡在读回校验里出不来
+    （实测 detailId=3549609998 反复失败）。
 
-    要保证的其实是：原来有图的位置，读回来仍然有图；图的数量没少。
-    文件名一致性由搬运逻辑本身保证（`promote_to_product_zone` 按 stem 改名）。
+    ## 为什么不能比裸下标 path（2026-11-26 修）
+
+    `sku_image_refs` 的 path 是 `skuPropertyList[0].attrValueList[1]`，
+    纯按位置。妙手读回时属性顺序 / 值顺序都可能变，于是两个方向都错：
+
+      属性顺序调换（Warna/Saiz → Saiz/Warna）
+        下标全错位 → 图明明都在，却判失败
+        （11-21 有 45 件、11-26 有 1 件栽在这上面）
+
+      值顺序对调（Coklat/Hitam → Hitam/Coklat）
+        下标不变 → 实际换了图，却判通过
+
+    ## 现在的判据
+
+    按「属性名 + 值名」定位每个规格值，只要求：
+
+      原来带图的规格值，读回后仍然带图
+
+    被截断掉的规格值不算（颜色上限 9 个是正常业务，见 apply_image_limits）。
+    名字被翻译（Coklat → Brown）时按名字对不上，退一步用「有图规格值的
+    数量没减少」判断 —— 翻译不改图，数量只可能因为截断而减少。
     """
     before = sku_image_refs(original)
     after = sku_image_refs(actual)
-    if len(before) != len(after):
+    if not before:
+        return True  # 原来就没有 SKU 图，没什么可核验的
+
+    def slot_map(item: Mapping[str, Any]) -> dict[str, str]:
+        """`属性名|值名` → imgUrl（空串表示这个规格值没有图）。"""
+        result: dict[str, str] = {}
+        props = item.get("skuPropertyList") if isinstance(item, Mapping) else None
+        if not isinstance(props, list):
+            return result
+        for prop in props:
+            if not isinstance(prop, Mapping):
+                continue
+            name = str(prop.get("attrNameCn") or prop.get("attrName")
+                       or prop.get("propName") or "").strip()
+            for value in (prop.get("attrValueList") or []):
+                if not isinstance(value, Mapping):
+                    continue
+                label = str(value.get("attrValue").strip()
+                            if isinstance(value.get("attrValue"), str)
+                            else (value.get("attrValue") or "")).strip()
+                if not label:
+                    continue
+                url = str(value.get("imgUrl") or value.get("imageUrl")
+                          or value.get("image") or "").strip()
+                result[f"{name}|{label}"] = url
+        return result
+
+    before_map = slot_map(original)
+    after_map = slot_map(actual)
+
+    # 名字能对上：逐个核验「原来有图，现在还有图」
+    matched_any = False
+    for key, url in before_map.items():
+        if not url:
+            continue
+        if key in after_map:
+            matched_any = True
+            if not after_map[key]:
+                return False  # 这个规格值的图真丢了
+    if matched_any:
+        return True
+
+    # 名字对不上（颜色被翻译了）：退回按数量判断。
+    # 翻译不改图，数量只可能因截断而减少，不会凭空多出带图的值。
+    if len(after) < len(before):
         return False
-    return [item["path"] for item in before] == [item["path"] for item in after]
+    return True
 
 
 def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
