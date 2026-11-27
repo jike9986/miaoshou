@@ -3202,16 +3202,16 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 原有的规格值逐字匹配，颜色被清洗过（HD866米色 → 米色）就必然报
     # 「SKU【米色-41】不存在」，整件商品存不进去（2026-11-09 实测）。
     if text_done:
-        # 文字处理过：草稿里的颜色已经是目标语言，**绝不能再拿中文规则洗一遍**。
-        # 这一步正是 2026-11-27 那个死循环的起点：`Meter` 不是中文颜色词，
-        # 认不出就被当广告词删掉，两个颜色并成一个。
-        # 原样沿用草稿里的规格，只做结构上的保底（去掉非 dict 项）。
-        #
-        # 也**不调** `_fill_spec_attr_ids`：那是给「要按清洗后的值重建规格表」
-        # 用的，既然不清洗就不需要，白打一趟上游接口。
+        # 处理过，不再清洗。
         props = [p for p in (payload.get("skuPropertyList") or [])
                  if isinstance(p, dict)]
         logger.info("文字已处理过，跳过颜色/尺码清洗 detailId=%s", detail_id)
+    elif not _payload_has_chinese(payload):
+        # 已翻译过（无汉字）：再按中文规则洗会把 Warna putih→Putih、
+        # Meter 直接删掉，读回必然报 skuImages 不一致。原样保留。
+        props = [p for p in (payload.get("skuPropertyList") or [])
+                 if isinstance(p, dict)]
+        logger.info("无中文，跳过颜色/尺码清洗 detailId=%s", detail_id)
     elif _fill_spec_attr_ids(
             db, client, payload, shop_id=shop_id,
             site=str(info.get("site") or account.site or "")):
@@ -3370,7 +3370,10 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 走到这里，标题、图片、类目、颜色、重量、尺寸、价格都已在中文上处理完。
     # 中文阶段清洗有两层意义：中文颜色词表/违规词表/工厂图判定都是为中文写的，
     # 拿马来语去撞会把颜色洗坏（HD866 kuning air → Kuning，SKU 对不上）。
-    if not text_done and _needs_translation(payload, language):
+    #
+    # 已翻译过（无汉字）就不重复翻译，否则拿马来语当中文源文再译一遍。
+    if not text_done and _needs_translation(payload, language) \
+            and _payload_has_chinese(payload):
         # 覆盖率检查的「源」必须是**上游原文**（info），不是已经处理过的 payload：
         # payload 走到这里已经换过图片、算过价格、清洗过颜色，结构上与译文对不上，
         # 拿它做源会把「我们把字段改成别的形态」误判成「漏翻」，
@@ -4407,7 +4410,27 @@ def _clean_size_values(payload: dict[str, Any]) -> int:
                 changed += 1
     return changed
 
-def _clean_color_props(payload: dict[str, Any]) -> list[dict[str, Any]]:
+
+def _payload_has_chinese(payload: Mapping[str, Any]) -> bool:
+    """草稿里还有没有汉字。没有就不清洗、不翻译。"""
+    if not isinstance(payload, Mapping):
+        return False
+    texts: list[str] = [str(payload.get("title") or "")]
+    for prop in (payload.get("skuPropertyList") or []):
+        if not isinstance(prop, Mapping):
+            continue
+        texts.append(str(prop.get("attrName") or ""))
+        for value in (prop.get("attrValueList") or []):
+            if isinstance(value, Mapping):
+                texts.append(str(value.get("attrValue") or ""))
+    for chunk in texts:
+        for char in chunk:
+            if "\u4e00" <= char <= "\u9fff":
+                return True
+    return False
+
+
+
     """就地规范化颜色属性值，返回清洗后的 skuPropertyList。
 
     走 color_service.normalize_colors（照搬老版 shoe_workflow.normalize_colors），
