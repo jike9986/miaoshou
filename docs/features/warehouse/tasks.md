@@ -117,6 +117,23 @@
 
 改后 180 KB / 1.8 秒。详见 `image-sizes-and-derived-2026-11-24.md`。
 
+### 2026-11-27 定时任务搬图不同步 payload，商品图全 404（已修）
+
+负责人：「为什么这些处理的图片全部没有了」。妙手详情全是空白框。
+
+- 根因：`/etc/cron.d/aohuang-img-migrate` 每天 02:00 的
+  `migrate_autotemp.py` 只改 `detail_images`/`images` 两个遗留列，
+  **完全没碰 `payload`**；而妙手读的是 payload 里的 `notes` /
+  `skuPropertyList` / `imgUrls`。文件被 `unlink` 搬走后地址全 404
+- 旧列残留 0 条（看起来迁移完成），payload 里 84 条死地址 —— 藏了很久
+- 附带：cron 不看 `automation_result`，把待确认商品的图也搬了，
+  绕过 `save_from_collect_box` 的 `if not automation_result` 保护
+- 修：payload 同步（含 `notes` 这段 HTML 里内嵌的地址）、
+  待确认的跳过、文件已被搬走的只改地址不搬文件
+- 另修扩展名不匹配：文件 `.jpg`、地址写 `.png`（内容哈希相同）
+- 复验：330 件商品 5110 个地址 **全 200，0 失败**
+- 详见 `../image-pipeline/cron-promote-payload-desync-2026-11-27.md`
+
 ## 待完成
 
 - [ ] 软删除恢复：被删除的商品可从"回收站"恢复（目前删了就没了）
