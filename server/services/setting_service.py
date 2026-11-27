@@ -61,12 +61,28 @@ def image_limits(db: Session) -> dict[str, Any]:
 
 
 # 额度上下限：给死值保护，避免手滑把每天改成 100 万张
+#
+# **2026-11-27 修**：预算那一项的键名原先是 `limitMilliyuan`，而
+# `image_service.budget_limit()` 读的是 `budgetMilliyuan`
+# （models/setting.py 里的默认值也是 `budgetMilliyuan`）。
+#
+# 后果：通过 `POST /images/limits` 传 `limitMilliyuan` 会被写进 settings，
+# 但从没被读取过 —— 改预算**静默无效**，上限永远停在默认/旧值。
+# 负责人 2026-11-27 问「服务器早就设置好上限 100 了为什么还是 10」，
+# 根因就在这里。
+#
+# 现在两个键名都收：`budgetMilliyuan` 是权威键，`limitMilliyuan` 作为
+# 历史别名一并接受并统一写到 `budgetMilliyuan`。
 IMAGE_LIMIT_BOUNDS = {
     "minute": (1, 600),
     "hour": (1, 6000),
     "day": (1, 100000),
+    "budgetMilliyuan": (0, 100_000_000),
     "limitMilliyuan": (0, 100_000_000),
 }
+
+# 历史别名 → 权威键
+_IMAGE_LIMIT_ALIASES = {"limitMilliyuan": "budgetMilliyuan"}
 
 
 def set_image_limits(db: Session, payload: Any) -> dict[str, Any]:
@@ -95,12 +111,18 @@ def set_image_limits(db: Session, payload: Any) -> dict[str, Any]:
         if key in ("minute", "hour", "day"):
             budgets[key] = value
         else:
-            current[key] = value
+            # `limitMilliyuan` 是 `budgetMilliyuan` 的历史别名，统一写权威键，
+            # 否则写进去的值没有任何代码会读（见 IMAGE_LIMIT_BOUNDS 注释）。
+            current[_IMAGE_LIMIT_ALIASES.get(key, key)] = value
         updated = True
     if budgets:
         current["budgets"] = budgets
     if not updated:
         raise errors.validation("没有可更新的额度项", field="limits")
+    # 别名键残留会让人以为设置成功但读不到，顺手清掉。
+    for alias in _IMAGE_LIMIT_ALIASES:
+        if alias != _IMAGE_LIMIT_ALIASES[alias]:
+            current.pop(alias, None)
     put(db, IMAGE_LIMITS_KEY, current)
     return current
 

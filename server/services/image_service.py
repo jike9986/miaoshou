@@ -2,7 +2,8 @@
 
 核心不变量（不可回归）：
   · 任务 id = sha256(原图 + model + prompt + size)，命中 ready 直接复用，不重复扣费；
-  · 累计预扣费上限 10000 毫央（10 元），在写事务内检查；
+  · 累计预扣费上限读 `settings["image.limits"]["budgetMilliyuan"]`
+    （默认 100000 毫央 = 100 元），在写事务内检查；
   · 状态五态：queued / submitted / ready / unknown / failed；
   · unknown 不自动重试（结果未确认，可能已扣费）；
   · 上传原图上限 15MB。

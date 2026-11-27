@@ -1,6 +1,11 @@
 """图片翻译任务。id = sha256(原图 + model + prompt + size)，天然幂等。
 
-费用上限检查在写事务内做：SUM(reserved_milliyuan) 不得超过 10000（10 元）。
+费用上限检查在写事务内做：SUM(reserved_milliyuan) 不得超过
+`settings["image.limits"]["budgetMilliyuan"]`（默认 100000 毫央 = 100 元）。
+
+（原来这里写死「10000（10 元）」，是旧上限留下的。实际上限可配，
+见 `image_service.budget_limit()`。2026-11-27 实测服务器配置已是 100 元，
+但旧注释让人以为还是 10 元。）
 """
 from __future__ import annotations
 

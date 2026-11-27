@@ -39,6 +39,8 @@ FILES = [
     ("schemas/requests.py",                 "schemas/requests.py"),
     ("core/constants.py",                   "core/constants.py"),
     ("core/config.py",                      "core/config.py"),
+    # 只改过 docstring，但让服务器与仓库一致，省得下次 diff 噪音。
+    ("models/image_job.py",                 "models/image_job.py"),
     ("main.py",                             "main.py"),
 ]
 
