@@ -33,6 +33,12 @@ from models.password_reset_token import PasswordResetToken
 from models.email_verification_code import EmailVerificationCode
 from models.operator_token import OperatorToken
 
+# 草稿处理标记（2026-11-27）。追加在末尾的理由同上：没有字母序要求，
+# 插进中间只会让整个文件的 diff 变红。
+# 必须注册进 Base.metadata，否则 create_all 不建表、_add_missing_columns
+# 也无从比对。
+from models.draft_mark import DraftMark
+
 __all__ = [
     "Account",
     "AccountBinding",
@@ -58,4 +64,6 @@ __all__ = [
     "PasswordResetToken",
     "EmailVerificationCode",
     "OperatorToken",
+    # 2026-11-27 追加
+    "DraftMark",
 ]

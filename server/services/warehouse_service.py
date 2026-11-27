@@ -2770,6 +2770,31 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         hold_for_session(
             db, [f"automation-process:{account.id}:{key}"], blocking=False,
             busy_message="该采集箱商品正在处理中，请稍后再试")
+
+    # === 文字处理过没有（2026-11-27）===
+    #
+    # 负责人口径：「一个商品是分图片和文字处理，哪个处理过了就里面打标记，
+    #              下次处理就会跳过」。
+    #
+    # 必须在**任何清洗之前**读：后面的颜色清洗、尺码清洗、违规词清洗、
+    # 翻译全部按中文规则写，而这批商品处理完写回妙手后草稿里已经是马来语。
+    # 再拿中文规则撞一遍，`Meter`（马来语「米色」）认不出，被当厂家广告词删掉，
+    # 两个颜色并成一个，读回核验立刻报 `skuImages` 不一致 —— 每次都失败，
+    # 且每次都已经把草稿改坏。实测 3563357906 / 3563357863 / 3563353396
+    # 等 6 件全卡在这个死循环里。
+    #
+    # 标记独立事务提交（见 draft_mark_service）：文字处理在**写回草稿**那一步
+    # 就完成了，比入仓早；入仓若失败 `products` 里连行都没有，
+    # 标记挂在商品上必然跟着丢。
+    from services import draft_mark_service
+
+    text_done = draft_mark_service.text_already_done(
+        db, account_id=int(account.id), detail_id=str(detail_id),
+        shop_id=str(shop_id), language=str(language or ""))
+    if text_done:
+        logger.info("文字已处理过，跳过中文清洗与翻译 detailId=%s lang=%s",
+                    detail_id, language)
+
     existing = (db.query(Product)
                 .filter(Product.account_id == account.id,
                         Product.warehouse_key == key)
@@ -3176,10 +3201,20 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # attrId 才会按我们提交的规格**重建**草稿的规格表；attrId 为空时它按草稿里
     # 原有的规格值逐字匹配，颜色被清洗过（HD866米色 → 米色）就必然报
     # 「SKU【米色-41】不存在」，整件商品存不进去（2026-11-09 实测）。
-    spec_attr_ids = _fill_spec_attr_ids(
-        db, client, payload, shop_id=shop_id,
-        site=str(info.get("site") or account.site or ""))
-    if spec_attr_ids:
+    if text_done:
+        # 文字处理过：草稿里的颜色已经是目标语言，**绝不能再拿中文规则洗一遍**。
+        # 这一步正是 2026-11-27 那个死循环的起点：`Meter` 不是中文颜色词，
+        # 认不出就被当广告词删掉，两个颜色并成一个。
+        # 原样沿用草稿里的规格，只做结构上的保底（去掉非 dict 项）。
+        #
+        # 也**不调** `_fill_spec_attr_ids`：那是给「要按清洗后的值重建规格表」
+        # 用的，既然不清洗就不需要，白打一趟上游接口。
+        props = [p for p in (payload.get("skuPropertyList") or [])
+                 if isinstance(p, dict)]
+        logger.info("文字已处理过，跳过颜色/尺码清洗 detailId=%s", detail_id)
+    elif _fill_spec_attr_ids(
+            db, client, payload, shop_id=shop_id,
+            site=str(info.get("site") or account.site or "")):
         props = _clean_color_props(payload)
         # 尺码值也要清：供应商在码数后面写销售建议，翻译后超 50 字符被妙手拒收。
         _size_cleaned = _clean_size_values(payload)
@@ -3333,11 +3368,9 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
 
     # ===== 最后一步：翻译 =====
     # 走到这里，标题、图片、类目、颜色、重量、尺寸、价格都已在中文上处理完。
-    # 翻译只做语言转换，不再参与任何清洗判定 —— 这是负责人 2026-11-09 定的流程：
-    #   标题 → 图片（主图/详情图/SKU 图）→ 类目 → 颜色 → 重量 → 尺寸 → 价格 → 翻译
     # 中文阶段清洗有两层意义：中文颜色词表/违规词表/工厂图判定都是为中文写的，
     # 拿马来语去撞会把颜色洗坏（HD866 kuning air → Kuning，SKU 对不上）。
-    if _needs_translation(payload, language):
+    if not text_done and _needs_translation(payload, language):
         # 覆盖率检查的「源」必须是**上游原文**（info），不是已经处理过的 payload：
         # payload 走到这里已经换过图片、算过价格、清洗过颜色，结构上与译文对不上，
         # 拿它做源会把「我们把字段改成别的形态」误判成「漏翻」，
@@ -3370,7 +3403,13 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             oss_md5=str(block["ossMd5"]), payload=upstream_payload, original=info,
             coverage=coverage, pricing_enabled=template is not None,
             warehouse_purchase_pricing=(template is None),
+            _mark_account_id=int(account.id),
+            _mark_language=str(language or ""),
         )
+        # 文字处理已完成（无论读回核验结果如何）。
+        # 丢弃本 session 里的草稿标记缓存，让下游读到刚写进去的标记。
+        text_done = True
+        db.expire_all()
         draft_verified = True
 
     # 入库 = 进「自动化结果」暂存区，**不搬图片**。
@@ -4419,8 +4458,15 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
                          original: Mapping[str, Any],
                          coverage: Mapping[str, Any],
                          pricing_enabled: bool,
-                         warehouse_purchase_pricing: bool = False) -> None:
-    """Write the processed product to Miaoshou and fail closed on readback mismatch."""
+                         warehouse_purchase_pricing: bool = False,
+                         _mark_account_id: int = 0,
+                         _mark_language: str = "") -> None:
+    """Write the processed product to Miaoshou and fail closed on readback mismatch.
+
+    `_mark_account_id` / `_mark_language` 只用于写「文字处理完成」标记
+    （见 draft_mark_service）。带下划线前缀是因为它们不参与上游请求，
+    只是把调用方的身份与目标语言带进来，避免再穿一层参数。
+    """
     from services import product_service, readback_check  # noqa: I001
 
     # 规格值必须与妙手草稿原文逐字一致。
@@ -4493,6 +4539,22 @@ def _save_processed_draft(client: MiaoshouClient, *, detail_id: str, shop_id: st
                 logger.info("成本下限抬价 detailId=%s %s -> %s（第%d轮）",
                             detail_id, adjustment.get("oldPrice"),
                             adjustment.get("newPrice"), cost_floor_retries)
+
+        # === 文字处理完成，立刻打标记（2026-11-27）===
+        #
+        # 妙手已经确认收下这份 payload，草稿此刻就是处理过的样子。
+        # 标记必须在这里落，**不能等读回核验通过**：读回判不一致时草稿
+        # 其实已经被改了，若此时不留标记，下次处理会拿中文规则再洗一遍
+        # 已经是马来语的草稿（`Meter` 认不出被删 → 颜色少一个 →
+        # 读回又报 skuImages 不一致），永远出不来。
+        #
+        # 独立事务提交，不随本函数的任何异常一起回滚。
+        from services import draft_mark_service
+
+        draft_mark_service.mark_text_done(
+            account_id=int(_mark_account_id), detail_id=str(detail_id),
+            shop_id=str(shop_id), language=str(_mark_language or ""))
+
         saved = client.shop_detail(detail_id, shop_id)
         if price_adjustments:
             payload["_costFloorAdjustments"] = price_adjustments

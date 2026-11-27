@@ -286,7 +286,36 @@ def process(
         client.close()
     image_result: dict[str, Any] | None = None
     bg_image_job: dict[str, Any] | None = None
+    # 图片处理过没有（2026-11-27）。负责人口径：「一个商品是分图片和文字处理，
+    # 哪个处理过了就里面打标记，下次处理就会跳过」。
+    #
+    # 图片按张计费（一张 24 毫 = 0.024 元），且重复提交会把已经译好的图再翻一遍。
+    # 标记在 `_run_image_job` 成功收尾时打上（见下方 mark_image_done）。
+    images_done = False
     if payload.processImages and payload.save:
+        from models import Product  # noqa: F401 - 下面只有 images_done 分支之外才用
+
+        from services import draft_mark_service
+        _want_total = (int(payload.mainImageCount or 0)
+                       + int(payload.skuImageCount or 0)
+                       + int(payload.detailImageCount or 0))
+        images_done = draft_mark_service.image_already_done(
+            db, account_id=int(account.id), detail_id=str(detail_id),
+            shop_id=str(resolved_shop_id),
+            # 张数一致才算数：商品换图后必须重翻，不能拿旧标记挡路。
+            expected_total=_want_total if _want_total else None)
+        if images_done:
+            # 跳过图片流程。**不要动 draft_verified_revision**：
+            # 那个字段是「草稿读回核验通过」的凭证，跟图片跑没跑是两件事。
+            # 这里若置 None，商品会立刻从「自动化结果」页消失
+            # （list_automation_results 要求 verified == revision），
+            # 等于把一件原本好的商品弄丢。
+            logger.info("图片已处理过，跳过图片翻译 detailId=%s", detail_id)
+            image_result = {"queued": False, "completed": True, "skipped": True,
+                            "reason": "该商品图片已处理过，本次跳过",
+                            "requested": 0, "submitted": 0, "failed": 0, "jobs": []}
+
+    if payload.processImages and payload.save and not images_done:
         # 图片翻译整体放后台：文字/价格/入仓几秒就完成，用户应当立刻看到结果；
         # 图片翻译每张 AI 20-30 秒、十几张要几分钟，绝不能卡在同步请求里让界面
         # 一直「处理中 0%」。这里只记下商品 id 与各环节上限，交给后台线程跑
@@ -702,6 +731,25 @@ def _run_image_translation(job: dict[str, Any]) -> None:
         row.automation_images = {**state, "queued": False, "completed": True, "failed": 0}
         automation_run_service.complete_image_processing(db, row)
         db.commit()
+        # === 图片处理完成，打标记（2026-11-27）===
+        #
+        # 到这里图片已经 OCR 筛选、翻译、写回草稿并且读回核验通过。
+        # 打上标记后，下次处理这件商品会跳过整套图片流程 ——
+        # 图片按张计费（一张 24 毫 = 0.024 元），重复处理等于重复扣费，
+        # 而且会把已经译好的图再提交一遍。
+        #
+        # 独立事务提交，与上面的 db.commit() 解耦：即使后续有异常也不影响标记。
+        try:
+            from services import draft_mark_service
+
+            draft_mark_service.mark_image_done(
+                account_id=int(row.account_id),
+                detail_id=str(row.detail_id or ""),
+                shop_id=str(row.shop_id or ""),
+                total=int((state or {}).get("requested")
+                          or (state or {}).get("submitted") or 0))
+        except Exception as mark_exc:  # noqa: BLE001 - 标记失败不影响结果
+            logger.warning("图片标记写入失败 product=%s：%s", product_id, mark_exc)
     except Exception as exc:  # noqa: BLE001 - never publish an unverified background result
         db.rollback()
         hold_for_session(db, [f"automation-image-result:{product_id}"])
