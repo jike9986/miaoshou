@@ -18,6 +18,7 @@ from __future__ import annotations  # noqa: I001
 
 import hashlib
 import os
+import threading
 import re
 import logging
 import urllib.error
@@ -39,6 +40,17 @@ _PRIVATE_PREFIXES = (
 )
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 20
+
+# 全服务器同时下载/上传的图片张数上限（2026-11-28 修 OOM）。
+#
+# 每次 `persist()` 都把整张图读进内存（`raw` = response.read()，最大 15 MB），
+# 还要再写一份临时文件、再读一遍传给图床。20 件商品同时处理时，
+# 每件几十张图，瞬时驻留内存直接顶到 6.5 GB —— 这是三次 OOM
+# （12:27 / 12:53 / 14:23，anon-rss 恒为 6.5 GB）的固定来源。
+#
+# 4 是这台 4 核 8 GB 机器的安全值：图片转存是 IO 密集型，
+# 4 路足够跑满带宽，再多只是把内存堆起来。
+_IMAGE_STORE_SLOTS = threading.BoundedSemaphore(4)
 
 # 已经是我们自己图床的地址前缀：这些不用再传
 OWN_PUBLIC_HINTS = ("aohuang888.com",)
@@ -108,21 +120,25 @@ class ImageStore:
         try:
             from services import image_upload
 
-            raw = _download(text)
-            # 用内容哈希当文件名：同一张图（哪怕 URL 不同）只传一次
-            digest = hashlib.sha256(raw).hexdigest()[:32]
-            from pathlib import Path  # noqa: I001
-            import tempfile
+            # 限流：全服务器最多 4 张图同时走「下载 → 落盘 → 上传」
+            # （见 _IMAGE_STORE_SLOTS）。上传也要在闸门内 —— 它同样要
+            # 把文件整个读进内存发给图床。
+            with _IMAGE_STORE_SLOTS:
+                raw = _download(text)
+                # 用内容哈希当文件名：同一张图（哪怕 URL 不同）只传一次
+                digest = hashlib.sha256(raw).hexdigest()[:32]
+                from pathlib import Path  # noqa: I001
+                import tempfile
 
-            suffix = ".jpg"
-            if raw.startswith(b"\x89PNG"):
-                suffix = ".png"
-            elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
-                suffix = ".webp"
-            tmp = Path(tempfile.gettempdir()) / f"store-{digest}{suffix}"
-            if not tmp.exists():
-                tmp.write_bytes(raw)
-            public = image_upload.upload_image(tmp, timeout=DOWNLOAD_TIMEOUT)
+                suffix = ".jpg"
+                if raw.startswith(b"\x89PNG"):
+                    suffix = ".png"
+                elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                    suffix = ".webp"
+                tmp = Path(tempfile.gettempdir()) / f"store-{digest}{suffix}"
+                if not tmp.exists():
+                    tmp.write_bytes(raw)
+                public = image_upload.upload_image(tmp, timeout=DOWNLOAD_TIMEOUT)
             self._memo[text] = public
             return public, "stored"
         except Exception as exc:  # noqa: BLE001 - 单张失败不阻断入库

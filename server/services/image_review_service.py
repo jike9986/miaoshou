@@ -13,6 +13,7 @@
 from __future__ import annotations  # noqa: I001
 
 import contextlib
+import gc
 import logging
 import hashlib
 import json
@@ -21,7 +22,7 @@ import subprocess
 import threading
 import sys
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -190,6 +191,11 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def _download_cache_path(url: str) -> Path:
+    """`_download()` 落盘的位置（不下载，只算路径）。"""
+    return _cache_dir() / f"{_key(url)}.image"
+
+
 def _download(url: str) -> Path:
     """下载原图到缓存目录；已存在则复用。
 
@@ -229,6 +235,47 @@ def _download(url: str) -> Path:
     return image
 
 
+# OCR 前先把图缩到这个长边（2026-11-28）。
+#
+# 负责人：「识图需要原图吗，不是压缩再识图吗」—— 对，不需要原图。
+# OCR 只判断「图上有没有中文」，1280 长边足够认字；原图动辄 3000×3000
+# 解成 numpy 是 27 MB/张，缩到 1280 后不到 5 MB，差 5 倍以上。
+# 而且 `analyze()` 要连看 9 张主图，这个差别直接决定会不会把内存打爆。
+OCR_MAX_EDGE = 1280
+OCR_JPEG_QUALITY = 82
+
+
+def _prepare_for_ocr(image: Path) -> Path:
+    """把原图缩到 `OCR_MAX_EDGE` 再交给引擎；返回压缩后的临时文件。
+
+    为什么要缩（2026-11-28）：
+      · 内存 —— onnxruntime 的输入张量按像素算，3000×3000 的 RGB
+        就是 27 MB，缩到 1280 只要 4.9 MB；
+      · 速度 —— 检测阶段的计算量随像素线性增长，缩图后单张快 2-3 倍；
+      · 精度 —— 分类任务只要「有没有字」，1280 长边对中文小字仍可识别。
+
+    缩放失败（图坏了 / 格式怪）就退回原图，不让预处理把整件商品卡住。
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(image) as img:
+            img = img.convert("RGB")
+            width, height = img.size
+            longest = max(width, height)
+            if longest > OCR_MAX_EDGE:
+                scale = OCR_MAX_EDGE / float(longest)
+                img = img.resize(
+                    (max(1, int(width * scale)), max(1, int(height * scale))),
+                    Image.LANCZOS)
+            compact = image.with_name(f"{image.stem}.ocr.jpg")
+            img.save(compact, "JPEG", quality=OCR_JPEG_QUALITY, optimize=True)
+            return compact
+    except Exception as exc:  # noqa: BLE001 - 缩图失败退回原图
+        logger.warning("OCR 预处理缩图失败，改用原图 %s：%s", image.name, exc)
+        return image
+
+
 def _script_path() -> Path:
     """定位 windows_ocr.ps1。
 
@@ -249,6 +296,22 @@ def _script_path() -> Path:
 # 常驻进程里复用同一个引擎，不能每张图都新建。
 _RAPIDOCR_ENGINE: Any = None
 _RAPIDOCR_LOCK = threading.Lock()
+
+# 引擎调用锁（2026-11-28 修 OOM）。
+#
+# **必须串行调用同一个引擎。** 原来 `analyze()` 用 4 个线程并发调
+# `engine(path)`，看着并行很快，实际 onnxruntime 的 InferenceSession
+# 在多线程同时推理时会**每个线程各分配一份动态 workspace**
+# （det/cls/rec 三个模型都要），内存随并发线程数成倍增长且用完不归还。
+#
+# 实测：单件商品走完整流程后进程 RSS 从 223 MB 涨到 1075 MB 并不回落；
+# 连续处理 8 件就顶到 6.5 GB 被内核 OOM 杀掉（12:27 / 12:53 / 14:23 三次，
+# anon-rss 恒为 6.5 GB）。负责人那几批全报「处理过程中断（服务重启）」。
+#
+# 单个引擎本来就该串行批量跑 —— 负责人原话：「ocr 为什么会加载这么多，
+# 不是只加载一个然后批量看图片吗」。串行后单张 0.35-0.56s，
+# 一件商品 9 张图也就 5 秒，相对 35-50 秒的图片翻译完全不是瓶颈。
+_RAPIDOCR_RUN_LOCK = threading.Lock()
 
 
 def _rapidocr_engine() -> Any:
@@ -275,10 +338,29 @@ def _run_ocr_rapidocr(image: Path) -> dict[str, Any]:
     尺码对照图也识别不了（2026-11-09 实测）。
     RapidOCR 是 PaddleOCR 模型的 ONNX 版本，纯 CPU 跑，实测单张 0.35-0.56s，
     对 35-50s 的图片翻译来说完全可以忽略。
+
+    **识别完立刻释放**（2026-11-28）：RapidOCR 返回的 result 里带着
+    检测框坐标数组、中间特征图等，一张 3000px 的图能占几十 MB。
+    不显式 `del` + `gc.collect()`，这些会留在堆里等下一次 GC ——
+    而 `analyze()` 是连跑 9 张的循环，等不到 GC 就叠满了。
     """
     engine = _rapidocr_engine()
-    result = engine(str(image.resolve()))
-    lines = [str(t) for t in (getattr(result, "txts", None) or []) if str(t).strip()]
+    compact = _prepare_for_ocr(image)
+    try:
+        # 串行调用同一个引擎（见 _RAPIDOCR_RUN_LOCK 的说明）：
+        # 并发推理会让 onnxruntime 每线程各开一份 workspace，内存成倍涨且不归还。
+        with _RAPIDOCR_RUN_LOCK:
+            result = engine(str(compact.resolve()))
+            lines = [str(t) for t in (getattr(result, "txts", None) or [])
+                     if str(t).strip()]
+            # 用完就地清掉结果对象，别让检测框数组留到下一张
+            del result
+    finally:
+        # 压缩出来的临时图用完即删（原图留着给后面翻译用）
+        if compact != image:
+            with contextlib.suppress(OSError):
+                compact.unlink()
+        gc.collect()
     return {"text": "\n".join(lines), "lines": lines, "version": OCR_CACHE_VERSION}
 
 
@@ -352,17 +434,77 @@ def analyze_one(url: str, *, retry: bool = False) -> dict[str, Any]:
 def analyze(images: Iterable[str], *, limit: int = ANALYZE_LIMIT, retry: bool = False,
             max_workers: int = OCR_CONCURRENCY,
             on_complete: Callable[[int, int], None] | None = None) -> list[dict[str, Any]]:
-    """批量识别主图，返回每张的 index/url/action/reason/text。"""
+    """批量识别主图，返回每张的 index/url/action/reason/text。
+
+    ## 走短命子进程（2026-11-28 修 OOM）
+
+    负责人的判断：「OCR 为什么会加载这么多，不是只加载一个然后批量看图片吗」
+    「识图需要原图吗不是压缩再识图吗」「识图完成一张不是立马释放一张吗」
+    「还有什么分批+子进程回收」—— 全部照做：
+
+      · 压缩：`_prepare_for_ocr` 把长边缩到 1280 再识别（原图 3000px 是 27 MB/张）；
+      · 单引擎：子进程内仍是单例，一批 9 张只加载一次模型；
+      · 立刻释放：每张识别完 `del result` + `gc.collect()`；
+      · 子进程回收：**这一批跑在独立进程里，结束就退出**，onnxruntime 的
+        原生内存由内核回收，主进程 RSS 完全不涨。
+
+    只用前三条不够 —— 实测单件处理完主进程 RSS 从 223 MB 涨到 1075 MB
+    且不回落，8 件就 OOM（anon-rss 恒 6.5 GB）。原生内存不受 Python GC 管，
+    进程不退出就不会归还。所以这里必须走子进程。
+
+    子进程不可用（起不来/超时/崩溃）时退回「待复核」，不阻断商品处理。
+    """
     selected = [str(url or "").strip() for url in images if str(url or "").strip()][:limit]
     unique = list(dict.fromkeys(selected))
+    if not unique:
+        return []
+
+    # 先下载 + 压缩，再把压缩后的路径一次性交给子进程
+    prepared: dict[str, Path] = {}
+    for url in unique:
+        try:
+            if not allowed_source(url):
+                raise ValueError("该图片来源暂未接入本地识别")
+            image = _download(url)
+            prepared[url] = _prepare_for_ocr(image)
+        except Exception as exc:  # noqa: BLE001 - 单张下载失败不影响其他
+            logger.warning("OCR 取图失败 %s：%s", url[:80], exc)
+
     results: dict[str, dict[str, Any]] = {}
-    if unique:
-        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
-            futures = {pool.submit(analyze_one, url, retry=retry): url for url in unique}
-            for future in as_completed(futures):
-                results[futures[future]] = future.result()
-                if on_complete:
-                    on_complete(len(results), len(unique))
+    if prepared:
+        from services import ocr_runner
+
+        paths = list(dict.fromkeys(str(p) for p in prepared.values()))
+        raw = ocr_runner.run_ocr_batch([Path(p) for p in paths])
+
+        # 把「压缩图路径 → 原文 URL」映射回去
+        by_path = {str(p): url for url, p in prepared.items()}
+        for path, payload in raw.items():
+            url = by_path.get(str(path))
+            if not url or not isinstance(payload, dict):
+                continue
+            text = str(payload.get("text") or "")
+            results[url] = {**classify_text(text), "text": text,
+                            "error": bool(payload.get("error"))}
+
+    # 没拿到的（下载失败 / 子进程没返）一律按待复核
+    for index, url in enumerate(unique, 1):
+        results.setdefault(url, {"action": "review",
+                                 "reason": "本地 OCR 未完成，请看图复核",
+                                 "hasChinese": None, "chineseText": "",
+                                 "text": "", "error": True})
+        if on_complete:
+            on_complete(index, len(unique))
+
+    # 清理压缩临时文件
+    for url, path in prepared.items():
+        try:
+            original = _download_cache_path(url)
+            if path != original:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     return [{"index": index, "url": url, **results.get(url, {})}
             for index, url in enumerate(selected, 1)]
 

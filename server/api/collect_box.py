@@ -41,6 +41,8 @@ router = APIRouter(prefix="/collect-box", tags=["采集箱"])
 # 还要受身份上限约束（取两者较小），防止学员传 5 把上游写回打爆。
 _image_semaphores: dict[int, threading.Semaphore] = {}
 _image_semaphore_lock = threading.Lock()
+# 每个闸门当前的上限（Python 3.10 的 Semaphore 不暴露该值，自己记）
+_image_semaphore_limits: dict[int, int] = {}
 
 # 启动恢复时一次最多拉起几个卡住的图片任务（2026-11-28）。
 #
@@ -49,6 +51,51 @@ _image_semaphore_lock = threading.Lock()
 # 2 件已经是这台 8 GB 机器的安全上限（实测 8 件并行时 anon-rss 6.5 GB 被杀）。
 # 剩下的等它们跑完由 `_pump_stuck_image_jobs()` 续上。
 IMAGE_RESUME_BATCH = 2
+
+# 全服务器同时运行的图片翻译任务数上限（2026-11-28 修 OOM）。
+#
+# 三次 OOM 的 anon-rss 都是 6.5 GB（12:27 / 12:53 / 14:23），说明不是偶发，
+# 是稳定的并发超载：每件商品的图片任务都要把十几到几十张图下载进内存、
+# 转 numpy 跑 OCR、再提交翻译。20 件同时跑，无论单件内部怎么限流，
+# 总量都会把 8 GB 机器撑爆。
+#
+# 2 是这台机器的安全值（实测跑 2 件时内存稳定在 3.7 GB 左右，
+# 跑 8 件时 6.5 GB 被杀）。其余任务排队等前面的跑完。
+_GLOBAL_IMAGE_TASK_SLOTS = threading.BoundedSemaphore(2)
+
+# 全服务器同时处理的商品件数上限（2026-11-28 修 OOM）。
+#
+# 每件商品在 `/process` 里要：拉详情 → 下载几十张图转存 → OCR → 提交翻译。
+# 20 件同时进来时，单是图片转存就把 8 GB 机器吃到 6.5 GB 被内核杀掉
+# （实测 12:27 / 12:53 / 14:23 三次，anon-rss 恒为 6.5 GB）。
+# 排队等前面的处理完，比服务崩溃让整批商品重来划算得多。
+#
+# 3 是实测安全值：本机 4 核 8 GB，跑 3 件时内存稳定在 4 GB 上下。
+_PROCESS_SLOTS = threading.BoundedSemaphore(3)
+
+
+def _limited_process_slot(func):
+    """给 `/process` 套一层全服务器并发闸门。"""
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _PROCESS_SLOTS:
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
+def _acquire_global_image_slot(timeout: float = 1800.0) -> bool:
+    """拿一个全局图片任务许可；超时返回 False（放弃这一件，不阻塞线程池）。"""
+    return _GLOBAL_IMAGE_TASK_SLOTS.acquire(timeout=timeout)
+
+
+def _release_global_image_slot() -> None:
+    try:
+        _GLOBAL_IMAGE_TASK_SLOTS.release()
+    except ValueError:  # 已经释放过
+        pass
 
 
 def _writeback_limit(concurrency: int | None, *, privileged: bool) -> int:
@@ -72,13 +119,39 @@ def _writeback_limit(concurrency: int | None, *, privileged: bool) -> int:
 
 def _reset_image_semaphore(concurrency: int, *, privileged: bool = False,
                            key: int | None = None) -> int:
-    """为这一批写回线程设定并发上限，返回实际生效值。"""
+    """为这一批写回线程设定并发上限，返回实际生效值。
+
+    ## 为什么同名但不再"重置"（2026-11-28 修 OOM 死循环）
+
+    原来是**每次都新建一个 Semaphore 覆盖掉旧的**：
+
+        _image_semaphores[key] = threading.Semaphore(limit)
+
+    可 `/process` 是**每件商品一次请求**，20 件就是 20 次调用。每次都把
+    闸门换成新的，等于把正在跑的许可全扔掉重发 —— 并发瞬间失控。
+
+    实测 14:23 服务 OOM（第三次，anon-rss 恒定 6.5 GB）被杀，
+    负责人那批 20 件全报「处理过程中断（服务重启）」。
+    20 件同时各拿 5 个许可 = 100 个图片任务并行下载/OCR/翻译。
+
+    现在语义改成「首次创建，之后只放宽不放窄」：
+      · 闸门已存在且新上限不大于旧值 → 原样保留（绝不覆盖正在跑的许可）；
+      · 身份从学员升到老师（1 → 5）时才重建。
+
+    上限自己记在 `_image_semaphore_limits` 里 —— Python 3.10 的
+    `threading.Semaphore` 没有 `_initial_value` 属性（3.11 才有），
+    直接读会 AttributeError。
+    """
     limit = _writeback_limit(concurrency, privileged=privileged)
+    slot_key = int(key or 0)
     with _image_semaphore_lock:
-        # 学员限 1、老师限 5 —— 直接按身份建对应信号量，不做全局共享，
-        # 否则一个学员把闸门占满，老师那 5 个就排不上了。
-        _image_semaphores[int(key or 0)] = threading.Semaphore(limit)
-    return limit
+        existing = _image_semaphores.get(slot_key)
+        current = _image_semaphore_limits.get(slot_key)
+        if existing is None or current is None or limit > current:
+            _image_semaphores[slot_key] = threading.Semaphore(limit)
+            _image_semaphore_limits[slot_key] = limit
+            return limit
+        return current
 
 
 def _image_semaphore_for(key: int | None) -> threading.Semaphore:
@@ -211,6 +284,7 @@ def claim(
 
 @router.post("/{detail_id}/process", summary="处理一件商品并入仓（拉详情→定价→入库）",
              dependencies=[require_permission("automation")])
+@_limited_process_slot
 def process(
     detail_id: str,
     payload: ProcessRequest,
@@ -526,10 +600,19 @@ def _run_image_translation_guarded(job: dict[str, Any]) -> None:
     剩下的靠这里补 —— 否则排在后面的商品永远不会被拉起。
     """
     key = int(job.get("operatorId") or 0)
+    acquired = False
     try:
+        # 先过全局闸门（全服务器最多 2 个图片任务同时跑），再过写回闸门。
+        # 没有全局闸门时，20 件商品各自并行，内存必爆（三次 OOM 都是 6.5 GB）。
+        acquired = _acquire_global_image_slot()
+        if not acquired:
+            logger.warning("图片任务排队超时，跳过本次 product=%s", job.get("productId"))
+            return
         with _image_semaphore_for(key):
             _run_image_translation(job)
     finally:
+        if acquired:
+            _release_global_image_slot()
         try:
             _pump_stuck_image_jobs()
         except Exception as exc:  # noqa: BLE001 - 续批失败不能影响已完成的
