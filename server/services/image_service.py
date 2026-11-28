@@ -559,6 +559,8 @@ def _image_type(raw: bytes) -> tuple[str, str] | None:
     老版 image_type() 判不出就抛「图片格式须为 PNG、JPEG 或 WebP」。
     这里不能兜底成 image/jpeg：上游返回 HTML 错误页、截断文件、
     GIF 之类的二进制都会被当图片提交并扣费，用户还看不到那张图。
+
+    **GIF 单独识别**（2026-11-28）：见 `_gif_to_jpeg`。
     """
     if raw.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png", "png"
@@ -566,7 +568,52 @@ def _image_type(raw: bytes) -> tuple[str, str] | None:
         return "image/jpeg", "jpg"
     if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
         return "image/webp", "webp"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif", "gif"
     return None
+
+
+def _gif_to_jpeg(raw: bytes) -> bytes:
+    """GIF 转成 JPEG 静图；不是 GIF 或转失败就原样返回。
+
+    ## 为什么必须转（2026-11-28）
+
+    负责人的现场问题：「图片翻译失败又是什么原因为什么这么多错误」。
+
+    采集来的商品详情图里混着 GIF，而**上游图床把 GIF 存成 `.jpg` 后缀**：
+
+        url   = https://.../store-b663a8e4345e0dbcb35a840deb898a9b.jpg
+        bytes = GIF89a\\xee\\x02\\xf6\\x03\\xf7 ...   (1.9 MB)
+
+    翻译接口只收 PNG/JPEG/WebP，GIF 一律拒绝，整件商品的图片任务就失败。
+    日志实测两例：一个是 43 字节的 1×1 占位 GIF，一个是 1.9MB 的真 GIF。
+
+    动图对商品图没有意义，取第一帧转 JPEG 即可 —— 这既让翻译能跑，
+    也把 1.9MB 的 GIF 变小（GIF 存照片本来效率就极低）。
+
+    **永不失败**：Pillow 没装、图坏了、转完认不出，一律原样返回，
+    让调用方按原来的「格式不支持」处理，不吞掉错误。
+    """
+    if raw[:6] not in (b"GIF87a", b"GIF89a"):
+        return raw
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as image:
+            # 动图只取第一帧：商品图不需要动效，而多帧转 JPEG 会叠影
+            image.seek(0)
+            frame = image.convert("RGB")
+            # 长边超过上限就等比缩：GIF 常常是几 MB 的巨图
+            if max(frame.size) > SHRINK_MAX_SIDE:
+                frame.thumbnail((SHRINK_MAX_SIDE, SHRINK_MAX_SIDE), Image.LANCZOS)
+            buffer = io.BytesIO()
+            frame.save(buffer, format="JPEG", quality=SHRINK_QUALITY, optimize=True)
+        converted = buffer.getvalue()
+        return converted or raw
+    except (ImportError, OSError, ValueError):
+        return raw
 
 
 def _first_text(value: Any, names: set[str]) -> str:
@@ -643,6 +690,9 @@ def _submit(raw: bytes, size: str, *, prompt: str) -> dict[str, Any]:
     """提交一次图片编辑；返回 {"image": bytes|None, "taskId": str, "status": str}。"""
     settings = get_settings()
     key = _api_key()
+    # GIF 兜底转换：正常路径在 `create_jobs` 里已经转过，这里防的是
+    # 别的调用方（直接调 _submit、或结果图复用）漏转（2026-11-28）。
+    raw = _gif_to_jpeg(raw)
     detected = _image_type(raw)
     if detected is None:
         raise errors.unprocessable("图片格式须为 PNG、JPEG 或 WebP")
@@ -1097,6 +1147,9 @@ def translate(db: Session, payload: Mapping[str, Any],
             raise errors.upstream("原图内容为空")
         # 必须在算摘要之前压：摘要按上传的字节算，先算再压会让同一张图
         # 因为「原图/压后图」算出两个 job id，去重和复用全部失效。
+        # GIF 必须先转 JPEG（2026-11-28）。上游图床把 GIF 存成 .jpg 后缀，
+        # 翻译接口只收 PNG/JPEG/WebP，不转就整件失败。见 `_gif_to_jpeg`。
+        raw = _gif_to_jpeg(raw)
         raw = _shrink(raw)
         # 格式必须在建 job 之前就拦：job 建出来是 queued，_submit 抛错后
         # 状态停在失败，但预扣费已经算进去，而且用户看不清是格式问题。
