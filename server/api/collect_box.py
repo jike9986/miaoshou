@@ -42,6 +42,14 @@ router = APIRouter(prefix="/collect-box", tags=["采集箱"])
 _image_semaphores: dict[int, threading.Semaphore] = {}
 _image_semaphore_lock = threading.Lock()
 
+# 启动恢复时一次最多拉起几个卡住的图片任务（2026-11-28）。
+#
+# 原来不限量，8 个 queued 就 8 个一起跑，内存冲顶 OOM，重启后又全拉起来，
+# 死循环。改成一次只拉 2 个：图片翻译每件要下载/OCR/翻译十几到几十张图，
+# 2 件已经是这台 8 GB 机器的安全上限（实测 8 件并行时 anon-rss 6.5 GB 被杀）。
+# 剩下的等它们跑完由 `_pump_stuck_image_jobs()` 续上。
+IMAGE_RESUME_BATCH = 2
+
 
 def _writeback_limit(concurrency: int | None, *, privileged: bool) -> int:
     """本批次写回妙手最多并行几件。
@@ -422,12 +430,20 @@ def _resume_stuck_image_jobs() -> list[int]:
     （2026-11-12 实测：部署重启杀了 20 件正在处理的批次，
     5 件成功的商品全部卡死在 queued=True）。
 
-    重启后把这些商品重新 spawn 一遍：
-      · generation 保留原值（线程用 generation 判断归属）；
-      · limits 重新从 payload 推导；
-      · allowedRevisions 放宽到当前 revision 及之后 5 个，
-        覆盖主流程正常推进的范围。
-    返回重新拉起的 product id 列表。
+    ## 为什么必须限量（2026-11-28 修：OOM 死循环）
+
+    原来这里是「有多少拉多少」。实测 12:27 服务被 OOM 杀掉时，
+    8 件商品的 `queued=True` 还挂着，重启后**一口气全拉起来**：
+
+        启动恢复：重新拉起 8 个卡住的图片任务 [714,715,717,716,713,720,718,719]
+
+    8 个图片任务同时下载/OCR/翻译，内存立刻又冲顶 → 再 OOM → 再重启 →
+    再全拉起来，**形成死循环**。负责人那批 10 件全报「处理过程中断
+    （服务重启）」就是这么来的；12:27 和 12:53 两次 OOM 的
+    `anon-rss` 都是 6.5 GB，一模一样。
+
+    现在按 `IMAGE_RESUME_BATCH` 分批：每次只拉这么多，跑完再拉下一批。
+    宁可慢一点，也不能让服务反复崩 —— 崩一次整批商品都要重来。
     """
     import secrets as _secrets
 
@@ -440,10 +456,28 @@ def _resume_stuck_image_jobs() -> list[int]:
         rows = (db.query(Product)
                 .filter(Product.deleted_at.is_(None))
                 .all())
+        stuck: list[Any] = []
         for row in rows:
-            ai = row.automation_images or {}
+            ai = dict(row.automation_images or {})
             if ai.get("queued") is not True:
                 continue
+            # 进程被 OOM 杀掉时 `running=True` 会残留（线程没了但标记还在）。
+            # 启动这一刻所有后台线程都随进程消失了，清掉这个标记才可能被重新拉起。
+            if ai.get("running") is True:
+                ai["running"] = False
+                row.automation_images = ai
+                db.add(row)
+            stuck.append(row)
+        if stuck:
+            db.commit()
+
+        if len(stuck) > IMAGE_RESUME_BATCH:
+            logger.warning(
+                "启动恢复：%d 个图片任务排队，本次只拉起前 %d 个，其余等下次",
+                len(stuck), IMAGE_RESUME_BATCH)
+
+        for row in stuck[:IMAGE_RESUME_BATCH]:
+            ai = row.automation_images or {}
             job = {
                 "productId": int(row.id),
                 "detailId": str(row.detail_id or ""),
@@ -487,10 +521,70 @@ def _run_image_translation_guarded(job: dict[str, Any]) -> None:
     许可按**提交这件商品的人**分配：老师 5、学员 1（负责人口径）。
     用 operatorId 作键，而不是一个全局信号量 —— 否则学员会把老师的
     那 5 个名额占掉。
+
+    跑完（无论成败）续上一批：启动恢复时只拉 `IMAGE_RESUME_BATCH` 件，
+    剩下的靠这里补 —— 否则排在后面的商品永远不会被拉起。
     """
     key = int(job.get("operatorId") or 0)
-    with _image_semaphore_for(key):
-        _run_image_translation(job)
+    try:
+        with _image_semaphore_for(key):
+            _run_image_translation(job)
+    finally:
+        try:
+            _pump_stuck_image_jobs()
+        except Exception as exc:  # noqa: BLE001 - 续批失败不能影响已完成的
+            logger.warning("续批图片任务失败：%s", exc)
+
+
+def _pump_stuck_image_jobs(limit: int | None = None) -> list[int]:
+    """补拉「还在 queued 但没在跑」的图片任务。
+
+    用 `automation_images["running"]` 标记正在跑的商品，避免和
+    `_resume_stuck_image_jobs` 或彼此之间重复拉起同一件。
+    """
+    import secrets as _secrets
+
+    from db.session import SessionLocal
+    from models import Product
+    from services import image_service
+
+    budget = IMAGE_RESUME_BATCH if limit is None else int(limit)
+    db = SessionLocal()
+    started: list[int] = []
+    try:
+        rows = (db.query(Product)
+                .filter(Product.deleted_at.is_(None))
+                .all())
+        for row in rows:
+            if len(started) >= budget:
+                break
+            ai = dict(row.automation_images or {})
+            if ai.get("queued") is not True or ai.get("running") is True:
+                continue
+            # 标记占用，防止并发进入本函数时重复拉起
+            ai["running"] = True
+            row.automation_images = ai
+            db.add(row)
+            db.commit()
+            job = {
+                "productId": int(row.id),
+                "detailId": str(row.detail_id or ""),
+                "operatorId": row.operator_id,
+                "generation": ai.get("generation") or _secrets.token_hex(16),
+                "allowedRevisions": [row.revision + d for d in range(0, 6)],
+                "limits": {"main": 9, "sku": 9, "detail": 9},
+            }
+            _reset_image_semaphore(
+                0,
+                privileged=image_service._operator_is_privileged(
+                    int(row.operator_id or 0)),
+                key=int(row.operator_id or 0))
+            _spawn_image_translation(job)
+            started.append(row.id)
+            logger.info("续批图片线程 product=%s detailId=%s", row.id, row.detail_id)
+    finally:
+        db.close()
+    return started
 
 
 def _run_image_translation(job: dict[str, Any]) -> None:
@@ -728,7 +822,8 @@ def _run_image_translation(job: dict[str, Any]) -> None:
         finally:
             client.close()
         row.draft_verified_revision = row.revision
-        row.automation_images = {**state, "queued": False, "completed": True, "failed": 0}
+        row.automation_images = {**state, "queued": False, "completed": True,
+                                 "failed": 0, "running": False}
         automation_run_service.complete_image_processing(db, row)
         db.commit()
         # === 图片处理完成，打标记（2026-11-27）===
@@ -758,7 +853,7 @@ def _run_image_translation(job: dict[str, Any]) -> None:
             db.refresh(row)
             if (row.automation_images or {}).get("generation") == generation:
                 state = dict(row.automation_images)
-                state.update({"queued": False, "completed": True,
+                state.update({"queued": False, "completed": True, "running": False,
                               "failed": max(1, int(state.get("failed") or 0)),
                               "reason": (exc.message if isinstance(exc, errors.AppError)
                                          else "图片处理或草稿保存失败，请刷新核对")})
