@@ -473,13 +473,24 @@ def readback_issues(payload: Mapping[str, Any], actual: Mapping[str, Any],
     # 而入库时图片会从 auto-temp 搬到 products —— URL 全变，于是每一项都
     # 被判成「图被换掉了」，商品卡在读回校验里出不来
     # （实测 detailId=3549609998：skuImages 恒失败，且只影响经过搬运的商品）。
+    # SKU 图**不再参与读回拦截**（2026-11-27 负责人决定）。
     #
-    # 真正要保证的是「保留范围内的颜色仍然各自有图、图的数量没少」，
-    # 不是 URL 字符串一致。搬图是本地正常动作，不该算不一致。
-    comparisons["skuImages"] = _sku_image_slots_match(
-        original, actual,
-        dropped_slots=(payload.get("_droppedSkuImages")
-                       if isinstance(payload, Mapping) else None))
+    # 负责人口径：「你告诉我这个有什么用，自己把这个检测去掉不就行了一点用没有，
+    #              文字只需要按照翻译处理不就行了，打上文字图片已经处理的标记
+    #              不就行了」。
+    #
+    # 这个检查拦了整整一周，每次都是同一句 `['skuImages']`，拦掉的商品
+    # 颜色图其实都好好的（逐槽位核对过：图片文件名处理前后完全一致）。
+    # 它想防的「SKU 图被换掉」在本流程里根本不会发生 —— SKU 图只做
+    # 本地固化（换成本地图床地址），不做翻译、不做替换。
+    #
+    # 真正该保证的是「处理过的别再处理第二遍」，那是 draft_marks 的事：
+    # 文字按语言判定 + 标记，图片按 `image_done` 标记跳过，都在入口处挡掉。
+    # 在读回这一层拿图片数量去猜，只会把好商品拦在门外。
+    #
+    # 保留 `_sku_image_slots_match` / `sku_image_diff` 供诊断脚本使用，
+    # 但不再成为拦截理由。
+    comparisons["skuImages"] = True
 
     if pricing_enabled:
         # 开定价时销售价必须与处理结果一致，采购价必须原样返回。
@@ -530,7 +541,7 @@ def details(payload: Mapping[str, Any], actual: Mapping[str, Any],
         translate_images=translate_images))
     checked: Iterable[str] = (
         "title", "subtitle", "categoryCid", "weight", "packageDimensions", "sizeChart",
-        "mainImages", "detailImages", "skuImages", "prices", "translations",
+        "mainImages", "detailImages", "prices", "translations",
     )
     rows = [{"field": name, "status": "failed" if name in failed else "passed"}
             for name in checked]
