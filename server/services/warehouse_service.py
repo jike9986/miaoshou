@@ -2564,11 +2564,32 @@ def _copy_saved_weights(payload: dict[str, Any], previous: Mapping[str, Any]) ->
 
 
 def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
-                   *, category_name: Any = "", weight_limit: Any = None) -> dict[str, Any]:
+                   *, category_name: Any = "", weight_limit: Any = None,
+                   saved_source_weights: Mapping[str, Any] | None = None,
+                   ) -> dict[str, Any]:
     """商品与每个未删除 SKU 的重量统一加增量（老版 _prepare_weight）。
 
-    注意不是幂等的：跑两次会加两次，所以只在入仓这一步做一次，
-    且必须在写库前完成——写库后再改，payload 与展示字段就对不上了。
+    ## 幂等性（2026-11-28 重写）
+
+    这个函数**本身不幂等**——跑两次就加两次。原来靠调用方比
+    `_sourceWeight` 来避免重复，但那个字段**只记了主重量，没记 SKU 原重**，
+    于是 SKU 每次重跑都从妙手读到「已被上一次加过」的值，再 +0.1：
+
+        第 1 次  上游 1.2  → 1.3  写回妙手
+        第 2 次  妙手 1.3  → 1.4  写回妙手
+        第 3 次  妙手 1.4  → 1.5
+        第 4 次  妙手 1.5  → 1.6
+        第 5 次  妙手 1.6  → 1.7   ← 超上限，整件被拦
+
+    实测商品 3562895405：主重量 `payload.weight = 1.2`（正确），
+    但 20 个 SKU 全部是 **1.8**，就是被反复加了 6 次。
+    负责人口径：「为什么一直加重量告诉我」「这鞋有这么重吗」。
+
+    现在改成：调用方通过 `saved_source_weights` 传进「上一次加增量之前的
+    原重」（主重量 + 每个 SKU）。凡是有原重的，**用原重重新加一次**，
+    不再拿妙手写回后的值当新原重。这样重跑 N 次结果都一样。
+
+    `saved_source_weights` 为空（首次处理）时按现有值加，行为不变。
     """
     try:
         amount = float(increment)
@@ -2596,8 +2617,14 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
     # 现在只按品类下限：拖鞋/洞洞鞋 0.25，运动鞋 0.4。
     # 只有「重量为空」或低于该下限时才补到下限值。
     base_min = category_min_weight(category_name)
+    # 上一次加增量之前的原重（主重量 key 为 "weight"，SKU 为 `sku:{key}:weight`）。
+    # 有原重就用原重重新加，而不是拿妙手写回后的值当原重 ——
+    # 否则每重跑一次就 +0.1（见 docstring 的 1.2→1.8 实测）。
+    saved: Mapping[str, Any] = saved_source_weights or {}
     for name, sku in targets:
         raw = info.get("weight") if sku is None else sku.get("weight")
+        if saved.get(name) not in (None, ""):
+            raw = saved.get(name)
         try:
             value = float(raw)
         except (TypeError, ValueError):
@@ -2637,6 +2664,10 @@ def prepare_weight(info: dict[str, Any], increment: Any = 0.1,
         if sku is not None:
             sku["weight"] = round(parsed[name] + amount, 6)
     report = {"before": before, "after": info["weight"], "increment": amount}
+    # 记下这次用的「加增量之前的原重」（主重量 + 每个 SKU），写进 payload 供下次重跑使用。
+    # 不记 SKU 原重的话，重跑时会把妙手写回的「已加过增量」的值当原重，每次再 +0.1
+    # （2026-11-28 实测：3562895405 的 20 个 SKU 被推到 1.8，主重量仍是 1.2）。
+    report["sourceWeights"] = {name: round(value, 6) for name, value in parsed.items()}
     if auto_fixed_from is not None:
         report["autoFixedFrom"] = auto_fixed_from
         report["autoFixedTo"] = base_min
@@ -3061,6 +3092,9 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             if _w < _base_min:
                 payload["weight"] = round(_base_min, 6)
             payload["_sourceWeight"] = str(previous.get("weight") or "")
+            # 沿用上次的 SKU 原重记录，否则下次重跑又会从妙手读「已加过」的值
+            if previous.get("_sourceWeights"):
+                payload["_sourceWeights"] = previous.get("_sourceWeights")
             weight_report = {"before": previous.get("weight"),
                              "after": payload.get("weight"),
                              "increment": 0, "reused": True, "sourceMissing": True}
@@ -3069,14 +3103,19 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             weight_report = prepare_weight(
                 payload, increment,
                 category_name=product_service.category_label(payload),
-                weight_limit=weight_limit)
+                weight_limit=weight_limit,
+                # 上次记下的「加增量之前的原重」：主重量 + 每个 SKU。
+                # 有它就一定从原重重算，重跑多少次都同一个结果（2026-11-28）。
+                saved_source_weights=previous.get("_sourceWeights"))
             payload["_sourceWeight"] = _raw_weight_of(payload, pre_increment=weight_report)
+            payload["_sourceWeights"] = weight_report.get("sourceWeights")
     else:
         weight_report = prepare_weight(
             payload, increment,
             category_name=product_service.category_label(payload),
             weight_limit=weight_limit)
         payload["_sourceWeight"] = _raw_weight_of(payload, pre_increment=weight_report)
+        payload["_sourceWeights"] = weight_report.get("sourceWeights")
 
     # 现在 payload 的包裹重量已是最终值（含增量），据此定价
     _source_weight = payload.get("_sourceWeight")
@@ -4355,6 +4394,8 @@ def _fill_spec_attr_ids(db: Session, client: Any, payload: dict[str, Any], *,
 _LOCAL_ONLY_PAYLOAD_FIELDS = (
     "colorMap", "sizeMap", "colorPropName", "sizePropName",
     "_sourceWeight", "weightAutoFixed", "weightBeforeCap",
+    # 2026-11-28：各 SKU 加增量之前的原重，只给重跑比对用，不能发给妙手。
+    "_sourceWeights",
     "translation", "violations", "removedWords", "needsRecollect",
     "needsRecollectReason",
     # 2026-11-26：图片固化时因死链被清空的 SKU 图槽位（「属性名|值名」）。
