@@ -3206,12 +3206,27 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         props = [p for p in (payload.get("skuPropertyList") or [])
                  if isinstance(p, dict)]
         logger.info("文字已处理过，跳过颜色/尺码清洗 detailId=%s", detail_id)
-    elif not _payload_has_chinese(payload):
-        # 已翻译过（无汉字）：再按中文规则洗会把 Warna putih→Putih、
-        # Meter 直接删掉，读回必然报 skuImages 不一致。原样保留。
+    elif not _colors_need_chinese_cleaning(payload):
+        # 颜色值里没有汉字 → 已经是目标语言，清洗只会改坏。原样保留。
         props = [p for p in (payload.get("skuPropertyList") or [])
                  if isinstance(p, dict)]
-        logger.info("无中文，跳过颜色/尺码清洗 detailId=%s", detail_id)
+        logger.info("颜色值无中文，跳过颜色清洗 detailId=%s", detail_id)
+        _size_cleaned = _clean_size_values(payload)
+        if _size_cleaned:
+            logger.info("尺码值清洗 %d 条 detailId=%s", _size_cleaned, detail_id)
+        # === 自愈：把这次判断回写成标记（2026-11-27）===
+        #
+        # 负责人口径：「不是已经让你加了文字/图片是否处理的标记吗」。
+        #
+        # 标记是**缓存**，语言检测才是**事实**。标记上线之前就已经翻译过的
+        # 存量草稿一件标记都没有（昨晚翻译的那批全在这类），所以第一次走到
+        # 这里时 text_done 必然是 False —— 只能靠语言检测兜。
+        # 兜住之后必须**立刻补上标记**，下次就走快路径，不必再逐件判断，
+        # 也不会因为以后改了什么检测逻辑又退回清洗。
+        draft_mark_service.mark_text_done(
+            account_id=int(account.id), detail_id=str(detail_id),
+            shop_id=str(shop_id), language=str(language or ""))
+        logger.info("存量草稿补写文字标记 detailId=%s", detail_id)
     elif _fill_spec_attr_ids(
             db, client, payload, shop_id=shop_id,
             site=str(info.get("site") or account.site or "")):
@@ -4411,55 +4426,65 @@ def _clean_size_values(payload: dict[str, Any]) -> int:
     return changed
 
 
-def _payload_has_chinese(payload: Mapping[str, Any]) -> bool:
-    """草稿里还有没有汉字。没有就不清洗、不翻译。"""
+def _has_chinese(text: Any) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in str(text or ""))
+
+
+def _colors_need_chinese_cleaning(payload: Mapping[str, Any]) -> bool:
+    """颜色值里还有没有中文 —— 只在**确实需要**清洗时才洗。
+
+    ## 为什么不看标题、只看颜色值（2026-11-27）
+
+    中文颜色清洗的规则（去型号前缀、收「米白/米黄」这类词、同色归一）
+    全是为**中文颜色值**写的。拿它去洗马来语把草稿改坏了，实测：
+
+        Beras hitam.  → 只剩 hitam，前面那截被当型号剥掉 → 拼成 "Redmi"
+        Beras hitam.  → Hitam     丢掉「Beras」（黑米）
+        Warna putih   → Putih     丢掉「Warna」
+        Merah wain    → Merah     丢掉「wain」（酒红）
+        Meter         → 认不出，被当厂家广告词**直接删掉**
+
+    洗坏的草稿被写回妙手之后，读回核验拿「提交前草稿」当基准，
+    名字/数量都对不上 → 恒报 `skuImages` 不一致，商品永远进不了仓。
+
+    标题里有没有中文不能作为判据：标题是中文、颜色却已经是马来语的情况
+    真实存在（分阶段处理）。**颜色清洗只看颜色值自己的语言**。
+
+    判据是「任一颜色值含汉字」：纯马来语/英文/型号+数字的颜色名必然
+    一个汉字都没有，不洗；中文颜色名必然有，照常洗。
+    """
     if not isinstance(payload, Mapping):
         return False
-    texts: list[str] = [str(payload.get("title") or "")]
     for prop in (payload.get("skuPropertyList") or []):
         if not isinstance(prop, Mapping):
             continue
-        texts.append(str(prop.get("attrName") or ""))
+        # **只认颜色维度**。尺码值里也常有中文（「36码建议拍大一码」），
+        # 那不归颜色清洗管 —— 用 _clean_size_values 单独处理。
+        # 混进来会让「颜色是马来语、尺码带中文」的商品被误触发颜色清洗，
+        # 又把颜色洗坏一次。
+        if not _is_color_property(prop):
+            continue
         for value in (prop.get("attrValueList") or []):
-            if isinstance(value, Mapping):
-                texts.append(str(value.get("attrValue") or ""))
-    for chunk in texts:
-        for char in chunk:
-            if "\u4e00" <= char <= "\u9fff":
+            if isinstance(value, Mapping) and _has_chinese(value.get("attrValue")):
                 return True
     return False
 
 
-
-    """就地规范化颜色属性值，返回清洗后的 skuPropertyList。
-
-    走 color_service.normalize_colors（照搬老版 shoe_workflow.normalize_colors），
-    而不是逐个值调 clean_color：老版这一步除了收敛写法，还做四件清洗器不做的事：
-      1. 颜色属性必须恰好 1 个，0 个或多个都报根因（颜色和尺码被压成同一属性时，
-         逐个改值看着成功，实际 SKU 键根本对不上）；
-      2. attrValueId 必须齐全且不重复 —— 重复 id 会让两个颜色共用一个 SKU 键；
-      3. 同名颜色去重（「白色」「白色 」「白」是同一个色）；
-      4. 删掉的颜色同步剪掉 skuMap 里对应的 SKU 键，否则上架时颜色选不到货。
-    这些在老版都是抛错即停，不是尽力而为。清理后会删空所有在售 SKU 的，
-    也在入仓前拦掉 —— 那种商品上架就是零库存。
-    """
-    props = payload.get("skuPropertyList") or []
-    if not isinstance(props, list):
-        return []
-    from services import color_service
-
-    try:
-        # 传整个 payload：normalize_colors 要同时改 skuPropertyList 和 skuMap，
-        # 只传属性列表就剪不掉 SKU 键。
-        result = color_service.normalize_colors(payload)
-    except color_service.ColorError as exc:
-        raise errors.unprocessable(f"颜色处理未通过：{exc}") from None
-    cleaned = result.get("properties")
-    if isinstance(cleaned, list):
-        payload["skuPropertyList"] = cleaned
-        return cleaned
-    payload["skuPropertyList"] = props
-    return props
+def _payload_has_chinese(payload: Mapping[str, Any]) -> bool:
+    """草稿标题 + 规格值里还有没有汉字。没有就不翻译。"""
+    if not isinstance(payload, Mapping):
+        return False
+    if _has_chinese(payload.get("title")):
+        return True
+    for prop in (payload.get("skuPropertyList") or []):
+        if not isinstance(prop, Mapping):
+            continue
+        if _has_chinese(prop.get("attrName")):
+            return True
+        for value in (prop.get("attrValueList") or []):
+            if isinstance(value, Mapping) and _has_chinese(value.get("attrValue")):
+                return True
+    return False
 
 
 def _clean_color_props(payload: dict[str, Any]) -> list[dict[str, Any]]:
