@@ -1012,9 +1012,19 @@ export function useCollectBoxList(
         timeoutMs: 60_000,
       });
     },
-    // A cached list is useful for the first paint, but it must not hide items
-    // added upstream while the user was away from this page.
-    refetchOnMount: "always",
+    // 切回本页时不要每次都强制重拉。
+    //
+    // 2026-11-27 负责人口径：「不管是从别的功能切换到自动化处理还是什么，
+    // 这个采集箱要等很久才会加载出来」。
+    //
+    // 原来这里是 refetchOnMount: "always" —— 回回切页都强制重新拉。
+    // 而妙手采集箱接口**每页要 1.2 秒**（实测 pageSize=100 拉 3 页 25.8 秒），
+    // 于是每次回到本页都卡满一次全量请求，后端那层 10 秒 TTL 缓存被绕过。
+    //
+    // 现在：10 秒内（与后端 TTL 对齐）复用缓存直接出图，超过才重新拉；
+    // 用户主动点「刷新」走 refetchFresh()，那是显式强制，不受此限。
+    staleTime: 10_000,
+    refetchOnMount: true,
     refetchOnWindowFocus: "always",
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

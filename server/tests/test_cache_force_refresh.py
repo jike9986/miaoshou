@@ -60,7 +60,7 @@ def test_collect_box_cache_isolated_for_transient_accounts_sharing_row_id(
         return {"items": [{"key": "1:2", "title": account.app_key}],
                 "total": 1, "scanned": 1}
 
-    monkeypatch.setattr(collect_box_service, "_scan_upstream", scan)
+    monkeypatch.setattr(collect_box_service, "_scan_all", scan)
     first_account = Account(id=0, app_key="app-key-a", app_secret_enc="secret-a")
     second_account = Account(id=0, app_key="app-key-b", app_secret_enc="secret-b")
 
@@ -95,7 +95,7 @@ def test_collect_box_invalidation_only_reloads_target_account(monkeypatch) -> No
         loads.append(account.id)
         return {"items": [], "total": 0, "scanned": 0, "hasMore": False}
 
-    monkeypatch.setattr(collect_box_service, "_scan_upstream", scan)
+    monkeypatch.setattr(collect_box_service, "_scan_all", scan)
     first_account = Account(id=1, app_key="app-key-a", app_secret_enc="secret-a")
     second_account = Account(id=2, app_key="app-key-b", app_secret_enc="secret-b")
     collect_box_service.list_items(object(), first_account)

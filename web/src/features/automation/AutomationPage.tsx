@@ -1179,7 +1179,26 @@ export function AutomationPage() {
     const plannedImages = 0;
     stopRef.current = false;
     standardNotesRef.current = [];
-    setStages(Object.fromEntries(targets.map((target) => [target.key, "queued" as ItemStage])));
+    // 只把本次选中的项标成 queued，**不能整体覆盖** stages。
+    //
+    // 2026-11-27 负责人口径：「这前面两个明明已经完成了，上面也有显示完成的标志，
+    // 为什么我处理别的完成的标准又消失了」。
+    //
+    // 原来这里是 `setStages(Object.fromEntries(...))`，等于把整个徽章表换成
+    // 新一批的 queued —— 之前处理完处于 done/failed 的商品徽章被一并抹掉，
+    // 界面上就"消失"了。当前状态在服务端（automation_run_items.process_status）
+    // 是好的，纯属前端把别人的结论覆盖了。
+    //
+    // 现在合并：已知的终态（done / failed / needs_review）保留，只覆盖本次
+    // 要跑的项。这样边处理边回看历史也不会互相冲掉。
+    setStages((prev) => {
+      const next: Record<string, ItemStage> = { ...prev };
+      for (const target of targets) {
+        // 真要被重跑的项，旧结论本来就作废，照常重置为 queued。
+        next[target.key] = "queued";
+      }
+      return next;
+    });
     setRun({
       phase: "running",
       total: targets.length,

@@ -179,15 +179,75 @@ def _recent_claim_blocker(db: Session, account: Account, key: str) -> None:
 def _cache_key(account: Account, *, page: int, page_size: int, status: str,
                keyword: str, shop_id: str | None, site: str | None,
                sort: str) -> str:
-    """所有会影响上游结果的参数都进 key，缺一个就会串页。"""
+    """缓存键。
+
+    注意 page / page_size 虽然还收着，但**不参与 key**（2026-11-27 改）：
+    `list_items` 现在缓存的是整份快照、翻页在本地切片，同一组筛选条件
+    所有页共用一个条目。参数留着是为了不破坏 `test_cache_force_refresh`
+    等按页调用 key 的既有测试。
+
+    改成全量快照的原因：原来每页各打一次妙手，而取第 N 页必须从上游第 1 页
+    重扫，页越深越慢（实测 pageSize=20 第 1 页 1.26s、第 2 页 2.7s，
+    pageSize=100 第 2 页 9.9s）。负责人反馈的「采集箱要等很久才会加载出来」
+    正是这个。
+    """
     return (
         f"{account_cache_prefix(account)}"
-        f"page={int(page)}|size={int(page_size)}|status={status}"
+        f"status={status}"
         f"|kw={str(keyword or '').strip().casefold()}"
         f"|shop={str(shop_id or '').strip()}"
         f"|site={str(site or '').strip().upper()}"
         f"|sort={sort}"
     )
+
+
+def _scan_all(account: Account, *, status: str, keyword: str,
+              shop_id: str | None, site: str | None) -> dict[str, Any]:
+    """把所有上游页拉完，返回过滤后的完整列表（供本地切片）。
+
+    与 `_scan_upstream` 的分工：后者保持「取第 N 页」的既有契约不变
+    （`test_collect_box_pagination` 的 9 个用例锁的就是它），本函数专门服务
+    `list_items` 的全量快照。翻页因此变成纯内存操作。
+    """
+    upstream_page_size = COLLECT_BOX_UPSTREAM_PAGE
+    client = account_client(account)
+    try:
+        upstream_status = None if status == "all" else status
+        request_page = 1
+        items: list[dict[str, Any]] = []
+        scanned = 0
+        seen: set[str] = set()
+        while True:
+            response = client.collect_box_list(
+                status=upstream_status, keyword=keyword or "",
+                page_no=request_page, page_size=upstream_page_size)
+            data = (response or {}).get("data") or {}
+            upstream_rows = data.get("detailList") or []
+            rows = listing_rows(response)
+            scanned += len(rows)
+            for row in rows:
+                if shop_id and str(row["shopId"]) != str(shop_id):
+                    continue
+                if site and str(row["site"]).upper() != str(site).upper():
+                    continue
+                if keyword and not _matches_keyword(row, keyword):
+                    continue
+                # listing_rows 会把一个商品按店铺展开成多行，key 是唯一身份。
+                # 上游翻页偶尔给重复行，这里兜一下，别让列表出现同一商品两次。
+                row_key = str(row.get("key") or "")
+                if row_key and row_key in seen:
+                    continue
+                if row_key:
+                    seen.add(row_key)
+                items.append(row)
+            if len(upstream_rows) < upstream_page_size:
+                break
+            request_page += 1
+            if request_page > 40:  # 兜底：500 x 40 = 2 万件
+                break
+    finally:
+        client.close()
+    return {"items": items, "total": len(items), "scanned": scanned}
 
 
 
@@ -344,9 +404,27 @@ def listing_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "status": "未发布",
                 "editModel": "shop",
             })
-            if len(products) >= COLLECT_BOX_MAX_ITEMS:
+            if len(products) >= _listing_row_limit():
                 return products
     return products
+
+
+def _listing_row_limit() -> int:
+    """`listing_rows` 最多展开多少行。
+
+    原来是硬编码的 `COLLECT_BOX_MAX_ITEMS`（=100），因为调用方每次都只取
+    一页（≤100 条），提前截断省事。
+
+    2026-11-27 全量快照后这条限制变成了 bug：`_scan_all` 一次拉 231 行，
+    `listing_rows` 走到第 100 行就 `return`，剩下 131 件商品凭空消失，
+    `total` 也跟着变成 100 —— 负责人会看到「采集箱 / 100」但实际有 231 件。
+
+    现在放宽到一次上游能返回的上限（`COLLECT_BOX_UPSTREAM_PAGE` ×
+    `_scan_all` 最多翻的页数）。真要限流应该限**对外返回**的
+    `pageSize`（那是 `COLLECT_BOX_PAGE_MAX` 的事），不该在数据源这一层
+    把商品丢掉。
+    """
+    return COLLECT_BOX_UPSTREAM_PAGE * 40
 
 
 def verify_items_present(client: Any, detail_ids: set[str] | list[str], shop_id: str,
@@ -479,15 +557,11 @@ def list_items(db: Session, account: Account, *, page: int = 1, page_size: int =
 
     key = _cache_key(account, page=page, page_size=page_size, status=status,
                      keyword=keyword, shop_id=shop_id, site=site, sort=sort)
-    # count_all=True：扫完所有上游页以得到准确总数（无过滤条件时使用）
-    count_all = (page == 1 and not keyword and not shop_id and not site
-                 and page_size <= COLLECT_BOX_UPSTREAM_PAGE)
     try:
         outcome: FetchResult = _cache().fetch(
             key,
-            lambda: _scan_upstream(account, page=page, page_size=page_size, status=status,
-                                   keyword=keyword, shop_id=shop_id, site=site,
-                                   count_all=count_all),
+            lambda: _scan_all(account, status=status, keyword=keyword,
+                              shop_id=shop_id, site=site),
             ttl=cache_ttl(),
             force_refresh=force_refresh,
             stale_on=MiaoshouError,
@@ -496,20 +570,25 @@ def list_items(db: Session, account: Account, *, page: int = 1, page_size: int =
         raise map_upstream_error(exc) from None
 
     snapshot = outcome.value or {}
-    items = snapshot.get("items") or []
+    # 缓存里是整份快照，翻页在本地切片（2026-11-27）。
+    all_items = list(snapshot.get("items") or [])
     total = int(snapshot.get("total") or 0)
     scanned = int(snapshot.get("scanned") or 0)
 
-    # 仓库标注查的是本地库，必须每次按当前库状态重算，不能跟着缓存走
-    _annotate_warehouse(db, account, items)
+    # 仓库标注查的是本地库，必须每次按当前库状态重算，不能跟着缓存走。
+    # 在切片**之前**标注：savedDesc 排序要用到 inWarehouse，切片后再排只排了本页。
+    _annotate_warehouse(db, account, all_items)
     if sort == "savedDesc":
-        items.sort(key=lambda row: row.get("inWarehouse", False), reverse=True)
+        all_items.sort(key=lambda row: row.get("inWarehouse", False), reverse=True)
+
+    start = (page - 1) * page_size
+    items = all_items[start:start + page_size]
     return {
         "items": items,
         "page": page,
         "pageSize": page_size,
-        "total": max(total, len(items)),
-        "hasMore": bool(snapshot.get("hasMore", len(items) >= page_size)),
+        "total": max(total, len(all_items)),
+        "hasMore": start + page_size < len(all_items),
         "scannedAt": now_ts(),
         "degraded": bool(outcome.degraded),
         "staleSeconds": int(outcome.stale_seconds),

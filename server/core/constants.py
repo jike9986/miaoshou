@@ -90,8 +90,15 @@ COLLECT_BOX_MAX_ITEMS = 100
 # 因此对外每页上限放开到 100（= COLLECT_BOX_MAX_ITEMS），与 API 层 le=100 对齐。
 # 以前这里锁 20，导致界面只敢给 10 / 20 两个选项，一页看不了几件。
 COLLECT_BOX_PAGE_MAX = 100
-# 打上游时每页仍按妙手上限 20 去要，避免被上游拒绝
-COLLECT_BOX_UPSTREAM_PAGE = 20
+# 打上游时每页向妙手要多少条（2026-11-27 由 20 改为 500）。
+#
+# 原注释写「妙手上游单次最多给 20 条」，实测是错的：
+#   pageSize=20  → 返回 20 行
+#   pageSize=500 → 一次返回全部 231 行（1.1s，1 次调用）
+# 按 20 去要，231 件商品要翻 12 页、每页约 1.1s，合计 13 秒 ——
+# 这正是负责人反馈的「采集箱要等很久才会加载出来」。
+# 用 500 一次拿完，全量快照约 1.1 秒，翻页变成纯内存切片。
+COLLECT_BOX_UPSTREAM_PAGE = 500
 # 仓库容量上限。**这是提示线，不是自动清理线**：
 # `warehouse_service.stats()` 用它算 remaining / nearLimit 让界面提前提示，
 # 但没有任路径会自动删商品——`trim_overflow()` 默认拒绝执行，理由见其 docstring。
