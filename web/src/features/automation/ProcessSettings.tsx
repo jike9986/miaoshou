@@ -376,7 +376,7 @@ export function ProcessSettings({
               <NumberInput
                 id="weight-limit"
                 value={settings.weightLimitKg}
-                onChange={(value) => onChange({ weightLimitKg: value ?? 1.5 })}
+                onChange={(value) => onChange({ weightLimitKg: value ?? 2.0 })}
                 min={0.1}
                 max={10}
                 step={0.1}

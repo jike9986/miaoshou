@@ -1101,6 +1101,13 @@ def translate(db: Session, payload: Mapping[str, Any],
         # 格式必须在建 job 之前就拦：job 建出来是 queued，_submit 抛错后
         # 状态停在失败，但预扣费已经算进去，而且用户看不清是格式问题。
         if _image_type(raw) is None:
+            # 打出手上到底是什么：URL 后缀是 .jpg 不代表内容是图，
+            # `_fetch_source` 会在多个候选 URL 间回退，可能拿到 HTML 错误页。
+            head = raw[:12].hex() if raw else "(空)"
+            logging.getLogger(__name__).warning(
+                "图片格式无法识别 source=%s index=%s url=%s bytes=%d head=%s preview=%r",
+                source, index, str(url)[:120], len(raw), head,
+                raw[:80].decode("utf-8", "replace") if raw else "")
             raise errors.unprocessable(
                 "图片格式须为 PNG、JPEG 或 WebP",
                 details={"index": index, "url": url})

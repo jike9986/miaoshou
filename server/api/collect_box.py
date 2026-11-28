@@ -52,6 +52,12 @@ _image_semaphore_limits: dict[int, int] = {}
 # 剩下的等它们跑完由 `_pump_stuck_image_jobs()` 续上。
 IMAGE_RESUME_BATCH = 2
 
+# `running=True` 超过这个秒数就认定线程已死，允许重新拉起（2026-11-28）。
+#
+# 一件商品的图片任务正常几十秒到两三分钟。取 8 分钟留足余量：
+# 图片多、上游慢的情况也不会误判，而真死掉的线程 8 分钟后一定能被救回来。
+_RUNNING_STALE_SECONDS = 480
+
 # 全服务器同时运行的图片翻译任务数上限（2026-11-28 修 OOM）。
 #
 # 三次 OOM 的 anon-rss 都是 6.5 GB（12:27 / 12:53 / 14:23），说明不是偶发，
@@ -411,8 +417,21 @@ def process(
             "failed": 0, "jobs": [], "generation": secrets.token_hex(16),
             "revision": row.revision, "startedAt": now_ts(),
         }
-        row.draft_verified_revision = None
-        product["draftVerified"] = False
+        # **不要清 draft_verified_revision**（2026-11-28 修）。
+        #
+        # 原来这里写 `row.draft_verified_revision = None`，意思是「图片还没跑完，
+        # 草稿不算最终定稿」。但 `draft_verified_revision` 是**文字/草稿写回核验
+        # 通过**的凭证，而此刻文字部分已经保存成功并通过了读回核验 ——
+        # 图片翻译是后面单独一步，跑没跑完不该否定已经通过的草稿。
+        #
+        # 实际后果（负责人截图）：20 件全部「文字已完成 100%」，
+        # 但一件都不在自动化结果里，界面上全部停在「识别中…」，
+        # 看起来像整批失败，其实文字早就处理好了。
+        #
+        # 图片跑完时 `_run_image_translation` 会在写回后重新 sync 这个字段
+        # （见那里的 `draft_verified_revision = row.revision`），
+        # 所以不清也不会漏掉最终的图片核对。
+        product["draftVerified"] = bool(row.draft_verified_revision is not None)
         bg_image_job = {
             "productId": int(row.id),
             "detailId": str(row.detail_id or ""),
@@ -624,6 +643,17 @@ def _pump_stuck_image_jobs(limit: int | None = None) -> list[int]:
 
     用 `automation_images["running"]` 标记正在跑的商品，避免和
     `_resume_stuck_image_jobs` 或彼此之间重复拉起同一件。
+
+    ## 僵尸占用自愈（2026-11-28）
+
+    `running=True` 只代表「某个线程领走了这件」，线程退出时必须清掉。
+    但线程有多种死法（generation 不匹配直接 return、写回失败、进程被杀），
+    漏一条就会让商品**永久**卡在「识别中…」—— 负责人截图里 20 件
+    全部停在识别中、进度条 50% 不动，就是 19 件 queued 里 3 件被僵尸
+    占用，续批看到 `running=True` 直接跳过。
+
+    这里加个时间判断：`running=True` 且 `runningAt` 超过
+    `_RUNNING_STALE_SECONDS` 的，认定线程已死，清掉标记让它能被重新拉起。
     """
     import secrets as _secrets
 
@@ -642,10 +672,19 @@ def _pump_stuck_image_jobs(limit: int | None = None) -> list[int]:
             if len(started) >= budget:
                 break
             ai = dict(row.automation_images or {})
-            if ai.get("queued") is not True or ai.get("running") is True:
+            if ai.get("queued") is not True:
                 continue
+            if ai.get("running") is True:
+                # 僵尸占用：领走太久还没结束，认定线程已死
+                started_at = float(ai.get("runningAt") or 0)
+                if started_at and now_ts() - started_at < _RUNNING_STALE_SECONDS:
+                    continue  # 还在合理运行时间内
+                logger.warning("清除僵尸 running 标记 product=%s（占用 %.0f 秒）",
+                               row.id, now_ts() - started_at if started_at else -1)
+                ai["running"] = False
             # 标记占用，防止并发进入本函数时重复拉起
             ai["running"] = True
+            ai["runningAt"] = now_ts()
             row.automation_images = ai
             db.add(row)
             db.commit()
@@ -946,6 +985,31 @@ def _run_image_translation(job: dict[str, Any]) -> None:
                 db.commit()
         logger.warning("后台图片处理未通过 product=%s type=%s", product_id, type(exc).__name__)
     finally:
+        # 清掉 running 占用标记（2026-11-28）。
+        #
+        # `_pump_stuck_image_jobs` 用 `running=True` 表示「这件已经被某个线程领走」，
+        # 靠它避免重复拉起。但线程有多种退出方式（generation 不匹配直接 return、
+        # 写回失败、异常），只要有一条路径没清掉，这件商品就**永久**不会被续批
+        # 再拉起 —— 界面永远停在「识别中…」。
+        #
+        # 实测 15:15 那批 20 件里 19 件卡 queued，其中 3 件 running=True 但
+        # 对应线程早已退出，就是这个原因。
+        #
+        # **不能先 rollback**：上面 except 分支已经 commit 了「失败」状态
+        # （completed=True / queued=False / failed>=1），rollback 会把它抹掉，
+        # 商品变成 queued 挂着不动、failed 恒为 0（test_automation_image_lifecycle
+        # 的 upload 用例就是这么挂的）。
+        try:
+            row = db.get(Product, product_id)
+            if row is not None:
+                ai = dict(row.automation_images or {})
+                if ai.get("running") is True:
+                    ai["running"] = False
+                    row.automation_images = ai
+                    db.commit()
+        except Exception as clear_exc:  # noqa: BLE001 - 清理失败不能影响收尾
+            db.rollback()
+            logger.warning("清除 running 标记失败 product=%s：%s", product_id, clear_exc)
         db.close()
 
 

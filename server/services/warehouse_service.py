@@ -2526,7 +2526,17 @@ CATEGORY_MIN_WEIGHT = {
 #   · 所有品类统一 1.5，厚底老爹鞋这类 1.27kg 属于正常装箱重量，
 #     按老的 1.2 会把正常货拦下来。
 WEIGHT_HARD_MAX = 1.5
-WEIGHT_LIMIT_DEFAULT = 1.5
+# 原重上限默认值（2026-11-28 由 1.5 改为 2.0）。
+#
+# 负责人口径：「失败的鞋子是不是因为反复加重量导致的，正常哪有这么重」
+# →「调到 2.0 kg」。
+#
+# 1.5 会把正常的厚底老爹鞋（1.7kg）、马丁靴这类拦下来，报
+# 「重量异常：采集原重 1.7 kg 超过设置的原重上限 1.5 kg，已跳过不处理」。
+# 鞋类 1.7-2.0kg 是正常范围，不该当成采集错误。
+# 真正要防的是「单位填错」（克当成千克，出现 1700 或 0.001），
+# 2.0 的界限对那个场景仍然有效。
+WEIGHT_LIMIT_DEFAULT = 2.0
 WEIGHT_LIMIT_RANGE = (0.1, 10.0)
 DIMENSION_MAX = 300
 DEFAULT_PACKAGE_DIMENSIONS = {
@@ -2817,6 +2827,17 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         }
         db.flush()
 
+    # 分段计时（2026-11-28）。负责人：「每个部分具体花费多少时间」。
+    # 一件商品的处理串了七八个慢环节（拉详情 / 图片固化 / OCR / 写回妙手 /
+    # 读回核验 / 建库），出问题时只能看到总耗时。这里记各段毫秒数，
+    # 末尾打一行日志，定位不用靠猜。
+    import time as _time
+    _t0 = _time.monotonic()
+    _marks: dict[str, float] = {"start": 0.0}
+
+    def _mark(name: str) -> None:
+        _marks[name] = (_time.monotonic() - _t0) * 1000
+
     try:
         response = client.shop_detail(detail_id, shop_id)
     except MiaoshouError as exc:
@@ -2825,6 +2846,8 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         raise map_upstream_error(exc) from None
     block = product_service.detail_block(response)
     info = block["info"]
+    # 拉详情是整条链的第一段（妙手详情接口 1-3 秒），单独记
+    _marks["start"] = (_time.monotonic() - _t0) * 1000
     if not info:
         raise errors.not_found(f"上游查无明细 {detail_id}", detailId=str(detail_id))
     if not block["ossMd5"]:
@@ -2942,6 +2965,7 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 先用原始重量算价、再把重量加 0.1 保存，会导致「价格按 1.85kg 算、实际存 1.95kg」，
     # 报价与实际重量不符（老版 product_workflow 是 prepare_weight 之后才 apply 定价）。
     payload = dict(info)
+
     # === 类目解析（必须在重量 / 尺寸 / 定价之前）===
     # 负责人 2026-11-12 明确要求：先有类目才能处理后面的东西。
     # 重量上限、包裹尺寸推荐值、尺码图 URL、颜色清洗的 attrId 全部按
@@ -3130,6 +3154,7 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     #     翻译服务取不到，图里的中文就永远清不掉。
     #   · 而且上游图会过期变挂图，仓库里放着外链等于把商品图交给别人保管。
     # 所以这里不再按 automation_result 跳过，两条路径都固化。
+    _mark("before_image_store")
     image_store_report: dict[str, Any] = {}
     try:
         from services import image_store
@@ -3143,9 +3168,11 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
     # 负责人口径（2026-11-09）：工厂宣传图和尺码对照图会混进主图与详情图，
     # 详情区除了图片不要任何文字。这里在写回妙手之前统一清一遍。
     # OCR 拿不到结果时不清（宁可不删，也不误删用户要的图）。
+    _mark("after_image_store")
     image_report: dict[str, Any] = {}
     try:
         analyzed = analyze_payload_images(payload, retry=skip_image_review)
+        _mark("after_ocr")
         detail_rows = rows_index(analyzed.get("detail") or [])
         image_report["detail"] = clean_detail_images(
             payload, limit=DETAIL_IMAGE_HARD_LIMIT, rows_by_url=detail_rows)
@@ -3415,6 +3442,7 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
         # 这些字段要留在库里给详情页和译文核对用，直接改 payload 会让入库后的
         # 商品丢掉它们（2026-11-09 实测：probe_img_wire 的 translation 字段被删，
         # 11 项断言只剩 4 项通过）。妙手那边仍然拿不到这些多余字段。
+        _mark("before_save_draft")
         upstream_payload = _strip_local_only_fields(deepcopy(payload))
         _save_processed_draft(
             client, detail_id=str(detail_id), shop_id=str(shop_id),
@@ -3424,6 +3452,7 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             _mark_account_id=int(account.id),
             _mark_language=str(language or ""),
         )
+        _mark("after_save_draft")
         # 文字处理已完成（无论读回核验结果如何）。
         # 丢弃本 session 里的草稿标记缓存，让下游读到刚写进去的标记。
         text_done = True
@@ -3463,6 +3492,7 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
             logger.warning("图片搬运到成品区失败 detailId=%s：%s", detail_id, exc)
             promote_report = {"error": str(exc)[:160]}
 
+    _mark("before_build")
     key = product_key(detail_id, shop_id)
     fields = product_service.build_product(
         info=payload, detail_id=detail_id, shop_id=shop_id, account_id=account.id,
@@ -3603,6 +3633,26 @@ def save_from_collect_box(db: Session, account: Account, client: MiaoshouClient,
                             detail_id, captured.get("sourceUrl"))
     except Exception as exc:  # noqa: BLE001 - 补池失败不影响入仓
         logger.warning("入仓自动补充货源链接失败 detailId=%s：%s", detail_id, exc)
+
+    # 分段耗时打一行日志（2026-11-28）。负责人：「每个部分具体花费多少时间」。
+    # 格式固定，方便直接 grep / 汇总：
+    #   耗时明细 detailId=xxx 总=12345ms 拉详情=800 类目=120 图片固化=8000 ...
+    try:
+        _mark("done")
+        _stages = [
+            ("拉详情", _marks.get("start", 0.0)),
+            ("图片固化", _marks.get("after_image_store", 0.0) - _marks.get("before_image_store", 0.0)),
+            ("OCR", _marks.get("after_ocr", 0.0) - _marks.get("after_image_store", 0.0)),
+            ("写回妙手", _marks.get("after_save_draft", 0.0) - _marks.get("before_save_draft", 0.0)),
+            ("建库", _marks.get("done", 0.0) - _marks.get("before_build", 0.0)),
+        ]
+        _total = _marks.get("done", 0.0)
+        _parts = " ".join(f"{_n}={_v:.0f}ms" for _n, _v in _stages if _v > 0)
+        logger.info("耗时明细 detailId=%s 总=%.0fms %s", detail_id, _total, _parts)
+        body["timings"] = {_n: round(_v) for _n, _v in _stages}
+        body["timings"]["total"] = round(_total)
+    except Exception:  # noqa: BLE001 - 计时失败绝不能影响返回
+        pass
 
     return body
 
