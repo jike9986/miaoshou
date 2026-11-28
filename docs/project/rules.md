@@ -768,3 +768,38 @@ claimToShopIds          空
 回归测试：`server/tests/test_shared_account_task_isolation.py`
 的 `test_member_schedule_creation_auto_claims_selected_products` 与
 `test_member_schedule_creation_still_rejects_unclaimable_products`。
+
+## 原重上限（2026-11-28 定）
+
+默认 **2.0 kg**（原 1.5 kg）。鞋类 1.7-2.0kg 是正常范围，1.5 会把厚底老爹鞋、
+马丁靴这类正常货拦下来报「重量异常：采集原重 1.7 kg 超过设置的原重上限 1.5 kg」。
+真正要防的是「单位填错」（克当千克，出现 1700 或 0.001），2.0 的界限对它仍然有效。
+
+三处必须同步改，否则会漂：
+- `warehouse_service.WEIGHT_LIMIT_DEFAULT`
+- `web/src/features/automation/types.ts` 的 `weightLimitKg` 默认值
+- `web/src/features/automation/ProcessSettings.tsx` 的 `value ?? 2.0` fallback
+
+另外 `workflow.defaults.operator.{id}` 里如果没写 `weightLimit`，就会回落到默认值——
+新用户/新账号上线前要检查该项是否存在。
+
+## 图片任务 `running` 标记（2026-11-28 定）
+
+`automation_images["running"]=True` 表示「这件商品已被某个图片线程领走」，
+`_pump_stuck_image_jobs()` 靠它防止重复拉起。
+
+**每一条退出路径都必须清掉它**，包括 generation 不匹配的静默 return。
+漏一条的后果是永久性的：这件商品再也不会被续批拉起，界面永远停在「识别中…」。
+清理放在 `finally` 里，且**不能先 `db.rollback()`**——异常分支已经 commit 了
+失败状态，rollback 会把它抹掉，商品变成 queued 挂着不动、failed 恒为 0。
+
+`_pump_stuck_image_jobs()` 有兜底：`running=True` 且 `runningAt` 超过 8 分钟
+认定线程已死，清掉标记让它能被重新拉起。
+
+## `draft_verified_revision` 与图片任务的关系（2026-11-28 定）
+
+`draft_verified_revision` 记的是**文字/草稿写回核验通过**，不是「图片也跑完了」。
+
+商品进图片任务队列时**不要**把它清成 None：图片翻译是后面单独一步，
+跑没跑完不该否定已经通过的草稿。清了会让文字已完成的商品从自动化结果页消失，
+界面看起来像整批失败。图片真正跑完时 `_run_image_translation` 会重新 sync。

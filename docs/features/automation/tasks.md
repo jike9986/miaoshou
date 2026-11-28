@@ -54,3 +54,24 @@
 | BUG-014 | 颜色属性为材质词（"网面"/"布面"）导致整件失败 | `clean_color_strict` 识别不出任何颜色词时整件抛错；改为回退到原样保留，让后续流程继续 | v0.1.26 |
 | BUG-015 | 颜色上限对一半商品无效 | `apply_image_limits` 写死 `attrId == "100000"` 认颜色维度，生产库一半商品该字段是 `None`/空串，颜色截断被静默跳过 | v0.1.28 |
 | BUG-016 | 颜色删了但 SKU 全留着（孤儿 SKU） | 用 `attrValueId` 比对 `skuMap` 的 key，但真实 key 是 `;颜色值文本;尺码值文本;`，永远匹配不上 | v0.1.28 |
+
+## 已完成（2026-11-28）
+
+### 全部卡在「识别中…」——两个独立原因叠加
+
+负责人截图：20 件全部「文字与文字 100% 已完成」，但一件都不出现在自动化结果里，全挂在「识别中…」。
+
+- [x] **线程死亡后不清 `running` 标记**：`_pump_stuck_image_jobs()` 用 `automation_images["running"]=True` 表示「已被某线程领走」，防止重复拉起。但 `_run_image_translation()` 有多种退出方式（generation 不匹配直接 return、写回失败、异常），原来一条都不清。漏一条就是永久性的——这件再也不会被续批拉起。实测 15:15 那批 20 件里 19 件卡 queued，其中 3 件 `running=True` 但线程早已退出。修法：`finally` 里清 `running`（**不能先 rollback**——异常分支已 commit 失败状态，rollback 会抹掉，商品变 queued 挂着不动、failed 恒 0）；`_pump_stuck_image_jobs()` 加僵尸自愈，`running=True` 且 `runningAt` 超 8 分钟认定线程已死。修完重启，25 件全部 `done`，queued 归零。
+- [x] **`/process` 主动抹掉 `draft_verified_revision`**：原来图片任务入队时写 `row.draft_verified_revision = None`，而 `draft_verified_revision == revision` 是商品出现在自动化结果的唯一条件。于是文字明明保存成功并通过读回核验，商品却因「图片没跑完」从结果页消失。该字段记的是文字/草稿写回核验通过，图片翻译是后面单独一步，不该否定已通过的草稿。改成不清；图片真正跑完时 `_run_image_translation` 会重新 sync。
+
+### 原重上限 1.5 → 2.0
+
+- [x] `workflow.defaults.operator.64` 里压根没有 `weightLimit`，回落到 `WEIGHT_LIMIT_DEFAULT = 1.5`，1.7kg 的厚底老爹鞋被「重量异常：采集原重 1.7 kg 超过设置的原重上限 1.5 kg，已跳过不处理」拦掉。鞋类 1.7-2.0kg 是正常范围。改了三处：`WEIGHT_LIMIT_DEFAULT` 1.5→2.0、前端 `types.ts` 默认值与 `ProcessSettings.tsx` fallback、库里所有 `workflow.defaults*` 补 `weightLimit=2.0`。实测 3562895405 改前 422、改后 200。库里 402 件：399 件 <1.5kg、3 件正好 1.5kg、0 件超 2.0kg，放宽不会放过真正的单位填错（那会是 1700 或 0.001）。
+
+### OCR 内存泄漏（OOM 根因，三次 6.5 GB）
+
+- [x] onnxruntime 推理分配的是**原生内存**（输入张量、中间特征图、线程 arena），Python `gc.collect()` 管不了，进程不退出就不归还。实测：进程内串行 OCR 3 张，RSS 83→366 MB（涨 282 MB 不回落）；子进程 OCR 连跑 3 批，RSS 366→366 MB（涨 0）。改三条：① `_prepare_for_ocr` 长边缩到 1280 再识别（3000×3000 是 27 MB/张，1280 只要 4.9 MB）；② 每张 `del result` + `gc.collect()`，压缩临时图用完即删；③ 新增 `ocr_runner.py` / `ocr_worker.py`，一批图片交给**短命子进程**，跑完退出，原生内存由内核回收。实测 10 件批次 10/10 通过、服务 RSS 503 MB、OOM 0 次。
+
+### 顺带
+
+- [x] `image_service._submit` 的「图片格式须为 PNG、JPEG 或 WebP」加上实际字节头与预览日志——原来只报一句格式错误，查不出手上到底是什么（URL 后缀 .jpg 不代表内容是图，`_fetch_source` 会在多个候选间回退）。
