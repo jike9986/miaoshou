@@ -378,6 +378,45 @@ export function useSelectAccount(): UseMutationResult<AuthConnectResult, Error, 
   });
 }
 
+/** 重命名已保存的妙手连接（PATCH /auth/accounts/{id}）。
+ *
+ * 只改本地显示名，不动妙手那边的任何东西 —— AppKey 与绑定关系原样保留。 */
+export function useRenameAccount(): UseMutationResult<
+  { account: unknown }, Error, { accountId: string; name: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ accountId, name }) =>
+      api.patch<{ account: unknown }, { name: string }>(
+        `/auth/accounts/${encodeURIComponent(accountId)}`, { name }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.auth.all });
+    },
+  });
+}
+
+/** 删除已保存的妙手连接（DELETE /auth/accounts/{id}）。
+ *
+ * 不可逆：账号的 AppKey 只能由账号主人重新生成一次。
+ * 删除前必须二次确认。 */
+export function useDeleteAccount(): UseMutationResult<
+  unknown, Error, string
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (accountId: string) =>
+      api.del(`/auth/accounts/${encodeURIComponent(accountId)}`),
+    onSuccess: () => {
+      for (const queryKey of [
+        queryKeys.auth.all, queryKeys.shops.all, queryKeys.warehouse.all,
+        queryKeys.collectBox.all, queryKeys.categories.all,
+      ]) {
+        void client.invalidateQueries({ queryKey });
+      }
+    },
+  });
+}
+
 /* ================================================================== *
  * §4 成品仓库
  * ================================================================== */

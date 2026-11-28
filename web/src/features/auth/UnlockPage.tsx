@@ -5,12 +5,12 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, KeyRound, Link2 } from "lucide-react";
+import { ArrowRight, KeyRound, Link2, Pencil, Trash2, UserCog } from "lucide-react";
 import { motion, useReducedMotion } from "framer-motion";
 import { fadeUp, ease } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { ApiError, apiErrorMessage } from "@/lib/api";
-import { useAuthStatus, useConnectAccount, useSelectAccount, useOperators, useShops, useSoftwareLogin, useEmailCodeLogin, useRequestEmailCodeLogin, useSoftwareRegister, useRequestRegistrationCode, useCompletePasswordSetup, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset, useWorkflowDefaults } from "@/lib/queries";
+import { useAuthStatus, useConnectAccount, useSelectAccount, useOperators, useShops, useSoftwareLogin, useEmailCodeLogin, useRequestEmailCodeLogin, useSoftwareRegister, useRequestRegistrationCode, useCompletePasswordSetup, useInitializeSoftwareCredentials, useRequestPasswordReset, useConfirmPasswordReset, useWorkflowDefaults, useRenameAccount, useDeleteAccount } from "@/lib/queries";
 import { lastLoginIdentifier, rememberLoginIdentifier, setOperator, useOperatorIdentity } from "@/lib/operator";
 import { useSessionStore } from "@/features/stores";
 import { normalizeEmailForVerification } from "@/features/auth/emailBinding.mjs";
@@ -25,6 +25,8 @@ import {
   Card,
   CardTitle,
   Checkbox,
+  ConfirmDialog,
+  Dialog,
   DropdownSelect,
   ErrorState,
   Field,
@@ -43,6 +45,166 @@ import { PageContent, PageHeader } from "@/components/layout";
  * 选中即 POST /auth/select {accountId}，仅切换本人上下文，不改变绑定，
  * 下面的店铺下拉会跟着换一批。老版顶部只有一个只读的账号徽章，这里做成可切。
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * 账号管理（改名 / 删除）
+ *
+ * 负责人口径（2026-11-27）：「第一个在连接妙手账号这里加上改名和删除功能」。
+ *
+ * 后端接口一直都有（PATCH /auth/accounts/{id} 改名、
+ * DELETE /auth/accounts/{id} 删号），只是前端从来没接 —— 连错了账号只能
+ * 去曲线救国（断开重连），而删号是不可逆操作，更不该藏在接口里。
+ *
+ * 改名只动本地显示名，AppKey 与绑定原样保留；删号会连本地记录一起清掉，
+ * 对方 AppKey 只能由账号主人重新生成，所以必须二次确认并写明影响。
+ * ------------------------------------------------------------------ */
+
+interface AccountManagerProps {
+  accounts: Array<{ id: string; name: string; isDefault?: boolean }>;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+function AccountManager({ accounts, open, onOpenChange }: AccountManagerProps) {
+  const renameAccount = useRenameAccount();
+  const deleteAccount = useDeleteAccount();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
+
+  const beginRename = (account: { id: string; name: string }): void => {
+    setEditingId(account.id);
+    setDraftName(account.name);
+  };
+
+  const submitRename = (): void => {
+    const name = draftName.trim();
+    if (!editingId || !name) return;
+    renameAccount.mutate(
+      { accountId: editingId, name },
+      {
+        onSuccess: () => {
+          toast.success(`已改名为「${name}」`);
+          setEditingId(null);
+        },
+        onError: (error) =>
+          toast.error("改名失败", { description: apiErrorMessage(error) }),
+      }
+    );
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) {
+          setEditingId(null);
+          setPendingDelete(null);
+        }
+        onOpenChange(next);
+      }}
+      size="md"
+      title="管理妙手账号"
+      description="改名只影响本地显示；删除会清掉本机保存的连接。"
+    >
+      <div className="space-y-2">
+        {accounts.length === 0 && (
+          <p className="text-[13px] text-fg-muted">还没有已保存的妙手账号。</p>
+        )}
+        {accounts.map((account) => (
+          <div
+            key={account.id}
+            className="rounded-lg border border-border bg-surface px-3 py-2.5"
+          >
+            {editingId === account.id ? (
+              <div className="flex items-center gap-2">
+                <Input
+                  autoFocus
+                  value={draftName}
+                  maxLength={64}
+                  onChange={(event) => setDraftName(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") submitRename();
+                    if (event.key === "Escape") setEditingId(null);
+                  }}
+                  aria-label="新的账号名"
+                />
+                <Button
+                  size="sm"
+                  onClick={submitRename}
+                  loading={renameAccount.isPending}
+                  disabled={!draftName.trim()}
+                >
+                  保存
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>
+                  取消
+                </Button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-[13px] font-medium text-fg">
+                    {account.name}
+                    {account.isDefault && (
+                      <span className="ml-1.5 text-[11px] font-normal text-fg-muted">
+                        当前
+                      </span>
+                    )}
+                  </p>
+                  <p className="truncate text-[11px] text-fg-muted">{account.id}</p>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => beginRename(account)}
+                    aria-label={`重命名 ${account.name}`}
+                  >
+                    <Pencil className="size-3.5" strokeWidth={1.75} />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setPendingDelete({ id: account.id, name: account.name })}
+                    aria-label={`删除 ${account.name}`}
+                  >
+                    <Trash2 className="size-3.5 text-danger-600" strokeWidth={1.75} />
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(next) => !next && setPendingDelete(null)}
+        title={`删除「${pendingDelete?.name ?? ""}」？`}
+        description="本机保存的 AppKey 会被清掉，已采集的商品与已处理结果不受影响。"
+        confirmLabel="删除账号"
+        danger
+        loading={deleteAccount.isPending}
+        onConfirm={() => {
+          if (!pendingDelete) return;
+          deleteAccount.mutate(pendingDelete.id, {
+            onSuccess: () => {
+              toast.success(`已删除「${pendingDelete.name}」`);
+              setPendingDelete(null);
+            },
+            onError: (error) =>
+              toast.error("删除失败", { description: apiErrorMessage(error) }),
+          });
+        }}
+      >
+        <p className="text-[13px] leading-5 text-fg-secondary">
+          要恢复必须由该妙手账号的主人重新生成 AppKey 并再来这里连接一次。
+        </p>
+      </ConfirmDialog>
+    </Dialog>
+  );
+}
 
 export interface AccountSwitcherProps {
   /** 紧凑模式：用在页面工具条里（无外框、字号更小） */
@@ -63,6 +225,7 @@ export function AccountSwitcher({ compact = false, disabled = false, className }
   const { data: shopsData } = useShops(status?.accountId, { enabled: connected });
   const shops = shopsData?.shops ?? [];
   const switchDisabled = disabled || selectAccount.isPending;
+  const [managerOpen, setManagerOpen] = useState(false);
 
   // 首次拿到店铺列表时默认选中第一家有货权的店铺
   useEffect(() => {
@@ -133,6 +296,24 @@ export function AccountSwitcher({ compact = false, disabled = false, className }
           </span>
         </span>
       )}
+
+      {/* 账号管理：改名 / 删除。连错账号或名字重了要能就地改，不必断开重连。 */}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={disabled}
+        onClick={() => setManagerOpen(true)}
+        aria-label="管理妙手账号"
+        title="管理妙手账号（改名 / 删除）"
+      >
+        <UserCog className="size-3.5" strokeWidth={1.75} />
+      </Button>
+
+      <AccountManager
+        accounts={status?.accounts ?? []}
+        open={managerOpen}
+        onOpenChange={setManagerOpen}
+      />
 
       <span aria-hidden className="h-4 w-px bg-border" />
 
