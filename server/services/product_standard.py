@@ -294,11 +294,19 @@ def validate(payload: Mapping[str, Any], *, category_name: str = "",
             if dup:
                 issues.append("维度%d属性值重复%s" % (dim, dup[:2]))  # noqa: UP031
                 fixable.append("属性值重复")
-            # 颜色必须有图
+            # 颜色必须有图。
+            #
+            # **2026-11-27 修**：`imgUrl` 才是妙手的真实字段名（与
+            # readback_check.sku_image_refs 同一条实测结论）。原来只看
+            # imageUrl / imgUrls，草稿里明明 `imgUrl` 有图也会被判成
+            # 「维度N颜色值缺图」→ 下面修复环节拿主图覆盖，SKU 图变成主图
+            # → 读回时图片地址对不上 → 恒报 skuImages 不一致。
+            # 实测栽在这四件：3563328216 / 3563328188 / 3563328281 / 3563328533。
             name = str(prop.get("propName") or "")
             if name not in ("尺码", "尺寸"):
                 for av in values:
-                    if not (av.get("imageUrl") or (av.get("imgUrls") or [])):
+                    if not (av.get("imgUrl") or av.get("imageUrl")
+                            or (av.get("imgUrls") or [])):
                         issues.append("维度%d颜色值缺图" % dim)  # noqa: UP031
                         fixable.append("颜色缺图")
                         break
@@ -562,10 +570,16 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
                 if len(label) > MAX_ATTR_VALUE_LEN:
                     av["attrValue"] = label[:MAX_ATTR_VALUE_LEN]
                     done.append("属性值截断")
-            # 颜色补图
+            # 颜色补图：只补**真的没有图**的槽位。
+            #
+            # 2026-11-27：原来判断只看 imageUrl / imgUrls，`imgUrl` 有图的槽位
+            # 也会走进来，把主图写进 imageUrl；而下面 colorMap 取的是
+            # `imageUrl or ...`，于是主图把真正的 SKU 图顶掉 —— 读回必然
+            # 不一致。现在三个字段一起看，任一有图就不动。
             if str(prop.get("propName")) not in ("尺码", "尺寸"):
                 for index, av in enumerate(values):
-                    if av.get("imageUrl") or (av.get("imgUrls") or []):
+                    if (av.get("imgUrl") or av.get("imageUrl")
+                            or (av.get("imgUrls") or [])):
                         continue
                     if main_imgs:
                         url = main_imgs[index % len(main_imgs)]
@@ -607,7 +621,9 @@ def repair(payload: Mapping[str, Any], *, category_name: str = "",
                 if is_size:
                     size_map[label] = {"name": label}
                 else:
-                    url = av.get("imageUrl") or (av.get("imgUrls") or [None])[0]
+                    # `imgUrl` 优先：妙手真实字段（2026-11-27，同 sku_image_refs）。
+                    url = (av.get("imgUrl") or av.get("imageUrl")
+                           or (av.get("imgUrls") or [None])[0])
                     entry: dict[str, Any] = {"name": label}
                     if url:
                         entry["imgUrls"] = [url]
