@@ -4462,6 +4462,38 @@ def _payload_has_chinese(payload: Mapping[str, Any]) -> bool:
     return props
 
 
+def _clean_color_props(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """就地规范化颜色属性值，返回清洗后的 skuPropertyList。
+
+    走 color_service.normalize_colors（照搬老版 shoe_workflow.normalize_colors），
+    而不是逐个值调 clean_color：老版这一步除了收敛写法，还做四件清洗器不做的事：
+      1. 颜色属性必须恰好 1 个，0 个或多个都报根因（颜色和尺码被压成同一属性时，
+         逐个改值看着成功，实际 SKU 键根本对不上）；
+      2. attrValueId 必须齐全且不重复 —— 重复 id 会让两个颜色共用一个 SKU 键；
+      3. 同名颜色去重（「白色」「白色 」「白」是同一个色）；
+      4. 删掉的颜色同步剪掉 skuMap 里对应的 SKU 键，否则上架时颜色选不到货。
+    这些在老版都是抛错即停，不是尽力而为。清理后会删空所有在售 SKU 的，
+    也在入仓前拦掉 —— 那种商品上架就是零库存。
+    """
+    props = payload.get("skuPropertyList") or []
+    if not isinstance(props, list):
+        return []
+    from services import color_service
+
+    try:
+        # 传整个 payload：normalize_colors 要同时改 skuPropertyList 和 skuMap，
+        # 只传属性列表就剪不掉 SKU 键。
+        result = color_service.normalize_colors(payload)
+    except color_service.ColorError as exc:
+        raise errors.unprocessable(f"颜色处理未通过：{exc}") from None
+    cleaned = result.get("properties")
+    if isinstance(cleaned, list):
+        payload["skuPropertyList"] = cleaned
+        return cleaned
+    payload["skuPropertyList"] = props
+    return props
+
+
 def _shop_name(db: Session, account: Account, shop_id: Any) -> str:
     from services.account_service import cached_shops
 
